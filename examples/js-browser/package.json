@@ -1,0 +1,15 @@
+{
+  "name": "witness-example-js-browser",
+  "private": true,
+  "type": "module",
+  "description": "Coins, the standard Witness sample game, as a browser canvas game driven through Playwright.",
+  "scripts": {
+    "start": "node serve.mjs",
+    "doctor": "node ../../bin/witness.js doctor",
+    "test": "node ../../bin/witness.js test",
+    "record-check": "node record-check.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}

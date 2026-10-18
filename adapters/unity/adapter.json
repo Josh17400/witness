@@ -1,0 +1,20 @@
+{
+  "id": "unity",
+  "title": "Unity (2021.3+, built players in -batchmode or the Editor)",
+  "languages": ["c#", "csharp", "unity"],
+  "detect": {
+    "files": ["ProjectSettings/ProjectVersion.txt", "Packages/manifest.json"],
+    "globs": ["Assets/**/*.cs", "Assets/**/*.unity"],
+    "contains": [{ "glob": "Packages/manifest.json", "text": "com.unity" }]
+  },
+  "priority": 30,
+  "install": [
+    { "from": "package.json", "to": "Packages/com.witnesskit.unity/package.json" },
+    { "from": "package.json.meta", "to": "Packages/com.witnesskit.unity/package.json.meta" },
+    { "from": "Runtime", "to": "Packages/com.witnesskit.unity/Runtime" },
+    { "from": "Runtime.meta", "to": "Packages/com.witnesskit.unity/Runtime.meta" }
+  ],
+  "launch": { "command": "Build/Game.exe", "args": ["-batchmode", "-logFile", "-"] },
+  "guide": "GUIDE.md",
+  "verified": false
+}

@@ -1,0 +1,25 @@
+{
+  "id": "js",
+  "title": "JavaScript / TypeScript (browser canvas, Phaser, three.js, PixiJS, Babylon.js, Node, Electron, Tauri; one ES module)",
+  "languages": ["javascript", "typescript"],
+  "detect": {
+    "files": ["package.json", "index.html", "vite.config.js", "vite.config.ts", "tsconfig.json"],
+    "globs": ["src/**/*.js", "src/**/*.ts", "*.mjs", "js/**/*.js"],
+    "contains": [
+      { "glob": "package.json", "text": "\"phaser\"" },
+      { "glob": "package.json", "text": "\"three\"" },
+      { "glob": "package.json", "text": "\"pixi.js\"" },
+      { "glob": "package.json", "text": "\"@babylonjs/core\"" },
+      { "glob": "package.json", "text": "\"electron\"" },
+      { "glob": "index.html", "text": "<canvas" }
+    ]
+  },
+  "priority": 8,
+  "install": [
+    { "from": "witness.js", "to": "witness/witness.js" },
+    { "from": "witness.d.ts", "to": "witness/witness.d.ts" }
+  ],
+  "launch": { "url": "http://localhost:5173/", "server": "npm run dev" },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

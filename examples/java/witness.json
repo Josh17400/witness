@@ -1,0 +1,8 @@
+{
+  "name": "coins-java",
+  "adapter": "java",
+  "build": "javac --release 8 -encoding UTF-8 -d build ../../adapters/java/Witness.java src/coins/CoinsGame.java src/coins/Main.java",
+  "launch": { "command": "java", "args": ["-Djava.awt.headless=true", "-cp", "build", "coins.Main"] },
+  "tests": "witness",
+  "seed": 1
+}

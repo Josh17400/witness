@@ -1,0 +1,6 @@
+bin/
+obj/
+build/
+witness/shots/
+witness/replays/
+*.jsonl

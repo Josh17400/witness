@@ -1,0 +1,16 @@
+[
+  { "name": "walking right collects the first coin",
+    "input": "right@0-0.5",
+    "steps": [ { "at": 0.6, "expect": ["state.score == 1", "count('Coin') == 4", "state.player.pos[0] > 90"] } ] },
+  { "name": "the player stays still without input",
+    "steps": [ { "at": 1, "expect": ["state.score == 0", "dist(state.player.pos, [40, 90]) < 0.01"] } ] },
+  { "name": "moving down then right changes y",
+    "input": "down@0-0.25, right@0.3-0.6",
+    "steps": [ { "at": 0.8, "expect": ["approx(state.player.pos[1], 120, 1.5)"] } ] },
+  { "name": "teleport and addcoin calls work",
+    "steps": [ { "at": 0.2, "call": [["teleport", 200, 30], ["addcoin", 300, 150]],
+                 "expect": ["dist(state.player.pos, [200, 30]) < 0.01", "count('Coin') == 6"] } ] },
+  { "name": "collecting logs and is seeded",
+    "seed": 3, "input": "right@0-1.5",
+    "steps": [ { "at": 1.6, "expect": ["state.score >= 1", "first('Coin') != null"] } ] }
+]

@@ -1,0 +1,4 @@
+witness/shots/
+witness/replays/
+__pycache__/
+*.pyc

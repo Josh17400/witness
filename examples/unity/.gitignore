@@ -1,0 +1,13 @@
+Library/
+Temp/
+Logs/
+Obj/
+UserSettings/
+Build/
+*.csproj
+*.sln
+Assets/Coins/Main.unity
+Assets/Coins/Main.unity.meta
+witness/shots/
+witness/replays/
+*.jsonl

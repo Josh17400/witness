@@ -1,0 +1,8 @@
+{
+  "name": "coins-csharp",
+  "adapter": "csharp",
+  "build": "dotnet build Coins.csproj -c Release -o build --nologo -v q",
+  "launch": { "command": "dotnet", "args": ["build/Coins.dll"] },
+  "tests": "witness",
+  "seed": 1
+}

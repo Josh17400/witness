@@ -1,0 +1,8 @@
+{
+  "name": "coins-cpp",
+  "build": "node build.mjs",
+  "launch": { "command": "build/coins", "args": [] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 30
+}

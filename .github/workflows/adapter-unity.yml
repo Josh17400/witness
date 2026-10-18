@@ -1,0 +1,48 @@
+name: adapter-unity
+
+# Unity needs a license, so this job checks what it can without one: the shared C# core builds at the
+# Unity floor (netstandard2.0, C# 7.3), the package's copy of it is identical, the package/asmdef JSON
+# is valid, and every package asset has a .meta file (required for git-URL installs).
+# Running the bridge needs a licensed Unity (e.g. game-ci/unity-builder with UNITY_LICENSE secrets).
+
+on:
+  push:
+    paths: ["adapters/unity/**", "adapters/csharp/Witness.cs", "examples/unity/**", ".github/workflows/adapter-unity.yml"]
+  pull_request:
+    paths: ["adapters/unity/**", "adapters/csharp/Witness.cs", "examples/unity/**", ".github/workflows/adapter-unity.yml"]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Runtime/Witness.cs is the shared core, unchanged
+        run: |
+          cmp adapters/csharp/Witness.cs adapters/unity/Runtime/Witness.cs
+          cmp examples/coins.witness.json examples/unity/witness/coins.witness.json
+      - name: core compiles at the Unity floor (netstandard2.0, C# 7.3)
+        run: dotnet build adapters/csharp/tests/compat/Compat.csproj -c Release
+      - name: package.json, asmdef and manifest are valid JSON
+        run: |
+          for f in adapters/unity/package.json adapters/unity/adapter.json adapters/unity/Runtime/WitnessKit.Runtime.asmdef examples/unity/Packages/manifest.json; do
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$f"
+            echo "ok $f"
+          done
+      - name: every package asset has a .meta file
+        working-directory: adapters/unity
+        run: |
+          missing=0
+          for f in $(find . -mindepth 1 -not -name "*.meta" -not -path "./.*"); do
+            if [ ! -f "$f.meta" ]; then echo "missing $f.meta"; missing=1; fi
+          done
+          exit $missing

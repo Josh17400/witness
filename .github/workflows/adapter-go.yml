@@ -1,0 +1,51 @@
+name: adapter-go
+
+on:
+  push:
+    paths: ["adapters/go/**", "examples/go/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-go.yml"]
+  pull_request:
+    paths: ["adapters/go/**", "examples/go/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-go.yml"]
+  workflow_dispatch:
+
+jobs:
+  coins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: package checks (gofmt, vet, unit tests)
+        working-directory: adapters/go
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go test ./...
+      - name: shared test is in sync
+        working-directory: examples/go
+        run: cmp ../coins.witness.json witness/coins.witness.json
+      - name: build the example
+        working-directory: examples/go
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go build -o build/ .
+      - name: witness doctor
+        working-directory: examples/go
+        run: node ../../bin/witness.js doctor
+      - name: witness test
+        working-directory: examples/go
+        run: node ../../bin/witness.js test
+      - name: record a replay in normal play, then replay it exactly
+        working-directory: examples/go
+        run: |
+          out=$(WITNESS_RECORD=witness/replays/ci.jsonl WITNESS_SEED=4 ./build/coins)
+          echo "$out"
+          x=$(echo "$out" | sed -n 's/.*player=(\([0-9.]*\),.*/\1/p')
+          grep -q '"mark":"F8"' witness/replays/ci.jsonl
+          node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.player.pos[0].toFixed(4)" | tee replay.txt
+          grep -F "$x" replay.txt

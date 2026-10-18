@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Proves Witness.cs builds against the netstandard2.0 API surface with C# 7.3, the floor for
+       Unity 2020+, Godot 4 .NET, MonoGame and FNA. Build only; nothing runs. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>Witness.Compat</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningLevel>4</WarningLevel>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../Witness.cs" />
+  </ItemGroup>
+
+</Project>

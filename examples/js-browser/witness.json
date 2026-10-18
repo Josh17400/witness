@@ -1,0 +1,10 @@
+{
+  "name": "coins-js-browser",
+  "launch": {
+    "url": "http://127.0.0.1:5317/",
+    "server": "node serve.mjs",
+    "size": [1280, 720]
+  },
+  "tests": "witness",
+  "seed": 1
+}

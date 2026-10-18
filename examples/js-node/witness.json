@@ -1,0 +1,6 @@
+{
+  "name": "coins-js-node",
+  "launch": { "command": "node", "args": ["game.mjs"] },
+  "tests": "witness",
+  "seed": 1
+}

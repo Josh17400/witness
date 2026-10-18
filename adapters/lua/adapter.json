@@ -1,0 +1,21 @@
+{
+  "id": "lua",
+  "title": "Lua (LÖVE 11 via witness_love.lua, plain Lua 5.1-5.4 / LuaJIT with LuaSocket)",
+  "languages": ["lua"],
+  "detect": {
+    "files": ["main.lua", "conf.lua", ".luarc.json"],
+    "globs": ["*.lua", "src/**/*.lua", "*.rockspec"],
+    "contains": [
+      { "glob": "main.lua", "text": "love." },
+      { "glob": "conf.lua", "text": "love.conf" }
+    ]
+  },
+  "priority": 20,
+  "install": [
+    { "from": "witness.lua", "to": "witness.lua" },
+    { "from": "witness_love.lua", "to": "witness_love.lua" }
+  ],
+  "launch": { "command": "love", "args": ["."] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

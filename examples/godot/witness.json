@@ -1,0 +1,11 @@
+{
+  "name": "coins-godot",
+  "launch": {
+    "command": "godot",
+    "args": ["--path", ".", "--rendering-driver", "opengl3", "--fixed-fps", "60",
+             "--write-movie", "user://witness.avi"]
+  },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 60
+}

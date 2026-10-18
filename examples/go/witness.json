@@ -1,0 +1,8 @@
+{
+  "name": "coins-go",
+  "build": "go build -o build/ .",
+  "launch": { "command": "go", "args": ["run", "."] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 180
+}

@@ -1,0 +1,5 @@
+node_modules/
+**/witness/shots/
+**/witness/replays/
+tests/media/out/
+*.log

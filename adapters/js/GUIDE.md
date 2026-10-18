@@ -1,0 +1,401 @@
+# Witness for JavaScript / TypeScript: integration guide (for Claude)
+
+You are wiring Witness into a JS/TS game you may not know yet: a browser game (plain canvas,
+Phaser, three.js, PixiJS, Babylon.js, ...), a Node game, or an Electron/Tauri app. The adapter is
+one ES module, `witness.js` (plus `witness.d.ts`), with no dependencies. Witness either launches
+the game with `WITNESS_ADDR=127.0.0.1:<port>` (Node, Electron), or opens the page in headless
+Chromium with `?witness=127.0.0.1:<port>` (browser). The adapter connects, says hello, and from
+then on **the game only advances when Witness says `step`**.
+
+In the browser most of the work is automatic. When the module is imported in witness mode, it
+takes over `requestAnimationFrame`, `setTimeout`/`setInterval`, `performance.now()` and `Date`,
+seeds `Math.random`, makes WebGL keep its drawing buffer, captures WebAudio offline, and injects
+input as real DOM events. **The game's own loop, input handlers and sound code stay as they
+are.** You add one import and one `witness.start({...})` call.
+
+Working references (read the one that matches, they're short):
+* `examples/js-browser/game.js`: an ordinary rAF canvas game with keyboard and WebAudio. The only
+  Witness code is the import and `start()`.
+* `examples/js-node/game.mjs`: a headless Node game using explicit `input`/`step` handlers,
+  `createMixer()` audio, and `recordFrame()` for replays.
+
+Work in this order and check each step with `witness doctor`:
+**import → start (hello) → snapshot → reset/seed → input → screenshot → audio → recording.**
+
+---
+
+## 1. Install and where to hook in
+
+1. Copy `witness.js` and `witness.d.ts` into the project (`witness init` puts them in
+   `witness/`). With a bundler (Vite, webpack, esbuild) import it like any module. Its Node-only
+   imports are dynamic and marked `/* @vite-ignore */ /* webpackIgnore: true */`, so browser builds
+   don't pull them in.
+2. **Import it before the engine starts its loop**, ideally as the first import of the entry
+   module:
+   ```js
+   import witness from "./witness/witness.js";   // first: installs the takeover in witness mode
+   import Phaser from "phaser";
+   ```
+   For classic `<script>` games, add `<script type="module" src="witness/witness.js"></script>`
+   and call `start()` from game code once `witness` is available (e.g. `import()` it from a
+   module, or put the game's boot code in a module). A loop that started before the import is
+   picked up at its next `requestAnimationFrame` call, so nothing breaks. The first frame just
+   runs on real time.
+3. **Call `witness.start({...})` exactly once, after assets are loaded and the game can run.**
+   In witness mode that is the hello. Until then frames run on the display clock (so engines can
+   boot and preload); afterwards they run only on `step`. Typical places: the end of `main()`
+   after `await loadAssets()`, Phaser's first scene `create()`, after `await app.init()` (Pixi), or
+   in `loader.onLoad` (three.js).
+4. Outside witness and record mode, importing patches nothing and `start()` returns at once, so
+   the call can stay in production builds (zero cost). `witness.active()` tells you which mode
+   you're in.
+
+```js
+await witness.start({
+  name: "My Game", fps: 60, size: [1280, 720],      // size = logical pixels for mouse events
+  canvas,                                           // optional: default is the largest <canvas>
+  reset({ seed, scene, params }) { restartLevel(scene ?? "level1"); },
+  snapshot: () => ({ scene: current.name, score, player: describe(player), entities: world.map(describe) }),
+  calls: { teleport: { args: "x y", help: "move the player", run: (x, y) => { player.x = +x; player.y = +y; return [player.x, player.y]; } } },
+  scope: () => ({ game, player, world }),           // what `eval` expressions can see
+});
+```
+
+Every option is optional, but without `snapshot` the CLI has nothing to test, and without
+`reset` it can't rerun deterministically. The full type is `StartOptions` in `witness.d.ts`.
+
+## 2. The rAF takeover (browser), and how determinism works
+
+In witness mode:
+
+* `requestAnimationFrame(cb)` queues `cb`. Each `step` frame runs every queued callback once
+  with the frame's timestamp, just as a browser frame would. Callbacks queued during a frame run
+  next frame. `cancelAnimationFrame` works, even within a frame.
+* `performance.now()` returns a **virtual clock** that advances by exactly `dt` per frame and
+  stays frozen within a frame. `Date.now()` / `new Date()` follow the same clock, starting at a
+  fixed epoch (2026-01-01T00:00:00Z, override with `WITNESS_CONFIG.epoch`), so even games that seed
+  from `Date.now()` become reproducible.
+* `setTimeout`/`setInterval`/`requestIdleCallback` are virtual timers. A timer due inside a frame
+  fires during that frame, before the rAF callbacks, with the clock set to its own due time.
+  Intervals keep their phase. The HTML 4 ms nesting clamp is applied, so `setTimeout(f, 0)`
+  chains can't spin forever.
+* The clock counts 1/1024 ms ticks, and a frame's dt is rounded **down** to a tick (1/60 s =
+  16.666015625 ms). Every difference of two clock readings is therefore exact, so
+  `now - last` gives bit-identical dts no matter how long the page has been open. Rounding
+  down also keeps dt under the `1000/fps` cap that engines like Phaser clamp to. The rounding
+  error is at most 0.001 ms per frame.
+* Exceptions in rAF or timer callbacks are caught, logged as `error` (tests fail), and the next
+  frame still runs. Note that a loop that throws before calling `requestAnimationFrame` again
+  stops, as it would in a real browser.
+
+Opt out per page with `WITNESS_CONFIG = {takeover: false}` (or `{timers: false}` / `{raf: false}`),
+set before the import, or with `?witness_timers=0` in the URL. Without the takeover, pass a
+`step(dt)` handler and drive the game yourself.
+
+**Node:** nothing is taken over by default. Prefer explicit handlers (`input`, `step`). For an
+unmodified `setInterval` loop, call `witness.takeover()` before the loop starts (or set
+`WITNESS_CONFIG = {takeover: true}` before the import): timers and clocks then become virtual
+exactly as in the browser.
+
+## 3. Input injection
+
+Protocol events are applied **at the start of their frame**, before timers and rAF callbacks, as
+real DOM events through the game's normal input path:
+
+| event | what the page receives |
+|---|---|
+| `key` | `keydown` (+ `keypress` for printable keys) / `keyup` with correct `key`, `code`, `location`, legacy `keyCode`/`which` (Phaser reads `keyCode`) and modifier flags. Target: `keyTarget` option, else a canvas with `tabindex`, else the focused element, else `body`. It bubbles to `document` and `window`. |
+| `mouse` | `pointermove`/`pointerdown`/`pointerup` + the compat `mousemove`/`mousedown`/`mouseup` (skipped after a cancelled `pointerdown`, per spec), then `click` / `auxclick` / `contextmenu`, with `buttons`, `movementX/Y`. Coordinates are mapped from logical game pixels (`size`) to client pixels through the canvas's `getBoundingClientRect()`, so CSS scaling works. The target is the element under the point (DOM UI buttons get clicked too), or the pressed element while a button is held. |
+| `wheel` | `WheelEvent` (`deltaY` in pixels) at the last mouse position. |
+| `text` | per character: `keydown`, `keypress`, `keyup`. Focused `<input>`/`<textarea>` elements also get the text and an `input` event. |
+| `pad`, `axis` | a virtual standard-mapping gamepad: `navigator.getGamepads()[0]` reflects them (buttons `a b x y lb rb lt rt back start ls rs up down left right home`, axes `leftx lefty rightx righty`, triggers `lefttrigger`/`righttrigger`) and `gamepadconnected` fires once. |
+| `action` | your `action(name, down)` handler. Without one, it is pressed as a key of that name. |
+
+Before `reset` runs, every held key and button is released (with real `keyup`/`pointerup`), so
+input never leaks from one run into the next.
+
+* To handle an event yourself, pass `input(ev)`: return `true` to skip the DOM injection
+  (Node games always handle input this way). `witness.input` holds the current
+  keys/mouse/pad/actions, and `witness.inputEvents()` lists this frame's events, for games that
+  poll.
+* Pointer lock (`requestPointerLock`) does nothing in headless Chromium. FPS games should read
+  `movementX/Y`, which the injected events carry.
+
+## 4. RNG seeding
+
+In witness mode `Math.random` is replaced by a seeded PRNG (mulberry32), reseeded with the
+`reset` seed **before** your `reset` handler runs. Code that uses `Math.random` needs no change.
+
+* If the game has its own PRNG (`seedrandom`, `Phaser.Math.RND`, a custom LCG), seed it in
+  `reset` from `seed` (Phaser: `game.config.seed` or `Phaser.Math.RND.sow([String(seed)])`).
+* `witness.seed()` is the current seed (a random one in normal play, the recorded one in record
+  mode). `witness.random()` draws from the same seeded stream.
+* `crypto.getRandomValues` / `crypto.randomUUID` are not seeded. Keep them out of gameplay.
+
+## 5. Exposing state (snapshot)
+
+`snapshot()` returns plain data: the adapter makes it JSON-safe (NaN becomes `"NaN"`, cycles,
+functions and DOM nodes are dropped or named, Maps and Sets become objects and arrays). Follow the
+conventions so the CLI helpers work: `count('Enemy')`, `first('Coin')`, `near(pos, 'Enemy')`:
+
+```js
+snapshot: () => ({
+  scene: scene.key, score, lives,
+  player: { id: 1, type: "Player", pos: [player.x, player.y], hp: player.hp },
+  entities: world.children.map((o) => ({ id: o.id, type: o.kind, pos: [o.x, o.y] })),
+}),
+```
+
+* Return copies of values, or references to plain objects. Never return engine objects (Phaser
+  sprites, three.js meshes): they are huge and circular.
+* Don't put wall-clock values in the snapshot (raw `performance.now()`, frame timings, FPS). They
+  differ between runs and fail the determinism check. Give elapsed game time instead.
+* `scope` (an object, or a function returning one) is what `witness raw '{"cmd":"eval",...}'`
+  expressions can see. In ES modules, top-level variables aren't global, so list what matters.
+  `state` (the snapshot) and `witness` are always in scope.
+
+## 6. Reset
+
+`reset({seed, scene, params})` must put the game in the same state every time, the way the
+game's own "restart level" does. Put a new game's init code in a function and call it from
+both places. Things that commonly leak across a reset:
+* timers and intervals the game started (clear them, or keep their ids and clear them in reset),
+* engine-side timers/tweens (Phaser `this.time.removeAllEvents()` / `this.tweens.killAll()`,
+  GSAP `gsap.globalTimeline.clear()`),
+* object pools, caches of "next id" counters, particles,
+* the camera.
+
+The virtual clock is **not** rewound on reset (games compute `dt = now - last`, so going backwards
+would break them). Keep absolute times out of the state.
+
+## 7. Audio
+
+**WebAudio (automatic, browser):** in witness mode `new AudioContext()` returns an
+`OfflineAudioContext` (mono, 24 kHz unless the game asks for a rate, 300 s per context) that is
+rendered in step with simulated time. An AudioWorklet tap behind `ctx.destination` collects the
+samples. `ctx.currentTime` advances with the steps, so sounds scheduled with
+`ctx.currentTime` land at the right simulated moment. `state` reports `"running"`, and
+`resume()`/`suspend()`/`close()` are harmless no-ops, so autoplay-unlock code passes. This works
+for Phaser's WebAudio sound manager, Howler.js (WebAudio mode), three.js `AudioListener`, Tone.js
+and hand-written graphs. Limits:
+* `<audio>`/`HTMLAudioElement` playback and `createMediaElementSource` are **not** captured (a
+  silent node is returned and a warning logged). Prefer decoded `AudioBuffer`s, or Howler with
+  `html5: false`.
+* Capacity: `WITNESS_CONFIG.audioSeconds` (default 300) of simulated time per context.
+  `WITNESS_CONFIG.webaudio = false` keeps the real AudioContext (and turns capture off).
+
+**Mixer (games that synthesize PCM, and Node):**
+```js
+const mixer = witness.createMixer({ sampleRate: 22050 });   // a no-op outside witness mode
+mixer.play(samples);                      // Float32Array mixed in at the current simulated time
+mixer.play(samples, { delay: 0.25, volume: 0.5 });
+```
+The `audio` command returns everything mixed (taps and mixers summed) since the last call or
+reset, exactly `dt × sampleRate` frames per step. For full control, pass `audio()` returning
+`{sampleRate, channels, format, data}`.
+
+## 8. Screenshots
+
+The default captures the canvas (or the canvases you pass, composited in order, e.g. a WebGL
+scene with a 2D UI canvas on top) at its backing resolution × `scale`, as exact RGBA.
+* **WebGL:** in witness mode every `getContext("webgl"|"webgl2")` is created with
+  `preserveDrawingBuffer: true`, so three.js, Pixi, Phaser and Babylon canvases read back
+  correctly at any time. If your code creates the context before the import (rare), pass
+  `preserveDrawingBuffer: true` yourself.
+* DOM/CSS UI (HTML health bars, menus) is not on the canvas, so it isn't captured. Draw it in
+  `screenshot()` yourself if it matters, or test it through state.
+* `screenshotFormat: "png"` sends a PNG (smaller, for 4K canvases). `screenshot()` may return a
+  canvas or `{width, height, data: Uint8Array RGBA}` (Node games render their own; see the Node
+  example).
+
+## 9. Recording replays in normal play
+
+* **Browser:** open the game with `?witness_record=<endpoint>` (e.g.
+  `?witness_record=/__witness/record`). Every frame is POSTed in chunks (each second, on
+  `visibilitychange`, and via `sendBeacon` on `pagehide`) to
+  `<endpoint>?session=<id>` as NDJSON lines; the dev server appends them to a file
+  (`examples/js-browser/serve.mjs` has the 6-line handler, and a Vite plugin or Express route is
+  the same idea). With `?witness_record=1` nothing is posted: **F9** (or
+  `witness.saveRecording()`) downloads `replay-<time>.jsonl`. **F8** marks a moment.
+  `?witness_seed=7` pins the seed.
+* How it works: in record mode the same virtual clock runs, driven by the real display. Real
+  key, pointer and wheel events are recorded (capture phase, before the game sees them), and
+  `start()` performs `reset(seed)`, so frame 0 of the file matches `witness replay`'s reset. A
+  replay re-feeds the exact recorded dts and events, and lands on the same state.
+* **Node / custom loops:** set `WITNESS_RECORD=replays/run.jsonl` (and optionally
+  `WITNESS_SEED`). `start()` calls `reset(seed)`, then each frame call
+  `dt = witness.recordFrame(dt, events)` and **simulate with the returned dt** (quantized so the
+  replay feeds back exactly the same value). Call `witness.mark("F8")` for markers. With
+  `takeover()` on, frames are recorded automatically: don't call `recordFrame` then.
+* Play it back with `witness replay <file> --watch "state.score"`.
+
+## 10. witness.json
+
+```jsonc
+// browser game with a dev server (Vite shown; any static server works)
+{ "launch": { "url": "http://localhost:5173/", "server": "npm run dev", "size": [1280, 720] } }
+// static files, no dev server needed by the game: a 30-line Node server like examples/js-browser/serve.mjs
+{ "launch": { "url": "http://127.0.0.1:5317/", "server": "node serve.mjs" } }
+// Node game
+{ "launch": { "command": "node", "args": ["src/main.js"] } }
+```
+
+`server` may also be `{"command", "cwd", "wait": "<url to poll>", "timeout": 60}`. The browser
+needs Playwright in the project (`npm i -D playwright && npx playwright install chromium`), and
+always runs headless. If the dev server prints a different port than the one you configured, fix
+`url`.
+
+## 11. Engine notes
+
+### Plain canvas / hand-written loops
+Nothing special: `requestAnimationFrame(loop)` and `dt = (now - last) / 1000` just work, as do
+`setInterval(update, 16)` loops. Pass `canvas` if the page has several. See
+`examples/js-browser`.
+
+### Phaser 3 (verified locally with 3.90, WebGL)
+```js
+import witness from "./witness/witness.js";
+class Main extends Phaser.Scene {
+  create() {
+    // ...build the level...
+    witness.start({ name: "My Phaser Game", size: [this.scale.width, this.scale.height], canvas: this.game.canvas,
+      reset: ({ seed }) => this.resetLevel(seed),            // reposition / rebuild directly
+      snapshot: () => ({ score: this.score, player: { id: 1, type: "Player", pos: [this.player.x, this.player.y] } }) });
+  }
+}
+```
+* Phaser's loop is rAF-driven, so the takeover runs it. Its keyboard plugin reads `keyCode` and
+  its pointer input reads the injected events (both verified). `this.time` timers follow
+  virtual time.
+* In `reset`, reset state directly, and clear what Phaser keeps running:
+  `this.time.removeAllEvents()`, `this.tweens.killAll()`, `this.physics.world` bodies. Avoid
+  `this.scene.restart()` in `reset`: the restart only happens during the next game step, so a
+  snapshot taken right after reset shows the old scene (it's still deterministic).
+* `Phaser.Math.RND` has its own seed: `Phaser.Math.RND.sow([String(seed)])` in reset.
+
+### three.js (verified locally with r169)
+* `renderer.setAnimationLoop(fn)` and `THREE.Clock` both use the taken-over rAF and
+  `performance.now()` (verified). WebGL readback works automatically. Pass
+  `canvas: renderer.domElement`.
+* For `snapshot`, report `mesh.position.toArray()` (copies), never the mesh.
+* Loaders (`GLTFLoader`, `TextureLoader`) are async: `await` them (`loadAsync`) **before**
+  `start()`. For assets loaded mid-game, `await` them in `reset` or a call.
+* `OrbitControls` and other pointer-driven controls receive the injected pointer events.
+
+### PixiJS (verified locally with v8)
+* `await app.init({...})` first, then `start({ canvas: app.canvas, ... })`. `app.ticker` (and
+  `Ticker.shared`) run on the taken-over rAF; `ticker.deltaMS` / `deltaTime` are exact.
+* Federated events (`eventMode = "static"`, `on("pointertap")`) hit-test the injected pointer
+  events correctly (verified). Pixi has no keyboard API, so the game's own `keydown` listeners
+  receive key events.
+* `Assets.load` is async: await it before `start()`.
+
+### Babylon.js (verified locally with 7.54)
+* `engine.runRenderLoop` uses rAF and `engine.getDeltaTime()` uses `performance.now()`, both
+  taken over (verified). `scene.onKeyboardObservable` receives the injected keys.
+* Pass `canvas` (the engine's canvas). WebGL readback works without setting
+  `preserveDrawingBuffer` yourself.
+* Wait for `scene.whenReadyAsync()` (and any `ImportMeshAsync`) before `start()`. With physics
+  plugins (Havok/Ammo), step them from the render loop (the default) so they follow dt.
+
+### Electron (written carefully, not run here)
+Witness launches Electron as a process, so the main process sees `WITNESS_ADDR`. Pass it to the
+page and keep the window hidden:
+```js
+// main.js
+const witnessAddr = process.env.WITNESS_ADDR;
+const win = new BrowserWindow({ show: !witnessAddr, webPreferences: { backgroundThrottling: false } });
+win.loadFile("index.html", witnessAddr ? { query: { witness: witnessAddr } } : {});
+if (witnessAddr) win.webContents.on("render-process-gone", () => app.exit(1));
+```
+* `witness.json`: `{"launch": {"command": "node_modules/.bin/electron", "args": ["."], "shell": true}}`.
+  On Windows the `.bin` entry is a `.cmd`, which is why `shell: true` is set.
+* The adapter quits on `quit` but can't close the app from the page. Exit from the main process
+  when the window closes (`app.on("window-all-closed", () => app.quit())`), and in witness mode
+  also when the page's WebSocket goes away (send an IPC message from `start({quit(){...}})`).
+* `backgroundThrottling: false` matters: a hidden window otherwise throttles the boot frames
+  before the hello.
+* For a renderer with `nodeIntegration`, the adapter also reads `process.env.WITNESS_ADDR`.
+
+### Tauri (written carefully, not run here)
+The Rust side sees `WITNESS_ADDR`. Hand it to the page before any script runs, and hide the
+window:
+```rust
+let addr = std::env::var("WITNESS_ADDR").ok();
+let mut b = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+    .visible(addr.is_none());
+if let Some(a) = &addr { b = b.initialization_script(&format!("window.WITNESS_CONFIG = {{ addr: {:?} }};", a)); }
+b.build()?;
+```
+Allow the WebSocket in the CSP (`connect-src 'self' ws://127.0.0.1:*`). `witness.json`:
+`{"launch": {"command": "src-tauri/target/debug/my-game"}, "build": "npm run tauri build -- --debug"}`.
+
+### Node games
+Use explicit handlers: `input(ev)` (return `true`), `step(dt, frame)`, `snapshot()`, and
+optionally `screenshot()` returning RGBA and a mixer. The process exits when Witness sends
+`quit` or disconnects (`exitOnQuit: false` to handle it yourself in `quit()`). `console.*`
+output is forwarded as game logs. See `examples/js-node/game.mjs`.
+
+## 12. Determinism pitfalls
+
+`witness doctor` runs the same seed and input twice and compares the snapshots byte for byte.
+When it says **NOT deterministic**, look for:
+1. **Async asset loading after the hello.** Image/audio/model loads resolve on real time, so a
+   texture arriving at frame 3 in one run and frame 9 in the next changes the game. Load
+   everything before `start()`. Load mid-game assets in `reset` (await them), or preload them.
+2. **Work outside the taken-over APIs:** Web Workers (their own clocks and timers: not taken
+   over), `fetch`/WebSocket game servers, `MessageChannel`/`postMessage` scheduling,
+   `document.timeline`, CSS animations/transitions driving gameplay, `event.timeStamp`.
+3. **Timers armed before a reset firing after it.** Clear the game's timers in `reset`
+   (the takeover keeps them, as a real browser would).
+4. **Unseeded randomness:** `crypto.getRandomValues`, a library PRNG seeded from `Date.now()`
+   before the import, `Math.random` captured as `const r = Math.random` before the import.
+5. **Wall-clock values in the snapshot** (FPS counters, frame timings, raw `performance.now()`).
+6. **Iteration order:** `Object.keys` on objects with numeric-like keys is fine; sorting with an
+   inconsistent comparator, or `Set`/`Map` filled in async-callback order, is not.
+7. **Reading layout during play** (`getBoundingClientRect`, `innerWidth`) can differ if the
+   viewport differs. Set `launch.size` to the size the game expects.
+
+## 13. Verify with `witness doctor`
+
+```
+witness doctor     # connection, capabilities, step, snapshot, determinism, screenshot, audio
+witness test       # run witness/*.witness.json
+witness shot --at 1                     # look at a frame (PNG)
+witness raw '{"cmd":"eval","expr":"player.x"}'   # poke at live game objects via `scope`
+```
+
+"All good" means: connected, `reset` + `step` + `snapshot` work, two identical runs match,
+screenshot and audio return data. Then write tests in `witness/*.witness.json`.
+
+**Troubleshooting**
+
+| symptom | cause / fix |
+|---|---|
+| `no game connected within 60s` (browser) | `start()` never ran: an asset failed to load, an exception happened earlier (see `[page error]` in the output), or the import path 404s. Is the URL right, and is the dev server up? |
+| `no game connected` (Node) | the game doesn't import the adapter or never calls `start()`. Is `WITNESS_ADDR` reaching it (wrapper scripts that drop the env)? |
+| `browser games need Playwright` | `npm i -D playwright && npx playwright install chromium` in the game folder |
+| frames don't advance the game | the game uses a loop the takeover can't see (a Worker, or a `MessageChannel` pump), or `WITNESS_CONFIG.takeover` is false: pass `step(dt)` |
+| audio is silent | sound plays through `<audio>` elements, or the AudioContext was created before the import. Use WebAudio buffers, or a mixer |
+| screenshot is black (WebGL) | the context was created before the import without `preserveDrawingBuffer`. Import the adapter first |
+| `new Function` / `eval` errors | the page's CSP blocks `unsafe-eval`: only the `eval` command (and string timers) need it |
+
+## API summary
+
+```js
+import witness, { createMixer } from "./witness/witness.js";
+witness.mode                 // "witness" | "record" | "off"
+witness.active()             // driven by the CLI?
+await witness.start(options) // hello (witness) / reset + start recording (record) / no-op
+witness.takeover()           // Node: virtualize timers + clocks
+witness.seed(); witness.random()
+witness.log("message"); witness.log("warn" | "error", ...)    // errors fail tests
+witness.mark("label")        // replay marker
+witness.recordFrame(dt, events) -> dt                          // Node record mode
+witness.saveRecording()      // browser record mode: download / flush
+witness.input, witness.inputEvents(), witness.frame, witness.time
+witness.createMixer({ sampleRate, channels }).play(samples, { delay, volume })
+witness.real                 // the real setTimeout/requestAnimationFrame/now/Date
+```
+Page config, read at import: `globalThis.WITNESS_CONFIG = { addr, record, seed, takeover, raf,
+timers, webaudio, console, audioSeconds, audioRate, epoch }`.

@@ -1,0 +1,50 @@
+name: adapter-cpp
+
+on:
+  push:
+    paths: ["adapters/cpp/**", "examples/cpp/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-cpp.yml"]
+  pull_request:
+    paths: ["adapters/cpp/**", "examples/cpp/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-cpp.yml"]
+  workflow_dispatch:
+
+jobs:
+  coins:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cc: gcc, cxx: g++ }
+          - { cc: clang, cxx: clang++ }
+    name: coins (${{ matrix.cxx }})
+    defaults:
+      run:
+        working-directory: examples/cpp
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: shared test is in sync
+        run: cmp ../coins.witness.json witness/coins.witness.json
+      - name: build (C++11 + C99, -Wall -Wextra -Wpedantic -Werror)
+        run: node build.mjs
+      - name: witness doctor (C++ layer)
+        run: node ../../bin/witness.js doctor
+      - name: witness test (C++ layer)
+        run: node ../../bin/witness.js test
+      - name: witness doctor (C API)
+        run: node ../../bin/witness.js doctor --cmd ./build/coins_c
+      - name: witness test (C API)
+        run: node ../../bin/witness.js test --cmd ./build/coins_c
+      - name: record a replay in normal play, then replay it exactly
+        run: |
+          out=$(WITNESS_RECORD=witness/replays/ci.jsonl WITNESS_SEED=4 ./build/coins)
+          echo "$out"
+          x=$(echo "$out" | sed -n 's/.*player=(\([0-9.]*\),.*/\1/p')
+          grep -q '"mark":"F8"' witness/replays/ci.jsonl
+          node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.player.pos[0].toFixed(4)" | tee replay.txt
+          grep -F "$x" replay.txt

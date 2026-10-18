@@ -1,0 +1,11 @@
+[package]
+name = "witness"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.73"
+description = "Witness adapter: let Claude see, hear and prove a Rust game (std only, no dependencies)"
+license = "MIT"
+keywords = ["gamedev", "testing", "headless", "replay", "determinism"]
+categories = ["game-development", "development-tools::testing"]
+
+[dependencies]

@@ -1,0 +1,8 @@
+{
+  "name": "witness-tools",
+  "owner": { "name": "Josh17400" },
+  "metadata": { "description": "Witness — game verification toolkit for Claude" },
+  "plugins": [
+    { "name": "witness", "source": ".", "description": "See, hear and prove any game: adapters for every major language/engine plus a headless test/inspect/record CLI", "category": "testing" }
+  ]
+}

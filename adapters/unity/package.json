@@ -1,0 +1,10 @@
+{
+  "name": "com.witnesskit.unity",
+  "version": "0.1.0",
+  "displayName": "Witness",
+  "description": "Lets the Witness CLI (and Claude) drive, see, hear and test your game headlessly: deterministic stepping, input injection, snapshots, screenshots, audio capture and replay recording. Inactive unless WITNESS_ADDR or WITNESS_RECORD is set.",
+  "unity": "2021.3",
+  "keywords": ["testing", "automation", "headless", "replay", "ai"],
+  "license": "MIT",
+  "author": { "name": "Witness" }
+}

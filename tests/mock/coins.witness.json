@@ -1,0 +1,9 @@
+[
+  { "name": "walking right collects the first coin",
+    "input": "right@0-0.5",
+    "steps": [ { "at": 0.6, "expect": ["state.score == 1", "count('Coin') == 4"], "probe": "state.player.pos[0]" } ] },
+  { "name": "teleport call moves the player",
+    "steps": [ { "at": 0.2, "call": ["teleport", 10, 20], "expect": ["state.player.pos[0] == 10", "dist(state.player.pos, [10, 20]) < 1"] } ] },
+  { "name": "this one must FAIL (wrong score)",
+    "steps": [ { "at": 0.3, "expect": "state.score == 99" } ] }
+]

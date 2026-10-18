@@ -1,0 +1,19 @@
+{
+  "id": "java",
+  "title": "Java / Kotlin (LibGDX, LWJGL, jMonkeyEngine, Swing/Java2D, custom engines)",
+  "languages": ["java", "kotlin"],
+  "detect": {
+    "files": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+    "globs": ["src/**/*.java", "src/**/*.kt", "core/src/**/*.java"],
+    "contains": [
+      { "glob": "build.gradle", "text": "gdx" },
+      { "glob": "build.gradle.kts", "text": "gdx" }
+    ]
+  },
+  "priority": 10,
+  "install": [{ "from": "Witness.java", "to": "src/main/java/witness/Witness.java" }],
+  "build": "./gradlew build",
+  "launch": { "command": "java", "args": ["-Djava.awt.headless=true", "-cp", "build/classes/java/main", "com.example.Main"] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

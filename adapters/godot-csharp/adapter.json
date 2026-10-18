@@ -1,0 +1,22 @@
+{
+  "id": "godot-csharp",
+  "title": "Godot 4 (.NET / C#)",
+  "languages": ["c#", "csharp", "godot"],
+  "detect": {
+    "files": ["project.godot"],
+    "globs": ["*.csproj", "**/*.tscn"],
+    "contains": [
+      { "glob": "project.godot", "text": "\"C#\"" },
+      { "glob": "*.csproj", "text": "Godot.NET.Sdk" }
+    ]
+  },
+  "priority": 25,
+  "install": [
+    { "from": "../csharp/Witness.cs", "to": "addons/witness/Witness.cs" },
+    { "from": "WitnessNode.cs", "to": "addons/witness/WitnessNode.cs" }
+  ],
+  "build": "dotnet build --nologo -v q && godot --headless --path . --import",
+  "launch": { "command": "godot", "args": ["--headless", "--path", ".", "--fixed-fps", "60"] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

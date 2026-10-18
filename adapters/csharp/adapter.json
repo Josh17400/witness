@@ -1,0 +1,19 @@
+{
+  "id": "csharp",
+  "title": "C# / .NET (console, MonoGame, FNA, Stride, custom engines)",
+  "languages": ["c#", "csharp", ".net"],
+  "detect": {
+    "files": ["global.json", "Directory.Build.props"],
+    "globs": ["*.csproj", "*.sln", "src/**/*.csproj"],
+    "contains": [
+      { "glob": "*.csproj", "text": "MonoGame" },
+      { "glob": "*.csproj", "text": "FNA" }
+    ]
+  },
+  "priority": 5,
+  "install": [{ "from": "Witness.cs", "to": "witness/Witness.cs" }],
+  "build": "dotnet build -c Release -o build",
+  "launch": { "command": "dotnet", "args": ["build/Game.dll"] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

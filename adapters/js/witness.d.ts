@@ -1,0 +1,205 @@
+// Type definitions for the Witness JS/TS adapter (witness.js). Protocol: docs/PROTOCOL.md.
+
+/** "witness": driven by the CLI · "record": normal play written as a replay · "off": inert. */
+export type WitnessMode = "witness" | "record" | "off";
+
+/** Protocol input events (docs/PROTOCOL.md section 4). `frame` is absolute since the last reset. */
+export type WitnessEvent =
+  | { frame: number; type: "key"; key: string; down: boolean }
+  | { frame: number; type: "mouse"; x: number; y: number; button?: 0 | 1 | 2; down?: boolean }
+  | { frame: number; type: "wheel"; dx?: number; dy: number }
+  | { frame: number; type: "text"; text: string }
+  | { frame: number; type: "action"; action: string; down: boolean }
+  | { frame: number; type: "pad"; button: string; down: boolean }
+  | { frame: number; type: "axis"; axis: string; value: number };
+
+/** The same events without `frame`, as written into replay lines. */
+export type WitnessRecordedEvent = WitnessEvent extends infer E ? (E extends { frame: number } ? Omit<E, "frame"> : never) : never;
+
+export interface ResetArgs {
+  /** Already used to reseed Math.random / witness.random() before reset runs. */
+  seed: number;
+  scene?: string;
+  params: Record<string, unknown>;
+}
+
+/** A screenshot the game produces itself. `data` may be raw RGBA bytes (encoded for you) or base64. */
+export interface WitnessImage {
+  width: number;
+  height: number;
+  format?: "rgba8" | "png";
+  data: Uint8Array | Uint8ClampedArray | ArrayBuffer | string;
+}
+
+/** PCM the game produces itself (interleaved). `data` may be raw samples (encoded for you) or base64. */
+export interface WitnessAudio {
+  sampleRate: number;
+  channels: number;
+  format: "f32" | "s16";
+  data: Float32Array | Int16Array | ArrayBuffer | string;
+}
+
+export type WitnessCallFn = (...args: any[]) => unknown;
+export interface WitnessCall {
+  run: WitnessCallFn;
+  /** Shown by `witness doctor`, e.g. "x y". */
+  args?: string;
+  help?: string;
+}
+
+export interface StartOptions {
+  name?: string;
+  /** Free text for the hello, auto-detected when omitted ("Phaser 3.90.0", "three.js r169", ...). */
+  engine?: string;
+  language?: string;
+  /** Frames per simulated second (default 60). */
+  fps?: number;
+  /** Logical size in game pixels: mouse events use these coordinates (default: the canvas size). */
+  size?: [number, number];
+  /** Keys the game uses (shown by doctor). */
+  keys?: string[];
+
+  /** Return the game to a deterministic start. Required for `reset` (and for recording). */
+  reset?(args: ResetArgs): void | Promise<void>;
+  /** Advance one frame by dt seconds. Optional in browsers (the rAF takeover runs the game's own loop). */
+  step?(dt: number, frame: number): void;
+  /** JSON-friendly state. Conventions: entities [{id, type, pos}], scene, player. */
+  snapshot?(): unknown | Promise<unknown>;
+  /** Handle one input event yourself; return true to skip the default DOM injection (browsers). */
+  input?(event: WitnessEvent): boolean | void;
+  /** Receive `action` events (input-mapping layers). Without it, an action is pressed as a key of that name. */
+  action?(name: string, down: boolean): void;
+  calls?: Record<string, WitnessCallFn | WitnessCall>;
+  /** Variables visible to `eval` expressions (a function is called for every eval). */
+  scope?: Record<string, unknown> | (() => Record<string, unknown>);
+
+  /** Browser: the canvas to capture and map mouse coordinates to (element, selector, list, or getter). Default: the largest <canvas>. */
+  canvas?: HTMLCanvasElement | string | ArrayLike<HTMLCanvasElement> | (() => HTMLCanvasElement | ArrayLike<HTMLCanvasElement>);
+  /** Browser: where key events are dispatched (default: a focusable canvas, else the focused element, else body). */
+  keyTarget?: EventTarget | (() => EventTarget);
+  /** "rgba8" (default, exact) or "png" (smaller for big canvases). */
+  screenshotFormat?: "rgba8" | "png";
+  /** Custom screenshots (Node games, DOM UIs). May also return a canvas to capture. */
+  screenshot?(opts: { scale: number }): WitnessImage | HTMLCanvasElement | Promise<WitnessImage | HTMLCanvasElement>;
+  /** Custom audio instead of the WebAudio tap / mixers. Everything since the last call or reset. */
+  audio?(): WitnessAudio | Promise<WitnessAudio>;
+  perf?(): Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** Called on `quit` and when the CLI disconnects. */
+  quit?(): void;
+  /** Node: exit the process on quit/disconnect (default true). */
+  exitOnQuit?: boolean;
+  /** Record mode: force this seed (default: random, or WITNESS_SEED / ?witness_seed=). */
+  seed?: number;
+  /** Yield to the event loop after every frame even without a takeover (default: only with one). */
+  yieldEachFrame?: boolean;
+}
+
+/** A PCM capture buffer that follows simulated time (games that synthesize their own sound). */
+export interface WitnessMixer {
+  readonly sampleRate: number;
+  readonly channels: number;
+  /** False outside witness mode: play() is then a no-op. */
+  readonly enabled: boolean;
+  /** Mix samples in at the current simulated time (+delay seconds). Stereo input is interleaved. */
+  play(samples: ArrayLike<number>, opts?: { delay?: number; volume?: number }): void;
+}
+
+export interface WitnessInputState {
+  keys: Set<string>;
+  mouse: { x: number; y: number; buttons: number };
+  pad: { buttons: number[]; axes: number[] };
+  actions: Set<string>;
+}
+
+/** Page-level configuration, read at import: set `globalThis.WITNESS_CONFIG` before importing. */
+export interface WitnessConfig {
+  /** host:port of the CLI (instead of ?witness= / WITNESS_ADDR, e.g. for Tauri). */
+  addr?: string;
+  /** Recording target: "1" (download with F9) or an endpoint URL (browser); a file path (Node). */
+  record?: string;
+  seed?: number;
+  /** false disables the whole takeover (rAF + timers + clock). */
+  takeover?: boolean;
+  raf?: boolean;
+  timers?: boolean;
+  /** false keeps the real AudioContext in witness mode (no audio capture). */
+  webaudio?: boolean;
+  /** false stops console.* from being forwarded as game logs. */
+  console?: boolean;
+  /** Seconds of audio each captured AudioContext can hold (default 300). */
+  audioSeconds?: number;
+  /** Sample rate of captured AudioContexts that don't ask for one (default 24000). */
+  audioRate?: number;
+  /** What Date.now() says at import in witness/record mode (default 2026-01-01T00:00:00Z). */
+  epoch?: string | number;
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var WITNESS_CONFIG: WitnessConfig | undefined;
+}
+
+export interface WitnessApi {
+  readonly version: string;
+  readonly mode: WitnessMode;
+  /** True when the Witness CLI drives the game. */
+  active(): boolean;
+  /** True while a replay is being recorded. */
+  recording(): boolean;
+  /** Hand the game to Witness. Call once, after loading. Resolves at once when inactive. */
+  start(options?: StartOptions): Promise<WitnessApi>;
+  /** Node / custom loops: virtualize setTimeout/setInterval/performance.now/Date (browsers do it at import). */
+  takeover(opts?: { raf?: boolean; timers?: boolean }): boolean;
+  /** The seed for the game's own RNGs. */
+  seed(): number;
+  /** Seeded random in [0, 1); Math.random uses the same stream in witness/record mode. */
+  random(): number;
+  /** A game log line: log("coin collected") or log("warn" | "error" | "info", ...). Errors fail tests. */
+  log(levelOrMessage: unknown, ...message: unknown[]): void;
+  /** Flag this moment in the recording (F8 does it in browsers). */
+  mark(label?: string): void;
+  /** Normal play with recording on (Node / custom loops): append one frame; returns the dt to simulate. */
+  recordFrame(dt: number, events?: WitnessRecordedEvent[]): number;
+  recordInput(event: WitnessRecordedEvent): void;
+  /** Browser recording: download (F9 mode) or flush to the endpoint. Returns the file name / URL. */
+  saveRecording(): string | null;
+  /** Events applied at the current frame (for games that pull input). */
+  inputEvents(): WitnessEvent[];
+  readonly input: WitnessInputState;
+  createMixer(opts?: { sampleRate?: number; channels?: 1 | 2 }): WitnessMixer;
+  /** Frames / simulated seconds since the last reset. */
+  readonly frame: number;
+  readonly time: number;
+  /** The real, un-virtualized timer and clock functions. */
+  readonly real: {
+    setTimeout: typeof setTimeout;
+    clearTimeout: typeof clearTimeout;
+    setInterval: typeof setInterval;
+    clearInterval: typeof clearInterval;
+    requestAnimationFrame: ((cb: FrameRequestCallback) => number) | null;
+    cancelAnimationFrame: ((id: number) => void) | null;
+    now(): number;
+    Date: DateConstructor;
+    random(): number;
+  };
+}
+
+export declare const witness: WitnessApi;
+export declare const mode: WitnessMode;
+export declare const active: WitnessApi["active"];
+export declare const start: WitnessApi["start"];
+export declare const takeover: WitnessApi["takeover"];
+export declare const seed: WitnessApi["seed"];
+export declare const random: WitnessApi["random"];
+export declare const log: WitnessApi["log"];
+export declare const mark: WitnessApi["mark"];
+export declare const recordFrame: WitnessApi["recordFrame"];
+export declare const createMixer: WitnessApi["createMixer"];
+export declare class Mixer implements WitnessMixer {
+  constructor(opts?: { sampleRate?: number; channels?: 1 | 2 });
+  readonly sampleRate: number;
+  readonly channels: number;
+  readonly enabled: boolean;
+  play(samples: ArrayLike<number>, opts?: { delay?: number; volume?: number }): void;
+}
+export default witness;

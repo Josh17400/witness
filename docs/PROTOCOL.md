@@ -1,0 +1,133 @@
+# Witness Protocol v1
+
+Witness drives a game through a tiny **adapter** that lives inside the game. The adapter
+speaks this protocol. Everything clever (tests, eval/trace, charts, screenshots, audio
+analysis, replays) lives in the `witness` CLI, so an adapter stays small: about 200–400
+lines in any language.
+
+## 1. Transport
+
+* The CLI opens a **TCP server** on `127.0.0.1:<port>` and launches the game with the
+  environment variable `WITNESS_ADDR=127.0.0.1:<port>`. Other values (games already
+  running in an editor, or started by hand) use the default `127.0.0.1:7357` with
+  `witness attach`.
+* The adapter **connects as a client**: on startup, if `WITNESS_ADDR` is set, or if the game
+  was started with `--witness`. Browsers connect with a **WebSocket** to
+  `ws://<addr>/` on the same port; the CLI auto-detects WebSocket upgrades. Browser games
+  read the address from a URL parameter: `?witness=127.0.0.1:<port>`.
+* Framing: **one JSON object per line** (UTF-8, `\n`-terminated; no newlines inside a
+  message). WebSocket: one JSON object per text frame.
+* While connected, the game runs in **witness mode**:
+  * It doesn't advance on its own (no real-time loop). It only steps when told to, at a
+    fixed `dt`.
+  * It needs no window. If it must open one, it may be hidden. Rendering happens only when a
+    screenshot is requested, or every step if that's simpler.
+  * Audio goes into a buffer instead of to a device (see `audio`).
+  * Saves and settings go to a scratch location so tests never touch the player's real save.
+* Logs: the game must keep stdout free of non-protocol text only when using the optional
+  `stdio` transport (section 7). TCP adapters can print freely.
+
+## 2. Handshake
+
+Right after connecting, the adapter sends:
+
+```json
+{"hello": {"protocol": 1, "name": "Embervale", "engine": "custom C++/SDL3", "language": "c++",
+  "fps": 60, "size": [1280, 720],
+  "capabilities": ["reset", "step", "input", "snapshot", "screenshot", "audio", "call", "logs"],
+  "calls": [{"name": "gotosite", "args": "quest|camp|cave", "help": "teleport next to a site"}],
+  "keys": ["w", "a", "s", "d", "space", "e", "escape"]}}
+```
+
+`capabilities` lists which commands below are implemented. `calls` advertises custom
+commands for `call`, and `keys` (optional) lists the keys the game actually uses.
+
+## 3. Commands
+
+The CLI sends `{"id": <n>, "cmd": "<name>", ...args}`. The adapter answers each one, in
+order, with `{"id": <n>, "ok": true, ...result}` or
+`{"id": <n>, "ok": false, "error": "<message>"}`.
+
+| cmd | args | result | notes |
+|---|---|---|---|
+| `reset` | `seed` (int), `scene?` (string), `params?` (object) | `{}` | Return the game to a deterministic initial state: the same seed and the same inputs must always give the same snapshots. Without `reset`, the CLI restarts the process for each run. |
+| `input` | `events: [Event]` | `{}` | Queue input events. Each has `frame` (absolute frame number at which to apply it; apply at the start of that frame). Events for a past or current frame apply at the next step. |
+| `step` | `frames` (int ≥ 1), `dt?` (seconds, default `1/fps`), `dts?` (an array of per-frame dt, used by replays; overrides `dt`) | `{"frame": f, "time": t}` | Advance exactly that many fixed frames, applying queued inputs at their frames. |
+| `snapshot` | `paths?` (array of strings, optional filter) | `{"frame", "time", "state": {...}}` | Game-defined JSON describing its state. Conventions (optional but unlocking helpers): `state.entities = [{"id", "type", "pos": [x, y(, z)], ...}]`, `state.scene`, `state.player`. Values must be JSON-safe (no NaN; use `"NaN"`). |
+| `screenshot` | `scale?` (number) | `{"width", "height", "format": "rgba8" \| "png", "data": "<base64>"}` | The frame as currently rendered. `rgba8` = raw top-to-bottom rows; the CLI encodes the PNG. Adapters may also write a file and return `{"path": "..."}`. |
+| `audio` | — | `{"sampleRate", "channels", "format": "f32" \| "s16", "data": "<base64>"}` | Interleaved PCM of everything the game mixed since the last `audio` call or reset, synchronized with simulated time (one step of dt = dt × sampleRate frames). |
+| `call` | `name`, `args: []` | `{"result": any}` | Game-specific commands (teleport, give item, open menu, spawn …). |
+| `eval` | `expr` (string) | `{"value": any}` | Optional, for languages with eval (JS, Python, Lua, GDScript). |
+| `logs` | — | `{"logs": [{"frame", "level": "info" \| "warn" \| "error", "message"}]}` | Messages since the last call. Errors here fail tests. |
+| `perf` | — | `{"frame_ms", "update_ms", "render_ms", "counts": {...}}` | Optional timing info. |
+| `quit` | — | `{}` | Then exit. |
+
+The adapter may also send **unsolicited** lines at any time:
+`{"event": "log", "level": "error", "message": "...", "frame": 12}`. The CLI collects
+them like `logs`.
+
+## 4. Input events
+
+```json
+{"frame": 30, "type": "key",    "key": "space", "down": true}
+{"frame": 30, "type": "mouse",  "x": 640, "y": 360, "button": 0, "down": true}
+{"frame": 31, "type": "mouse",  "x": 650, "y": 360}
+{"frame": 40, "type": "wheel",  "dy": -120}
+{"frame": 45, "type": "text",   "text": "hello"}
+{"frame": 50, "type": "action", "action": "jump", "down": true}
+{"frame": 60, "type": "pad",    "button": "a", "down": true}
+{"frame": 60, "type": "axis",   "axis": "leftx", "value": 0.8}
+```
+
+* **Key names** are lowercase: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`,
+  `backspace`, `shift`, `ctrl`, `alt`, `left`, `right`, `up`, `down`, `f1`–`f12`, plus any
+  other name the game understands.
+* Mouse coordinates are in the game's logical pixels, with the top-left origin.
+* `button`: 0 = left, 1 = middle, 2 = right.
+* `action` events are for games with an input-mapping layer: the adapter passes the action
+  straight to it.
+* Adapters inject events through the game's normal input path, so gameplay code can't tell
+  the difference.
+
+## 5. Recording (replays)
+
+When the game runs normally (a human playing) with `WITNESS_RECORD=<file.jsonl>` set, the
+adapter writes a replay:
+
+```
+{"replay": 1, "name": "...", "seed": 123, "fps": 60, "started": "2026-10-17T20:00:00Z"}
+{"f": 0, "dt": 0.016667, "in": [{"type": "key", "key": "d", "down": true}]}
+{"f": 1, "dt": 0.016671}
+{"f": 2, "dt": 0.016660, "mark": "F8"}
+```
+
+* There is one line per frame, carrying its dt and any input events from that frame (in the
+  same shapes as above, without `frame`).
+* `mark` is written when the player presses F8 (or calls `witness_mark()`), to flag a
+  moment.
+* The game must seed its randomness with the recorded seed. Adapters expose
+  `seed()` / `on_reset` helpers for this.
+* `witness replay` plays the file back through `reset(seed)` + `input` + `step(dts)`.
+
+## 6. Determinism checklist (for adapter authors and game code)
+
+1. Seed every random generator from the `reset` seed. No wall-clock randomness and no
+   `time()` in gameplay.
+2. Simulate only on `step`, with the given dt. Never read real elapsed time in witness mode.
+3. Iterate collections in a stable order: hash maps with randomized ordering need care.
+4. Asynchronous work (worker threads, loading) must finish before `step` returns, or be
+   joined per frame.
+5. `witness doctor` checks this: two runs with the same seed and inputs must give
+   byte-identical snapshots.
+
+## 7. Optional stdio transport
+
+If TCP is impossible, set `"transport": "stdio"` in `witness.json`. The CLI then talks over
+the child's stdin and stdout. Protocol lines must start with the two characters `@w`
+(e.g. `@w{"id":1,...}`); other stdout lines are treated as game logs.
+
+## 8. Versioning
+
+`hello.protocol` is the integer version. The CLI supports v1. Future versions will be
+additive: unknown fields must be ignored, and unknown commands must answer with
+`ok: false`.

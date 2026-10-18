@@ -1,0 +1,24 @@
+{
+  "name": "witness-kit",
+  "version": "0.1.0",
+  "description": "Witness: let Claude see, hear and prove any game. A universal headless test/inspect/record toolkit with adapters for every major language and engine.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "node tests/run.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "witness": "bin/witness.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

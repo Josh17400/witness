@@ -1,0 +1,48 @@
+name: adapter-csharp
+
+on:
+  push:
+    paths: ["adapters/csharp/**", "examples/csharp/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-csharp.yml"]
+  pull_request:
+    paths: ["adapters/csharp/**", "examples/csharp/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-csharp.yml"]
+  workflow_dispatch:
+
+jobs:
+  coins:
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: shared test and engine copies are in sync
+        run: |
+          cmp examples/coins.witness.json examples/csharp/witness/coins.witness.json
+          cmp adapters/csharp/Witness.cs adapters/unity/Runtime/Witness.cs
+          cmp adapters/csharp/Witness.cs examples/godot-csharp/addons/witness/Witness.cs
+      - name: Witness.cs compiles for netstandard2.0 with C# 7.3 (the Unity / Godot / MonoGame floor)
+        run: dotnet build adapters/csharp/tests/compat/Compat.csproj -c Release
+      - name: unit checks
+        run: dotnet run --project adapters/csharp/tests/selftest/SelfTest.csproj -c Release
+      - name: build the coins example
+        working-directory: examples/csharp
+        run: dotnet build Coins.csproj -c Release -o build --nologo -v q
+      - name: witness doctor
+        working-directory: examples/csharp
+        run: node ../../bin/witness.js doctor
+      - name: witness test
+        working-directory: examples/csharp
+        run: node ../../bin/witness.js test
+      - name: record a replay (WITNESS_RECORD), then play it back
+        run: |
+          WITNESS_RECORD="$PWD/examples/csharp/witness/replays/ci.jsonl" dotnet run --no-build --project adapters/csharp/tests/selftest/SelfTest.csproj -c Release
+          grep -q '"mark":"F8"' examples/csharp/witness/replays/ci.jsonl
+          cd examples/csharp
+          node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.score" | tee replay.txt
+          grep -q "state.score = 1" replay.txt

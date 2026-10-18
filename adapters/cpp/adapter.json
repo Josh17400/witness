@@ -1,0 +1,19 @@
+{
+  "id": "cpp",
+  "title": "C / C++ (SDL, raylib, SFML, custom engines; single header witness.h)",
+  "languages": ["c", "c++"],
+  "detect": {
+    "files": ["CMakeLists.txt", "meson.build", "premake5.lua", "Makefile", "xmake.lua"],
+    "globs": ["*.vcxproj", "*.sln", "src/**/*.cpp", "src/**/*.c", "*.cpp"],
+    "contains": [
+      { "glob": "CMakeLists.txt", "text": "SDL" },
+      { "glob": "CMakeLists.txt", "text": "raylib" },
+      { "glob": "CMakeLists.txt", "text": "SFML" }
+    ]
+  },
+  "priority": 10,
+  "install": [{ "from": "witness.h", "to": "witness/witness.h" }],
+  "launch": { "command": "./build/game", "args": [] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

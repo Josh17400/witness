@@ -1,0 +1,7 @@
+{
+  "name": "coins-plain-lua",
+  "launch": { "command": "lua", "args": ["coins.lua"] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 30
+}

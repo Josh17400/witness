@@ -1,0 +1,7 @@
+{
+  "name": "coins-love",
+  "launch": { "command": "love", "args": ["."] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 30
+}

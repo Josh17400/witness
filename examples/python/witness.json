@@ -1,0 +1,7 @@
+{
+  "name": "coins-python",
+  "launch": { "command": "python", "args": ["coins.py"] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 30
+}

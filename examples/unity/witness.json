@@ -1,0 +1,9 @@
+{
+  "name": "coins-unity",
+  "adapter": "unity",
+  "build": "Unity -batchmode -quit -projectPath . -executeMethod CoinsBuild.Build -logFile -",
+  "launch": { "command": "Build/Coins.exe", "args": ["-batchmode", "-logFile", "-"] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 120
+}

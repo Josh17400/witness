@@ -1,0 +1,88 @@
+name: adapter-js
+
+on:
+  push:
+    paths: ["adapters/js/**", "examples/js-node/**", "examples/js-browser/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-js.yml"]
+  pull_request:
+    paths: ["adapters/js/**", "examples/js-node/**", "examples/js-browser/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-js.yml"]
+  workflow_dispatch:
+
+jobs:
+  node:
+    name: coins (node ${{ matrix.node }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [18, 22]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: examples/js-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: shared test is in sync
+        run: cmp ../coins.witness.json witness/coins.witness.json
+      - name: syntax
+        run: node --check ../../adapters/js/witness.js && node --check game.mjs
+      - name: witness doctor
+        run: node ../../bin/witness.js doctor
+      - name: witness test
+        run: node ../../bin/witness.js test
+      - name: record a replay in normal play, then replay it exactly
+        run: |
+          out=$(WITNESS_RECORD=witness/replays/ci.jsonl WITNESS_SEED=4 node game.mjs < /dev/null)
+          echo "$out"
+          x=$(echo "$out" | sed -n 's/.*player=(\([0-9.]*\),.*/\1/p')
+          grep -q '"mark":"F8"' witness/replays/ci.jsonl
+          node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.player.pos[0].toFixed(4)" | tee replay.txt
+          grep -F "\"$x\"" replay.txt
+
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: witness.d.ts type-checks (strict)
+        run: |
+          mkdir -p /tmp/ts && cp adapters/js/witness.js adapters/js/witness.d.ts /tmp/ts/
+          cat > /tmp/ts/use.ts <<'TS'
+          import witness, { type StartOptions, createMixer } from "./witness.js";
+          const mixer = createMixer({ sampleRate: 22050 });
+          let x = 0;
+          const opts: StartOptions = { name: "ts", size: [320, 180], reset({ seed }) { x = seed; }, snapshot: () => ({ x }),
+            calls: { teleport: { args: "x", run: (n: number) => (x = n) } } };
+          await witness.start(opts);
+          mixer.play(new Float32Array(4));
+          const dt: number = witness.recordFrame(1 / 60);
+          witness.log("warn", dt, witness.input.keys.has("a"), witness.random());
+          TS
+          cd /tmp/ts && npx -y -p typescript@5.6 tsc --noEmit --strict --target es2022 --module es2022 --moduleResolution bundler --lib es2022,dom use.ts
+
+  browser:
+    name: coins (browser, headless Chromium)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/js-browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: shared test is in sync
+        run: cmp ../coins.witness.json witness/coins.witness.json
+      - name: install Playwright + Chromium
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: witness doctor
+        run: node ../../bin/witness.js doctor
+      - name: witness test
+        run: node ../../bin/witness.js test
+      - name: record with real key presses, then replay it exactly
+        run: node record-check.mjs

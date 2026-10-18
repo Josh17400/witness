@@ -1,0 +1,7 @@
+{
+  "name": "coins-pygame",
+  "launch": { "command": "python", "args": ["coins_pygame.py"] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 30
+}

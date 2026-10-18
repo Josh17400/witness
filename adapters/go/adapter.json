@@ -1,0 +1,25 @@
+{
+  "id": "go",
+  "title": "Go (custom engines, Ebitengine via guide; package witness, std only)",
+  "languages": ["go"],
+  "detect": {
+    "files": ["go.mod"],
+    "globs": ["*.go", "cmd/**/*.go"],
+    "contains": [
+      { "glob": "go.mod", "text": "hajimehoshi/ebiten" },
+      { "glob": "go.mod", "text": "gen2brain/raylib-go" },
+      { "glob": "go.mod", "text": "gopxl/pixel" }
+    ]
+  },
+  "priority": 10,
+  "install": [
+    { "from": "witness.go", "to": "witness/witness.go" },
+    { "from": "json.go", "to": "witness/json.go" },
+    { "from": "record.go", "to": "witness/record.go" },
+    { "from": "quiet_windows.go", "to": "witness/quiet_windows.go" },
+    { "from": "quiet_other.go", "to": "witness/quiet_other.go" }
+  ],
+  "launch": { "command": "go", "args": ["run", "."] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

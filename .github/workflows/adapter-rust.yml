@@ -1,0 +1,47 @@
+name: adapter-rust
+
+on:
+  push:
+    paths: ["adapters/rust/**", "examples/rust/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-rust.yml"]
+  pull_request:
+    paths: ["adapters/rust/**", "examples/rust/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-rust.yml"]
+  workflow_dispatch:
+
+jobs:
+  coins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: crate checks (fmt, clippy, unit + doc tests)
+        working-directory: adapters/rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: shared test is in sync
+        working-directory: examples/rust
+        run: cmp ../coins.witness.json witness/coins.witness.json
+      - name: build the example
+        working-directory: examples/rust
+        run: cargo build --release
+      - name: witness doctor
+        working-directory: examples/rust
+        run: node ../../bin/witness.js doctor
+      - name: witness test
+        working-directory: examples/rust
+        run: node ../../bin/witness.js test
+      - name: record a replay in normal play, then replay it exactly
+        working-directory: examples/rust
+        run: |
+          out=$(WITNESS_RECORD=witness/replays/ci.jsonl WITNESS_SEED=4 ./target/release/coins)
+          echo "$out"
+          x=$(echo "$out" | sed -n 's/.*player=(\([0-9.]*\),.*/\1/p')
+          grep -q '"mark":"F8"' witness/replays/ci.jsonl
+          node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.player.pos[0].toFixed(4)" | tee replay.txt
+          grep -F "$x" replay.txt

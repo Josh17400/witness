@@ -1,0 +1,69 @@
+name: adapter-lua
+
+on:
+  push:
+    paths: ["adapters/lua/**", "examples/lua/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-lua.yml"]
+  pull_request:
+    paths: ["adapters/lua/**", "examples/lua/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-lua.yml"]
+  workflow_dispatch:
+
+jobs:
+  plain:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        lua: [lua5.1, luajit, lua5.4]
+    name: plain Lua (${{ matrix.lua }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: install ${{ matrix.lua }} + LuaSocket
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.lua }} lua-socket
+      - name: unit tests (JSON, base64, capture)
+        working-directory: adapters/lua
+        run: ${{ matrix.lua }} tests/test_witness.lua
+      - name: shared test is in sync
+        working-directory: examples/lua/plain
+        run: cmp ../../coins.witness.json witness/coins.witness.json
+      - name: witness doctor
+        working-directory: examples/lua/plain
+        run: node ../../../bin/witness.js doctor --cmd "${{ matrix.lua }} coins.lua"
+      - name: witness test
+        working-directory: examples/lua/plain
+        run: node ../../../bin/witness.js test --cmd "${{ matrix.lua }} coins.lua"
+
+  love:
+    runs-on: ubuntu-24.04
+    name: LÖVE 11 (xvfb)
+    defaults:
+      run:
+        working-directory: examples/lua
+    env:
+      ALSOFT_DRIVERS: "null"     # OpenAL Soft without a sound card
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: install LÖVE + virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y love xvfb libgl1-mesa-dri
+          love --version
+      - name: shared test is in sync
+        run: cmp ../coins.witness.json witness/coins.witness.json
+      - name: witness doctor
+        run: xvfb-run -a node ../../bin/witness.js doctor
+      - name: witness test
+        run: xvfb-run -a node ../../bin/witness.js test
+      - name: record a replay in normal play, then replay it exactly
+        run: |
+          out=$(WITNESS_RECORD=witness/replays/ci.jsonl WITNESS_SEED=4 xvfb-run -a love . --demo)
+          echo "$out"
+          x=$(echo "$out" | sed -n 's/.*player=(\([0-9.]*\),.*/\1/p')
+          grep -q '"mark":"F8"' witness/replays/ci.jsonl
+          xvfb-run -a node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.player.pos[0].toFixed(4)" | tee replay.txt
+          grep -F "\"$x\"" replay.txt

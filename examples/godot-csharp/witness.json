@@ -1,0 +1,9 @@
+{
+  "name": "coins-godot-csharp",
+  "adapter": "godot-csharp",
+  "build": "dotnet build Coins.csproj --nologo -v q && godot --headless --path . --import",
+  "launch": { "command": "godot", "args": ["--headless", "--path", ".", "--fixed-fps", "60"] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 120
+}

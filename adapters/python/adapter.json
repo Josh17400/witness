@@ -1,0 +1,24 @@
+{
+  "id": "python",
+  "title": "Python (plain Python, pygame / pygame-ce, Arcade, Pyglet; single file witness.py, stdlib only)",
+  "languages": ["python"],
+  "detect": {
+    "files": ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg", "main.py", "game.py"],
+    "globs": ["*.py", "src/**/*.py"],
+    "contains": [
+      { "glob": "requirements.txt", "text": "pygame" },
+      { "glob": "pyproject.toml", "text": "pygame" },
+      { "glob": "requirements.txt", "text": "arcade" },
+      { "glob": "requirements.txt", "text": "pyglet" },
+      { "glob": "*.py", "text": "import pygame" }
+    ]
+  },
+  "priority": 10,
+  "install": [
+    { "from": "witness.py", "to": "witness.py" },
+    { "from": "witness_pygame.py", "to": "witness_pygame.py" }
+  ],
+  "launch": { "command": "python", "args": ["main.py"] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

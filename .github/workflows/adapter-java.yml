@@ -1,0 +1,49 @@
+name: adapter-java
+
+on:
+  push:
+    paths: ["adapters/java/**", "examples/java/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-java.yml"]
+  pull_request:
+    paths: ["adapters/java/**", "examples/java/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-java.yml"]
+  workflow_dispatch:
+
+jobs:
+  coins:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [8, 17, 21]
+    name: coins (Java ${{ matrix.java }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - name: shared test is in sync
+        run: cmp examples/coins.witness.json examples/java/witness/coins.witness.json
+      - name: compile (Java 8 language and API level, all lint warnings)
+        run: |
+          REL=""
+          if javac --release 8 -version >/dev/null 2>&1; then REL="--release 8"; fi
+          javac $REL -Xlint:all -encoding UTF-8 -d adapters/java/build adapters/java/Witness.java adapters/java/tests/SelfTest.java
+          javac $REL -encoding UTF-8 -d examples/java/build adapters/java/Witness.java examples/java/src/coins/CoinsGame.java examples/java/src/coins/Main.java
+      - name: unit checks
+        run: java -cp adapters/java/build SelfTest
+      - name: witness doctor
+        working-directory: examples/java
+        run: node ../../bin/witness.js doctor
+      - name: witness test
+        working-directory: examples/java
+        run: node ../../bin/witness.js test
+      - name: record a replay (WITNESS_RECORD), then play it back
+        run: |
+          WITNESS_RECORD="$PWD/examples/java/witness/replays/ci.jsonl" java -cp adapters/java/build SelfTest
+          grep -q '"mark":"F8"' examples/java/witness/replays/ci.jsonl
+          cd examples/java
+          node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.score" | tee replay.txt
+          grep -q "state.score = 1" replay.txt

@@ -1,0 +1,24 @@
+{
+  "id": "rust",
+  "title": "Rust (custom engines, winit/wgpu, macroquad, Bevy via guide; crate `witness`, std only)",
+  "languages": ["rust"],
+  "detect": {
+    "files": ["Cargo.toml"],
+    "globs": ["src/**/*.rs"],
+    "contains": [
+      { "glob": "Cargo.toml", "text": "bevy" },
+      { "glob": "Cargo.toml", "text": "winit" },
+      { "glob": "Cargo.toml", "text": "macroquad" }
+    ]
+  },
+  "priority": 10,
+  "install": [
+    { "from": "Cargo.toml", "to": "witness/Cargo.toml" },
+    { "from": "src/lib.rs", "to": "witness/src/lib.rs" },
+    { "from": "src/json.rs", "to": "witness/src/json.rs" },
+    { "from": "src/record.rs", "to": "witness/src/record.rs" }
+  ],
+  "launch": { "command": "cargo", "args": ["run", "--release", "--quiet"] },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

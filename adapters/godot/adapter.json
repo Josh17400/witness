@@ -1,0 +1,21 @@
+{
+  "id": "godot",
+  "title": "Godot 4 (GDScript autoload Witness.gd; TCP on desktop, WebSocket on web exports)",
+  "languages": ["gdscript", "godot"],
+  "detect": {
+    "files": ["project.godot"],
+    "globs": ["**/*.gd", "**/*.tscn"],
+    "contains": [{ "glob": "project.godot", "text": "config_version=5" }]
+  },
+  "priority": 20,
+  "install": [
+    { "from": "Witness.gd", "to": "addons/witness/Witness.gd" },
+    { "from": "witness_logger.gd", "to": "addons/witness/witness_logger.gd" }
+  ],
+  "launch": {
+    "command": "godot",
+    "args": ["--path", ".", "--rendering-driver", "opengl3", "--fixed-fps", "60", "--write-movie", "user://witness.avi"]
+  },
+  "guide": "GUIDE.md",
+  "verified": "local"
+}

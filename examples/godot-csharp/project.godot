@@ -1,0 +1,35 @@
+; Engine configuration file.
+; The Witness sample game ("coins") for Godot 4 .NET.
+
+config_version=5
+
+[application]
+
+config/name="Coins (Godot C#)"
+run/main_scene="res://Main.tscn"
+config/features=PackedStringArray("4.7", "C#")
+
+[autoload]
+
+Witness="*res://addons/witness/WitnessNode.cs"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=180
+window/size/window_width_override=960
+window/size/window_height_override=540
+window/stretch/mode="viewport"
+
+[dotnet]
+
+project/assembly_name="Coins"
+
+[physics]
+
+common/physics_ticks_per_second=60
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

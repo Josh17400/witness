@@ -1,0 +1,8 @@
+{
+  "name": "coins-rust",
+  "build": "cargo build --release --quiet",
+  "launch": { "command": "cargo", "args": ["run", "--release", "--quiet"] },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 180
+}

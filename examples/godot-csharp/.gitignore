@@ -1,0 +1,8 @@
+.godot/
+.mono/
+bin/
+obj/
+*.translation
+witness/shots/
+witness/replays/
+*.jsonl

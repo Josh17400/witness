@@ -1,0 +1,70 @@
+name: adapter-python
+
+on:
+  push:
+    paths: ["adapters/python/**", "examples/python/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-python.yml"]
+  pull_request:
+    paths: ["adapters/python/**", "examples/python/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-python.yml"]
+  workflow_dispatch:
+
+jobs:
+  coins:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, python: "3.8" }    # oldest supported
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.13" }
+    runs-on: ${{ matrix.os }}
+    name: coins (python ${{ matrix.python }}, ${{ matrix.os }})
+    defaults:
+      run:
+        shell: bash
+        working-directory: examples/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: shared tests are in sync
+        run: |
+          cmp ../coins.witness.json witness/coins.witness.json
+          cmp ../coins.witness.json pygame/witness/coins.witness.json
+      - name: adapter compiles (no third-party imports)
+        run: python -We -c "import sys; sys.path.insert(0, '../../adapters/python'); import witness; print('witness.py OK')"
+      - name: witness doctor
+        run: node ../../bin/witness.js doctor
+      - name: witness test
+        run: node ../../bin/witness.js test
+      - name: record a replay in normal play, then replay it exactly
+        run: |
+          out=$(WITNESS_RECORD=witness/replays/ci.jsonl WITNESS_SEED=4 python coins.py --demo)
+          echo "$out"
+          x=$(echo "$out" | sed -n 's/.*player=(\([0-9.]*\),.*/\1/p')
+          grep -q '"mark":"F8"' witness/replays/ci.jsonl
+          node ../../bin/witness.js replay witness/replays/ci.jsonl --watch "state.player.pos[0].toFixed(4)" | tee replay.txt
+          grep -F "\"$x\"" replay.txt
+
+  pygame:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/python/pygame
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install pygame-ce
+        run: python -m pip install pygame-ce
+      - name: witness doctor (SDL dummy drivers, no display needed)
+        run: node ../../../bin/witness.js doctor
+      - name: witness test
+        run: node ../../../bin/witness.js test
