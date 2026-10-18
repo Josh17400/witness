@@ -41,18 +41,18 @@ cd /path/to/your/game && witness init
 
 | id | for | verified |
 |---|---|---|
-| `cpp` | C / C++ (SDL, raylib, SFML, custom engines; single header witness.h) | ✅ run locally |
-| `csharp` | C# / .NET (console, MonoGame, FNA, Stride, custom engines) | ✅ run locally |
-| `go` | Go (custom engines, Ebitengine via guide; package witness, std only) | ✅ run locally |
-| `godot` | Godot 4 (GDScript autoload Witness.gd; TCP on desktop, WebSocket on web exports) | ✅ run locally |
-| `godot-csharp` | Godot 4 (.NET / C#) | ✅ run locally |
-| `java` | Java / Kotlin (LibGDX, LWJGL, jMonkeyEngine, Swing/Java2D, custom engines) | ✅ run locally |
-| `js` | JavaScript / TypeScript (browser canvas, Phaser, three.js, PixiJS, Babylon.js, Node, Electron, Tauri; one ES module) | ✅ run locally |
-| `lua` | Lua (LÖVE 11 via witness_love.lua, plain Lua 5.1-5.4 / LuaJIT with LuaSocket) | ✅ run locally |
-| `lumen` | Lumen (.lum games): a bridge onto Lumen's built-in test API through its Electron shell | ✅ run locally |
-| `python` | Python (plain Python, pygame / pygame-ce, Arcade, Pyglet; single file witness.py, stdlib only) | ✅ run locally |
-| `rust` | Rust (custom engines, winit/wgpu, macroquad, Bevy via guide; crate `witness`, std only) | ✅ run locally |
-| `unity` | Unity (2021.3+, built players in -batchmode or the Editor) | ⚠️ written, not run |
+| `cpp` | C / C++ (SDL, raylib, SFML, custom engines; single header witness.h) | ✅ local + CI |
+| `csharp` | C# / .NET (console, MonoGame, FNA, Stride, custom engines) | ✅ local + CI |
+| `go` | Go (custom engines, Ebitengine via guide; package witness, std only) | ✅ local + CI |
+| `godot` | Godot 4 (GDScript autoload Witness.gd; TCP on desktop, WebSocket on web exports) | ✅ local + CI |
+| `godot-csharp` | Godot 4 (.NET / C#) | ✅ local + CI |
+| `java` | Java / Kotlin (LibGDX, LWJGL, jMonkeyEngine, Swing/Java2D, custom engines) | ✅ local + CI |
+| `js` | JavaScript / TypeScript (browser canvas, Phaser, three.js, PixiJS, Babylon.js, Node, Electron, Tauri; one ES module) | ✅ local + CI |
+| `lua` | Lua (LÖVE 11 via witness_love.lua, plain Lua 5.1-5.4 / LuaJIT with LuaSocket) | ✅ local + CI |
+| `lumen` | Lumen (.lum games): a bridge onto Lumen's built-in test API through its Electron shell | ✅ local + CI |
+| `python` | Python (plain Python, pygame / pygame-ce, Arcade, Pyglet; single file witness.py, stdlib only) | ✅ local + CI |
+| `rust` | Rust (custom engines, winit/wgpu, macroquad, Bevy via guide; crate `witness`, std only) | ✅ local + CI |
+| `unity` | Unity (2021.3+, built players in -batchmode or the Editor) | ⚠️ compile-checked in CI; never run inside Unity (needs a license) |
 
 `witness adapters` lists what's bundled. Each adapter has a `GUIDE.md` written for Claude,
 and a sample game in `examples/<id>/` that passes the same shared test in CI.
