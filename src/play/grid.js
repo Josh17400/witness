@@ -78,6 +78,12 @@ export class NavGrid {
     if (changed) this.version++;
   }
 
+  /** Forget everything (a new level or scene). */
+  reset() {
+    this.mapSolid.clear(); this.hazard.clear(); this.learned.clear(); this.temp.clear(); this.visited.clear(); this.seen.clear();
+    this.bounds = null; this.mapKey = null; this.version++;
+  }
+
   growBounds(x0, y0, x1, y1) {
     const b = this.bounds;
     this.bounds = b ? { x0: Math.min(b.x0, x0), y0: Math.min(b.y0, y0), x1: Math.max(b.x1, x1), y1: Math.max(b.y1, y1) } : { x0, y0, x1, y1 };

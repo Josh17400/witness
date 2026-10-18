@@ -124,6 +124,7 @@ export async function runDaemon(dir) {
     const combat = ap.inCombat(), careful = b && b.careful;
     for (const e of ev) {
       if (["death", "goal", "error", "scene", "lowhp"].includes(e.kind)) return e.text;
+      if (world.dead && (e.kind === "alert" || e.kind === "hurt")) continue;
       if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return e.text;
       if (!combat && e.kind === "hurt" && b?.verb !== "flee") return e.text;
       // platformer runs jump or stomp enemies on their own: an approaching enemy isn't worth a wake there
@@ -186,7 +187,7 @@ export async function runDaemon(dir) {
       if (ev.length) { await S.input(ev); recorder.add(ev); }
       if (DEBUG) {
         const nav = ap.cur && (ap.cur.nav || (ap.cur.go && ap.cur.go.nav));
-        log(`tick f${frame} t${world.t.toFixed(2)} p=${world.player && world.player.p2 ? world.player.p2.map((x) => x.toFixed(1)).join(",") : "-"} ${ap.cur ? ap.cur.label : "-"} st=${dec.status} k=${dec.k} held=[${[...ap.ctrl.held.keys()].join(" ")}] ev=${ev.map((e) => `${e.key || e.type}${e.down === true ? "+" : e.down === false ? "-" : ""}@${e.frame}`).join(" ")}${nav ? ` path=${(nav.path || []).slice(0, 4).map((c) => c.join(".")).join(">")} esc=${nav.escape ? JSON.stringify(nav.escape) : ""} best=${(nav.best / world.cell).toFixed(2)}@${nav.bestT.toFixed(2)}` : ""}`);
+        log(`tick f${frame} t${world.t.toFixed(2)} p=${world.player && world.player.p2 ? world.player.p2.map((x) => x.toFixed(1)).join(",") : "-"} ${ap.cur ? ap.cur.label : "-"} st=${dec.status} k=${dec.k} held=[${[...ap.ctrl.held.keys()].join(" ")}] ev=${ev.map((e) => `${e.key || e.type}${e.down === true ? "+" : e.down === false ? "-" : ""}@${e.frame}`).join(" ")}${nav ? ` path=${(nav.path || []).slice(0, 4).map((c) => c.join(".")).join(">")} esc=${nav.escape ? JSON.stringify(nav.escape) : ""} best=${(nav.best / world.cell).toFixed(2)}@${nav.bestT.toFixed(2)}` : ""} foes=${world.things.filter((th) => th.rel === "hostile" && th.dist < 6).map((th) => `${th.key}@${th.p2.map((x) => x.toFixed(0)).join(",")}`).join(" ")} vel=${world.player && world.player.vel ? world.player.vel.map((x) => x.toFixed(2)).join(",") : ""} g=${world.player ? world.player.onGround : ""}`);
       }
       if (dec.status === "done" || dec.status === "fail" || dec.status === "idle") { result = { status: dec.status === "idle" ? "done" : dec.status, msg: dec.message, hint: dec.hint }; break; }
       if (S.closed) { result = { status: "error", msg: "the game disconnected (crashed?)" }; break; }

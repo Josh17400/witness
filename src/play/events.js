@@ -77,6 +77,7 @@ export class EventTracker {
     // ---- things that vanished / appeared / took damage
     const prevById = new Map(prev.things.map((th) => [th.id, th])), curById = new Map(cur.things.map((th) => [th.id, th]));
     const attackedRecently = ctx.lastAttackT != null && t - ctx.lastAttackT <= 0.6;
+    const teamGame = !!(P && P.team != null);   // teammates shoot too: only count damage/kills while you were firing
     let dealtNow = 0;
     const killedNow = [];
     for (const [id, th] of prevById) {
@@ -84,7 +85,7 @@ export class EventTracker {
       const near = th.dist <= 3.5, far = th.dist > Math.max(cur.maxListed, prev.maxListed) * 0.6 && th.dist > 8;
       if (th.rel === "hostile") {
         if ((th.hp != null && th.hp <= 2 && th.dist <= 6) || near || (!far && th.hp != null && th.maxHp && th.hp < th.maxHp)) {
-          this.kills.push({ t, key: th.key, type: th.type });
+          if (!teamGame || attackedRecently) this.kills.push({ t, key: th.key, type: th.type });
           killedNow.push(th);
           if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; if (th.hp != null) dealtNow += th.hp; }
           pushInf("kill", `${th.key} died`, { id }, th.key);
@@ -99,7 +100,7 @@ export class EventTracker {
       const was = prevById.get(id);
       // games that keep the dead in the list (dead: true / hp 0) instead of removing them
       if (was && !was.dead && th.dead && th.rel === "hostile") {
-        this.kills.push({ t, key: th.key, type: th.type });
+        if (!teamGame || attackedRecently) this.kills.push({ t, key: th.key, type: th.type });
         killedNow.push(was);
         if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; }
         if (was.hp != null && th.hp != null && was.hp > th.hp) dealtNow += was.hp - th.hp;
@@ -116,7 +117,7 @@ export class EventTracker {
       } else if (th.hp != null && was.hp != null && th.hp < was.hp) {
         const d = was.hp - th.hp;
         if (th.rel === "hostile") {
-          dealtNow += d;
+          if (!teamGame || attackedRecently) dealtNow += d;
           const mine = attackedRecently && th.dist <= reach * 2;
           pushInf("hit", mine ? `you hit ${th.key} (-${r1(d)}, hp ${r1(th.hp)}${th.maxHp ? `/${r1(th.maxHp)}` : ""})` : `${th.key} took ${r1(d)} damage (hp ${r1(th.hp)})`, { id }, th.key);
         }
@@ -170,6 +171,7 @@ export class EventTracker {
   trackFight(prev, cur, ev, dealtNow, attackedRecently, killedNow = []) {
     const t = cur.t, reach = this.cfg.reach.attack, P = cur.player;
     if (!P || !P.p2) return;
+    if (cur.dead) { if (this.active) this.closeFight("lost", t); return; }   // no new fights while dead
     const hurt = ev.some((e) => e.kind === "hurt"), hit = ev.some((e) => e.kind === "hit" || e.kind === "kill");
     const close = cur.things.filter((th) => th.rel === "hostile" && !th.dead && th.dist <= Math.max(reach * 2.5, 2.5, this.cfg.profile === "fps" ? (this.cfg.fps.range ?? 12) * 1.5 : 0));
     if (!this.active) {

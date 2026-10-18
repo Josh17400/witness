@@ -370,6 +370,17 @@ class Fight extends Behaviour {
     const size = Math.atan2(0.45, Math.max(0.5, d));
     const onTarget = Math.abs(aim.yawErr) < size * cfg.fps.aimTolerance + 0.01 && Math.abs(aim.pitchErr) < size * 1.6 + 0.02;
     if (onTarget && th.los !== false) { want.held.set("attack", c.attack); ap.lastAttackT = ap.t; }
+    if (this.mode === "hold") {
+      // hold position: shoot what's in sight, never chase; switch to another visible enemy when this one hides
+      if (th.los === false) {
+        const vis = w.things.find((x) => x.rel === "hostile" && !x.dead && x.los !== false && x.dist <= (cfg.fps.range ?? 12) * 2.5);
+        if (vis) { this.target = vis.id; this.targetKey = vis.key; }
+        this.unseen = (this.unseen ?? ap.t);
+        if (ap.t - this.unseen > 2.5) return this.done(`no enemy in sight for 2.5s (held position)`);
+      } else this.unseen = null;
+      if (cfg.fps.strafe && th.los !== false) { const phase = Math.floor(ap.t / 0.9) % 2 ? 1 : -1; ap.profile.move(w, scale(perp(norm(sub(th.p2, p))), phase), want, { faceDir: sub(th.p2, p), turn: false }); }
+      return null;
+    }
     const prefer = (this.kite ?? cfg.fps.range ?? 12) * w.cell;
     let mv = null;
     if (th.los === false || d > prefer * 1.4) {
@@ -627,7 +638,7 @@ export class Autopilot {
   setOrders(orders) { this.queue = orders.slice(); this.cur = null; this.results = []; }
   clear() { this.queue = []; this.cur = null; }
   busy() { return !!(this.cur || this.queue.length); }
-  inCombat() { return this.cur instanceof Fight || this.cur instanceof Flee; }
+  inCombat() { return this.cur instanceof Fight || this.cur instanceof Flee || /^(fight|stomp|flee)$/.test(this.cur?.o?.verb || ""); }
   currentLabel() { return this.cur ? this.cur.label : null; }
   replaceWith(b, why) { this.cur = b; this.emit("reflex", why); }
 
@@ -635,6 +646,11 @@ export class Autopilot {
   observe(w) {
     this.t = w.t; this.frame = w.frame;
     const p = w.player;
+    if (w.newScene) {   // a new level or scene: the old map knowledge and what we remembered no longer apply
+      this.grid.reset(); this.windupSeen.clear(); this.prevP = null;
+      if (this.platform) this.platform.reset();
+      this.emit("scene", `new scene/level (${w.sceneKey}): map knowledge reset`);
+    }
     if (!p || !p.p2) return;
     if (w.map) this.grid.setMap(w.map);
     this.grid.visit(p.p2, this.cfg.sight);
@@ -755,7 +771,11 @@ export class Autopilot {
       const spec = o.target;
       if (e instanceof OrderError && spec && spec.id != null) {
         const m = this.perceiver.memory.get(isNaN(+spec.id) ? spec.id : +spec.id) || this.perceiver.memory.get(spec.id);
-        if (m && m.gone) throw new OrderError(`${m.thing.key} is gone (picked up, killed or removed earlier)`, e.hint);
+        if (m && m.gone) {
+          // fighting / stomping something that's already dead is a success, not an error
+          if (/^(fight|stomp)$/.test(o.verb) && m.thing.rel === "hostile") return new Instant(o, this, w, () => ({ status: "done", msg: `${m.thing.key} is already defeated` }));
+          throw new OrderError(`${m.thing.key} is gone (picked up, killed or removed earlier)`, e.hint);
+        }
       }
       throw e;
     }
@@ -836,12 +856,18 @@ export class Autopilot {
       });
       case "call": if (!cfg.allowCalls) throw new OrderError("calls are disabled in playtests (start with --allow-calls to enable them)"); return new CallOrder(o, this, w);
       case "combo": return new Combo(o, this, w);
-      case "respawn": return new Instant(o, this, w, (w2, want) => {
-        if (!w2.dead) return { status: "done", msg: "not dead" };
-        if (!this.respawnT) { this.respawnT = this.t; want.taps.push({ label: "confirm", c: c.confirm || parseControl("enter"), frames: c.tapFrames }); return { status: "run" }; }
-        if (this.t - this.respawnT > 1.5) { this.respawnT = null; return { status: "fail", msg: "pressed confirm but still dead" }; }
-        return { status: "run" };
-      });
+      case "respawn": {
+        // press confirm once (and again after 3 s); many games respawn on their own timer, so wait up to 8 s
+        let t0 = null, pressed = 0;
+        return new Instant(o, this, w, (w2, want) => {
+          if (t0 == null) { t0 = this.t; if (!w2.dead) return { status: "done", msg: "not dead" }; }
+          if (!w2.dead) return { status: "done", msg: `respawned after ${r1(this.t - t0)}s` };
+          const due = pressed === 0 || (pressed === 1 && this.t - t0 >= 3);
+          if (due && (c.confirm || cfg.profile !== "fps")) { want.taps.push({ label: "confirm", c: c.confirm || parseControl("enter"), frames: c.tapFrames }); pressed++; }
+          if (this.t - t0 > 8) return { status: "fail", msg: `still dead after 8s${pressed ? " (pressed confirm)" : ""} — the game may need a menu choice: look at a screenshot` };
+          return { status: "run" };
+        });
+      }
       case "jump": case "stomp": {
         if (!this.platform) {
           if (o.verb === "stomp") return new Fight({ ...o, verb: "fight" }, this, w);
@@ -908,6 +934,11 @@ export class Autopilot {
         const pause = () => { for (const n of [b.nav, b.go && b.go.nav]) if (n) n.bestT = this.t; };
         if (threat && this.defend(w, want, threat, mode)) { pause(); this.k = this.cfg.combatTick; this.wantedMove = this.wantedMoveNow; return { want, k: this.cfg.combatTick, status: "run" }; }
         if (this.blockUntilT && this.t < this.blockUntilT && this.cfg.controls.block) { pause(); want.held.set("block", this.cfg.controls.block); this.k = this.cfg.combatTick; return { want, k: this.cfg.combatTick, status: "run" }; }
+      }
+      // platformers: while an order stands still (wait, press, look, wait for ...), jump onto or away from an enemy about to touch you
+      if (this.platform && this.policy.guard && (b instanceof Wait || b instanceof WaitFor || b instanceof Tap || b instanceof Look || b instanceof Hold) && this.platform.guard(w, want)) {
+        this.k = this.cfg.combatTick; this.wantedMove = true;
+        return { want, k: this.cfg.combatTick, status: "run" };
       }
       // ---- the order
       const res = b.tick(w, want);

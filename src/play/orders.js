@@ -95,6 +95,7 @@ function takeModifiers(words) {
     if (/^(careful|carefully|cautious|cautiously|slowly)$/.test(w)) { mods.careful = true; continue; }
     if ((w === "using" || w === "with") && nx) { mods.using = words[i + 1].w; i++; continue; }
     if (/^(shooting|ranged)$/.test(w)) { mods.mode = mods.mode || "ranged"; continue; }
+    if (/^(hold|stay|camp|defensive|stationary)$/.test(w) || (w === "in" && nx === "place")) { mods.mode = "hold"; if (w === "in") i++; continue; }
     rest.push(words[i]);
   }
   return { mods, rest };

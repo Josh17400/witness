@@ -16,7 +16,10 @@ export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie
   const W = `${cli} play`;
   const start = [`${W} start --name ${name}`, `--config ${q(configDir)}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
   const card = profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
-    : ORDER_CARD + (profile === "fps" ? `\n${ORDER_CARD_FPS}` : "");
+    : profile === "fps" ? `goto <thing|x,y> · go forward|back|left|right [cells] · go <n|s|e|w…> [cells] · explore [dir] · follow <thing>
+fight [thing] [retreat 30%] [kite N] · flee · look <dir|thing> · reload · weapon <n>
+press <key> [xN] · hold <key> <s> · wait [s] · stop · respawn · modifiers: for 8s · careful`
+      : ORDER_CARD;
   const does = profile === "platformer" ? "running, jumping gaps and walls, stomping enemies that can be stomped"
     : profile === "fps" ? "moving, turning, aiming and firing, strafing, reloading" : "walking around walls, aiming, attack timing, blocking when an enemy winds up";
   const tips = profile === "platformer"

@@ -176,6 +176,11 @@ export class Perceiver {
       } else { th.dist = Infinity; th.dir = "?"; }
     }
     things.sort((a, b) => a.dist - b.dist || String(a.id).localeCompare(String(b.id)));
+    // measured velocity (world units per frame) from the previous snapshot: unit-free, works for any game
+    if (this.prev && frame > this.prev.frame) {
+      const pf = this.prev.frame, byId = new Map(this.prev.things.map((th) => [th.id, th]));
+      for (const th of things) { const o = byId.get(th.id); th.v = o ? [(th.p2[0] - o.p2[0]) / (frame - pf), (th.p2[1] - o.p2[1]) / (frame - pf)] : [0, 0]; }
+    } else for (const th of things) th.v = [0, 0];
 
     // ---- dialogue / menu / goal / notice / scene / outcome
     const pick = (fx, ...cands) => (fx ? fx(S) : cands.find((v) => v != null && v !== ""));
@@ -205,7 +210,16 @@ export class Perceiver {
       remembered.push({ ...m.thing, lastSeen: m.lastSeen, remembered: true });
     }
 
-    const world = { snap, frame, t, player, things, remembered, maxListed, map, dialogue, menu, goal, notice: notice ? String(notice) : null, scene, won, dead, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
+    // scene/level identity: when it changes, what we remembered (and the nav grid) belongs to another place
+    const sceneKey = JSON.stringify([state.scene ?? null, state.level ?? null, state.stage ?? null, state.area ?? null, state.world ?? null, state.chapter ?? null, state.map && state.map.id != null ? state.map.id : null]);
+    let newScene = false;
+    if (this.sceneKey !== undefined && sceneKey !== this.sceneKey) {
+      newScene = true;
+      for (const [id, m] of this.memory) if (!visible.has(id)) this.memory.delete(id);
+      remembered.length = 0;
+    }
+    this.sceneKey = sceneKey;
+    const world = { snap, frame, t, player, things, remembered, sceneKey, newScene, maxListed, map, dialogue, menu, goal, notice: notice ? String(notice) : null, scene, won, dead, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
     this.prev = world;
     return world;
   }
