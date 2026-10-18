@@ -6,3 +6,5 @@ tests/media/out/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+__pycache__/
+*.pyc
