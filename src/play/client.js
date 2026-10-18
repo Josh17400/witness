@@ -15,12 +15,13 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
 
   witness play start [--name t1] [--goal "…"] [--persona newbie|explorer|speedrunner|breaker|fighter]
                      [--seed N] [--scene S] [--params JSON] [--minutes 20] [--idle 300] [--allow-calls] [--no-map]
+                     [--model haiku] [--out DIR] [--force] [--json] [--cmd "<launch>"]
                      → launches the game + a background session daemon, prints the first observation
   witness play do "<orders>" [-s t1] [--for S]  run orders ("fight wolf block; then talk guard") until done/interrupted
-  witness play look [-s t1] [--shot]             the observation now (no game time passes)
-  witness play shot [-s t1]                      screenshot → PNG path (open it with the Read tool)
+  witness play look [-s t1] [--shot] [--json]    the observation now (no game time passes)
+  witness play shot [-s t1] [--scale 2]          screenshot → PNG path (open it with the Read tool)
   witness play note "<text>" [--bug|--confusing|--fun|--idea] [--shot] [-s t1]
-  witness play end [-s t1] [--fun 1-5] [--difficulty 1-5] [--feedback "…"]   → report.md/json + replay, stops everything
+  witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback "…"]   → report.md/json + replay, stops everything
   witness play status|stop [-s t1|--all]|list [--clean]|report [t1|dir] [--json]
   witness play brief [--goal …] [--persona …] [--minutes 4] [--name t1] [--extra "…"]  → the prompt for a tester subagent
   witness play suggest [--write]                  probe the game and propose a "play" config for witness.json
@@ -170,7 +171,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       const targets = opt.all ? liveEntries() : [findSession(opt)];
       if (!targets.length) { console.log("no sessions running"); return; }
       for (const e of targets) {
-        const args = sub === "end" ? { fun: opt.fun !== undefined && opt.fun !== true ? +opt.fun : undefined, difficulty: opt.difficulty !== undefined && opt.difficulty !== true ? +opt.difficulty : undefined, feedback: opt.feedback && opt.feedback !== true ? String(opt.feedback) : undefined } : { reason: "stopped by the main agent" };
+        const args = sub === "end" ? { fun: opt.fun !== undefined && opt.fun !== true ? +opt.fun : undefined, difficulty: opt.difficulty !== undefined && opt.difficulty !== true ? +opt.difficulty : undefined, feedback: opt.feedback && opt.feedback !== true ? String(opt.feedback) : undefined } : { reason: "stopped by the main agent", outcome: "stopped" };
         let r = null;
         try { r = await request(e, "end", args, 120000); } catch (err) { console.error(`⚠ ${e.name}: ${err.message}`); }
         const info = sessionInfo(e);
@@ -198,8 +199,10 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
     case "report": {
       let dir;
       const ref = pos[0];
-      if (ref && fs.existsSync(path.resolve(ref))) dir = path.resolve(ref);
-      else { const e = ref ? readEntry(ref) : findSession(opt, { allowEnded: true }); if (!e) fail(`no session "${ref}"`); dir = e.dir; }
+      const byName = ref && /^[\w.-]{1,40}$/.test(ref) ? readEntry(ref) : null;
+      if (byName) dir = byName.dir;
+      else if (ref && fs.existsSync(path.resolve(ref))) dir = path.resolve(ref);
+      else { const e = ref ? null : findSession(opt, { allowEnded: true }); if (!e) fail(`no session or folder "${ref}"`); dir = e.dir; }
       const f = path.join(dir, opt.json ? "report.json" : "report.md");
       if (!fs.existsSync(f)) fail(`no report yet in ${dir}${opt.json ? "" : " (the session may still be running: report.json is updated after every order)"}`);
       console.log(fs.readFileSync(f, "utf8"));

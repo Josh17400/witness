@@ -115,7 +115,7 @@ export function observeText(w, ctx) {
   if (ctx.first && ctx.session && ctx.session.goal) L.push(`your goal: ${ctx.session.goal}`);
   if (d.goal) L.push(`goal: ${clip(oneLine(d.goal), 140)}`);
   if (d.result) L.push(d.result.line);
-  if (w.dead) L.push(`YOU ARE DEAD${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}`);
+  if (w.dead) L.push(`YOU ARE DEAD${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}${cfg.controls.confirm ? ` (to continue: "respawn", or press the key the game names)` : ""}`);
   else if (w.won) L.push("★ GOAL REACHED (the game reports a win) — keep exploring or end the session");
   if (d.near.length) {
     L.push("near (dist in cells, compass dir):");

@@ -1,7 +1,7 @@
 # arena: a small top-down action game for agent playtests
 
 A headless Node game built on the JS adapter (`adapters/js/witness.js`), made for the agent playtest harness
-(`docs/PLAYTEST_PLAN.md` §11). Coins is too simple to test a playing agent. Arena needs the things an agent has to
+(`docs/PLAYTEST.md`; design notes in `docs/PLAYTEST_PLAN.md` §11). Coins is too simple to test a playing agent. Arena needs the things an agent has to
 get right:
 
 * **a maze** where walking in a straight line gets you stuck (the direct line from the start to the exit is walled);

@@ -56,7 +56,7 @@ order, with `{"id": <n>, "ok": true, ...result}` or
 | `reset` | `seed` (int), `scene?` (string), `params?` (object) | `{}` | Return the game to a deterministic initial state: the same seed and the same inputs must always give the same snapshots, screenshots and audio, **whatever ran before in the same process** (see §6). Without `reset`, the CLI restarts the process for each run. Reserved `params` (honour them if the game can vary them per run): `window: [w, h]` (window/backbuffer size in device pixels) and `dpi` (device pixel ratio); the CLI sends them for `--window 1920x1080` / `--dpi 2`. |
 | `input` | `events: [Event]` | `{}` | Queue input events. Each has `frame` (absolute frame number at which to apply it; apply at the start of that frame). Events for a past or current frame apply at the next step. |
 | `step` | `frames` (int ≥ 1), `dt?` (seconds, default `1/fps`), `dts?` (an array of per-frame dt, used by replays; overrides `dt`) | `{"frame": f, "time": t}` | Advance exactly that many fixed frames, applying queued inputs at their frames. |
-| `snapshot` | `paths?` (array of strings, optional filter) | `{"frame", "time", "state": {...}}` | Game-defined JSON describing its state. Conventions (optional but unlocking helpers): `state.entities = [{"id", "type", "pos": [x, y(, z)], ...}]`, `state.scene`, `state.player`. Values must be JSON-safe (no NaN; use `"NaN"`). Optional `digest` (in the reply or in `state`): a string hash of the game's full internal state (every actor, RNG states, timers), so comparisons also catch hidden state the snapshot doesn't show. |
+| `snapshot` | `paths?` (array of strings, optional filter) | `{"frame", "time", "state": {...}}` | Game-defined JSON describing its state. Conventions (optional but unlocking helpers): `state.entities = [{"id", "type", "pos": [x, y(, z)], ...}]`, `state.scene`, `state.player`. Values must be JSON-safe (no NaN; use `"NaN"`). Optional `digest` (in the reply or in `state`): a string hash of the game's full internal state (every actor, RNG states, timers), so comparisons also catch hidden state the snapshot doesn't show. Agent playtests (`witness play`) read more optional conventions: entity `hostile`/`item`/`talk`, `state: "windup"` or `telegraph: <seconds>`, `state.dialogue`, `state.goal`, `state.notice`, `state.map`, `state.won`/`state.dead` (see [PLAYTEST.md](PLAYTEST.md#snapshot-conventions)). |
 | `screenshot` | `scale?` (number) | `{"width", "height", "format": "rgba8" \| "png", "data": "<base64>"}` | The frame as currently rendered. `rgba8` = raw top-to-bottom rows; the CLI encodes the PNG. Adapters may also write a file and return `{"path": "..."}`. |
 | `audio` | — | `{"sampleRate", "channels", "format": "f32" \| "s16", "data": "<base64>"}` | Interleaved PCM of everything the game mixed since the last `audio` call or reset, synchronized with simulated time (one step of dt = dt × sampleRate frames). |
 | `call` | `name`, `args: []` | `{"result": any}` | Game-specific commands (teleport, give item, open menu, spawn …). |
@@ -155,6 +155,13 @@ adapter writes a replay:
   `state`). `witness replay` then compares the replay's final state to it field by field and fails on any
   difference — the proof that the recording replays exactly.
 * `witness replay` plays the file back through `reset(seed, scene, params)` + `input` + `step(dts)`.
+* Replays written by an agent playtest (`witness play`, see [PLAYTEST.md](PLAYTEST.md)) use the same format. Their
+  header has `"source": "witness play"` and `"session": "<name>"`, and their frame lines are sparse: only frames with
+  input, marks or calls, plus the last stepped frame (missing frames ran at `1/fps`).
+* `calls` (optional, CLI-side): a frame line may carry `"calls": [["name", arg, ...], ...]`. Only
+  `witness play` writes it, when calls were allowed (`--allow-calls`) and the tester ran a game `call`. `witness replay` (and `trace --replay`)
+  run those calls when the replay reaches that frame, before stepping it. Adapters never write it, and it needs the
+  `call` capability to replay.
 
 ## 6. Determinism checklist (for adapter authors and game code)
 

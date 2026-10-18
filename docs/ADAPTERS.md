@@ -82,6 +82,16 @@ engine's key codes to Witness names.
 Rules: no third-party dependencies (stdlib only); thread-safe enough for engines with a
 render thread; never block the game when Witness isn't active; zero cost when inactive.
 
+## Playtest-friendly snapshots
+
+Adapters don't need anything new for agent playtests (`witness play`): the harness uses protocol v1 only. What
+matters is what the game puts in its snapshot. A few optional conventions make a cheap tester model play far better:
+entities with `hostile` / `item` / `talk` flags; enemies about to strike with `state: "windup"` or
+`telegraph: <seconds left>`; `dialogue: {speaker, text, options}` while a conversation is open; `goal` and `notice`
+text; `map: {cell, origin, rows, solid}` so walls are known up front; `won` / `dead`. Game events as info logs show up
+in the playtest timeline. The full table and priorities are in
+[PLAYTEST.md](PLAYTEST.md#snapshot-conventions); [examples/arena](../examples/arena) shows all of them.
+
 ## The standard sample game ("coins")
 
 Every `examples/<id>/` implements the same tiny game, so one shared test file proves every

@@ -325,7 +325,7 @@ export async function runDaemon(dir) {
       case "status": return { ok: true, text: `session ${spec.name}: ${r1(world.t)}s game time, frame ${frame}, ${orders.length} orders, ${notes.length} notes${world.dead ? ", player dead" : ""}${world.won ? ", goal reached" : ""}`, data: { t: world.t, frame, orders: orders.length } };
       case "end": {
         const fb = { fun: a.fun != null ? +a.fun : null, difficulty: a.difficulty != null ? +a.difficulty : null, text: a.feedback ? String(a.feedback).slice(0, 4000) : null };
-        const r = await finalize(a.reason || "ended by the tester", null, fb);
+        const r = await finalize(a.reason || "ended by the tester", a.outcome || null, fb);
         try { server && server.close(); } catch { /* closed */ }
         setTimeout(() => process.exit(0), 300);
         return { ok: true, text: r ? `${r.summary}\nreport: ${r.report}\nreplay: ${r.replay}` : "ended", data: r };

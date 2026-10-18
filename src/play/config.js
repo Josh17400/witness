@@ -110,6 +110,9 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     tick: Math.max(1, Math.round(+(raw.tick ?? 3))),
     combatTick: Math.max(1, Math.round(+(raw.combatTick ?? 1))),
     guard: raw.guard !== false,
+    guardMode: ["block", "dodge", "backoff"].includes(raw.guardMode) ? raw.guardMode : null,   // null: block if possible, else dodge, else back off
+    radius: raw.radius != null ? +raw.radius : null,     // player collision radius in cells (null: from player.size, else 0.35)
+    mirrorCombos: raw.mirrorCombos !== false,
     retreat: +(raw.retreat ?? 0),
     heal: +(raw.heal ?? 0),
     combos: raw.combos || {},

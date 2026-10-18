@@ -300,7 +300,7 @@ class Fight extends Behaviour {
     const c = this.ap.cfg.controls;
     if (this.mode) return this.mode;
     if (!this.ap.policy.guard) return "aggressive";
-    return c.block ? "block" : c.dodge ? "dodge" : "backoff";
+    return this.ap.cfg.guardMode || (c.block ? "block" : c.dodge ? "dodge" : "backoff");
   }
   pick(w, first = false) {
     let cands;
@@ -904,7 +904,7 @@ export class Autopilot {
       }
       if (b.guardable && this.policy.guard && !this.platform) {
         const threat = this.reactingThreat(w, reachW(w, this.cfg.reach.attack) * 1.9);
-        const mode = this.cfg.controls.block ? "block" : this.cfg.controls.dodge ? "dodge" : "backoff";
+        const mode = this.cfg.guardMode || (this.cfg.controls.block ? "block" : this.cfg.controls.dodge ? "dodge" : "backoff");
         const pause = () => { for (const n of [b.nav, b.go && b.go.nav]) if (n) n.bestT = this.t; };
         if (threat && this.defend(w, want, threat, mode)) { pause(); this.k = this.cfg.combatTick; this.wantedMove = this.wantedMoveNow; return { want, k: this.cfg.combatTick, status: "run" }; }
         if (this.blockUntilT && this.t < this.blockUntilT && this.cfg.controls.block) { pause(); want.held.set("block", this.cfg.controls.block); this.k = this.cfg.combatTick; return { want, k: this.cfg.combatTick, status: "run" }; }

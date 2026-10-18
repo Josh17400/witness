@@ -1,7 +1,7 @@
 ---
 name: witness
 description: Witness lets you see, hear and prove a game headlessly — in any language or engine (C/C++, Rust, Go, C#, Unity, Godot, Java/LibGDX, Python/pygame, Lua/LÖVE, JS/TS web). Use it whenever you are building, debugging, testing or polishing a GAME (or any real-time interactive app): to wire the Witness adapter into the project, then verify gameplay with scripted-input tests, query game state at any moment, chart values over time, take and diff screenshots, analyze the game's audio, and replay a human's recorded play session.
-when_to_use: User asks to test/verify/debug a game, "make sure it works", check a mechanic, reproduce a bug they hit while playing, look at what the game renders, check sound/music, add automated gameplay tests or CI for a game, or set up Witness. Also when you have changed game code and should prove it still works.
+when_to_use: User asks to test/verify/debug a game, "make sure it works", check a mechanic, reproduce a bug they hit while playing, look at what the game renders, check sound/music, add automated gameplay tests or CI for a game, or set up Witness. Also when you have changed game code and should prove it still works, and after building a level or mechanic, to have a cheap tester subagent play it (agent playtest) before handing it over.
 ---
 
 # Witness: see, hear and prove any game
@@ -111,7 +111,38 @@ records seed, frame times and inputs (F8 marks a moment). Then:
 4. If the game writes `<file.jsonl>.state.json` at the end of a recording, `witness replay`
    checks the replay ends in exactly that state; recorded `scene`/`params` go to `reset`.
 
-## 5. Troubleshooting
+## 5. Run an agent playtest
+
+`witness play` lets a cheap model **play** the game as a subagent and report back: feel, difficulty, confusing
+spots, places it got stuck, bugs. Do it after building a level or a mechanic and before handing the work to the
+user. Tests prove what you thought of; a playtester finds what you didn't. Full reference:
+`${CLAUDE_PLUGIN_ROOT}/docs/PLAYTEST.md`.
+
+1. **Config.** Add a `"play"` section to `witness.json`: at least `controls` (move, attack, block, dodge,
+   interact, heal, choose…), plus `profile` (`topdown` | `platformer` | `fps`) if it isn't top-down.
+   `witness play suggest` probes the game and proposes one (`--write` saves it). The harness works much better when
+   the snapshot follows the playtest conventions (entity `hostile`/`item`/`talk`, enemy `state: "windup"` or
+   `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`): see PLAYTEST.md "Snapshot conventions".
+2. **Sanity-check it yourself:** `witness play start --name check --goal "smoke"`, `witness play do "explore for 3s"
+   -s check`, `witness play end -s check`. Fix the config until orders work and things are classified right.
+3. **Brief:** `witness play brief --goal "<what to achieve>" --persona newbie --minutes 4 --name t1` prints the
+   complete tester prompt (commands with the absolute CLI path, the order card, the rules).
+4. **Spawn the tester** with the Agent tool: `model: "haiku"` and the brief as the prompt, or `model: "sonnet"` with
+   low effort for harder games. The tester runs the commands itself; don't play for it.
+5. **Read `witness/playtests/t1/report.md`**: tester feedback and bug notes first, then fights (windups avoided vs
+   hit), stuck incidents, deaths, coverage. Open the key shots and `coverage.png`.
+6. **Reproduce** what it flagged: report.md lists `witness replay witness/playtests/t1/replay.jsonl --at <t> --shot`
+   for every note and death. Every playtest is a frame-exact replay.
+7. **Fix**, then **turn each bug into a test** (section 3), and playtest again if the change affects feel.
+
+* Several testers give a broader picture: different `--persona`s (`newbie`, `explorer`, `speedrunner`, `breaker`,
+  `fighter`) and different `--name`s. **Run at most 2 at once** (each is a game process; `WITNESS_PLAY_MAX`).
+* **Never leave sessions running.** `witness play list` shows them; `witness play stop --all` ends them. Sessions
+  also end themselves after 5 idle minutes or 20 minutes total.
+* Judge the feedback: the reflex layer plays like a decent human, not a pro, and a stuck incident can be a harness
+  limit (moving blockers, no `state.map`) rather than a game bug. Check with a replay before changing the game.
+
+## 6. Troubleshooting
 
 * "no game connected": the adapter isn't connecting. Check `launch`, that the game reads
   `WITNESS_ADDR`, and the game output printed below the error.

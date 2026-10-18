@@ -19,6 +19,7 @@ witness shot --at 1,4 --diff witness/shots/before.png
 witness listen --time 8                          # audio report + spectrogram PNGs
 witness replay last --shot                       # what the human saw when they pressed F8
 witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
+witness play start --goal "Escape the arena"     # agent playtests: a cheap model PLAYS the game, Witness reports
 ```
 
 ## Install
@@ -78,8 +79,28 @@ Test files are JSON (or JS modules):
 ```
 
 * Spec: [docs/PROTOCOL.md](docs/PROTOCOL.md)
+* Agent playtests: [docs/PLAYTEST.md](docs/PLAYTEST.md)
 * Writing adapters: [docs/ADAPTERS.md](docs/ADAPTERS.md)
 * The Claude skill: [skills/witness/SKILL.md](skills/witness/SKILL.md)
+
+## Agent playtests
+
+`witness play` lets a cheap Claude model (Haiku, or Sonnet at low effort) **play** the game as a subagent. It gives
+plain-word orders through short commands; a deterministic reflex layer inside Witness carries them out frame by
+frame (pathing around walls, attack timing, blocking telegraphed attacks, dialogue choices). The game only steps on
+command, so the model's thinking costs no game time, and every playtest is recorded as a frame-exact replay with a
+report (fights, stuck spots, deaths, coverage, the tester's feedback).
+
+```bash
+witness play brief --goal "Escape the arena" --persona newbie --name t1   # the prompt for the tester subagent
+witness play start --name t1 --goal "Escape the arena"                    # (what the tester runs)
+witness play do "talk guard; choose 1; fight wolves block" -s t1
+witness play end -s t1 --fun 4 --difficulty 2 --feedback "…"              # → witness/playtests/t1/report.md
+witness replay witness/playtests/t1/replay.jsonl --at 12.4 --shot         # see a marked moment again
+```
+
+[examples/arena](examples/arena) is a small top-down game built for it (a maze, wolves that telegraph their bites,
+an NPC dialogue, a locked gate). Reference: [docs/PLAYTEST.md](docs/PLAYTEST.md).
 
 ## License
 

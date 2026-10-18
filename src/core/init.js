@@ -109,12 +109,13 @@ export async function init(project, opt, ROOT) {
   put("witness/smoke.witness.json", JSON.stringify([
     { name: "the game boots, steps and reports state", steps: [{ at: 1, expect: ["frame >= 60", "state != null"] }] },
   ], null, 2) + "\n");
-  put("witness/.gitignore", "shots/\nreplays/\n");
-  // Claude skill (project-local copy, with the CLI path filled in)
-  const skillSrc = path.join(ROOT, "skills", "witness", "SKILL.md");
-  if (fs.existsSync(skillSrc) && !opt["no-skill"]) {
+  put("witness/.gitignore", "shots/\nreplays/\nplaytests/\n");
+  // Claude skills (project-local copies, with the CLI path filled in): the main skill and the playtester's
+  for (const skill of ["witness", "witness-playtester"]) {
+    const skillSrc = path.join(ROOT, "skills", skill, "SKILL.md");
+    if (!fs.existsSync(skillSrc) || opt["no-skill"]) continue;
     const cli = path.join(ROOT, "bin", "witness.js").replace(/\\/g, "/");
-    put(".claude/skills/witness/SKILL.md", fs.readFileSync(skillSrc, "utf8").replaceAll("${CLAUDE_PLUGIN_ROOT}/bin/witness.js", cli).replaceAll("${CLAUDE_PLUGIN_ROOT}", ROOT.replace(/\\/g, "/")));
+    put(`.claude/skills/${skill}/SKILL.md`, fs.readFileSync(skillSrc, "utf8").replaceAll("${CLAUDE_PLUGIN_ROOT}/bin/witness.js", cli).replaceAll("${CLAUDE_PLUGIN_ROOT}", ROOT.replace(/\\/g, "/")));
   }
 
   for (const w of wrote) console.log(`  + ${w}`);
@@ -125,5 +126,6 @@ Next (Claude can do all of this):
   1. Wire the adapter into the game by following witness/ADAPTER-GUIDE.md
      (connect when WITNESS_ADDR is set, step only on command, expose state, seed the RNG).
   2. Fix "launch" in ${CONFIG_NAME} so it starts the built game.
-  3. Run:  witness doctor      then write tests in witness/*.witness.json and run  witness test`);
+  3. Run:  witness doctor      then write tests in witness/*.witness.json and run  witness test
+  4. Optional: agent playtests, a cheap model plays the game and reports:  witness play suggest  (witness help play)`);
 }

@@ -196,6 +196,7 @@ export class EventTracker {
     const f = this.active; if (!f) return;
     this.active = null;
     const targets = [...f.participants.values()].map((p) => p.key);
+    f.windups = Math.max(f.windups, f.avoided + f.hits);
     this.fights.push({ n: f.n, targets, start: +f.t0.toFixed(2), seconds: +Math.max(0, (result === "broke off" ? f.lastExchange : t) - f.t0).toFixed(2), result, dealt: +f.dealt.toFixed(2), taken: +f.taken.toFixed(2), kills: f.kills, windups: f.windups, avoided: f.avoided, hits: f.hits });
   }
 
