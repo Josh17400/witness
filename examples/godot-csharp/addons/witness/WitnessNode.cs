@@ -158,7 +158,10 @@ public partial class WitnessNode : Node
         var st = e as InputEventScreenTouch;
         if (st != null)
         {
-            _recordEvents.Add(WitnessEvent.TouchEvent(st.Index, st.Position.X, st.Position.Y, st.Pressed ? WitnessTouchPhase.Down : WitnessTouchPhase.Up));
+            // A lift the system canceled (InputEventScreenTouch.canceled, Godot 4.2+) records as "cancel". Read by name
+            // so the node still compiles against older Godot.NET.Sdk versions (a missing property reads as false).
+            var phase = st.Pressed ? WitnessTouchPhase.Down : st.Get("canceled").AsBool() ? WitnessTouchPhase.Cancel : WitnessTouchPhase.Up;
+            _recordEvents.Add(WitnessEvent.TouchEvent(st.Index, st.Position.X, st.Position.Y, phase));
             return;
         }
         var sd = e as InputEventScreenDrag;
@@ -341,14 +344,20 @@ public partial class WitnessNode : Node
                 Vector2 last;
                 bool known = _fingers.TryGetValue(e.Id, out last);
                 if (e.Phase != WitnessTouchPhase.Down && !known) return;   // a move or lift without a down
-                if (e.Phase == WitnessTouchPhase.Move || (e.Phase == WitnessTouchPhase.Up && pos != last))
+                bool ends = e.Phase == WitnessTouchPhase.Up || e.Phase == WitnessTouchPhase.Cancel;
+                if (e.Phase == WitnessTouchPhase.Move || (ends && pos != last))
                 {
                     var rel = pos - last;
                     Input.ParseInputEvent(new InputEventScreenDrag { Index = e.Id, Position = pos, Relative = rel, Velocity = rel * _fps, Pressure = (float)e.Pressure });
                 }
                 if (e.Phase != WitnessTouchPhase.Move)
-                    Input.ParseInputEvent(new InputEventScreenTouch { Index = e.Id, Position = pos, Pressed = e.Phase == WitnessTouchPhase.Down });
-                if (e.Phase == WitnessTouchPhase.Up) _fingers.Remove(e.Id);
+                {
+                    var touch = new InputEventScreenTouch { Index = e.Id, Position = pos, Pressed = e.Phase == WitnessTouchPhase.Down };
+                    // "cancel": a lift with canceled = true (Godot 4.2+; set by name, a no-op where it doesn't exist)
+                    if (e.Phase == WitnessTouchPhase.Cancel) touch.Set("canceled", true);
+                    Input.ParseInputEvent(touch);
+                }
+                if (ends) _fingers.Remove(e.Id);
                 else _fingers[e.Id] = pos;
                 break;
             }

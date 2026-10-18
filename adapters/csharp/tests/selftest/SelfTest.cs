@@ -136,6 +136,22 @@ internal static class SelfTest
         Witness.ResetClock(1);
         Eq(0, Witness.FrameEvents.Count, "reset clears frame events");
 
+        // Cancel: the system ended the touch. Parses, ends it like up (Down false, mouse button 0 up), round-trips
+        var cancel = WitnessEvent.FromJson((Dictionary<string, object>)WitnessJson.Parse("{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"cancel\"}"));
+        Eq(WitnessTouchPhase.Cancel, cancel.Phase, "touch phase cancel");
+        Eq(false, cancel.Down, "cancel ends the touch (Down false)");
+        Eq("{\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"cancel\"}", WitnessJson.Write(cancel.ToJson(false)), "cancel round-trips");
+        Eq(false, WitnessEvent.TouchEvent(0, 3, 4, WitnessTouchPhase.Cancel).Down, "TouchEvent factory: cancel is not down");
+        Eq(3, (int)WitnessTouchPhase.Cancel, "Cancel appended last");
+        Eq(WitnessTouchPhase.Move, WitnessEvent.FromJson((Dictionary<string, object>)WitnessJson.Parse("{\"type\":\"touch\",\"phase\":\"lift\"}")).Phase, "unknown phase is a move");
+        Witness.QueueInput((List<object>)WitnessJson.Parse("[{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"down\"}," +
+            "{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"cancel\"}]"));
+        var dueCancel = Witness.BeginFrame();
+        Eq(4, dueCancel.Count, "down + cancel, each with its fallback mouse event");
+        Eq(WitnessTouchPhase.Cancel, dueCancel[2].Phase, "cancel delivered as cancel");
+        Eq(false, dueCancel[3].Down, "touch cancel -> button up");
+        Witness.ResetClock(1);
+
         // Images
         var img = WitnessImage.FromRgba(2, 2, new byte[] { 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4 }, bottomUp: true);
         Eq((byte)3, img.Rgba[0], "bottom-up flip");

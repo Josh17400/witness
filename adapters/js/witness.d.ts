@@ -16,7 +16,8 @@ export type WitnessEvent =
   /** A finger: id 0 = first finger down (stable until up), x/y in game pixels like the mouse, pressure 0..1 (1 when not given). */
   | { frame: number; type: "touch"; id: number; x: number; y: number; phase: WitnessTouchPhase; pressure?: number };
 
-export type WitnessTouchPhase = "down" | "move" | "up";
+/** "cancel": the system ended the touch (touchcancel / pointercancel). It ends the finger like "up" but is not a completed tap. */
+export type WitnessTouchPhase = "down" | "move" | "up" | "cancel";
 
 /** The same events without `frame`, as written into replay lines. */
 export type WitnessRecordedEvent = WitnessEvent extends infer E ? (E extends { frame: number } ? Omit<E, "frame"> : never) : never;

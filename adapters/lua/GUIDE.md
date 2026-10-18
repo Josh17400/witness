@@ -141,8 +141,10 @@ fingers. Like LÖVE on a phone, finger 0 also fires `love.mousepressed(x, y, 1, 
 `mousemoved(..., true)` and `mousereleased(x, y, 1, true, 1)` right after (the 4th/5th argument
 `istouch` is true), so mouse-only games work with touch tests. A game that handles touch itself
 passes `setup{ touch = true }`: finger 0 then makes no mouse callbacks (the hello says
-`"touch": true`). Plain Lua: `input` gets `{type = "touch", id, x, y, phase = "down"|"move"|"up",
-pressure}` followed, for finger 0, by `{type = "mouse", ..., from_touch = true}` (skip those if you
+`"touch": true`). A `cancel` (the system ended the touch) fires `love.touchreleased`, since LÖVE has
+no cancel callback. Plain Lua: `input` gets `{type = "touch", id, x, y,
+phase = "down"|"move"|"up"|"cancel", pressure}` (`cancel` ends the finger like `up` but isn't a
+completed tap) followed, for finger 0, by `{type = "mouse", ..., from_touch = true}` (skip those if you
 handle the touch; `run{ touch = true }` turns them off). Polling: `witness.touch(id)` → x, y,
 pressure while the finger is down, `witness.mouse()` → x, y, `witness.mouse_down(0)`.
 

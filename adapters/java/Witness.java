@@ -108,7 +108,7 @@ public final class Witness {
         public String padButton;
         /**
          * null for events without a down/up meaning (mouse moves, wheel, text, axis).
-         * Touch: true on "down", false on "up", null on "move".
+         * Touch: true on "down", false on "up" / "cancel", null on "move".
          */
         public Boolean down;
         /** Mouse / touch: logical pixels, top-left origin. */
@@ -117,7 +117,11 @@ public final class Witness {
         public int button;
         /** Touch: the finger, 0 = first finger down (stable from down to up). */
         public int id;
-        /** Touch: "down" | "move" | "up". */
+        /**
+         * Touch: "down" | "move" | "up" | "cancel". "cancel" = the system ended the touch (SDL's
+         * FINGER_CANCELED, Android's ACTION_CANCEL): it ends the finger like "up" but is not a
+         * completed tap; games that don't care may treat it as "up".
+         */
         public String phase;
         /** Touch: 0..1, 1 when not given (when recording, 0 also means not given). */
         public double pressure = 1;
@@ -152,8 +156,9 @@ public final class Witness {
         }
 
         /**
-         * A finger for recording (or injecting): id 0 = first finger, phase "down" | "move" | "up",
-         * logical pixels. Don't also record mouse events the platform synthesizes from touch.
+         * A finger for recording (or injecting): id 0 = first finger, phase "down" | "move" | "up" |
+         * "cancel" (anything else is "move"), logical pixels. Record a touch the system ended as
+         * "cancel": it replays as one. Don't also record mouse events the platform synthesizes from touch.
          */
         public static Event touch(int id, double x, double y, String phase) {
             Event e = new Event();
@@ -161,9 +166,19 @@ public final class Witness {
             e.id = id;
             e.x = x;
             e.y = y;
-            e.phase = "down".equals(phase) || "up".equals(phase) ? phase : "move";
-            e.down = "down".equals(e.phase) ? Boolean.TRUE : "up".equals(e.phase) ? Boolean.FALSE : null;
+            e.phase = touchPhase(phase);
+            e.down = touchDown(e.phase);
             return e;
+        }
+
+        /** A protocol touch phase: "down", "up" and "cancel" as given, anything else (or null) "move". */
+        static String touchPhase(String p) {
+            return "down".equals(p) || "up".equals(p) || "cancel".equals(p) ? p : "move";
+        }
+
+        /** Touch down/up meaning of a phase: true on down, false when it ends the touch (up / cancel), null on move. */
+        static Boolean touchDown(String phase) {
+            return "down".equals(phase) ? Boolean.TRUE : "move".equals(phase) ? null : Boolean.FALSE;
         }
 
         public static Event fromJson(Map<String, Object> o) {
@@ -188,8 +203,8 @@ public final class Witness {
             if ("touch".equals(e.type)) {
                 String p = Json.str(o.get("phase"), "move");
                 e.id = (int) Json.toLong(o.get("id"), 0);
-                e.phase = "down".equals(p) || "up".equals(p) ? p : "move";
-                e.down = "down".equals(e.phase) ? Boolean.TRUE : "up".equals(e.phase) ? Boolean.FALSE : null;
+                e.phase = touchPhase(p);
+                e.down = touchDown(e.phase);
                 e.pressure = Json.toDouble(o.get("pressure"), 1);
             }
             return e;
@@ -212,7 +227,7 @@ public final class Witness {
                     o.put("id", id);
                     o.put("x", x);
                     o.put("y", y);
-                    o.put("phase", "down".equals(phase) || "up".equals(phase) ? phase : "move");
+                    o.put("phase", touchPhase(phase));
                     if (pressure > 0 && pressure != 1) o.put("pressure", pressure);
                     return o;   // no "down": the phase says it
                 default:
@@ -699,7 +714,7 @@ public final class Witness {
         }
     }
 
-    /** The mouse fallback for finger 0: down = button 0 down, move = a move, up = button 0 up. */
+    /** The mouse fallback for finger 0: down = button 0 down, move = a move, up / cancel = button 0 up. */
     private static Event mouseFromTouch(Event t) {
         Event m = Event.mouse(t.x, t.y, 0, t.down);
         m.frame = t.frame;

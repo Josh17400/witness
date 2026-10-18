@@ -84,7 +84,8 @@ keys work too. Mouse coordinates are viewport pixels (equal to window pixels und
 Held keys are released on reset.
 
 **Touch** (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`): a down/up becomes
-`InputEventScreenTouch` (`Index` = Witness finger id, `Position`, `Pressed`), a move becomes
+`InputEventScreenTouch` (`Index` = Witness finger id, `Position`, `Pressed`), a cancel (the system
+ended the touch) becomes a lift with `Canceled = true`, a move becomes
 `InputEventScreenDrag` (`Index`, `Position`, `Relative` from that finger's last position, `Velocity`,
 `Pressure`), in the same coordinates as the mouse. The mouse fallback is Godot's own: with Project
 Settings > Input Devices > Pointing > **Emulate Mouse From Touch** on (the default), Godot turns the
@@ -146,7 +147,8 @@ image is the current frame.
 ## 9. Replay recording
 
 Run the game normally with `WITNESS_RECORD=run.jsonl`: the node records each frame's delta and key /
-mouse-button / touch events (`InputEventScreenTouch` → touch down/up, `InputEventScreenDrag` → move;
+mouse-button / touch events (`InputEventScreenTouch` → touch down/up, or cancel when `Canceled`,
+`InputEventScreenDrag` → move;
 F8 adds a mark) and flushes on exit. Emulated events (`Device == -1`: the mouse Godot makes from
 touch, or touch made from the mouse) are skipped, because the replay makes Godot emulate them again.
 Seed with `Witness.Seed`. Physics in normal play may tick 0 or 2 times per frame; record with

@@ -204,7 +204,7 @@ namespace WitnessKit
 
         /// <summary>
         /// Like Input.GetTouch: fingerId = the Witness finger id, position in screen pixels (bottom-left origin),
-        /// phase Began / Moved / Stationary / Ended for this frame.
+        /// phase Began / Moved / Stationary / Ended (Canceled for a Witness "cancel") for this frame.
         /// </summary>
         public static UnityEngine.Touch GetTouch(int index)
         {
@@ -338,10 +338,11 @@ namespace WitnessKit
 #endif
         }
 
-        // Legacy-style touch state: Began on the frame a finger goes down, Moved when it moves, Ended on lift.
+        // Legacy-style touch state: Began on the frame a finger goes down, Moved when it moves, Ended on lift,
+        // Canceled when the system ended it (a Witness "cancel").
         private static void ApplyFinger(WitnessEvent e, Vector2 pos)
         {
-            Finger f = Fingers.Find(x => x.Id == e.Id && x.Phase != UnityEngine.TouchPhase.Ended);
+            Finger f = Fingers.Find(x => x.Id == e.Id && x.Phase != UnityEngine.TouchPhase.Ended && x.Phase != UnityEngine.TouchPhase.Canceled);
             if (e.Phase == WitnessTouchPhase.Down)
             {
                 if (f == null) { f = new Finger { Id = e.Id }; Fingers.Add(f); }
@@ -356,6 +357,7 @@ namespace WitnessKit
             f.Position = pos;
             f.Pressure = (float)e.Pressure;
             if (e.Phase == WitnessTouchPhase.Up) f.Phase = UnityEngine.TouchPhase.Ended;
+            else if (e.Phase == WitnessTouchPhase.Cancel) f.Phase = UnityEngine.TouchPhase.Canceled;
             else if (f.Phase != UnityEngine.TouchPhase.Began) f.Phase = UnityEngine.TouchPhase.Moved;
         }
 
@@ -457,7 +459,9 @@ namespace WitnessKit
                         if (e.Phase != WitnessTouchPhase.Down && !known) return;   // a move or lift without a down
                         if (_touchscreen == null) _touchscreen = Touchscreen.current ?? InputSystem.AddDevice<Touchscreen>();
                         var phase = e.Phase == WitnessTouchPhase.Down ? UnityEngine.InputSystem.TouchPhase.Began
-                            : e.Phase == WitnessTouchPhase.Up ? UnityEngine.InputSystem.TouchPhase.Ended : UnityEngine.InputSystem.TouchPhase.Moved;
+                            : e.Phase == WitnessTouchPhase.Up ? UnityEngine.InputSystem.TouchPhase.Ended
+                            : e.Phase == WitnessTouchPhase.Cancel ? UnityEngine.InputSystem.TouchPhase.Canceled
+                            : UnityEngine.InputSystem.TouchPhase.Moved;
                         InputSystem.QueueStateEvent(_touchscreen, new TouchState
                         {
                             touchId = e.Id + 1,
@@ -466,7 +470,7 @@ namespace WitnessKit
                             delta = known && e.Phase != WitnessTouchPhase.Down ? touchPos - last : Vector2.zero,
                             pressure = (float)e.Pressure,
                         });
-                        if (e.Phase == WitnessTouchPhase.Up) TouchPositions.Remove(e.Id);
+                        if (e.Phase == WitnessTouchPhase.Up || e.Phase == WitnessTouchPhase.Cancel) TouchPositions.Remove(e.Id);
                         else TouchPositions[e.Id] = touchPos;
                         break;
                     }

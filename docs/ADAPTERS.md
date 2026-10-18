@@ -70,7 +70,8 @@ witness.mark(label)                     F8 / markers
 witness.seed()                        → the seed to use for RNG (from reset, or the replay header)
 ```
 
-Touch (protocol section 4): touch events reach the game as touch (`id`, `x`, `y`, `phase`), and
+Touch (protocol section 4): touch events reach the game as touch (`id`, `x`, `y`, `phase`: `down`,
+`move`, `up` or `cancel`, where `cancel` ends the finger like `up`), and
 finger 0 is also delivered as the matching mouse event unless the game sets the adapter's
 `touch` option (it handles touch itself). Recording gets a `record_touch(id, x, y, phase)`
 helper next to `record_key` / `record_mouse`.

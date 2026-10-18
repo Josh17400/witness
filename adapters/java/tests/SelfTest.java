@@ -144,6 +144,19 @@ public final class SelfTest {
             seq.append("touch".equals(d.type) ? "t" + d.id + d.phase : "m" + (int) d.x + "/" + d.down + "/" + d.button + (d.fromTouch ? "T" : "")).append(' ');
         eq("t0down m7/true/0T t1down t0move m9/null/0T t0up m9/false/0T ", seq.toString(), "touch mouse fallback");
         eq("{\"type\":\"mouse\",\"x\":9,\"y\":8,\"button\":0,\"down\":false}", Witness.Json.write(Witness.frameEvents().get(6).toJson(false)), "fallback mouse shape");
+        // cancel: the system ended the touch. Parses, ends it like up (down false, mouse button 0 up), round-trips
+        Witness.Event tc = Witness.Event.fromJson((Map<String, Object>) Witness.Json.parse("{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"cancel\"}"));
+        eq("cancel", tc.phase, "touch phase cancel");
+        eq(Boolean.FALSE, tc.down, "cancel ends the touch");
+        eq("{\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"cancel\"}", Witness.Json.write(tc.toJson(false)), "cancel round-trips");
+        eq("{\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"cancel\"}", Witness.Json.write(Witness.Event.touch(0, 3, 4, "cancel").toJson(false)), "Event.touch cancel");
+        eq("move", Witness.Event.touch(0, 3, 4, "lift").phase, "unknown phase is a move");
+        Witness.queueInput((List<Object>) Witness.Json.parse("[{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"down\"},"
+            + "{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":3,\"y\":4,\"phase\":\"cancel\"}]"));
+        StringBuilder cseq = new StringBuilder();
+        for (Witness.Event d : Witness.beginFrame())
+            cseq.append("touch".equals(d.type) ? "t" + d.id + d.phase : "m" + (int) d.x + "/" + d.down + "/" + d.button + (d.fromTouch ? "T" : "")).append(' ');
+        eq("t0down m3/true/0T t0cancel m3/false/0T ", cseq.toString(), "touch cancel mouse fallback");
 
         // Images
         Witness.Image img = Witness.Image.rgba(2, 2, new byte[] { 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4 }, true);

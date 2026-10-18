@@ -121,10 +121,12 @@ fn input(&mut self, e: &witness::Input) {
 ```
 
 **Touch.** `Input::Touch { id, x, y, phase, pressure }` is one finger: `id` 0 is the first finger
-down (it keeps its id until `TouchPhase::Up`), `x`/`y` are logical pixels like the mouse,
-`phase` is `TouchPhase::Down` / `Move` / `Up`, `pressure` is 0..1 (1 when not given). By default
-finger 0 is **also** delivered as `Input::Mouse` right after each touch event (down → button 0
-down, move → move, up → button 0 up) with `from_touch: true`, so touch tests
+down (it keeps its id until `TouchPhase::Up` or `Cancel`), `x`/`y` are logical pixels like the
+mouse, `phase` is `TouchPhase::Down` / `Move` / `Up` / `Cancel`, `pressure` is 0..1 (1 when not
+given). `Cancel` is a touch the system ended (SDL's FINGER_CANCELED, winit's `TouchPhase::Cancelled`):
+it ends the finger like `Up` (`phase.ends()` is true for both), but it isn't a completed tap. By
+default finger 0 is **also** delivered as `Input::Mouse` right after each touch event (down →
+button 0 down, move → move, up or cancel → button 0 up) with `from_touch: true`, so touch tests
 (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games too. A game with real
 touch handling (on-screen sticks, gestures) calls `Hello::touch()`: it then gets only the
 touch events (the hello says `"touch": true`). If the engine wants normalized 0..1 touch
@@ -231,7 +233,7 @@ next frame line. Lines are flushed per frame, so crashes keep the replay. Play i
 `witness replay last`.
 
 Touch (phones, tablets, touchscreens): record each finger with
-`r.touch(id, x, y, witness::TouchPhase::Down | Move | Up)` in logical pixels, with small ids
+`r.touch(id, x, y, witness::TouchPhase::Down | Move | Up | Cancel)` in logical pixels, with small ids
 (0 = first finger down; map winit's `Touch::id` / SDL finger ids to slots and reuse a slot
 after its finger lifts). Don't also record the mouse events the platform synthesizes from
 touch (SDL `which == SDL_TOUCH_MOUSEID`, winit/browser emulated mouse): on replay the mouse

@@ -153,9 +153,12 @@ h.input = [&](const witness_event& e) {
 ```
 
 **Touch.** `WITNESS_EV_TOUCH` carries `id` (finger, 0 = first finger down), `x`/`y` (logical pixels,
-like the mouse), `phase` (`WITNESS_TOUCH_DOWN` / `_MOVE` / `_UP`; `down` is also 1 / -1 / 0) and
-`pressure` (1 when not given). By default the adapter also delivers finger 0 as a mouse event right
-after each touch event (down → button 0 down, move → move, up → button 0 up), flagged
+like the mouse), `phase` (`WITNESS_TOUCH_DOWN` / `_MOVE` / `_UP` / `_CANCEL`; `down` is also
+1 / -1 / 0, 0 for cancel too) and `pressure` (1 when not given). `WITNESS_TOUCH_CANCEL` is a touch
+the system ended (SDL's `SDL_EVENT_FINGER_CANCELED`): it ends the finger like `_UP`, but don't count
+it as a completed tap (or just treat it as `_UP`). By default the adapter also delivers finger 0 as a
+mouse event right after each touch event (down → button 0 down, move → move, up or cancel → button 0
+up), flagged
 `from_touch = 1` like SDL's `SDL_TOUCH_MOUSEID`, so touch tests (`touch:160,90@1`,
 `swipe:40,90->200,90@1-1.5`) drive mouse-only games too. A game with real touch handling (on-screen
 sticks, multi-finger gestures) sets `hello.touch = 1`: it then gets only the touch events, like on a
@@ -404,9 +407,11 @@ case SDL_EVENT_MOUSE_MOTION:
 // touch (phones/tablets): record fingers in logical pixels; small ids (0 = first finger down)
 case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_CANCELED: {
     int id = finger_slot(ev.tfinger.fingerID, ev.type == SDL_EVENT_FINGER_DOWN);   // your SDL_FingerID -> 0..9 map
-    int phase = ev.type == SDL_EVENT_FINGER_DOWN ? WITNESS_TOUCH_DOWN : ev.type == SDL_EVENT_FINGER_MOTION ? WITNESS_TOUCH_MOVE : WITNESS_TOUCH_UP;
-    if (id >= 0) witness_record_touch(id, ev.tfinger.x * logical_w, ev.tfinger.y * logical_h, phase);
-    if (phase == WITNESS_TOUCH_UP) finger_slot_free(ev.tfinger.fingerID);
+    int phase = ev.type == SDL_EVENT_FINGER_DOWN ? WITNESS_TOUCH_DOWN : ev.type == SDL_EVENT_FINGER_MOTION ? WITNESS_TOUCH_MOVE
+              : ev.type == SDL_EVENT_FINGER_CANCELED ? WITNESS_TOUCH_CANCEL : WITNESS_TOUCH_UP;
+    // _ex also records pressure (0..1; <= 0 = not given). witness_record_touch(id, x, y, phase) records none.
+    if (id >= 0) witness_record_touch_ex(id, ev.tfinger.x * logical_w, ev.tfinger.y * logical_h, phase, ev.tfinger.pressure);
+    if (phase == WITNESS_TOUCH_UP || phase == WITNESS_TOUCH_CANCEL) finger_slot_free(ev.tfinger.fingerID);
     break; }
 
 // fixed-step loop: one replay line per SIM tick

@@ -107,14 +107,17 @@ func (g *WitnessGame) Input(e witness.Event) {
 	case "action":
 		g.input.SetAction(e.Action, e.Down)
 	case "touch":
-		g.input.Finger(e.ID, e.X, e.Y, e.Phase, e.Pressure) // witness.TouchDown / TouchMove / TouchUp
+		g.input.Finger(e.ID, e.X, e.Y, e.Phase, e.Pressure) // witness.TouchDown / TouchMove / TouchUp / TouchCancel
 	}
 }
 ```
 
 **Touch.** A `"touch"` event is one finger: `e.ID` 0 is the first finger down (it keeps its id until
-`TouchUp`), `e.X`/`e.Y` are logical pixels like the mouse, `e.Phase` is `witness.TouchDown` /
-`TouchMove` / `TouchUp` (`e.Down`/`e.HasDown` mirror it), `e.Pressure` is 0..1 (1 when not given).
+`TouchUp` or `TouchCancel`), `e.X`/`e.Y` are logical pixels like the mouse, `e.Phase` is
+`witness.TouchDown` / `TouchMove` / `TouchUp` / `TouchCancel` (`e.Down`/`e.HasDown` mirror it;
+`e.Phase.Ends()` is true for up and cancel), `e.Pressure` is 0..1 (1 when not given). `TouchCancel`
+is a touch the system ended (SDL's FINGER_CANCELED): it ends the finger like `TouchUp`, but it isn't a
+completed tap (games that don't care can treat it as `TouchUp`).
 By default finger 0 is **also** delivered as a `"mouse"` event right after each touch event (down →
 button 0 down, move → move, up → button 0 up) with `e.FromTouch` set, so touch tests
 (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games too. A game with real touch
@@ -199,7 +202,7 @@ rec := witness.RecordFromEnv("My Game", 60) // nil unless WITNESS_RECORD is set;
 defer rec.Close()
 world := NewWorld(rec.Seed()) // the recorded seed (WITNESS_SEED or the clock)
 // input pump: rec.Key(name, down) / rec.Mouse(x, y, button, down). F8 becomes a mark.
-// touch: rec.Touch(id, x, y, witness.TouchDown / TouchMove / TouchUp), logical pixels
+// touch: rec.Touch(id, x, y, witness.TouchDown / TouchMove / TouchUp / TouchCancel), logical pixels
 // after each SIM tick: rec.Frame(dt)
 ```
 
@@ -329,7 +332,7 @@ witness shot --at 1       # look at the PNG
 | `witness.Run(Hello, Game)` / `Connect(Hello, Game)` + `(*Conn).Poll(timeout)` | serve commands |
 | `Game{Reset, Step, Snapshot}` + optional `InputHandler`, `Screenshotter`, `Caller`, `Evaluator`, `PerfReporter` | hooks |
 | `Step{DT, Frame, Time, Events}`, `KeyDown`, `Mouse`, `Touch`, `AudioFrames`, `WriteAudio` | per-step context |
-| `Event{Type, ...}`; touch: `ID`, `X`, `Y`, `Phase` (`TouchDown`/`TouchMove`/`TouchUp`), `Pressure`; mouse: `FromTouch` | input events |
+| `Event{Type, ...}`; touch: `ID`, `X`, `Y`, `Phase` (`TouchDown`/`TouchMove`/`TouchUp`/`TouchCancel`), `Pressure`; mouse: `FromTouch` | input events |
 | `Hello{..., Touch: true}` | the game handles touch itself: no mouse events from finger 0 |
 | `witness.Image`, `witness.FromRGBA(*image.RGBA)` | screenshots |
 | `witness.Info/Warn/Error/Log` | logs (errors fail tests) |

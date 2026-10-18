@@ -165,7 +165,7 @@ type Event struct {
 	Frame   int64          // frame at whose start it applies
 	Type    string         // "key", "mouse", "wheel", "text", "action", "pad", "axis", "touch", or anything else
 	Key     string         // key: lowercase Witness name ("a", "space", "left", "f1" ...)
-	Down    bool           // key/mouse/action/pad: pressed; touch: true on TouchDown
+	Down    bool           // key/mouse/action/pad: pressed; touch: true on TouchDown (false on TouchUp/TouchCancel)
 	HasDown bool           // false for mouse moves, axis, text, touch moves
 	X, Y    float64        // mouse, touch: logical pixels, top-left origin
 	HasPos  bool           // mouse: X/Y are set (always true for touch)
@@ -180,7 +180,7 @@ type Event struct {
 
 	// Touch fields (Type "touch"); FromTouch marks mouse events made by the mouse fallback.
 	ID        int        // touch: finger, 0 = the first finger down (stable from down to up)
-	Phase     TouchPhase // touch: TouchDown, TouchMove or TouchUp
+	Phase     TouchPhase // touch: TouchDown, TouchMove, TouchUp or TouchCancel
 	Pressure  float64    // touch: 0..1, 1 when not given (when recording, 0 also means not given)
 	FromTouch bool       // mouse: synthesized from finger 0 (like SDL_TOUCH_MOUSEID); never recorded
 }
@@ -188,38 +188,49 @@ type Event struct {
 // TouchPhase is the phase of a touch event.
 type TouchPhase int
 
-// Touch phases: the protocol's "down", "move" and "up".
+// Touch phases: the protocol's "down", "move", "up" and "cancel".
 const (
 	TouchDown TouchPhase = iota
 	TouchMove
 	TouchUp
+	// TouchCancel: the system ended the touch (SDL's FINGER_CANCELED, the OS took the gesture,
+	// focus lost). It ends the finger like TouchUp, but it is not a completed tap; games that
+	// don't care may treat it as TouchUp. Appended last so the values above keep their numbers.
+	TouchCancel
 )
 
-// String returns the protocol name: "down", "move" or "up".
+// Ends reports whether the phase ends the touch (TouchUp or TouchCancel).
+func (p TouchPhase) Ends() bool { return p == TouchUp || p == TouchCancel }
+
+// String returns the protocol name: "down", "move", "up" or "cancel".
 func (p TouchPhase) String() string {
 	switch p {
 	case TouchDown:
 		return "down"
 	case TouchUp:
 		return "up"
+	case TouchCancel:
+		return "cancel"
 	default:
 		return "move"
 	}
 }
 
-// touchPhase parses a protocol phase; anything but "down" / "up" (or a missing one) is a move.
+// touchPhase parses a protocol phase; anything but "down" / "up" / "cancel" (or a missing one) is a move.
 func touchPhase(s string) TouchPhase {
 	switch s {
 	case "down":
 		return TouchDown
 	case "up":
 		return TouchUp
+	case "cancel":
+		return TouchCancel
 	}
 	return TouchMove
 }
 
 // mouseFromTouch is the mouse event finger 0 also produces (the mouse fallback):
-// down -> button 0 down, move -> move, up -> button 0 up. ok is false for anything else.
+// down -> button 0 down, move -> move, up / cancel -> button 0 up. ok is false for anything else.
 func mouseFromTouch(e Event) (m Event, ok bool) {
 	if e.Type != "touch" || e.ID != 0 {
 		return Event{}, false
@@ -827,7 +838,7 @@ func (c *Conn) track(e Event) {
 		if c.touches == nil {
 			c.touches = map[int][2]float64{}
 		}
-		if e.Phase == TouchUp {
+		if e.Phase.Ends() {
 			delete(c.touches, e.ID)
 		} else {
 			c.touches[e.ID] = [2]float64{e.X, e.Y}

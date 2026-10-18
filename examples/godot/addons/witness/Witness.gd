@@ -695,11 +695,14 @@ func _inject(e: Dictionary) -> void:
 			var index := int(e.get("id", 0))
 			var tpos := Vector2(float(e.get("x", 0.0)), float(e.get("y", 0.0)))
 			var phase := str(e.get("phase", "move"))
-			if phase == "down" or phase == "up":
+			if phase == "down" or phase == "up" or phase == "cancel":
+				# "cancel" (the system ended the touch) is a lift with canceled = true
 				var t := InputEventScreenTouch.new()
 				t.index = index
 				t.position = tpos
 				t.pressed = phase == "down"
+				if phase == "cancel":
+					t.set("canceled", true)   # set(): Godot 4.2+ property, a no-op where it doesn't exist
 				if t.pressed:
 					_touches[index] = tpos
 				else:
@@ -1060,8 +1063,10 @@ func _on_window_input(event: InputEvent) -> void:
 	elif (event is InputEventMouseButton or event is InputEventMouseMotion) and event.device == _DEVICE_EMULATION:
 		pass   # synthesized from touch: replay recreates it from the recorded touch, so don't record it twice
 	elif event is InputEventScreenTouch:
+		# a lift the system canceled (canceled = true) records as "cancel" and replays as one
+		var lift := "cancel" if event.get("canceled") == true else "up"
 		_rec_events.append({"type": "touch", "id": event.index, "x": event.position.x, "y": event.position.y,
-			"phase": "down" if event.pressed else "up"})
+			"phase": "down" if event.pressed else lift})
 	elif event is InputEventScreenDrag:
 		var drag := {"type": "touch", "id": event.index, "x": event.position.x, "y": event.position.y, "phase": "move"}
 		var pressure = event.get("pressure")

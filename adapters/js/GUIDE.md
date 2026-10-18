@@ -116,8 +116,8 @@ Before `reset` runs, every held key, button and finger is released (with real `k
 input never leaks from one run into the next.
 
 * **Touch mouse fallback.** Right after each touch event of finger 0 the adapter delivers a mouse
-  event `{type: "mouse", x, y, fromTouch: true}` (down → button 0 down, move → move, up → button 0
-  up), so touch tests (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games. In
+  event `{type: "mouse", x, y, fromTouch: true}` (down → button 0 down, move → move, up or cancel →
+  button 0 up), so touch tests (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games. In
   browsers it arrives as compatibility `mousemove`/`mousedown`/`mouseup` + `click` only (no second
   set of pointer events, like a phone), immediately per phase. It is skipped when the page calls
   `preventDefault()` on the touch's `pointerdown` or `touchstart` (for the whole touch) or on a
@@ -125,8 +125,8 @@ input never leaks from one run into the next.
   touch handling pass `touch: true` to `start()` (sent as `"touch": true` in the hello): they then
   get only the touch events. Other fingers never make mouse events.
 * To handle an event yourself, pass `input(ev)`: return `true` to skip the DOM injection
-  (Node games always handle input this way; a touch is `{type: "touch", id, x, y, phase, pressure}`,
-  followed for finger 0 by its `fromTouch` mouse event unless `touch: true`). `witness.input` holds
+  (Node games always handle input this way; a touch is `{type: "touch", id, x, y, phase, pressure}`
+  with `phase` `"down"` / `"move"` / `"up"` / `"cancel"`, followed for finger 0 by its `fromTouch` mouse event unless `touch: true`). `witness.input` holds
   the current keys/mouse/touches (finger id → `{x, y, pressure}` while down)/pad/actions, and
   `witness.inputEvents()` lists this frame's events (fallback mouse events included), for games
   that poll.
@@ -247,7 +247,12 @@ scene with a 2D UI canvas on top) at its backing resolution × `scale`, as exact
   replay feeds back exactly the same value). Call `witness.mark("F8")` for markers. With
   `takeover()` on, frames are recorded automatically: don't call `recordFrame` then. Input goes
   in with `witness.recordInput(ev)`, fingers with `witness.recordTouch(id, x, y, "down" | "move" |
-  "up")` (game pixels); mouse events flagged `fromTouch` are dropped.
+  "up" | "cancel")` (game pixels); mouse events flagged `fromTouch` are dropped. In browsers a touch
+  `pointercancel` is recorded as `"cancel"`.
+* **Cancel.** `phase: "cancel"` is a touch the system ended (the browser took the gesture over,
+  focus was lost): it ends the finger like `"up"` but isn't a completed tap; games that don't care
+  can treat it as `"up"`. In browsers it is injected as `pointercancel` (+ `pointerout`/`pointerleave`)
+  and `touchcancel`.
 * Play it back with `witness replay <file> --watch "state.score"`.
 
 ## 10. witness.json

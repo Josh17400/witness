@@ -110,13 +110,14 @@ scaled, the game must undo the scale when it records input.
 
 **Touch.** `{"type": "touch", "id": 0, "x": 160.0, "y": 90.0, "phase": "down", "pressure": 1.0}`:
 `id` is the finger (0 = first finger down), `x`/`y` are the same logical pixels as the mouse,
-`phase` is `"down"` / `"move"` / `"up"` (fields are defaulted for you). By default finger 0 is also
-delivered as the matching mouse event right after it (`down` → button 0 down, `move` → move, `up` →
-button 0 up), marked `"from_touch": True`, so touch tests (`touch:160,90@1`,
+`phase` is `"down"` / `"move"` / `"up"` / `"cancel"` (fields are defaulted for you; `"cancel"` is a
+touch the system ended, e.g. SDL's FINGER_CANCELED: it ends the finger like `"up"` but isn't a
+completed tap). By default finger 0 is also delivered as the matching mouse event right after it
+(`down` → button 0 down, `move` → move, `up` or `cancel` → button 0 up), marked `"from_touch": True`, so touch tests (`touch:160,90@1`,
 `swipe:40,90->200,90@1-1.5`) drive mouse-only games. A game with its own touch handling passes
 `witness.run(..., touch=True)`: it then gets only the touch events, and the hello says
 `"touch": true`. With `witness_pygame.Bridge`, touch arrives as real `FINGERDOWN` / `FINGERMOTION` /
-`FINGERUP` events (normalized 0..1 `x`/`y`/`dx`/`dy`, `finger_id` = the Witness id) and the fallback as
+`FINGERUP` events (a cancel posts `FINGERUP`: pygame has no cancel event; normalized 0..1 `x`/`y`/`dx`/`dy`, `finger_id` = the Witness id) and the fallback as
 `MOUSE*` events with `touch=True`, exactly like pygame on a phone.
 
 ## 5. RNG seeding
@@ -272,7 +273,8 @@ events **before** that frame's update, so record them in the same frame you appl
 From an event pump you can also queue events as they arrive with `witness.record_event(e)` /
 `witness.record_touch(id, x, y, phase)`; the next `record_frame` writes them first.
 
-Touch: record the fingers (logical pixels, ids from 0, stable until `"up"`) and never the mouse
+Touch: record the fingers (logical pixels, ids from 0, stable until `"up"`; a touch the system ended
+is `"cancel"`) and never the mouse
 events the platform synthesizes from them (pygame: skip events with `e.touch`; `wp.event_to_witness`
 does both). On replay the mouse fallback recreates those mouse events, so recording both would
 deliver them twice. Mouse events marked `"from_touch"` are dropped by `record_frame` for you.

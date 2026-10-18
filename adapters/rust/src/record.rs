@@ -108,7 +108,8 @@ impl Recorder {
         });
     }
     /// Queue a finger event: `id` 0 = the first finger down (keep it until `Up`), `x`/`y` in
-    /// logical pixels (convert from the engine's normalized 0..1 coordinates). Don't also record
+    /// logical pixels (convert from the engine's normalized 0..1 coordinates). Record a touch the
+    /// system ended (SDL's `FINGER_CANCELED`) as `Cancel`: it replays as `"cancel"`. Don't also record
     /// the mouse events the platform synthesizes from touch: replay recreates them.
     pub fn touch(&mut self, id: u32, x: f64, y: f64, phase: TouchPhase) {
         self.input(&Input::Touch {
