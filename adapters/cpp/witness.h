@@ -243,6 +243,10 @@ WITNESS_API int witness_audio_frames_for_step(double dt);
 /* Normal play only: if WITNESS_RECORD=<file.jsonl> is set (and Witness is not active),
  * create the file (and its folders) and write the header. Returns 1 when recording. */
 WITNESS_API int witness_record_start(const char *game_name, int fps);
+/* The same with the seed the world really used and an optional params object (raw JSON, e.g. {"scene":"town"}: what
+ * the game's reset needs to rebuild this start), written to the header as "seed" and "params". Starts a fresh file
+ * if a recording is already open (a new playthrough). Returns 1 when recording. */
+WITNESS_API int witness_record_begin(const char *game_name, int fps, long long seed, const char *params_json);
 WITNESS_API int witness_recording(void);
 /* Queue input for the current frame (call from your event pump). Pressing F8 writes a mark. */
 WITNESS_API void witness_record_event(const witness_event *event);
@@ -1933,10 +1937,9 @@ static void witness__iso_now(char *out, size_t size) {
     snprintf(out, size, "%04lld-%02lld-%02lldT%02lld:%02lld:%02lldZ", y, m, d, secs / 3600, (secs / 60) % 60, secs % 60);
 }
 
-int witness_record_start(const char *game_name, int fps) {
+static int witness__record_open(const char *game_name, int fps, long long seed, const char *params_json) {
     witness_json *w = &witness__g.rec_line;
     char started[64];
-    if (witness__g.rec) return 1;
     if (witness__g.connected || witness_active(0, NULL)) return 0;
     witness__g.rec = witness__open_record_file();
     if (!witness__g.rec) return 0;
@@ -1948,14 +1951,30 @@ int witness_record_start(const char *game_name, int fps) {
     witness_json_begin_object(w);
     witness_json_field_int(w, "replay", 1);
     witness_json_field_string(w, "name", game_name ? game_name : "game");
-    witness_json_field_int(w, "seed", witness_seed());
+    witness_json_field_int(w, "seed", seed);
     witness_json_field_int(w, "fps", fps > 0 ? fps : 60);
+    if (params_json && *params_json) {
+        witness_json_key(w, "params");
+        witness_json_raw(w, params_json);
+    }
     witness_json_field_string(w, "started", started);
     witness_json_field_string(w, "adapter", "witness.h " WITNESS_VERSION);
     witness_json_end_object(w);
     fprintf(witness__g.rec, "%s\n", w->buf);
     fflush(witness__g.rec);
     return 1;
+}
+
+int witness_record_start(const char *game_name, int fps) {
+    if (witness__g.rec) return 1;
+    return witness__record_open(game_name, fps, witness_seed(), NULL);
+}
+
+int witness_record_begin(const char *game_name, int fps, long long seed, const char *params_json) {
+    witness_record_stop();
+    witness__g.seed = seed;
+    witness__g.seed_chosen = 1;
+    return witness__record_open(game_name, fps, seed, params_json);
 }
 
 int witness_recording(void) { return witness__g.rec != NULL; }

@@ -400,6 +400,10 @@ witness_record_stop();
   frame where the sim applied them. If no tick ran this render frame, keep them queued: the
   adapter only flushes them on `witness_record_frame`.
 * For variable-dt games, call `witness_record_frame(dt)` once per frame with the real dt.
+* If the game picks its own seed, or the start depends on choices made before play (a character creator, a chosen
+  scene), start the recording when play begins with
+  `witness_record_begin("Embervale", 60, world_seed, "{\"background\":3}")`. The header then holds the seed the world
+  really used plus params that your `reset` handler applies to rebuild the same start.
 * Mouse coordinates must be the same logical pixels Witness injects.
 * Lines are flushed every frame, so a crash still leaves a usable replay.
 
@@ -450,7 +454,7 @@ witness listen --time 3   # audio report + spectrogram
 | `witness_key_down(name)`, `witness_mouse(&x, &y, &buttons)`, `witness_frame_events(&n)` | polled input |
 | `witness_log(level, fmt, ...)` | logs (errors fail tests) |
 | `witness_audio_frames_for_step(dt)`, `witness_audio_write(f32, frames)`, `witness_audio_write_s16` | audio capture |
-| `witness_record_start/key/mouse/event/frame/stop`, `witness_mark(label)` | replays |
+| `witness_record_start/begin/key/mouse/event/frame/stop`, `witness_mark(label)` | replays |
 | `witness_json_*`, `witness::Json` | snapshot / result writer |
 | `witness_get/at/number/int/string/bool`, `witness::Value` | read command arguments |
 | `witness_key_normalize(name, out, n)` | any key name → Witness name |

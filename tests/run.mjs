@@ -76,6 +76,8 @@ r = cli(["test", path.join(root, "examples", "coins.witness.json")]);
 ok("e2e shared coins test passes on the mock", r.status === 0 && /5 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
 r = cli(["test", path.join(here, "mock", "coins.witness.json")]);
 ok("e2e failing test fails with both sides", r.status === 1 && /got 0 == 99/.test(r.stdout), r.stdout);
+r = cli(["test", path.join(here, "mock", "prev.witness.json")]);
+ok("e2e prev is the previous step's snapshot", r.status === 0 && /1 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
 r = cli(["eval", "--at", "0.6", "--input", "right@0-0.5", "state.score", "--json"]);
 ok("e2e eval json", r.status === 0 && JSON.parse(r.stdout)[0].values["state.score"] === 1, r.stdout + r.stderr);
 r = cli(["call", "teleport", "50", "60"]);

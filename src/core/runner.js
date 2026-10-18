@@ -27,7 +27,10 @@ export async function stepTo(session, state, target, dts = null) {
 /** Reset (or rely on a fresh process) and queue inputs. Returns the timeline state. */
 export async function begin(session, { seed = 1, scene, params, input, events, replay } = {}) {
   const fps = session.fps;
-  if (session.has("reset")) await session.reset(replay ? replay.seed : seed, scene, params);
+  if (session.has("reset")) {
+    // a replay restarts exactly as recorded: its seed, and its scene/params when the header has them
+    await session.reset(replay ? replay.seed : seed, replay && replay.scene != null ? replay.scene : scene, replay && replay.params != null ? replay.params : params);
+  }
   const state = { frame: 0, time: 0, dts: replay ? replay.dts : null };
   const evs = [...(events || []), ...parseWitnessInput(input, fps), ...(replay ? replay.events : [])];
   if (evs.length) {
@@ -54,7 +57,7 @@ export function loadReplay(file) {
   const startOf = [0];
   for (let i = 0; i < dts.length; i++) startOf[i + 1] = startOf[i] + dts[i];
   const marks = markFrames.map((m) => ({ ...m, t: startOf[m.frame] }));
-  return { file, seed: head.seed ?? 1, name: head.name, dts, events, marks, duration: startOf[dts.length], frames: dts.length };
+  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, dts, events, marks, duration: startOf[dts.length], frames: dts.length };
 }
 
 /** Frame index for time t, honoring replay dts. */
@@ -103,13 +106,14 @@ export async function runTest(session, test, { shotDir, onShot } = {}) {
   const fps = session.fps;
   const res = { name: test.name, file: test.file, ok: true, expects: { passed: 0, failed: 0 }, failures: [], probes: {}, shots: [] };
   const state = await begin(session, test);
-  let snap = null, prev = null;
+  let snap = null, lastSnap = null;   // lastSnap = the snapshot taken at the previous step (exposed as `prev`)
   const steps = [...(test.steps || [])].sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   if (!steps.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
   for (const st of steps) {
     await stepTo(session, state, frameAt(st.at ?? 0, fps, state.dts), state.dts);
     snap = null;
-    const getSnap = async () => { if (!snap) { prev = snap; snap = await session.snapshot(); } return snap; };
+    const prev = lastSnap;
+    const getSnap = async () => { if (!snap) snap = await session.snapshot(); return snap; };
     const where = `at ${st.at ?? 0}s`;
     try {
       const calls = st.call ? (Array.isArray(st.call[0]) ? st.call : [st.call]) : [];
@@ -151,6 +155,7 @@ export async function runTest(session, test, { shotDir, onShot } = {}) {
       res.failures.push({ kind: "error", at: st.at, message: `${where}: ${e.message}` });
       if (session.closed) break;
     }
+    if (snap) lastSnap = snap;
   }
   for (const l of await session.drainLogs()) {
     if (l.level === "error") res.failures.push({ kind: "error", message: `game error${l.frame != null ? ` (frame ${l.frame})` : ""}: ${l.message}` });

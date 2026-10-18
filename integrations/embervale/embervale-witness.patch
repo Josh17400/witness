@@ -1,0 +1,3081 @@
+From a99bbed6a2bd0fa9f9ea0e6c6f8f212890c4d179 Mon Sep 17 00:00:00 2001
+From: Josh17400 <Joshuap968@gmail.com>
+Date: Sat, 17 Oct 2026 21:59:30 -0500
+Subject: [PATCH] Witness mode: the game can be driven, seen and heard by the
+ Witness test harness
+
+`embervale --witness` (or WITNESS_ADDR set, as `witness test|doctor|shot|listen|trace` do from witness.json)
+connects to the harness and runs headless and deterministic: it steps only on command at the dt given, input
+goes through the script driver's paths (pushed SDL events, View::scriptHold), the synth is mixed into the
+capture buffer per step (no audio device), a frame is drawn into a hidden window only for a screenshot, and
+`call` runs every script command (built in or registered: hello.calls is generated from the registry).
+The snapshot (rpg/view/witness_state.cpp) reports the mode, clock, player, quests, place, nearby people and
+beasts (state.entities), the open UI, counts, and that no save was written.
+
+Determinism in witness mode only: a fresh Game per reset, no prefetch worker (chunks made on demand),
+Game::syncStreams makes the foes step warm cold regions at once (no worker timing, warm memo == cold), and
+View::settleBakes waits for the terrain bakers before a screenshot.
+
+Normal play with WITNESS_RECORD=<file.jsonl> records a replay (one line per sim step, F8 marks) whose header
+holds the seed the world used and the start's params.
+
+engine/witness.h is the vendored single-header adapter; EMBERVALE_WITNESS (ON for desktop, OFF for
+Emscripten) builds it, so the web build has no sockets. witness/ holds 8 harness tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                 |   12 +
+ engine/audio.cpp               |    2 +-
+ engine/audio.h                 |    1 +
+ engine/pix.cpp                 |   34 +-
+ engine/pix.h                   |    5 +-
+ engine/witness.h               | 2088 ++++++++++++++++++++++++++++++++
+ engine/witness_impl.cpp        |    4 +
+ rpg/main.cpp                   |  319 ++++-
+ rpg/sim/foes_game.cpp          |    5 +-
+ rpg/sim/game.h                 |    4 +
+ rpg/view/terrain.cpp           |   17 +
+ rpg/view/view.h                |    4 +
+ rpg/view/witness_state.cpp     |  136 +++
+ rpg/view/witness_state.h       |   23 +
+ witness.json                   |    8 +
+ witness/.gitignore             |    2 +
+ witness/embervale.witness.json |   40 +
+ 17 files changed, 2691 insertions(+), 13 deletions(-)
+ create mode 100644 engine/witness.h
+ create mode 100644 engine/witness_impl.cpp
+ create mode 100644 rpg/view/witness_state.cpp
+ create mode 100644 rpg/view/witness_state.h
+ create mode 100644 witness.json
+ create mode 100644 witness/.gitignore
+ create mode 100644 witness/embervale.witness.json
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c5904f8..d1a91ba 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -103,6 +103,18 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/rpg/main.cpp AND TARGET rpg_art)
+   file(GLOB RPG_VIEW CONFIGURE_DEPENDS rpg/view/*.cpp)
+   add_executable(embervale WIN32 rpg/main.cpp ${RPG_VIEW})
+   target_link_libraries(embervale PRIVATE rpg_sim rpg_art engine)
++  # Witness (engine/witness.h): a test harness drives the game headless over a local socket when it is started with
++  # WITNESS_ADDR set or --witness (rpg/main.cpp). Desktop only: the web build has no sockets.
++  if(EMSCRIPTEN)
++    set(EMBERVALE_WITNESS_DEFAULT OFF)
++  else()
++    set(EMBERVALE_WITNESS_DEFAULT ON)
++  endif()
++  option(EMBERVALE_WITNESS "Witness test harness in the game (desktop)" ${EMBERVALE_WITNESS_DEFAULT})
++  if(EMBERVALE_WITNESS)
++    target_sources(embervale PRIVATE engine/witness_impl.cpp)
++    target_compile_definitions(embervale PRIVATE EMB_WITNESS=1)
++  endif()
+   if(EMSCRIPTEN)
+     # web build: embervale.js + embervale.wasm, loaded by web/index.html (GitHub Pages, add-to-Home-Screen)
+     set_target_properties(embervale PROPERTIES SUFFIX ".js")
+diff --git a/engine/audio.cpp b/engine/audio.cpp
+index 2fff543..8c29fad 100644
+--- a/engine/audio.cpp
++++ b/engine/audio.cpp
+@@ -21,7 +21,7 @@
+ #include <initializer_list>
+ 
+ namespace {
+-constexpr float FS = 48000.0f;
++constexpr float FS = (float)Audio::kSampleRate;
+ constexpr float DT = 1.0f / FS;
+ constexpr float CROSSFADE_SEC = 2.0f;
+ 
+diff --git a/engine/audio.h b/engine/audio.h
+index a7a061a..fdd37d4 100644
+--- a/engine/audio.h
++++ b/engine/audio.h
+@@ -125,6 +125,7 @@ enum class Music : uint8_t {
+ 
+ class Audio {
+  public:
++  static constexpr int kSampleRate = 48000;   // mono f32 (render: a test harness mixes into its own buffer)
+   bool init();
+   void shutdown();
+   void play(Sfx s, float pitch = 1.0f, float vol = 1.0f);
+diff --git a/engine/pix.cpp b/engine/pix.cpp
+index b498c9a..6346002 100644
+--- a/engine/pix.cpp
++++ b/engine/pix.cpp
+@@ -1,6 +1,7 @@
+ #include "engine/pix.h"
+ #include <SDL3/SDL.h>
+ #include <cmath>
++#include <cstring>
+ #include "engine/font5x7.h"
+ 
+ using namespace font5x7;
+@@ -9,8 +10,9 @@ namespace {
+ constexpr int kCols = 16, kRows = 6;
+ }  // namespace
+ 
+-bool Pix::init(const char* title, int winW, int winH, bool vsync) {
++bool Pix::init(const char* title, int winW, int winH, bool vsync, bool hidden) {
+   SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
++  if (hidden) flags |= SDL_WINDOW_HIDDEN;
+ #ifdef __EMSCRIPTEN__
+   flags |= SDL_WINDOW_FILL_DOCUMENT;   // the canvas takes the whole page and follows the browser size
+ #endif
+@@ -243,3 +245,33 @@ bool Pix::screenshot(const char* path) {
+   SDL_DestroySurface(s);
+   return ok;
+ }
++
++bool Pix::readCanvas(std::vector<uint8_t>& rgba, int& w, int& h) {
++  SDL_Rect vp{};
++  float sx = 1, sy = 1;
++  SDL_GetRenderViewport(ren_, &vp);
++  SDL_GetRenderScale(ren_, &sx, &sy);
++  SDL_SetRenderScale(ren_, 1, 1);
++  SDL_SetRenderViewport(ren_, nullptr);
++  SDL_Surface* s = SDL_RenderReadPixels(ren_, nullptr);
++  SDL_SetRenderScale(ren_, sx, sy);
++  SDL_SetRenderViewport(ren_, &vp);
++  if (!s) return false;
++  SDL_Surface* c = SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGBA32);
++  SDL_DestroySurface(s);
++  if (!c) return false;
++  w = W; h = H;
++  rgba.assign((size_t)w * h * 4, 0);
++  const uint8_t* src = (const uint8_t*)c->pixels;
++  for (int y = 0; y < h; y++) {
++    const int dy = (int)((baseY_ + y + 0.5f) * scale_);
++    if (dy < 0 || dy >= c->h) continue;
++    for (int x = 0; x < w; x++) {
++      const int dx = (int)((baseX_ + x + 0.5f) * scale_);
++      if (dx < 0 || dx >= c->w) continue;
++      std::memcpy(&rgba[((size_t)y * w + x) * 4], src + (size_t)dy * c->pitch + (size_t)dx * 4, 4);
++    }
++  }
++  SDL_DestroySurface(c);
++  return true;
++}
+diff --git a/engine/pix.h b/engine/pix.h
+index 2ad357c..35b3fa0 100644
+--- a/engine/pix.h
++++ b/engine/pix.h
+@@ -54,7 +54,7 @@ class Pix {
+   void pushBox(int x, int y, int w, int h);
+   void popBox();
+   void outputSize(int& w, int& h) const;   // the window's drawable size in device pixels
+-  bool init(const char* title, int winW, int winH, bool vsync = true);
++  bool init(const char* title, int winW, int winH, bool vsync = true, bool hidden = false);   // hidden: a test harness (Witness)
+   void shutdown();
+   void begin(Color clear);
+   void end();
+@@ -87,6 +87,9 @@ class Pix {
+ 
+   void windowToLogical(float wx, float wy, float& lx, float& ly) const;
+   bool screenshot(const char* path);
++  // the logical canvas as RGBA8 (Pix::W x Pix::H, top row first) read back from this frame before end(): each logical
++  // pixel's centre sampled from the device pixels (the Witness test harness's screenshot)
++  bool readCanvas(std::vector<uint8_t>& rgba, int& w, int& h);
+   SDL_Window* window() const { return win_; }
+   SDL_Renderer* renderer() const { return ren_; }
+ 
+diff --git a/engine/witness.h b/engine/witness.h
+new file mode 100644
+index 0000000..41a204f
+--- /dev/null
++++ b/engine/witness.h
+@@ -0,0 +1,2088 @@
++/* witness.h - Witness adapter for C and C++ games. Single header, no dependencies.
++ * Protocol v1: https://github.com/ (see docs/PROTOCOL.md in the Witness repo)
++ *
++ * USAGE
++ *   In exactly ONE source file (ideally its own, e.g. witness_impl.c / .cpp):
++ *       #define WITNESS_IMPLEMENTATION
++ *       #include "witness.h"
++ *   Everywhere else just #include "witness.h".
++ *
++ *   Works from C99 and C++11 or later. The implementation compiles as either.
++ *   Link: ws2_32 on Windows (automatic with MSVC; add -lws2_32 for MinGW),
++ *         -pthread -lm on POSIX.
++ *
++ * SHAPE (C API; a thin C++ layer at the bottom adds witness::Json, witness::Value
++ *        and std::function handlers)
++ *
++ *   if (witness_active(argc, argv)) {           // WITNESS_ADDR set or --witness passed
++ *       witness_hello hello = {0};
++ *       hello.name = "My Game"; hello.fps = 60; hello.width = 320; hello.height = 180;
++ *       witness_handlers h = {0};
++ *       h.reset = my_reset; h.step = my_step; h.input = my_input; h.snapshot = my_snapshot;
++ *       if (!witness_connect(&hello, &h)) return 1;
++ *       witness_run();                          // blocks, dispatching commands until quit
++ *       witness_shutdown();
++ *       return 0;
++ *   }
++ *   ... normal real-time loop (optionally witness_record_start() for replays) ...
++ *
++ *   Capabilities are advertised from the handlers you fill in. When Witness is not active,
++ *   every function here is a cheap early-out: zero cost in normal play.
++ *
++ * THREADS: witness_log() and witness_audio_write() may be called from any thread once
++ *   witness_connect() returned. Everything else belongs to the thread that calls
++ *   witness_poll()/witness_run() (your main/sim thread).
++ *
++ * LICENSE: MIT. */
++#ifndef WITNESS_H
++#define WITNESS_H
++
++#include <stddef.h>
++
++#define WITNESS_PROTOCOL 1
++#define WITNESS_VERSION "1.0.0"
++
++#ifndef WITNESS_API
++#define WITNESS_API
++#endif
++
++#if defined(__GNUC__) || defined(__clang__)
++#define WITNESS_PRINTF(fmt_index, first_arg) __attribute__((format(printf, fmt_index, first_arg)))
++#else
++#define WITNESS_PRINTF(fmt_index, first_arg)
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ---------------------------------------------------------------- JSON values (read) */
++
++typedef enum witness_type {
++    WITNESS_NULL, WITNESS_BOOL, WITNESS_NUMBER, WITNESS_STRING, WITNESS_ARRAY, WITNESS_OBJECT
++} witness_type;
++
++/* A parsed JSON value. Valid only during the handler call that received it. */
++typedef struct witness_value {
++    witness_type type;
++    double number;                     /* NUMBER; BOOL as 0/1 */
++    const char *string;                /* STRING: unescaped UTF-8, NUL-terminated */
++    size_t length;                     /* STRING: bytes. ARRAY/OBJECT: child count */
++    const char *key;                   /* member name when inside an OBJECT, else NULL */
++    const struct witness_value *child; /* ARRAY/OBJECT: first child */
++    const struct witness_value *next;  /* next sibling */
++} witness_value;
++
++/* All accessors are NULL-safe, so chains like witness_get(witness_get(v, "a"), "b") work. */
++WITNESS_API const witness_value *witness_get(const witness_value *object, const char *key);
++WITNESS_API const witness_value *witness_at(const witness_value *array, size_t index);
++/* NUMBER, BOOL, or a STRING holding a number ("12.5"); otherwise def. */
++WITNESS_API double witness_number(const witness_value *v, double def);
++WITNESS_API long long witness_int(const witness_value *v, long long def);
++WITNESS_API const char *witness_string(const witness_value *v, const char *def);
++WITNESS_API int witness_bool(const witness_value *v, int def);
++
++/* ---------------------------------------------------------------- JSON writer */
++
++/* Streaming writer used for snapshots, call results, perf. Commas and nesting are handled
++ * for you; unbalanced containers are closed automatically when your handler returns.
++ * Doubles that are NaN/Inf are written as the strings "NaN", "Infinity", "-Infinity". */
++typedef struct witness_json witness_json;
++
++WITNESS_API void witness_json_begin_object(witness_json *w);
++WITNESS_API void witness_json_end_object(witness_json *w);
++WITNESS_API void witness_json_begin_array(witness_json *w);
++WITNESS_API void witness_json_end_array(witness_json *w);
++WITNESS_API void witness_json_key(witness_json *w, const char *key);
++WITNESS_API void witness_json_null(witness_json *w);
++WITNESS_API void witness_json_bool(witness_json *w, int v);
++WITNESS_API void witness_json_int(witness_json *w, long long v);
++WITNESS_API void witness_json_number(witness_json *w, double v);
++WITNESS_API void witness_json_string(witness_json *w, const char *s);          /* NULL -> null */
++WITNESS_API void witness_json_string_n(witness_json *w, const char *s, size_t n);
++WITNESS_API void witness_json_raw(witness_json *w, const char *json);          /* pre-encoded value */
++WITNESS_API void witness_json_vec2(witness_json *w, double x, double y);       /* [x, y] */
++WITNESS_API void witness_json_vec3(witness_json *w, double x, double y, double z);
++WITNESS_API void witness_json_base64(witness_json *w, const void *data, size_t n);
++/* key + value in one call */
++WITNESS_API void witness_json_field_int(witness_json *w, const char *key, long long v);
++WITNESS_API void witness_json_field_number(witness_json *w, const char *key, double v);
++WITNESS_API void witness_json_field_string(witness_json *w, const char *key, const char *s);
++WITNESS_API void witness_json_field_bool(witness_json *w, const char *key, int v);
++
++/* ---------------------------------------------------------------- input events */
++
++typedef enum witness_event_type {
++    WITNESS_EV_KEY, WITNESS_EV_MOUSE, WITNESS_EV_WHEEL, WITNESS_EV_TEXT,
++    WITNESS_EV_ACTION, WITNESS_EV_PAD, WITNESS_EV_AXIS, WITNESS_EV_OTHER
++} witness_event_type;
++
++typedef struct witness_event {
++    witness_event_type type;
++    long long frame;  /* frame at whose start the event applies */
++    char name[32];    /* KEY: key name ("a", "space", "left"); ACTION: action; PAD: button;
++                         AXIS: axis; OTHER: the unrecognised "type" string */
++    int down;         /* 1 pressed, 0 released, -1 not given (mouse move, axis, text) */
++    int has_pos;      /* MOUSE: 1 when x/y are set */
++    double x, y;      /* MOUSE: logical pixels, top-left origin */
++    int button;       /* MOUSE: 0 left, 1 middle, 2 right; -1 when not a button event */
++    double dx, dy;    /* WHEEL */
++    double value;     /* AXIS: -1..1 */
++    char text[128];   /* TEXT: UTF-8 */
++} witness_event;
++
++/* Canonical Witness key name from any common spelling: "Return" -> "enter",
++ * "Left Shift" -> "shift", "ArrowUp" -> "up", "Esc" -> "escape", "A" -> "a".
++ * Feed it SDL_GetKeyName(), browser KeyboardEvent.key, etc. Returns out. */
++WITNESS_API const char *witness_key_normalize(const char *name, char *out, size_t out_size);
++
++/* ---------------------------------------------------------------- handlers & hello */
++
++typedef struct witness_image {
++    const unsigned char *rgba; /* 8-bit RGBA pixels */
++    int width, height;
++    int stride;                /* bytes per row; 0 = width * 4 */
++    int bottom_up;             /* 1 if row 0 is the BOTTOM row (glReadPixels); flipped for you */
++} witness_image;
++
++typedef struct witness_handlers {
++    void *user; /* passed back to every handler */
++    /* Return the game to a deterministic initial state. scene/params may be NULL.
++     * Return 0 (optionally after witness_error()) to fail. */
++    int (*reset)(void *user, long long seed, const char *scene, const witness_value *params);
++    /* REQUIRED. Advance exactly one fixed frame of dt seconds. Due input was already
++     * delivered through input() (and is available from witness_frame_events()). */
++    void (*step)(void *user, double dt);
++    /* Deliver one input event through the game's normal input path. Optional: games that
++     * poll can use witness_key_down() / witness_mouse() / witness_frame_events() instead. */
++    void (*input)(void *user, const witness_event *event);
++    /* REQUIRED. Write the state as ONE JSON object. paths may be NULL (an optional filter). */
++    void (*snapshot)(void *user, witness_json *out, const witness_value *paths);
++    /* Fill *out with the current frame. The pixels must stay valid until the call returns. */
++    int (*screenshot)(void *user, witness_image *out);
++    /* Game-specific command. Write ONE JSON value into result (nothing = null).
++     * Return 0 for unknown names or failures (use witness_error() for the message). */
++    int (*call)(void *user, const char *name, const witness_value *args, witness_json *result);
++    /* Optional: evaluate an expression in the game's script language; write ONE value. */
++    int (*eval)(void *user, const char *expr, witness_json *value);
++    /* Optional: write timing FIELDS (keys + values), e.g. "frame_ms", "counts". */
++    void (*perf)(void *user, witness_json *out);
++} witness_handlers;
++
++typedef struct witness_call_info {
++    const char *name; /* "teleport" */
++    const char *args; /* "x y" (free text, may be NULL) */
++    const char *help; /* may be NULL */
++} witness_call_info;
++
++/* Zero-initialise, then set what you have. Unset fields get defaults. */
++typedef struct witness_hello {
++    const char *name;                /* default "game" */
++    const char *engine;              /* e.g. "custom C++/SDL3" */
++    const char *language;            /* default "c++" */
++    int fps;                         /* default 60; the default step dt is 1/fps */
++    int width, height;               /* logical size */
++    const witness_call_info *calls;  /* advertised custom commands */
++    int call_count;
++    const char *const *keys;         /* keys the game actually uses (optional) */
++    int key_count;
++    int audio_sample_rate;           /* > 0 enables the "audio" capability */
++    int audio_channels;              /* default 1 */
++} witness_hello;
++
++/* ---------------------------------------------------------------- lifecycle */
++
++/* True when WITNESS_ADDR is set or "--witness" is in argv (argv may be NULL). */
++WITNESS_API int witness_active(int argc, char **argv);
++/* Connect to WITNESS_ADDR (default 127.0.0.1:7357, retrying for up to 10 s) and send the
++ * hello. Copies *handlers; hello strings are only read during the call. 1 = connected. */
++WITNESS_API int witness_connect(const witness_hello *hello, const witness_handlers *handlers);
++/* Process commands. timeout_ms < 0 blocks until at least one command was handled.
++ * Returns 1 while connected, 0 after "quit" or a disconnect (then exit the game). */
++WITNESS_API int witness_poll(int timeout_ms);
++/* witness_poll(-1) until it returns 0. */
++WITNESS_API void witness_run(void);
++WITNESS_API int witness_connected(void);
++/* Close the connection, stop recording, free everything. Safe to call anytime. */
++WITNESS_API void witness_shutdown(void);
++/* From inside a handler: make the current command fail with this message. */
++WITNESS_API void witness_error(const char *fmt, ...) WITNESS_PRINTF(1, 2);
++
++/* ---------------------------------------------------------------- simulation info */
++
++WITNESS_API long long witness_frame(void); /* frames stepped since reset */
++WITNESS_API double witness_time(void);     /* simulated seconds since reset */
++/* Seed your RNGs with this: the reset seed in witness mode, the recorded seed while
++ * recording (WITNESS_SEED or the clock), else a clock-based seed chosen once. */
++WITNESS_API long long witness_seed(void);
++
++/* Pull-style input (alternative to the input handler), valid during step(): */
++WITNESS_API const witness_event *witness_frame_events(int *count);
++WITNESS_API int witness_key_down(const char *name);
++/* Mouse position and button bitmask (bit 0 left, 1 middle, 2 right). Any pointer may be NULL. */
++WITNESS_API void witness_mouse(double *x, double *y, int *buttons);
++
++/* ---------------------------------------------------------------- logs */
++
++typedef enum witness_level { WITNESS_INFO, WITNESS_WARN, WITNESS_ERROR } witness_level;
++/* Buffered and returned on "logs". WITNESS_ERROR lines fail tests. No-op when inactive. */
++WITNESS_API void witness_log(witness_level level, const char *fmt, ...) WITNESS_PRINTF(2, 3);
++
++/* ---------------------------------------------------------------- audio capture */
++
++/* In witness mode, render your mixer once per step into a buffer and hand it over here
++ * (interleaved, hello.audio_channels channels, hello.audio_sample_rate Hz). */
++WITNESS_API void witness_audio_write(const float *interleaved, int frames);
++WITNESS_API void witness_audio_write_s16(const short *interleaved, int frames);
++/* Inside step(dt): how many sample frames to render so audio tracks simulated time exactly
++ * (no drift, even with irregular replay dts). */
++WITNESS_API int witness_audio_frames_for_step(double dt);
++
++/* ---------------------------------------------------------------- replay recording */
++
++/* Normal play only: if WITNESS_RECORD=<file.jsonl> is set (and Witness is not active),
++ * create the file (and its folders) and write the header. Returns 1 when recording. */
++WITNESS_API int witness_record_start(const char *game_name, int fps);
++/* The same with the seed the world really used and an optional params object (raw JSON, e.g. {"scene":"town"}: what
++ * the game's reset needs to rebuild this start), written to the header as "seed" and "params". Starts a fresh file
++ * if a recording is already open (a new playthrough). Returns 1 when recording. */
++WITNESS_API int witness_record_begin(const char *game_name, int fps, long long seed, const char *params_json);
++WITNESS_API int witness_recording(void);
++/* Queue input for the current frame (call from your event pump). Pressing F8 writes a mark. */
++WITNESS_API void witness_record_event(const witness_event *event);
++WITNESS_API void witness_record_key(const char *key, int down);
++WITNESS_API void witness_record_mouse(double x, double y, int button, int down); /* button -1 = move */
++/* End of frame: write one line with this frame's dt and queued events (flushed every frame,
++ * so a crash keeps the replay). */
++WITNESS_API void witness_record_frame(double dt);
++WITNESS_API void witness_mark(const char *label);
++WITNESS_API void witness_record_stop(void);
++
++/* ---------------------------------------------------------------- misc helpers */
++
++/* Writes base64 of data into out (needs WITNESS_BASE64_SIZE(n) bytes incl. NUL). */
++#define WITNESS_BASE64_SIZE(n) ((((n) + 2) / 3) * 4 + 1)
++WITNESS_API size_t witness_base64_encode(const void *data, size_t n, char *out);
++
++#ifdef __cplusplus
++} /* extern "C" */
++#endif
++
++/* ================================================================= C++ convenience layer */
++#if defined(__cplusplus) && !defined(WITNESS_NO_CPP)
++#include <functional>
++#include <string>
++
++namespace witness {
++
++/* Fluent wrapper over witness_json:
++ *   j.begin_object().field("score", score).key("pos").vec(x, y).end_object(); */
++class Json {
++public:
++    explicit Json(witness_json *w) : w_(w) {}
++    Json &begin_object() { witness_json_begin_object(w_); return *this; }
++    Json &end_object() { witness_json_end_object(w_); return *this; }
++    Json &begin_array() { witness_json_begin_array(w_); return *this; }
++    Json &end_array() { witness_json_end_array(w_); return *this; }
++    Json &key(const char *k) { witness_json_key(w_, k); return *this; }
++    Json &key(const std::string &k) { witness_json_key(w_, k.c_str()); return *this; }
++    Json &value(std::nullptr_t) { witness_json_null(w_); return *this; }
++    Json &value(bool v) { witness_json_bool(w_, v ? 1 : 0); return *this; }
++    Json &value(int v) { witness_json_int(w_, v); return *this; }
++    Json &value(long v) { witness_json_int(w_, v); return *this; }
++    Json &value(long long v) { witness_json_int(w_, v); return *this; }
++    Json &value(unsigned v) { witness_json_int(w_, static_cast<long long>(v)); return *this; }
++    Json &value(unsigned long v) { witness_json_number(w_, static_cast<double>(v)); return *this; }
++    Json &value(unsigned long long v) { witness_json_number(w_, static_cast<double>(v)); return *this; }
++    Json &value(float v) { witness_json_number(w_, static_cast<double>(v)); return *this; }
++    Json &value(double v) { witness_json_number(w_, v); return *this; }
++    Json &value(const char *s) { witness_json_string(w_, s); return *this; }
++    Json &value(const std::string &s) { witness_json_string_n(w_, s.data(), s.size()); return *this; }
++    template <class T> Json &field(const char *k, const T &v) { key(k); return value(v); }
++    Json &vec(double x, double y) { witness_json_vec2(w_, x, y); return *this; }
++    Json &vec(double x, double y, double z) { witness_json_vec3(w_, x, y, z); return *this; }
++    Json &raw(const char *json) { witness_json_raw(w_, json); return *this; }
++    witness_json *c() const { return w_; }
++private:
++    witness_json *w_;
++};
++
++/* Read-only view over a witness_value: v["events"][0]["key"].str() */
++class Value {
++public:
++    Value(const witness_value *v = nullptr) : v_(v) {}
++    Value operator[](const char *k) const { return Value(witness_get(v_, k)); }
++    Value operator[](int i) const { return Value(i < 0 ? nullptr : witness_at(v_, static_cast<size_t>(i))); }
++    Value at(size_t i) const { return Value(witness_at(v_, i)); }
++    bool exists() const { return v_ != nullptr; }
++    witness_type type() const { return v_ ? v_->type : WITNESS_NULL; }
++    size_t size() const { return v_ && (v_->type == WITNESS_ARRAY || v_->type == WITNESS_OBJECT) ? v_->length : 0; }
++    double num(double def = 0) const { return witness_number(v_, def); }
++    long long integer(long long def = 0) const { return witness_int(v_, def); }
++    const char *str(const char *def = "") const { return witness_string(v_, def); }
++    bool boolean(bool def = false) const { return witness_bool(v_, def ? 1 : 0) != 0; }
++    const witness_value *c() const { return v_; }
++private:
++    const witness_value *v_;
++};
++
++/* std::function handlers. Leave a member empty if the game doesn't support it. To fail a
++ * command, call witness::fail("message") (or throw, if exceptions are enabled). */
++struct Handlers {
++    std::function<void(long long seed, const char *scene, Value params)> reset;
++    std::function<void(double dt)> step;                                   /* required */
++    std::function<void(const witness_event &event)> input;
++    std::function<void(Json &state)> snapshot;                             /* required */
++    std::function<bool(witness_image &out)> screenshot;
++    std::function<void(const char *name, Value args, Json &result)> call;
++    std::function<void(const char *expr, Json &value)> eval;
++    std::function<void(Json &fields)> perf;
++};
++
++inline void fail(const char *message) { witness_error("%s", message ? message : "failed"); }
++inline void fail(const std::string &message) { witness_error("%s", message.c_str()); }
++
++namespace detail {
++inline Handlers &handlers() { static Handlers h; return h; }
++#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
++template <class F> inline bool guard(F f) {
++    try { f(); } catch (const std::exception &e) { fail(e.what()); return false; }
++    catch (...) { fail("unknown C++ exception"); return false; }
++    return true;
++}
++#else
++template <class F> inline bool guard(F f) { f(); return true; }
++#endif
++inline int reset(void *, long long seed, const char *scene, const witness_value *params) {
++    return guard([&] { handlers().reset(seed, scene, Value(params)); }) ? 1 : 0;
++}
++inline void step(void *, double dt) { guard([&] { handlers().step(dt); }); }
++inline void input(void *, const witness_event *e) { guard([&] { handlers().input(*e); }); }
++inline void snapshot(void *, witness_json *w, const witness_value *) {
++    Json j(w);
++    guard([&] { handlers().snapshot(j); });
++}
++inline int screenshot(void *, witness_image *out) {
++    bool ok = false;
++    guard([&] { ok = handlers().screenshot(*out); });
++    return ok ? 1 : 0;
++}
++inline int call(void *, const char *name, const witness_value *args, witness_json *w) {
++    Json j(w);
++    return guard([&] { handlers().call(name, Value(args), j); }) ? 1 : 0;
++}
++inline int eval(void *, const char *expr, witness_json *w) {
++    Json j(w);
++    return guard([&] { handlers().eval(expr, j); }) ? 1 : 0;
++}
++inline void perf(void *, witness_json *w) {
++    Json j(w);
++    guard([&] { handlers().perf(j); });
++}
++} /* namespace detail */
++
++/* Connect with std::function handlers (stored internally; one connection per process). */
++inline bool connect(const witness_hello &hello, const Handlers &h) {
++    detail::handlers() = h;
++    witness_handlers c = witness_handlers();
++    if (h.reset) c.reset = detail::reset;
++    if (h.step) c.step = detail::step;
++    if (h.input) c.input = detail::input;
++    if (h.snapshot) c.snapshot = detail::snapshot;
++    if (h.screenshot) c.screenshot = detail::screenshot;
++    if (h.call) c.call = detail::call;
++    if (h.eval) c.eval = detail::eval;
++    if (h.perf) c.perf = detail::perf;
++    return witness_connect(&hello, &c) != 0;
++}
++
++inline bool active(int argc = 0, char **argv = nullptr) { return witness_active(argc, argv) != 0; }
++
++} /* namespace witness */
++#endif /* __cplusplus */
++
++#endif /* WITNESS_H */
++
++/* ================================================================= implementation */
++#ifdef WITNESS_IMPLEMENTATION
++#ifndef WITNESS_IMPLEMENTATION_DONE
++#define WITNESS_IMPLEMENTATION_DONE
++
++#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
++#define _POSIX_C_SOURCE 200809L /* effective only if no system header came first */
++#endif
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <time.h>
++#include <locale.h>
++
++#ifdef _WIN32
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <winsock2.h>
++#include <ws2tcpip.h>
++#include <windows.h>
++#ifdef _MSC_VER
++#pragma comment(lib, "ws2_32")
++#include <crtdbg.h>
++#endif
++typedef SOCKET witness__socket;
++#define WITNESS__NO_SOCKET INVALID_SOCKET
++#define witness__closesocket closesocket
++#else
++#include <sys/types.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <poll.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <netdb.h>
++#include <unistd.h>
++#include <errno.h>
++#include <pthread.h>
++typedef int witness__socket;
++#define WITNESS__NO_SOCKET (-1)
++#define witness__closesocket close
++#endif
++
++#ifndef MSG_NOSIGNAL
++#define MSG_NOSIGNAL 0
++#endif
++
++#define WITNESS__MAX_DEPTH 64
++#define WITNESS__MAX_KEYS 64
++#define WITNESS__MAX_LOGS 4096
++#define WITNESS__AUDIO_MAX_SECONDS 120
++
++#ifdef __cplusplus
++#define WITNESS__CAST(T, x) static_cast<T>(x)
++#else
++#define WITNESS__CAST(T, x) ((T)(x))
++#endif
++
++/* ---------------------------------------------------------------- small utilities */
++
++static void *witness__grow(void *p, size_t *cap, size_t need, size_t elem) {
++    size_t c = *cap ? *cap : 16;
++    void *q;
++    if (need <= *cap) return p;
++    while (c < need) c *= 2;
++    q = realloc(p, c * elem);
++    if (!q) return NULL;
++    *cap = c;
++    return q;
++}
++
++static void witness__copy(char *dst, size_t size, const char *src) {
++    size_t i = 0;
++    if (!size) return;
++    if (src) for (; src[i] && i + 1 < size; i++) dst[i] = src[i];
++    /* never cut a UTF-8 sequence in half */
++    if (src && src[i]) while (i > 0 && (WITNESS__CAST(unsigned char, src[i]) & 0xC0) == 0x80) i--;
++    dst[i] = 0;
++}
++
++static int witness__getenv(const char *name, char *out, size_t size) {
++#ifdef _WIN32
++    DWORD n = GetEnvironmentVariableA(name, out, WITNESS__CAST(DWORD, size));
++    if (n == 0 || n >= size) { if (size) out[0] = 0; return 0; }
++    return 1;
++#else
++    const char *v = getenv(name);
++    if (!v || !*v || strlen(v) >= size) { if (size) out[0] = 0; return 0; }
++    witness__copy(out, size, v);
++    return 1;
++#endif
++}
++
++static void witness__sleep_ms(int ms) {
++#ifdef _WIN32
++    Sleep(WITNESS__CAST(DWORD, ms));
++#else
++    struct timespec ts;
++    ts.tv_sec = ms / 1000;
++    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
++    nanosleep(&ts, NULL);
++#endif
++}
++
++static double witness__now_ms(void) {
++#ifdef _WIN32
++    return WITNESS__CAST(double, GetTickCount64());
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
++#endif
++}
++
++/* Locale-proof strtod: JSON always uses '.', the C locale of a game may not. */
++static double witness__strtod(const char *s, size_t n, int *ok) {
++    char buf[96];
++    char *end = NULL;
++    const char *dp = localeconv()->decimal_point;
++    size_t i;
++    double v;
++    *ok = 0;
++    if (n == 0 || n >= sizeof buf) return 0;
++    for (i = 0; i < n; i++) buf[i] = (s[i] == '.' && dp && dp[0]) ? dp[0] : s[i];
++    buf[n] = 0;
++    v = strtod(buf, &end);
++    *ok = end == buf + n;
++    return v;
++}
++
++static size_t witness__fmt_double(char *buf, size_t size, double v) {
++    const char *dp = localeconv()->decimal_point;
++    int n, ok = 0;
++    size_t i;
++    n = snprintf(buf, size, "%.15g", v);
++    if (n > 0 && WITNESS__CAST(size_t, n) < size) {
++        if (dp && dp[0] && dp[0] != '.') for (i = 0; buf[i]; i++) if (buf[i] == dp[0]) buf[i] = '.';
++        if (witness__strtod(buf, WITNESS__CAST(size_t, n), &ok) == v && ok) return WITNESS__CAST(size_t, n);
++    }
++    n = snprintf(buf, size, "%.17g", v); /* exact round trip */
++    if (dp && dp[0] && dp[0] != '.') for (i = 0; buf[i]; i++) if (buf[i] == dp[0]) buf[i] = '.';
++    return n > 0 ? WITNESS__CAST(size_t, n) : 0;
++}
++
++size_t witness_base64_encode(const void *data, size_t n, char *out) {
++    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    const unsigned char *p = WITNESS__CAST(const unsigned char *, data);
++    size_t i = 0, o = 0;
++    for (; i + 2 < n; i += 3) {
++        unsigned v = (unsigned)p[i] << 16 | (unsigned)p[i + 1] << 8 | p[i + 2];
++        out[o++] = T[v >> 18]; out[o++] = T[(v >> 12) & 63]; out[o++] = T[(v >> 6) & 63]; out[o++] = T[v & 63];
++    }
++    if (i < n) {
++        unsigned v = (unsigned)p[i] << 16 | (i + 1 < n ? (unsigned)p[i + 1] << 8 : 0u);
++        out[o++] = T[v >> 18]; out[o++] = T[(v >> 12) & 63];
++        out[o++] = i + 1 < n ? T[(v >> 6) & 63] : '=';
++        out[o++] = '=';
++    }
++    out[o] = 0;
++    return o;
++}
++
++/* ---------------------------------------------------------------- JSON writer */
++
++struct witness_json {
++    char *buf;
++    size_t len, cap;
++    int depth;
++    int after_key;
++    int failed;
++    unsigned count[WITNESS__MAX_DEPTH];
++    char kind[WITNESS__MAX_DEPTH]; /* '{' or '[' */
++};
++
++static int witness__jw_reserve(witness_json *w, size_t extra) {
++    char *p;
++    if (w->failed) return 0;
++    p = WITNESS__CAST(char *, witness__grow(w->buf, &w->cap, w->len + extra + 1, 1));
++    if (!p) { w->failed = 1; return 0; }
++    w->buf = p;
++    return 1;
++}
++
++static void witness__jw_put(witness_json *w, const char *s, size_t n) {
++    if (!witness__jw_reserve(w, n)) return;
++    memcpy(w->buf + w->len, s, n);
++    w->len += n;
++    w->buf[w->len] = 0;
++}
++
++static void witness__jw_putc(witness_json *w, char c) { witness__jw_put(w, &c, 1); }
++
++static void witness__jw_clear(witness_json *w) {
++    w->len = 0; w->depth = 0; w->after_key = 0; w->failed = 0;
++    if (w->buf) w->buf[0] = 0;
++}
++
++/* comma management before any value or key */
++static void witness__jw_pre(witness_json *w) {
++    if (w->after_key) { w->after_key = 0; return; }
++    if (w->depth > 0 && w->count[w->depth - 1]++) witness__jw_putc(w, ',');
++}
++
++static void witness__jw_str(witness_json *w, const char *s, size_t n) {
++    static const char hex[] = "0123456789abcdef";
++    size_t i, run = 0;
++    witness__jw_putc(w, '"');
++    for (i = 0; i < n; i++) {
++        unsigned char c = WITNESS__CAST(unsigned char, s[i]);
++        const char *esc = NULL;
++        char u[6];
++        if (c == '"') esc = "\\\"";
++        else if (c == '\\') esc = "\\\\";
++        else if (c == '\n') esc = "\\n";
++        else if (c == '\r') esc = "\\r";
++        else if (c == '\t') esc = "\\t";
++        else if (c < 0x20 || c == 0x7f) {
++            u[0] = '\\'; u[1] = 'u'; u[2] = '0'; u[3] = '0'; u[4] = hex[c >> 4]; u[5] = hex[c & 15];
++        } else continue;
++        if (i > run) witness__jw_put(w, s + run, i - run);
++        if (esc) witness__jw_put(w, esc, 2); else witness__jw_put(w, u, 6);
++        run = i + 1;
++    }
++    if (n > run) witness__jw_put(w, s + run, n - run);
++    witness__jw_putc(w, '"');
++}
++
++static void witness__jw_open(witness_json *w, char kind) {
++    witness__jw_pre(w);
++    witness__jw_putc(w, kind);
++    if (w->depth >= WITNESS__MAX_DEPTH) { w->failed = 1; return; }
++    w->kind[w->depth] = kind;
++    w->count[w->depth] = 0;
++    w->depth++;
++}
++
++static void witness__jw_close(witness_json *w, char kind) {
++    if (w->depth <= 0 || w->kind[w->depth - 1] != kind) return; /* tolerate stray ends */
++    if (w->after_key) { w->after_key = 0; witness__jw_put(w, "null", 4); }
++    w->depth--;
++    witness__jw_putc(w, kind == '{' ? '}' : ']');
++}
++
++/* close everything a handler left open, down to `depth` */
++static void witness__jw_close_to(witness_json *w, int depth) {
++    if (w->after_key) { w->after_key = 0; witness__jw_put(w, "null", 4); }
++    while (w->depth > depth) witness__jw_close(w, w->kind[w->depth - 1]);
++}
++
++void witness_json_begin_object(witness_json *w) { witness__jw_open(w, '{'); }
++void witness_json_end_object(witness_json *w) { witness__jw_close(w, '{'); }
++void witness_json_begin_array(witness_json *w) { witness__jw_open(w, '['); }
++void witness_json_end_array(witness_json *w) { witness__jw_close(w, '['); }
++
++void witness_json_key(witness_json *w, const char *key) {
++    if (w->depth <= 0 || w->kind[w->depth - 1] != '{') return;
++    if (w->after_key) { w->after_key = 0; witness__jw_put(w, "null", 4); }
++    witness__jw_pre(w);
++    witness__jw_str(w, key ? key : "", key ? strlen(key) : 0);
++    witness__jw_putc(w, ':');
++    w->after_key = 1;
++}
++
++void witness_json_null(witness_json *w) { witness__jw_pre(w); witness__jw_put(w, "null", 4); }
++void witness_json_bool(witness_json *w, int v) { witness__jw_pre(w); if (v) witness__jw_put(w, "true", 4); else witness__jw_put(w, "false", 5); }
++
++void witness_json_int(witness_json *w, long long v) {
++    char b[32];
++    int n = snprintf(b, sizeof b, "%lld", v);
++    witness__jw_pre(w);
++    witness__jw_put(w, b, n > 0 ? WITNESS__CAST(size_t, n) : 0);
++}
++
++void witness_json_number(witness_json *w, double v) {
++    char b[40];
++    if (v != v) { witness__jw_pre(w); witness__jw_put(w, "\"NaN\"", 5); return; }
++    if (v > 1.7976931348623157e308) { witness__jw_pre(w); witness__jw_put(w, "\"Infinity\"", 10); return; }
++    if (v < -1.7976931348623157e308) { witness__jw_pre(w); witness__jw_put(w, "\"-Infinity\"", 11); return; }
++    witness__jw_pre(w);
++    witness__jw_put(w, b, witness__fmt_double(b, sizeof b, v));
++}
++
++void witness_json_string(witness_json *w, const char *s) {
++    if (!s) { witness_json_null(w); return; }
++    witness_json_string_n(w, s, strlen(s));
++}
++
++void witness_json_string_n(witness_json *w, const char *s, size_t n) {
++    witness__jw_pre(w);
++    witness__jw_str(w, s ? s : "", s ? n : 0);
++}
++
++void witness_json_raw(witness_json *w, const char *json) {
++    witness__jw_pre(w);
++    if (!json || !*json) { witness__jw_put(w, "null", 4); return; }
++    witness__jw_put(w, json, strlen(json));
++}
++
++void witness_json_vec2(witness_json *w, double x, double y) {
++    witness_json_begin_array(w); witness_json_number(w, x); witness_json_number(w, y); witness_json_end_array(w);
++}
++
++void witness_json_vec3(witness_json *w, double x, double y, double z) {
++    witness_json_begin_array(w); witness_json_number(w, x); witness_json_number(w, y); witness_json_number(w, z);
++    witness_json_end_array(w);
++}
++
++void witness_json_base64(witness_json *w, const void *data, size_t n) {
++    size_t need = WITNESS_BASE64_SIZE(n) + 2;
++    witness__jw_pre(w);
++    if (!witness__jw_reserve(w, need)) return;
++    w->buf[w->len++] = '"';
++    w->len += witness_base64_encode(data, n, w->buf + w->len);
++    w->buf[w->len++] = '"';
++    w->buf[w->len] = 0;
++}
++
++void witness_json_field_int(witness_json *w, const char *key, long long v) { witness_json_key(w, key); witness_json_int(w, v); }
++void witness_json_field_number(witness_json *w, const char *key, double v) { witness_json_key(w, key); witness_json_number(w, v); }
++void witness_json_field_string(witness_json *w, const char *key, const char *s) { witness_json_key(w, key); witness_json_string(w, s); }
++void witness_json_field_bool(witness_json *w, const char *key, int v) { witness_json_key(w, key); witness_json_bool(w, v); }
++
++/* ---------------------------------------------------------------- JSON reader */
++
++/* Nodes are built in a growable array with index links, then published as a pointer tree. */
++typedef struct witness__node {
++    witness_type type;
++    double number;
++    const char *string;
++    size_t length;
++    const char *key;
++    long child, next;
++} witness__node;
++
++typedef struct witness__parser {
++    char *p;
++    char *end;
++    witness__node *nodes;
++    size_t count, cap;
++    int failed;
++} witness__parser;
++
++static void witness__skip_ws(witness__parser *ps) {
++    while (ps->p < ps->end && (*ps->p == ' ' || *ps->p == '\t' || *ps->p == '\n' || *ps->p == '\r')) ps->p++;
++}
++
++static long witness__new_node(witness__parser *ps, witness_type t) {
++    witness__node *n = WITNESS__CAST(witness__node *, witness__grow(ps->nodes, &ps->cap, ps->count + 1, sizeof(witness__node)));
++    if (!n) { ps->failed = 1; return -1; }
++    ps->nodes = n;
++    memset(&n[ps->count], 0, sizeof(witness__node));
++    n[ps->count].type = t;
++    n[ps->count].child = n[ps->count].next = -1;
++    return WITNESS__CAST(long, ps->count++);
++}
++
++static int witness__hex4(const char *s, unsigned *out) {
++    unsigned v = 0;
++    int i;
++    for (i = 0; i < 4; i++) {
++        char c = s[i];
++        v <<= 4;
++        if (c >= '0' && c <= '9') v |= WITNESS__CAST(unsigned, c - '0');
++        else if (c >= 'a' && c <= 'f') v |= WITNESS__CAST(unsigned, c - 'a' + 10);
++        else if (c >= 'A' && c <= 'F') v |= WITNESS__CAST(unsigned, c - 'A' + 10);
++        else return 0;
++    }
++    *out = v;
++    return 1;
++}
++
++/* Unescape a string in place (the output never outruns the input). ps->p is just past '"'. */
++static const char *witness__parse_string(witness__parser *ps, size_t *len) {
++    char *start = ps->p, *dst = ps->p;
++    while (ps->p < ps->end) {
++        unsigned char c = WITNESS__CAST(unsigned char, *ps->p++);
++        if (c == '"') { *dst = 0; *len = WITNESS__CAST(size_t, dst - start); return start; }
++        if (c < 0x20) break;
++        if (c != '\\') { *dst++ = WITNESS__CAST(char, c); continue; }
++        if (ps->p >= ps->end) break;
++        c = WITNESS__CAST(unsigned char, *ps->p++);
++        switch (c) {
++            case '"': *dst++ = '"'; break;
++            case '\\': *dst++ = '\\'; break;
++            case '/': *dst++ = '/'; break;
++            case 'b': *dst++ = '\b'; break;
++            case 'f': *dst++ = '\f'; break;
++            case 'n': *dst++ = '\n'; break;
++            case 'r': *dst++ = '\r'; break;
++            case 't': *dst++ = '\t'; break;
++            case 'u': {
++                unsigned cp, lo;
++                if (ps->end - ps->p < 4 || !witness__hex4(ps->p, &cp)) goto bad;
++                ps->p += 4;
++                if (cp >= 0xD800 && cp <= 0xDBFF && ps->end - ps->p >= 6 && ps->p[0] == '\\' && ps->p[1] == 'u' &&
++                    witness__hex4(ps->p + 2, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
++                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
++                    ps->p += 6;
++                } else if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD; /* lone surrogate */
++                if (cp < 0x80) *dst++ = WITNESS__CAST(char, cp);
++                else if (cp < 0x800) { *dst++ = WITNESS__CAST(char, 0xC0 | (cp >> 6)); *dst++ = WITNESS__CAST(char, 0x80 | (cp & 63)); }
++                else if (cp < 0x10000) {
++                    *dst++ = WITNESS__CAST(char, 0xE0 | (cp >> 12)); *dst++ = WITNESS__CAST(char, 0x80 | ((cp >> 6) & 63));
++                    *dst++ = WITNESS__CAST(char, 0x80 | (cp & 63));
++                } else {
++                    *dst++ = WITNESS__CAST(char, 0xF0 | (cp >> 18)); *dst++ = WITNESS__CAST(char, 0x80 | ((cp >> 12) & 63));
++                    *dst++ = WITNESS__CAST(char, 0x80 | ((cp >> 6) & 63)); *dst++ = WITNESS__CAST(char, 0x80 | (cp & 63));
++                }
++                break;
++            }
++            default: goto bad;
++        }
++    }
++bad:
++    ps->failed = 1;
++    return NULL;
++}
++
++static long witness__parse_value(witness__parser *ps, int depth);
++
++static long witness__parse_container(witness__parser *ps, int depth, int is_object) {
++    long self = witness__new_node(ps, is_object ? WITNESS_OBJECT : WITNESS_ARRAY), last = -1;
++    char close = is_object ? '}' : ']';
++    if (self < 0) return -1;
++    if (depth > WITNESS__MAX_DEPTH) { ps->failed = 1; return -1; }
++    ps->p++; /* past '{' or '[' */
++    witness__skip_ws(ps);
++    if (ps->p < ps->end && *ps->p == close) { ps->p++; return self; }
++    for (;;) {
++        const char *key = NULL;
++        long child;
++        witness__skip_ws(ps);
++        if (is_object) {
++            size_t klen;
++            if (ps->p >= ps->end || *ps->p != '"') { ps->failed = 1; return -1; }
++            ps->p++;
++            key = witness__parse_string(ps, &klen);
++            if (!key) return -1;
++            witness__skip_ws(ps);
++            if (ps->p >= ps->end || *ps->p != ':') { ps->failed = 1; return -1; }
++            ps->p++;
++        }
++        child = witness__parse_value(ps, depth + 1);
++        if (child < 0) return -1;
++        ps->nodes[child].key = key;
++        if (last < 0) ps->nodes[self].child = child; else ps->nodes[last].next = child;
++        last = child;
++        ps->nodes[self].length++;
++        witness__skip_ws(ps);
++        if (ps->p < ps->end && *ps->p == ',') { ps->p++; continue; }
++        if (ps->p < ps->end && *ps->p == close) { ps->p++; return self; }
++        ps->failed = 1;
++        return -1;
++    }
++}
++
++static long witness__parse_value(witness__parser *ps, int depth) {
++    long n;
++    witness__skip_ws(ps);
++    if (ps->p >= ps->end) { ps->failed = 1; return -1; }
++    switch (*ps->p) {
++        case '{': return witness__parse_container(ps, depth, 1);
++        case '[': return witness__parse_container(ps, depth, 0);
++        case '"': {
++            size_t len;
++            const char *s;
++            ps->p++;
++            s = witness__parse_string(ps, &len);
++            if (!s) return -1;
++            n = witness__new_node(ps, WITNESS_STRING);
++            if (n < 0) return -1;
++            ps->nodes[n].string = s;
++            ps->nodes[n].length = len;
++            return n;
++        }
++        case 't': case 'f': case 'n': {
++            static const char *const lit[3] = {"true", "false", "null"};
++            int i;
++            for (i = 0; i < 3; i++) {
++                size_t l = strlen(lit[i]);
++                if (WITNESS__CAST(size_t, ps->end - ps->p) >= l && memcmp(ps->p, lit[i], l) == 0) {
++                    ps->p += l;
++                    n = witness__new_node(ps, i == 2 ? WITNESS_NULL : WITNESS_BOOL);
++                    if (n >= 0) ps->nodes[n].number = i == 0 ? 1 : 0;
++                    return n;
++                }
++            }
++            ps->failed = 1;
++            return -1;
++        }
++        default: {
++            char *s = ps->p;
++            int ok;
++            double v;
++            if (*ps->p == '-') ps->p++;
++            while (ps->p < ps->end && ((*ps->p >= '0' && *ps->p <= '9') || *ps->p == '.' || *ps->p == 'e' ||
++                                       *ps->p == 'E' || *ps->p == '+' || *ps->p == '-')) ps->p++;
++            v = witness__strtod(s, WITNESS__CAST(size_t, ps->p - s), &ok);
++            if (!ok) { ps->failed = 1; return -1; }
++            n = witness__new_node(ps, WITNESS_NUMBER);
++            if (n >= 0) ps->nodes[n].number = v;
++            return n;
++        }
++    }
++}
++
++const witness_value *witness_get(const witness_value *o, const char *key) {
++    const witness_value *c;
++    if (!o || o->type != WITNESS_OBJECT || !key) return NULL;
++    for (c = o->child; c; c = c->next) if (c->key && strcmp(c->key, key) == 0) return c;
++    return NULL;
++}
++
++const witness_value *witness_at(const witness_value *a, size_t i) {
++    const witness_value *c;
++    if (!a || (a->type != WITNESS_ARRAY && a->type != WITNESS_OBJECT)) return NULL;
++    for (c = a->child; c && i; c = c->next) i--;
++    return c;
++}
++
++double witness_number(const witness_value *v, double def) {
++    if (!v) return def;
++    if (v->type == WITNESS_NUMBER || v->type == WITNESS_BOOL) return v->number;
++    if (v->type == WITNESS_STRING) {
++        int ok;
++        size_t a = 0, b = v->length;
++        double d;
++        while (a < b && v->string[a] == ' ') a++;
++        while (b > a && v->string[b - 1] == ' ') b--;
++        d = witness__strtod(v->string + a, b - a, &ok);
++        return ok ? d : def;
++    }
++    return def;
++}
++
++long long witness_int(const witness_value *v, long long def) {
++    double d = witness_number(v, WITNESS__CAST(double, def));
++    if (d != d || d > 9.2e18 || d < -9.2e18) return def;
++    return WITNESS__CAST(long long, d);
++}
++
++const char *witness_string(const witness_value *v, const char *def) {
++    return v && v->type == WITNESS_STRING ? v->string : def;
++}
++
++int witness_bool(const witness_value *v, int def) {
++    if (!v) return def;
++    if (v->type == WITNESS_BOOL || v->type == WITNESS_NUMBER) return v->number != 0;
++    return def;
++}
++
++/* ---------------------------------------------------------------- key names */
++
++const char *witness_key_normalize(const char *name, char *out, size_t size) {
++    static const char *const alias[][2] = {
++        {"return", "enter"}, {"kpenter", "enter"}, {"numpadenter", "enter"}, {"esc", "escape"},
++        {"spacebar", "space"}, {" ", "space"}, {"arrowleft", "left"}, {"arrowright", "right"},
++        {"arrowup", "up"}, {"arrowdown", "down"}, {"leftarrow", "left"}, {"rightarrow", "right"},
++        {"uparrow", "up"}, {"downarrow", "down"}, {"lshift", "shift"}, {"rshift", "shift"},
++        {"leftshift", "shift"}, {"rightshift", "shift"}, {"shiftleft", "shift"}, {"shiftright", "shift"},
++        {"control", "ctrl"}, {"lctrl", "ctrl"}, {"rctrl", "ctrl"}, {"leftctrl", "ctrl"}, {"rightctrl", "ctrl"},
++        {"leftcontrol", "ctrl"}, {"rightcontrol", "ctrl"}, {"controlleft", "ctrl"}, {"controlright", "ctrl"},
++        {"lalt", "alt"}, {"ralt", "alt"}, {"leftalt", "alt"}, {"rightalt", "alt"}, {"altleft", "alt"},
++        {"altright", "alt"}, {"option", "alt"}, {"altgr", "alt"}, {"del", "delete"}, {"ins", "insert"},
++        {"keypadenter", "enter"}, {"pgup", "pageup"}, {"pgdn", "pagedown"}, {"back", "backspace"}, {"leftsuper", "super"},
++        {"rightsuper", "super"}, {"lsuper", "super"}, {"rsuper", "super"}, {"meta", "super"},
++        {"metaleft", "super"}, {"metaright", "super"}, {"leftgui", "super"}, {"rightgui", "super"},
++        {"lgui", "super"}, {"rgui", "super"}, {"command", "super"}, {"windows", "super"}};
++    char tmp[64];
++    size_t i, n = 0;
++    if (!out || !size) return out;
++    out[0] = 0;
++    if (!name) return out;
++    if (name[0] == ' ' && name[1] == 0) { witness__copy(out, size, "space"); return out; }
++    /* lowercase, drop spaces/underscores/dashes: "Left Shift" -> "leftshift" */
++    for (i = 0; name[i] && n + 1 < sizeof tmp; i++) {
++        char c = name[i];
++        if (c == ' ' || c == '_' || c == '-') continue;
++        if (c >= 'A' && c <= 'Z') c = WITNESS__CAST(char, c - 'A' + 'a');
++        tmp[n++] = c;
++    }
++    tmp[n] = 0;
++    if (n == 4 && memcmp(tmp, "key", 3) == 0) memmove(tmp, tmp + 3, 2);        /* KeyA -> a */
++    else if (n == 6 && memcmp(tmp, "digit", 5) == 0) memmove(tmp, tmp + 5, 2); /* Digit1 -> 1 */
++    for (i = 0; i < sizeof alias / sizeof alias[0]; i++) {
++        if (strcmp(tmp, alias[i][0]) == 0) { witness__copy(out, size, alias[i][1]); return out; }
++    }
++    witness__copy(out, size, tmp);
++    return out;
++}
++
++/* ---------------------------------------------------------------- global state */
++
++typedef struct witness__log {
++    long long frame;
++    witness_level level;
++    char *message;
++} witness__log;
++
++typedef struct witness__state {
++    int connected, quit;
++    int sock_open, wsa_started;
++    witness__socket sock;
++    witness_handlers h;
++    int fps, audio_rate, audio_channels;
++    long long frame, seed;
++    double time;
++    int seed_chosen;
++    /* network in / out */
++    char *in;
++    size_t in_len, in_cap;
++    witness_json out;
++    /* command parsing */
++    witness__parser parser;
++    witness_value *values;
++    size_t values_cap;
++    char error[512];
++    int has_error;
++    /* input */
++    witness_event *queue;
++    size_t queue_len, queue_cap;
++    witness_event *cur;
++    size_t cur_len, cur_cap;
++    char keys[WITNESS__MAX_KEYS][32];
++    int key_count;
++    double mouse_x, mouse_y;
++    int mouse_buttons;
++    /* logs + audio (shared with other threads, guarded by the lock) */
++    witness__log *logs;
++    size_t log_len, log_cap, logs_dropped;
++    float *audio;
++    size_t audio_cap, audio_head, audio_len; /* ring, in samples */
++    long long audio_emitted;                 /* sample frames written since reset */
++    /* scratch */
++    unsigned char *pixels;
++    size_t pixels_cap;
++    /* recording */
++    FILE *rec;
++    long long rec_frame;
++    witness_event *rec_events;
++    size_t rec_len, rec_cap;
++    char rec_mark[64];
++    witness_json rec_line;
++} witness__state;
++
++static witness__state witness__g;
++
++#ifdef _WIN32
++static SRWLOCK witness__lock_obj = SRWLOCK_INIT;
++static void witness__lock(void) { AcquireSRWLockExclusive(&witness__lock_obj); }
++static void witness__unlock(void) { ReleaseSRWLockExclusive(&witness__lock_obj); }
++#else
++static pthread_mutex_t witness__lock_obj = PTHREAD_MUTEX_INITIALIZER;
++static void witness__lock(void) { pthread_mutex_lock(&witness__lock_obj); }
++static void witness__unlock(void) { pthread_mutex_unlock(&witness__lock_obj); }
++#endif
++
++void witness_error(const char *fmt, ...) {
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(witness__g.error, sizeof witness__g.error, fmt, ap);
++    va_end(ap);
++    witness__g.has_error = 1;
++}
++
++int witness_connected(void) { return witness__g.connected; }
++long long witness_frame(void) { return witness__g.frame; }
++double witness_time(void) { return witness__g.time; }
++
++long long witness_seed(void) {
++    if (!witness__g.seed_chosen) {
++        char buf[32];
++        int ok = 0;
++        double v = 0;
++        if (witness__getenv("WITNESS_SEED", buf, sizeof buf)) v = witness__strtod(buf, strlen(buf), &ok);
++        witness__g.seed = ok ? WITNESS__CAST(long long, v) : WITNESS__CAST(long long, time(NULL) % 1000000);
++        witness__g.seed_chosen = 1;
++    }
++    return witness__g.seed;
++}
++
++int witness_active(int argc, char **argv) {
++    char buf[128];
++    int i;
++    if (witness__getenv("WITNESS_ADDR", buf, sizeof buf)) return 1;
++    if (argv) for (i = 1; i < argc; i++) if (argv[i] && strcmp(argv[i], "--witness") == 0) return 1;
++    return 0;
++}
++
++/* ---------------------------------------------------------------- logs & audio */
++
++void witness_log(witness_level level, const char *fmt, ...) {
++    va_list ap, ap2;
++    int n;
++    char *msg;
++    witness__log *l;
++    if (!witness__g.connected) return;
++    va_start(ap, fmt);
++    va_copy(ap2, ap);
++    n = vsnprintf(NULL, 0, fmt, ap);
++    va_end(ap);
++    if (n < 0) { va_end(ap2); return; }
++    msg = WITNESS__CAST(char *, malloc(WITNESS__CAST(size_t, n) + 1));
++    if (!msg) { va_end(ap2); return; }
++    vsnprintf(msg, WITNESS__CAST(size_t, n) + 1, fmt, ap2);
++    va_end(ap2);
++    witness__lock();
++    if (witness__g.log_len >= WITNESS__MAX_LOGS) {
++        witness__g.logs_dropped++;
++        free(msg);
++    } else {
++        l = WITNESS__CAST(witness__log *, witness__grow(witness__g.logs, &witness__g.log_cap, witness__g.log_len + 1, sizeof(witness__log)));
++        if (l) {
++            witness__g.logs = l;
++            l[witness__g.log_len].frame = witness__g.frame;
++            l[witness__g.log_len].level = level;
++            l[witness__g.log_len].message = msg;
++            witness__g.log_len++;
++        } else free(msg);
++    }
++    witness__unlock();
++}
++
++/* Push samples into the ring (lock held). Grows up to the cap, then drops the oldest. */
++static void witness__audio_push(const float *src, const short *src16, size_t samples) {
++    size_t max = WITNESS__CAST(size_t, witness__g.audio_rate) * WITNESS__CAST(size_t, witness__g.audio_channels) * WITNESS__AUDIO_MAX_SECONDS;
++    size_t i;
++    if (witness__g.audio_len + samples > witness__g.audio_cap && witness__g.audio_cap < max) {
++        size_t want = witness__g.audio_cap ? witness__g.audio_cap : 4096, k;
++        float *nb;
++        while (want < witness__g.audio_len + samples && want < max) want *= 2;
++        if (want > max) want = max;
++        nb = WITNESS__CAST(float *, malloc(want * sizeof(float)));
++        if (nb) {
++            for (k = 0; k < witness__g.audio_len; k++) nb[k] = witness__g.audio[(witness__g.audio_head + k) % witness__g.audio_cap];
++            free(witness__g.audio);
++            witness__g.audio = nb;
++            witness__g.audio_cap = want;
++            witness__g.audio_head = 0;
++        }
++    }
++    if (!witness__g.audio_cap) return;
++    for (i = 0; i < samples; i++) {
++        float s = src ? src[i] : WITNESS__CAST(float, src16[i]) / 32768.0f;
++        if (witness__g.audio_len == witness__g.audio_cap) { /* full: drop the oldest sample */
++            witness__g.audio_head = (witness__g.audio_head + 1) % witness__g.audio_cap;
++            witness__g.audio_len--;
++        }
++        witness__g.audio[(witness__g.audio_head + witness__g.audio_len) % witness__g.audio_cap] = s;
++        witness__g.audio_len++;
++    }
++}
++
++void witness_audio_write(const float *interleaved, int frames) {
++    if (!witness__g.connected || !witness__g.audio_rate || frames <= 0 || !interleaved) return;
++    witness__lock();
++    witness__audio_push(interleaved, NULL, WITNESS__CAST(size_t, frames) * WITNESS__CAST(size_t, witness__g.audio_channels));
++    witness__g.audio_emitted += frames;
++    witness__unlock();
++}
++
++void witness_audio_write_s16(const short *interleaved, int frames) {
++    if (!witness__g.connected || !witness__g.audio_rate || frames <= 0 || !interleaved) return;
++    witness__lock();
++    witness__audio_push(NULL, interleaved, WITNESS__CAST(size_t, frames) * WITNESS__CAST(size_t, witness__g.audio_channels));
++    witness__g.audio_emitted += frames;
++    witness__unlock();
++}
++
++int witness_audio_frames_for_step(double dt) {
++    long long target, n;
++    if (!witness__g.connected || !witness__g.audio_rate) return 0;
++    target = llround((witness__g.time + dt) * witness__g.audio_rate);
++    witness__lock();
++    n = target - witness__g.audio_emitted;
++    witness__unlock();
++    return n > 0 ? WITNESS__CAST(int, n) : 0;
++}
++
++/* ---------------------------------------------------------------- input state */
++
++const witness_event *witness_frame_events(int *count) {
++    if (count) *count = WITNESS__CAST(int, witness__g.cur_len);
++    return witness__g.cur;
++}
++
++int witness_key_down(const char *name) {
++    char k[32];
++    int i;
++    witness_key_normalize(name, k, sizeof k);
++    for (i = 0; i < witness__g.key_count; i++) if (strcmp(witness__g.keys[i], k) == 0) return 1;
++    return 0;
++}
++
++void witness_mouse(double *x, double *y, int *buttons) {
++    if (x) *x = witness__g.mouse_x;
++    if (y) *y = witness__g.mouse_y;
++    if (buttons) *buttons = witness__g.mouse_buttons;
++}
++
++static void witness__track(const witness_event *e) {
++    int i;
++    if (e->type == WITNESS_EV_KEY && e->down >= 0) {
++        for (i = 0; i < witness__g.key_count; i++) if (strcmp(witness__g.keys[i], e->name) == 0) break;
++        if (e->down && i == witness__g.key_count && i < WITNESS__MAX_KEYS) {
++            witness__copy(witness__g.keys[i], sizeof witness__g.keys[i], e->name);
++            witness__g.key_count++;
++        } else if (!e->down && i < witness__g.key_count) {
++            witness__g.key_count--;
++            if (i != witness__g.key_count) memcpy(witness__g.keys[i], witness__g.keys[witness__g.key_count], sizeof witness__g.keys[i]);
++        }
++    } else if (e->type == WITNESS_EV_MOUSE) {
++        if (e->has_pos) { witness__g.mouse_x = e->x; witness__g.mouse_y = e->y; }
++        if (e->down >= 0 && e->button >= 0 && e->button < 8) {
++            if (e->down) witness__g.mouse_buttons |= 1 << e->button;
++            else witness__g.mouse_buttons &= ~(1 << e->button);
++        }
++    }
++}
++
++static void witness__parse_event(const witness_value *v, witness_event *e) {
++    const char *type = witness_string(witness_get(v, "type"), "");
++    const witness_value *down = witness_get(v, "down");
++    memset(e, 0, sizeof *e);
++    e->frame = witness_int(witness_get(v, "frame"), 0);
++    e->down = down ? witness_bool(down, 0) : -1;
++    e->button = -1;
++    if (strcmp(type, "key") == 0) {
++        e->type = WITNESS_EV_KEY;
++        witness_key_normalize(witness_string(witness_get(v, "key"), ""), e->name, sizeof e->name);
++    } else if (strcmp(type, "mouse") == 0) {
++        e->type = WITNESS_EV_MOUSE;
++        e->has_pos = witness_get(v, "x") != NULL;
++        e->x = witness_number(witness_get(v, "x"), 0);
++        e->y = witness_number(witness_get(v, "y"), 0);
++        e->button = WITNESS__CAST(int, witness_int(witness_get(v, "button"), e->down >= 0 ? 0 : -1));
++    } else if (strcmp(type, "wheel") == 0) {
++        e->type = WITNESS_EV_WHEEL;
++        e->dx = witness_number(witness_get(v, "dx"), 0);
++        e->dy = witness_number(witness_get(v, "dy"), 0);
++    } else if (strcmp(type, "text") == 0) {
++        e->type = WITNESS_EV_TEXT;
++        witness__copy(e->text, sizeof e->text, witness_string(witness_get(v, "text"), ""));
++    } else if (strcmp(type, "action") == 0) {
++        e->type = WITNESS_EV_ACTION;
++        witness__copy(e->name, sizeof e->name, witness_string(witness_get(v, "action"), ""));
++    } else if (strcmp(type, "pad") == 0) {
++        e->type = WITNESS_EV_PAD;
++        witness__copy(e->name, sizeof e->name, witness_string(witness_get(v, "button"), ""));
++    } else if (strcmp(type, "axis") == 0) {
++        e->type = WITNESS_EV_AXIS;
++        witness__copy(e->name, sizeof e->name, witness_string(witness_get(v, "axis"), ""));
++        e->value = witness_number(witness_get(v, "value"), 0);
++    } else {
++        e->type = WITNESS_EV_OTHER;
++        witness__copy(e->name, sizeof e->name, type);
++    }
++}
++
++/* Protocol shape of an event (shared by recording). */
++static void witness__write_event(witness_json *w, const witness_event *e) {
++    static const char *const names[] = {"key", "mouse", "wheel", "text", "action", "pad", "axis"};
++    witness_json_begin_object(w);
++    witness_json_field_string(w, "type", e->type == WITNESS_EV_OTHER ? e->name : names[e->type]);
++    switch (e->type) {
++        case WITNESS_EV_KEY: witness_json_field_string(w, "key", e->name); break;
++        case WITNESS_EV_MOUSE:
++            if (e->has_pos) { witness_json_field_number(w, "x", e->x); witness_json_field_number(w, "y", e->y); }
++            if (e->down >= 0) witness_json_field_int(w, "button", e->button < 0 ? 0 : e->button);
++            break;
++        case WITNESS_EV_WHEEL:
++            if (e->dx != 0) witness_json_field_number(w, "dx", e->dx);
++            witness_json_field_number(w, "dy", e->dy);
++            break;
++        case WITNESS_EV_TEXT: witness_json_field_string(w, "text", e->text); break;
++        case WITNESS_EV_ACTION: witness_json_field_string(w, "action", e->name); break;
++        case WITNESS_EV_PAD: witness_json_field_string(w, "button", e->name); break;
++        case WITNESS_EV_AXIS:
++            witness_json_field_string(w, "axis", e->name);
++            witness_json_field_number(w, "value", e->value);
++            break;
++        default: break;
++    }
++    if (e->down >= 0) witness_json_field_bool(w, "down", e->down);
++    witness_json_end_object(w);
++}
++
++/* ---------------------------------------------------------------- socket */
++
++static int witness__send_all(const char *data, size_t n) {
++    while (n > 0) {
++        int chunk = n > 0x40000000u ? 0x40000000 : WITNESS__CAST(int, n);
++#ifdef _WIN32
++        int sent = send(witness__g.sock, data, chunk, 0);
++        if (sent == SOCKET_ERROR) return 0;
++#else
++        ssize_t sent = send(witness__g.sock, data, WITNESS__CAST(size_t, chunk), MSG_NOSIGNAL);
++        if (sent < 0) { if (errno == EINTR) continue; return 0; }
++#endif
++        data += sent;
++        n -= WITNESS__CAST(size_t, sent);
++    }
++    return 1;
++}
++
++static void witness__disconnect(void) {
++    if (witness__g.sock_open) witness__closesocket(witness__g.sock);
++    witness__g.sock_open = 0;
++    witness__g.connected = 0;
++}
++
++/* Wait until the socket is readable: 1 readable, 0 timeout, -1 error (EINTR retried). */
++static int witness__wait_readable(double timeout_ms) {
++#ifdef _WIN32
++    fd_set rd;
++    struct timeval tv;
++    int r;
++    FD_ZERO(&rd);
++    FD_SET(witness__g.sock, &rd);
++    if (timeout_ms >= 0) {
++        tv.tv_sec = WITNESS__CAST(long, timeout_ms / 1000);
++        tv.tv_usec = WITNESS__CAST(long, fmod(timeout_ms, 1000.0) * 1000);
++    }
++    r = select(0, &rd, NULL, NULL, timeout_ms >= 0 ? &tv : NULL);
++    return r < 0 ? -1 : r > 0;
++#else
++    struct pollfd pfd;
++    int r;
++    pfd.fd = witness__g.sock;
++    pfd.events = POLLIN;
++    pfd.revents = 0;
++    do r = poll(&pfd, 1, timeout_ms >= 0 ? WITNESS__CAST(int, timeout_ms) : -1);
++    while (r < 0 && errno == EINTR);
++    return r < 0 ? -1 : r > 0;
++#endif
++}
++
++static int witness__send_out(void) {
++    witness_json *w = &witness__g.out;
++    if (w->failed) return 0;
++    witness__jw_putc(w, '\n');
++    if (w->failed || !witness__send_all(w->buf, w->len)) { witness__disconnect(); return 0; }
++    return 1;
++}
++
++static witness__socket witness__dial(const char *host, const char *port) {
++    struct addrinfo hints, *res = NULL, *ai;
++    witness__socket s = WITNESS__NO_SOCKET;
++    memset(&hints, 0, sizeof hints);
++    hints.ai_family = AF_UNSPEC;
++    hints.ai_socktype = SOCK_STREAM;
++    hints.ai_protocol = IPPROTO_TCP;
++    if (getaddrinfo(host, port, &hints, &res) != 0) return WITNESS__NO_SOCKET;
++    for (ai = res; ai; ai = ai->ai_next) {
++        s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
++        if (s == WITNESS__NO_SOCKET) continue;
++#ifdef _WIN32
++        if (connect(s, ai->ai_addr, WITNESS__CAST(int, ai->ai_addrlen)) == 0) break;
++#else
++        if (connect(s, ai->ai_addr, ai->ai_addrlen) == 0) break;
++#endif
++        witness__closesocket(s);
++        s = WITNESS__NO_SOCKET;
++    }
++    freeaddrinfo(res);
++    if (s != WITNESS__NO_SOCKET) {
++        int one = 1;
++        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, WITNESS__CAST(const char *, WITNESS__CAST(const void *, &one)), sizeof one);
++#ifdef SO_NOSIGPIPE
++        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
++#endif
++    }
++    return s;
++}
++
++/* ---------------------------------------------------------------- commands */
++
++static void witness__reply_begin(double id) {
++    witness_json *w = &witness__g.out;
++    witness__jw_clear(w);
++    witness_json_begin_object(w);
++    witness_json_field_number(w, "id", id);
++    witness_json_field_bool(w, "ok", 1);
++}
++
++static void witness__reply_fail(double id, const char *msg) {
++    witness_json *w = &witness__g.out;
++    witness__jw_clear(w);
++    witness_json_begin_object(w);
++    witness_json_field_number(w, "id", id);
++    witness_json_field_bool(w, "ok", 0);
++    witness_json_field_string(w, "error", msg);
++    witness_json_end_object(w);
++}
++
++/* After a handler: report its failure, or close what it left open. */
++static int witness__handler_ok(int returned, double id, const char *what) {
++    if (!returned || witness__g.has_error) {
++        char msg[600];
++        if (witness__g.has_error) witness__copy(msg, sizeof msg, witness__g.error);
++        else snprintf(msg, sizeof msg, "%s failed", what);
++        witness__reply_fail(id, msg);
++        return 0;
++    }
++    witness__jw_close_to(&witness__g.out, 1);
++    return 1;
++}
++
++static void witness__reset_sim(long long seed) {
++    witness__g.frame = 0;
++    witness__g.time = 0;
++    witness__g.seed = seed;
++    witness__g.seed_chosen = 1;
++    witness__g.queue_len = 0;
++    witness__g.cur_len = 0;
++    witness__g.key_count = 0;
++    witness__g.mouse_x = witness__g.mouse_y = 0;
++    witness__g.mouse_buttons = 0;
++    witness__lock();
++    witness__g.audio_len = 0;
++    witness__g.audio_head = 0;
++    witness__g.audio_emitted = 0;
++    witness__unlock();
++}
++
++static void witness__queue_event(const witness_event *e) {
++    witness_event *q = WITNESS__CAST(witness_event *, witness__grow(witness__g.queue, &witness__g.queue_cap, witness__g.queue_len + 1, sizeof(witness_event)));
++    if (!q) return;
++    witness__g.queue = q;
++    q[witness__g.queue_len++] = *e;
++}
++
++/* Move the events due at the current frame (frame <= current, queue order) into cur. */
++static void witness__take_due(void) {
++    size_t i, keep = 0;
++    witness__g.cur_len = 0;
++    for (i = 0; i < witness__g.queue_len; i++) {
++        witness_event *e = &witness__g.queue[i];
++        if (e->frame <= witness__g.frame) {
++            witness_event *c = WITNESS__CAST(witness_event *, witness__grow(witness__g.cur, &witness__g.cur_cap, witness__g.cur_len + 1, sizeof(witness_event)));
++            if (!c) continue;
++            witness__g.cur = c;
++            c[witness__g.cur_len++] = *e;
++        } else {
++            witness__g.queue[keep++] = *e;
++        }
++    }
++    witness__g.queue_len = keep;
++}
++
++static int witness__screenshot(double id, double scale) {
++    witness_image img;
++    witness_json *w = &witness__g.out;
++    const unsigned char *src;
++    size_t stride, ow, oh, x, y, bytes;
++    int ok;
++    memset(&img, 0, sizeof img);
++    witness__g.has_error = 0;
++    ok = witness__g.h.screenshot(witness__g.h.user, &img);
++    if (ok && (!img.rgba || img.width <= 0 || img.height <= 0)) { witness_error("screenshot handler returned no pixels"); ok = 0; }
++    if (!ok || witness__g.has_error) {
++        witness__reply_fail(id, witness__g.has_error ? witness__g.error : "screenshot failed");
++        return 0;
++    }
++    stride = img.stride > 0 ? WITNESS__CAST(size_t, img.stride) : WITNESS__CAST(size_t, img.width) * 4;
++    if (!(scale > 0) || scale > 16) scale = 1;
++    ow = WITNESS__CAST(size_t, floor(img.width * scale + 0.5));
++    oh = WITNESS__CAST(size_t, floor(img.height * scale + 0.5));
++    if (ow < 1) ow = 1;
++    if (oh < 1) oh = 1;
++    bytes = ow * oh * 4;
++    if (ow == WITNESS__CAST(size_t, img.width) && oh == WITNESS__CAST(size_t, img.height) && !img.bottom_up && stride == ow * 4) {
++        src = img.rgba; /* already tight, top-down, unscaled: encode directly */
++    } else {
++        unsigned char *dst = WITNESS__CAST(unsigned char *, witness__grow(witness__g.pixels, &witness__g.pixels_cap, bytes, 1));
++        if (!dst) { witness__reply_fail(id, "out of memory"); return 0; }
++        witness__g.pixels = dst;
++        for (y = 0; y < oh; y++) {
++            size_t sy = WITNESS__CAST(size_t, (double)y * img.height / (double)oh);
++            if (img.bottom_up) sy = WITNESS__CAST(size_t, img.height) - 1 - sy;
++            for (x = 0; x < ow; x++) {
++                size_t sx = WITNESS__CAST(size_t, (double)x * img.width / (double)ow);
++                memcpy(dst + (y * ow + x) * 4, img.rgba + sy * stride + sx * 4, 4);
++            }
++        }
++        src = dst;
++    }
++    witness__reply_begin(id);
++    witness_json_field_int(w, "width", WITNESS__CAST(long long, ow));
++    witness_json_field_int(w, "height", WITNESS__CAST(long long, oh));
++    witness_json_field_string(w, "format", "rgba8");
++    witness_json_key(w, "data");
++    witness_json_base64(w, src, bytes);
++    witness_json_end_object(w);
++    return 1;
++}
++
++static void witness__audio_reply(double id) {
++    witness_json *w = &witness__g.out;
++    size_t n, i, bytes;
++    unsigned char *tmp;
++    const unsigned one = 1;
++    int big_endian = *WITNESS__CAST(const unsigned char *, WITNESS__CAST(const void *, &one)) == 0;
++    witness__lock();
++    n = witness__g.audio_len;
++    bytes = n * 4;
++    tmp = WITNESS__CAST(unsigned char *, witness__grow(witness__g.pixels, &witness__g.pixels_cap, bytes ? bytes : 1, 1));
++    if (tmp) {
++        witness__g.pixels = tmp;
++        for (i = 0; i < n; i++) {
++            float s = witness__g.audio[(witness__g.audio_head + i) % witness__g.audio_cap];
++            unsigned char *b = tmp + i * 4;
++            memcpy(b, &s, 4);
++            if (big_endian) { unsigned char t = b[0]; b[0] = b[3]; b[3] = t; t = b[1]; b[1] = b[2]; b[2] = t; }
++        }
++        witness__g.audio_len = 0;
++        witness__g.audio_head = 0;
++    }
++    witness__unlock();
++    if (!tmp) { witness__reply_fail(id, "out of memory"); return; }
++    witness__reply_begin(id);
++    witness_json_field_int(w, "sampleRate", witness__g.audio_rate);
++    witness_json_field_int(w, "channels", witness__g.audio_channels);
++    witness_json_field_string(w, "format", "f32");
++    witness_json_key(w, "data");
++    witness_json_base64(w, tmp, bytes);
++    witness_json_end_object(w);
++}
++
++static void witness__logs_reply(double id) {
++    static const char *const levels[] = {"info", "warn", "error"};
++    witness_json *w = &witness__g.out;
++    size_t i;
++    witness__reply_begin(id);
++    witness_json_key(w, "logs");
++    witness_json_begin_array(w);
++    witness__lock();
++    for (i = 0; i < witness__g.log_len; i++) {
++        witness__log *l = &witness__g.logs[i];
++        witness_json_begin_object(w);
++        witness_json_field_int(w, "frame", l->frame);
++        witness_json_field_string(w, "level", levels[l->level <= WITNESS_ERROR ? l->level : WITNESS_INFO]);
++        witness_json_field_string(w, "message", l->message);
++        witness_json_end_object(w);
++        free(l->message);
++    }
++    witness__g.log_len = 0;
++    if (witness__g.logs_dropped) {
++        char msg[96];
++        snprintf(msg, sizeof msg, "witness: %lu log lines dropped (buffer full)", WITNESS__CAST(unsigned long, witness__g.logs_dropped));
++        witness_json_begin_object(w);
++        witness_json_field_int(w, "frame", witness__g.frame);
++        witness_json_field_string(w, "level", "warn");
++        witness_json_field_string(w, "message", msg);
++        witness_json_end_object(w);
++        witness__g.logs_dropped = 0;
++    }
++    witness__unlock();
++    witness_json_end_array(w);
++    witness_json_end_object(w);
++}
++
++static void witness__dispatch(const witness_value *m) {
++    witness__state *g = &witness__g;
++    witness_json *w = &g->out;
++    double id = witness_number(witness_get(m, "id"), 0);
++    const char *cmd = witness_string(witness_get(m, "cmd"), "");
++    g->has_error = 0;
++    g->error[0] = 0;
++
++    if (strcmp(cmd, "step") == 0) {
++        long long frames = witness_int(witness_get(m, "frames"), 1), i;
++        const witness_value *dts = witness_get(m, "dts");
++        const witness_value *dtv = dts && dts->type == WITNESS_ARRAY ? dts->child : NULL;
++        double dt = witness_number(witness_get(m, "dt"), 1.0 / g->fps);
++        if (frames < 1) { witness__reply_fail(id, "step: 'frames' must be >= 1"); return; }
++        if (!(dt > 0)) dt = 1.0 / g->fps;
++        for (i = 0; i < frames && !g->has_error; i++) {
++            size_t k;
++            double fdt = dtv ? witness_number(dtv, dt) : dt;
++            if (dtv) dtv = dtv->next;
++            witness__take_due();
++            for (k = 0; k < g->cur_len; k++) {
++                witness__track(&g->cur[k]);
++                if (g->h.input) g->h.input(g->h.user, &g->cur[k]);
++            }
++            g->h.step(g->h.user, fdt);
++            g->cur_len = 0;
++            g->frame++;
++            g->time += fdt;
++        }
++        witness__reply_begin(id);
++        if (!witness__handler_ok(1, id, "step")) return;
++        witness_json_field_int(w, "frame", g->frame);
++        witness_json_field_number(w, "time", g->time);
++        witness_json_end_object(w);
++    } else if (strcmp(cmd, "input") == 0) {
++        const witness_value *ev = witness_get(m, "events"), *e;
++        witness_event parsed;
++        for (e = ev && ev->type == WITNESS_ARRAY ? ev->child : NULL; e; e = e->next) {
++            witness__parse_event(e, &parsed);
++            witness__queue_event(&parsed);
++        }
++        witness__reply_begin(id);
++        witness_json_end_object(w);
++    } else if (strcmp(cmd, "snapshot") == 0) {
++        witness__reply_begin(id);
++        witness_json_field_int(w, "frame", g->frame);
++        witness_json_field_number(w, "time", g->time);
++        witness_json_key(w, "state");
++        g->h.snapshot(g->h.user, w, witness_get(m, "paths"));
++        if (w->after_key) { w->after_key = 0; witness__jw_put(w, "{}", 2); }
++        if (!witness__handler_ok(1, id, "snapshot")) return;
++        witness_json_end_object(w);
++    } else if (strcmp(cmd, "reset") == 0) {
++        long long seed = witness_int(witness_get(m, "seed"), 1);
++        int ok = 1;
++        witness__reset_sim(seed);
++        if (g->h.reset) ok = g->h.reset(g->h.user, seed, witness_string(witness_get(m, "scene"), NULL), witness_get(m, "params"));
++        witness__reply_begin(id);
++        if (!witness__handler_ok(ok, id, "reset")) return;
++        witness_json_end_object(w);
++    } else if (strcmp(cmd, "screenshot") == 0 && g->h.screenshot) {
++        witness__screenshot(id, witness_number(witness_get(m, "scale"), 1));
++    } else if (strcmp(cmd, "audio") == 0 && g->audio_rate > 0) {
++        witness__audio_reply(id);
++    } else if (strcmp(cmd, "call") == 0 && g->h.call) {
++        const char *name = witness_string(witness_get(m, "name"), "");
++        const witness_value *args = witness_get(m, "args");
++        int ok;
++        witness__reply_begin(id);
++        witness_json_key(w, "result");
++        ok = g->h.call(g->h.user, name, args, w);
++        if (!ok && !g->has_error) witness_error("unknown call '%s'", name);
++        if (!witness__handler_ok(ok, id, "call")) return;
++        witness_json_end_object(w);
++    } else if (strcmp(cmd, "eval") == 0 && g->h.eval) {
++        int ok;
++        witness__reply_begin(id);
++        witness_json_key(w, "value");
++        ok = g->h.eval(g->h.user, witness_string(witness_get(m, "expr"), ""), w);
++        if (!witness__handler_ok(ok, id, "eval")) return;
++        witness_json_end_object(w);
++    } else if (strcmp(cmd, "logs") == 0) {
++        witness__logs_reply(id);
++    } else if (strcmp(cmd, "perf") == 0 && g->h.perf) {
++        witness__reply_begin(id);
++        g->h.perf(g->h.user, w);
++        if (!witness__handler_ok(1, id, "perf")) return;
++        witness_json_end_object(w);
++    } else if (strcmp(cmd, "quit") == 0) {
++        witness__reply_begin(id);
++        witness_json_end_object(w);
++        g->quit = 1;
++    } else {
++        char msg[160];
++        snprintf(msg, sizeof msg, "unknown command '%.100s'", cmd);
++        witness__reply_fail(id, msg);
++    }
++}
++
++/* Parse one protocol line (mutated in place) and answer it. */
++static void witness__handle_line(char *line, size_t len) {
++    witness__parser *ps = &witness__g.parser;
++    long root;
++    size_t i;
++    if (len >= 2 && line[0] == '@' && line[1] == 'w') { line += 2; len -= 2; }
++    ps->p = line;
++    ps->end = line + len;
++    ps->count = 0;
++    ps->failed = 0;
++    root = witness__parse_value(ps, 0);
++    if (root < 0 || ps->failed || ps->nodes[root].type != WITNESS_OBJECT) {
++        fprintf(stderr, "[witness] ignoring malformed command line\n");
++        return;
++    }
++    {
++        witness_value *v = WITNESS__CAST(witness_value *, witness__grow(witness__g.values, &witness__g.values_cap, ps->count, sizeof(witness_value)));
++        if (!v) return;
++        witness__g.values = v;
++        for (i = 0; i < ps->count; i++) {
++            witness__node *n = &ps->nodes[i];
++            v[i].type = n->type;
++            v[i].number = n->number;
++            v[i].string = n->string;
++            v[i].length = n->length;
++            v[i].key = n->key;
++            v[i].child = n->child >= 0 ? &v[n->child] : NULL;
++            v[i].next = n->next >= 0 ? &v[n->next] : NULL;
++        }
++        witness__dispatch(&v[root]);
++    }
++    witness__send_out();
++}
++
++/* Handle every complete line in the input buffer. Returns how many were handled. */
++static int witness__drain_lines(void) {
++    int handled = 0;
++    size_t start = 0, i;
++    for (i = 0; i < witness__g.in_len && witness__g.connected && !witness__g.quit; i++) {
++        if (witness__g.in[i] != '\n') continue;
++        {
++            size_t len = i - start;
++            char *line = witness__g.in + start;
++            if (len && line[len - 1] == '\r') len--;
++            line[len] = 0;
++            while (len && (*line == ' ' || *line == '\t')) { line++; len--; }
++            if (len) { witness__handle_line(line, len); handled++; }
++        }
++        start = i + 1;
++    }
++    if (start) {
++        memmove(witness__g.in, witness__g.in + start, witness__g.in_len - start);
++        witness__g.in_len -= start;
++    }
++    return handled;
++}
++
++int witness_poll(int timeout_ms) {
++    double deadline = timeout_ms >= 0 ? witness__now_ms() + timeout_ms : 0;
++    if (!witness__g.connected) return 0;
++    for (;;) {
++        double left = -1;
++        int r;
++        long got;
++        if (witness__drain_lines() > 0 || witness__g.quit || !witness__g.connected) break;
++        if (timeout_ms >= 0) {
++            left = deadline - witness__now_ms();
++            if (left < 0) left = 0;
++        }
++        r = witness__wait_readable(left);
++        if (r < 0) { witness__disconnect(); break; }
++        if (r == 0) return 1; /* timed out, still connected */
++        {
++            char *p = WITNESS__CAST(char *, witness__grow(witness__g.in, &witness__g.in_cap, witness__g.in_len + 65536 + 1, 1));
++            if (!p) { witness__disconnect(); break; }
++            witness__g.in = p;
++        }
++        got = WITNESS__CAST(long, recv(witness__g.sock, witness__g.in + witness__g.in_len, 65536, 0));
++        if (got <= 0) {
++#ifndef _WIN32
++            if (got < 0 && errno == EINTR) continue;
++#endif
++            witness__disconnect();
++            break;
++        }
++        witness__g.in_len += WITNESS__CAST(size_t, got);
++    }
++    if (witness__g.quit) witness__disconnect();
++    return witness__g.connected;
++}
++
++void witness_run(void) {
++    while (witness_poll(-1)) {}
++}
++
++/* Witness runs games unattended: a crash, abort() or assert must print to stderr and exit
++ * non-zero, never pop a dialog that waits for a human. Called only in witness mode. */
++static void witness__quiet_crashes(void) {
++#ifdef _WIN32
++    SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
++#ifdef _MSC_VER
++    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
++#ifdef _DEBUG /* debug CRT: assert/error reports go to stderr instead of a message box */
++    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
++    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
++    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
++    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
++    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
++    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
++#endif
++#endif
++#endif
++}
++
++int witness_connect(const witness_hello *hello, const witness_handlers *handlers) {
++    char addr[128], host[100], port[16];
++    const char *colon;
++    double give_up;
++    witness_json *w = &witness__g.out;
++    if (witness__g.connected) return 1;
++    witness__quiet_crashes();
++    if (!handlers || !handlers->step || !handlers->snapshot) {
++        fprintf(stderr, "[witness] witness_connect: the step and snapshot handlers are required\n");
++        return 0;
++    }
++    if (!witness__getenv("WITNESS_ADDR", addr, sizeof addr)) witness__copy(addr, sizeof addr, "127.0.0.1:7357");
++    colon = strrchr(addr, ':');
++    if (!colon || colon == addr || WITNESS__CAST(size_t, colon - addr) >= sizeof host) {
++        fprintf(stderr, "[witness] bad WITNESS_ADDR '%s' (want host:port)\n", addr);
++        return 0;
++    }
++    memcpy(host, addr, WITNESS__CAST(size_t, colon - addr));
++    host[colon - addr] = 0;
++    witness__copy(port, sizeof port, colon + 1);
++#ifdef _WIN32
++    {
++        WSADATA wsa;
++        if (!witness__g.wsa_started) {
++            if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { fprintf(stderr, "[witness] WSAStartup failed\n"); return 0; }
++            witness__g.wsa_started = 1;
++        }
++    }
++#endif
++    give_up = witness__now_ms() + 10000;
++    for (;;) {
++        witness__g.sock = witness__dial(host, port);
++        if (witness__g.sock != WITNESS__NO_SOCKET) break;
++        if (witness__now_ms() > give_up) {
++            fprintf(stderr, "[witness] could not connect to %s (is 'witness' listening?)\n", addr);
++            return 0;
++        }
++        witness__sleep_ms(100);
++    }
++    witness__g.sock_open = 1;
++    witness__g.connected = 1;
++    witness__g.quit = 0;
++    witness__g.h = *handlers;
++    witness__g.fps = hello && hello->fps > 0 ? hello->fps : 60;
++    witness__g.audio_rate = hello && hello->audio_sample_rate > 0 ? hello->audio_sample_rate : 0;
++    witness__g.audio_channels = hello && hello->audio_channels > 0 ? hello->audio_channels : 1;
++    witness__reset_sim(1);
++
++    witness__jw_clear(w);
++    witness_json_begin_object(w);
++    witness_json_key(w, "hello");
++    witness_json_begin_object(w);
++    witness_json_field_int(w, "protocol", WITNESS_PROTOCOL);
++    witness_json_field_string(w, "name", hello && hello->name ? hello->name : "game");
++    witness_json_field_string(w, "engine", hello && hello->engine ? hello->engine : "custom");
++    witness_json_field_string(w, "language", hello && hello->language ? hello->language : "c++");
++    witness_json_field_string(w, "adapter", "witness.h " WITNESS_VERSION);
++    witness_json_field_int(w, "fps", witness__g.fps);
++    if (hello && hello->width > 0 && hello->height > 0) {
++        witness_json_key(w, "size");
++        witness_json_vec2(w, hello->width, hello->height);
++    }
++    witness_json_key(w, "capabilities");
++    witness_json_begin_array(w);
++    if (handlers->reset) witness_json_string(w, "reset");
++    witness_json_string(w, "step");
++    witness_json_string(w, "input");
++    witness_json_string(w, "snapshot");
++    if (handlers->screenshot) witness_json_string(w, "screenshot");
++    if (witness__g.audio_rate) witness_json_string(w, "audio");
++    if (handlers->call) witness_json_string(w, "call");
++    if (handlers->eval) witness_json_string(w, "eval");
++    witness_json_string(w, "logs");
++    if (handlers->perf) witness_json_string(w, "perf");
++    witness_json_end_array(w);
++    if (hello && hello->calls && hello->call_count > 0) {
++        int i;
++        witness_json_key(w, "calls");
++        witness_json_begin_array(w);
++        for (i = 0; i < hello->call_count; i++) {
++            witness_json_begin_object(w);
++            witness_json_field_string(w, "name", hello->calls[i].name);
++            if (hello->calls[i].args) witness_json_field_string(w, "args", hello->calls[i].args);
++            if (hello->calls[i].help) witness_json_field_string(w, "help", hello->calls[i].help);
++            witness_json_end_object(w);
++        }
++        witness_json_end_array(w);
++    }
++    if (hello && hello->keys && hello->key_count > 0) {
++        int i;
++        witness_json_key(w, "keys");
++        witness_json_begin_array(w);
++        for (i = 0; i < hello->key_count; i++) witness_json_string(w, hello->keys[i]);
++        witness_json_end_array(w);
++    }
++    witness_json_end_object(w);
++    witness_json_end_object(w);
++    return witness__send_out();
++}
++
++/* ---------------------------------------------------------------- recording */
++
++#ifdef _WIN32
++static FILE *witness__open_record_file(void) {
++    wchar_t path[1024];
++    wchar_t *p;
++    FILE *f = NULL;
++    DWORD n = GetEnvironmentVariableW(L"WITNESS_RECORD", path, 1024);
++    if (n == 0 || n >= 1024) return NULL;
++    for (p = path; *p; p++) {
++        if ((*p == L'\\' || *p == L'/') && p != path && p[-1] != L':') {
++            wchar_t c = *p;
++            *p = 0;
++            CreateDirectoryW(path, NULL);
++            *p = c;
++        }
++    }
++    if (_wfopen_s(&f, path, L"wb") != 0) return NULL;
++    return f;
++}
++#else
++static FILE *witness__open_record_file(void) {
++    const char *env = getenv("WITNESS_RECORD");
++    char path[4096];
++    char *p;
++    if (!env || !*env || strlen(env) >= sizeof path) return NULL;
++    witness__copy(path, sizeof path, env);
++    for (p = path + 1; *p; p++) {
++        if (*p == '/') { *p = 0; mkdir(path, 0777); *p = '/'; }
++    }
++    return fopen(path, "wb");
++}
++#endif
++
++/* UTC ISO-8601 without gmtime (portable, thread-safe). */
++static void witness__iso_now(char *out, size_t size) {
++    long long t = WITNESS__CAST(long long, time(NULL));
++    long long days = t / 86400, secs = t % 86400, z, era, doe, yoe, y, doy, mp, d, m;
++    if (secs < 0) { secs += 86400; days--; }
++    z = days + 719468;
++    era = (z >= 0 ? z : z - 146096) / 146097;
++    doe = z - era * 146097;
++    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
++    y = yoe + era * 400;
++    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++    mp = (5 * doy + 2) / 153;
++    d = doy - (153 * mp + 2) / 5 + 1;
++    m = mp < 10 ? mp + 3 : mp - 9;
++    if (m <= 2) y++;
++    snprintf(out, size, "%04lld-%02lld-%02lldT%02lld:%02lld:%02lldZ", y, m, d, secs / 3600, (secs / 60) % 60, secs % 60);
++}
++
++static int witness__record_open(const char *game_name, int fps, long long seed, const char *params_json) {
++    witness_json *w = &witness__g.rec_line;
++    char started[64];
++    if (witness__g.connected || witness_active(0, NULL)) return 0;
++    witness__g.rec = witness__open_record_file();
++    if (!witness__g.rec) return 0;
++    witness__g.rec_frame = 0;
++    witness__g.rec_len = 0;
++    witness__g.rec_mark[0] = 0;
++    witness__iso_now(started, sizeof started);
++    witness__jw_clear(w);
++    witness_json_begin_object(w);
++    witness_json_field_int(w, "replay", 1);
++    witness_json_field_string(w, "name", game_name ? game_name : "game");
++    witness_json_field_int(w, "seed", seed);
++    witness_json_field_int(w, "fps", fps > 0 ? fps : 60);
++    if (params_json && *params_json) {
++        witness_json_key(w, "params");
++        witness_json_raw(w, params_json);
++    }
++    witness_json_field_string(w, "started", started);
++    witness_json_field_string(w, "adapter", "witness.h " WITNESS_VERSION);
++    witness_json_end_object(w);
++    fprintf(witness__g.rec, "%s\n", w->buf);
++    fflush(witness__g.rec);
++    return 1;
++}
++
++int witness_record_start(const char *game_name, int fps) {
++    if (witness__g.rec) return 1;
++    return witness__record_open(game_name, fps, witness_seed(), NULL);
++}
++
++int witness_record_begin(const char *game_name, int fps, long long seed, const char *params_json) {
++    witness_record_stop();
++    witness__g.seed = seed;
++    witness__g.seed_chosen = 1;
++    return witness__record_open(game_name, fps, seed, params_json);
++}
++
++int witness_recording(void) { return witness__g.rec != NULL; }
++
++void witness_mark(const char *label) {
++    if (!witness__g.rec) return;
++    witness__copy(witness__g.rec_mark, sizeof witness__g.rec_mark, label && *label ? label : "mark");
++}
++
++void witness_record_event(const witness_event *e) {
++    witness_event *q;
++    if (!witness__g.rec || !e) return;
++    if (e->type == WITNESS_EV_KEY && strcmp(e->name, "f8") == 0) { /* F8 marks, it isn't gameplay */
++        if (e->down == 1) witness_mark("F8");
++        return;
++    }
++    q = WITNESS__CAST(witness_event *, witness__grow(witness__g.rec_events, &witness__g.rec_cap, witness__g.rec_len + 1, sizeof(witness_event)));
++    if (!q) return;
++    witness__g.rec_events = q;
++    q[witness__g.rec_len++] = *e;
++}
++
++void witness_record_key(const char *key, int down) {
++    witness_event e;
++    if (!witness__g.rec) return;
++    memset(&e, 0, sizeof e);
++    e.type = WITNESS_EV_KEY;
++    e.down = down ? 1 : 0;
++    e.button = -1;
++    witness_key_normalize(key, e.name, sizeof e.name);
++    witness_record_event(&e);
++}
++
++void witness_record_mouse(double x, double y, int button, int down) {
++    witness_event e;
++    if (!witness__g.rec) return;
++    memset(&e, 0, sizeof e);
++    e.type = WITNESS_EV_MOUSE;
++    e.has_pos = 1;
++    e.x = x;
++    e.y = y;
++    e.button = button;
++    e.down = button >= 0 ? (down ? 1 : 0) : -1;
++    witness_record_event(&e);
++}
++
++void witness_record_frame(double dt) {
++    witness_json *w = &witness__g.rec_line;
++    size_t i;
++    if (!witness__g.rec) return;
++    witness__jw_clear(w);
++    witness_json_begin_object(w);
++    witness_json_field_int(w, "f", witness__g.rec_frame);
++    witness_json_field_number(w, "dt", dt);
++    if (witness__g.rec_len) {
++        witness_json_key(w, "in");
++        witness_json_begin_array(w);
++        for (i = 0; i < witness__g.rec_len; i++) witness__write_event(w, &witness__g.rec_events[i]);
++        witness_json_end_array(w);
++    }
++    if (witness__g.rec_mark[0]) witness_json_field_string(w, "mark", witness__g.rec_mark);
++    witness_json_end_object(w);
++    if (!w->failed) {
++        fputs(w->buf, witness__g.rec);
++        fputc('\n', witness__g.rec);
++        fflush(witness__g.rec);
++    }
++    witness__g.rec_len = 0;
++    witness__g.rec_mark[0] = 0;
++    witness__g.rec_frame++;
++}
++
++void witness_record_stop(void) {
++    if (!witness__g.rec) return;
++    fclose(witness__g.rec);
++    witness__g.rec = NULL;
++}
++
++/* ---------------------------------------------------------------- shutdown */
++
++void witness_shutdown(void) {
++    size_t i;
++    witness__disconnect();
++    witness_record_stop();
++#ifdef _WIN32
++    if (witness__g.wsa_started) WSACleanup();
++    witness__g.wsa_started = 0;
++#endif
++    witness__lock();
++    for (i = 0; i < witness__g.log_len; i++) free(witness__g.logs[i].message);
++    free(witness__g.logs);
++    free(witness__g.audio);
++    witness__g.logs = NULL; witness__g.log_len = witness__g.log_cap = 0;
++    witness__g.audio = NULL; witness__g.audio_cap = witness__g.audio_len = witness__g.audio_head = 0;
++    witness__unlock();
++    free(witness__g.in); free(witness__g.out.buf); free(witness__g.rec_line.buf);
++    free(witness__g.parser.nodes); free(witness__g.values);
++    free(witness__g.queue); free(witness__g.cur); free(witness__g.pixels); free(witness__g.rec_events);
++    witness__g.in = NULL; witness__g.in_len = witness__g.in_cap = 0;
++    memset(&witness__g.out, 0, sizeof witness__g.out);
++    memset(&witness__g.rec_line, 0, sizeof witness__g.rec_line);
++    witness__g.parser.nodes = NULL; witness__g.parser.cap = 0;
++    witness__g.values = NULL; witness__g.values_cap = 0;
++    witness__g.queue = NULL; witness__g.queue_len = witness__g.queue_cap = 0;
++    witness__g.cur = NULL; witness__g.cur_len = witness__g.cur_cap = 0;
++    witness__g.pixels = NULL; witness__g.pixels_cap = 0;
++    witness__g.rec_events = NULL; witness__g.rec_len = witness__g.rec_cap = 0;
++}
++
++#endif /* WITNESS_IMPLEMENTATION_DONE */
++#endif /* WITNESS_IMPLEMENTATION */
+diff --git a/engine/witness_impl.cpp b/engine/witness_impl.cpp
+new file mode 100644
+index 0000000..c8d1571
+--- /dev/null
++++ b/engine/witness_impl.cpp
+@@ -0,0 +1,4 @@
++// The one translation unit that compiles the Witness adapter (engine/witness.h, STB-style). Built only with the
++// EMBERVALE_WITNESS option (desktop; the web build has no sockets): see CMakeLists.txt and rpg/main.cpp.
++#define WITNESS_IMPLEMENTATION
++#include "engine/witness.h"
+diff --git a/rpg/main.cpp b/rpg/main.cpp
+index 6d5b046..b87aeba 100644
+--- a/rpg/main.cpp
++++ b/rpg/main.cpp
+@@ -8,6 +8,11 @@
+ //   --perf                                          once a second: fps, frame work ms (avg / worst), NPCs awake and
+ //                                                   asleep, hostiles, active sites, chunks/s, worst shift ms, regions,
+ //                                                   settlements built; at exit a summary (worst frame at a window shift)
++//   embervale.exe --witness                         (desktop, EMBERVALE_WITNESS) driven by the Witness test harness over a
++//                                                   local socket (WITNESS_ADDR, set by `witness test|doctor|shot|...` from
++//                                                   witness.json): headless, deterministic, never saves; see "Witness" below
++//   WITNESS_RECORD=file.jsonl embervale.exe         normal play records a replay (one line per sim step, F8 marks a
++//                                                   moment) that `witness replay` re-simulates
+ //
+ // Script format: one command per line, "<time> <command> [args]". Times are seconds of script time; "+0.5" means
+ // 0.5 s after the previous line. '#' starts a comment. Script time stops while a walkto runs, so later lines keep
+@@ -97,10 +102,19 @@
+ #include "rpg/view/view.h"
+ #include "rpg/sim/stream.h"
+ #include "rpg/world/source.h"
++#ifdef EMB_WITNESS
++#include <new>
++#include "engine/witness.h"
++#include "rpg/view/witness_state.h"
++#endif
+ 
+ namespace {
+ std::string g_savePath;
+-void newWorld(Game& g, uint64_t s) { g.newEndlessGame(s); }
++void newWorld(Game& g, uint64_t s) {
++  g.newEndlessGame(s);
++  if (!g.streamThreads) g.world.streamer.reset();   // (Witness) no prefetch worker: every chunk is made on demand, in order
++}
++int g_savesWritten = 0;   // saves written this session (the Witness snapshot reports it: a harness run never writes one)
+ 
+ bool readSave(std::vector<uint8_t>& out) {
+   if (g_savePath.empty()) return false;
+@@ -129,6 +143,7 @@ void writeSave(const Game& g) {
+     std::fclose(f);
+     std::remove(g_savePath.c_str());
+     std::rename(tmp.c_str(), g_savePath.c_str());
++    g_savesWritten++;
+   }
+ #ifdef __EMSCRIPTEN__
+   // persist the in-memory file system to IndexedDB (mounted at /save by the web shell)
+@@ -210,6 +225,9 @@ SDL_Scancode keyFromName(std::string s) {
+   else if (u == "SHIFT") s = "Left Shift";
+   else if (u == "LSHIFT") s = "Left Shift";
+   else if (u == "RSHIFT") s = "Right Shift";
++  else if (u == "CTRL") s = "Left Ctrl";
++  else if (u == "ALT") s = "Left Alt";
++  else if (u == "SUPER") s = "Left GUI";
+   return SDL_GetScancodeFromName(s.c_str());
+ }
+ 
+@@ -308,7 +326,12 @@ int main(int argc, char** argv) {
+     }
+   }
+   const bool scripted = scriptPath != nullptr;
+-  const bool noSave = play || shotPath || seed != 0 || scripted;   // test runs never touch the player's save
++#ifdef EMB_WITNESS
++  const bool witness = witness_active(argc, argv);   // a Witness harness drives this run (see "Witness" below)
++#else
++  const bool witness = false;
++#endif
++  const bool noSave = play || shotPath || seed != 0 || scripted || witness;   // test runs never touch the player's save
+ 
+   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+   SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+@@ -319,19 +342,21 @@ int main(int argc, char** argv) {
+ #else
+   if (char* pref = SDL_GetPrefPath("Josh17400", "Embervale")) { g_savePath = std::string(pref) + "save.bin"; SDL_free(pref); }
+ #endif
+-  if (scripted) g_savePath.clear();   // belt and braces: a script can never read or write the real save
++  if (scripted || witness) g_savePath.clear();   // belt and braces: a script or harness never reads or writes the real save
+   // test hook: read the title's save from another file (e.g. an old-format save, to see the title's notice). Test runs
+   // (--shot, --play, --seed) still never write it.
+   const char* saveOverride = std::getenv("EMB_SAVE_PATH");
+-  if (saveOverride && *saveOverride && !scripted) g_savePath = saveOverride;
++  if (saveOverride && *saveOverride && !scripted && !witness) g_savePath = saveOverride;
+ 
+   Pix pix;
+-  if (!pix.init("EMBERVALE", winW, winH, vsync)) return 1;
++  // (Witness) a hidden 960x540 window (the 480x270 canvas at 2x), no vsync, no audio device (the mix is rendered per step)
++  if (!(witness ? pix.init("EMBERVALE", 960, 540, false, true) : pix.init("EMBERVALE", winW, winH, vsync))) return 1;
+   static Audio audio;   // ~175 KB: keep it off the stack
+-  audio.init();
++  if (!witness) audio.init();
+ 
+-  uint64_t startSeed = seed ? seed : (uint64_t)SDL_GetTicks() * 2654435761ull + 12345;
++  uint64_t startSeed = seed ? seed : witness ? 1 : (uint64_t)SDL_GetTicks() * 2654435761ull + 12345;
+   Game game(startSeed);
++  if (witness) { game.streamThreads = false; game.syncStreams = true; }   // runs never depend on worker timing
+   newWorld(game, startSeed);   // title screen drifts over this world
+   game.mode = Mode::Title;
+   View view;
+@@ -346,7 +371,7 @@ int main(int argc, char** argv) {
+ #else
+     if (char* pref = SDL_GetPrefPath("Josh17400", "Embervale")) { settingsPath = std::string(pref) + "settings.bin"; SDL_free(pref); }
+ #endif
+-    if (scripted) settingsPath.clear();
++    if (scripted || witness) settingsPath.clear();
+     screen::init(pix, settingsPath, view.touchUI);
+   }
+ 
+@@ -371,6 +396,19 @@ int main(int argc, char** argv) {
+     view.snap(game);
+     audio.play(Sfx::QuestStart);
+   };
++#ifdef EMB_WITNESS
++  // WITNESS_RECORD=<file.jsonl> in normal play: a replay `witness replay` re-simulates, one line per sim step. It begins
++  // when play does (--play, or the creator handing over); the header holds the seed the world used and the params the
++  // harness's reset needs to rebuild that start (scene, the creator's background)
++  auto recordBegin = [&](const std::string& params) {
++    if (!witness) witness_record_begin("Embervale", 60, (long long)game.seed, params.c_str());
++  };
++  auto jsonStr = [](const std::string& v) {
++    std::string r = "\"";
++    for (char ch : v) { if (ch == '"' || ch == '\\') r += '\\'; if ((unsigned char)ch >= 0x20) r += ch; }
++    return r + "\"";
++  };
++#endif
+   // test helpers shared by the command-line flags and the script commands
+   auto doGoto = [&](const std::string& w, bool enterIt) {
+     SiteType want = SiteType::City;
+@@ -481,6 +519,13 @@ int main(int argc, char** argv) {
+     view.snap(game);
+     if (menuTab >= 0) view.openMenu(game, menuTab);
+     if (fight) doFight(fight, 0);
++#ifdef EMB_WITNESS
++    std::string params = "{\"god\":" + std::string(god ? "true" : "false");
++    if (gotoWhat) params += ",\"scene\":" + jsonStr(gotoWhat) + ",\"enter\":" + (enter ? "true" : "false");
++    if (hourSet >= 0) params += ",\"hour\":" + std::to_string(hourSet);
++    if (fight) params += ",\"fight\":" + jsonStr(fight);
++    recordBegin(params + "}");
++#endif
+   }
+ 
+   bool running = true;
+@@ -494,6 +539,10 @@ int main(int argc, char** argv) {
+   size_t scriptNext = 0;
+   float scriptT = 0, scriptEndT = -1;
+   int scriptFails = 0;
++  std::string lastFail;        // the last failure's message (a Witness call reports it)
++#ifdef EMB_WITNESS
++  bool witnessInCall = false;  // failing inside a call: the call's error says it; later failures are logged
++#endif
+   std::vector<std::string> heard;   // every notice (Game::say) shown since the script began, for "expect heard"
+   std::string pendingShot;
+   struct Held { SDL_Scancode sc; float until; };
+@@ -566,6 +615,10 @@ int main(int argc, char** argv) {
+   auto fail = [&](int line, const std::string& msg) {
+     std::printf("script FAIL (line %d): %s\n", line, msg.c_str());
+     scriptFails++;
++    lastFail = msg;
++#ifdef EMB_WITNESS
++    if (witness && !witnessInCall) witness_log(WITNESS_ERROR, "script: %s", msg.c_str());
++#endif
+   };
+   auto plTile = [&](int& x, int& y) { x = (int)std::floor(game.pl().p.x / TILE); y = (int)std::floor((game.pl().p.y - 2) / TILE); };
+   auto findActorIdx = [&](int id) { for (size_t k = 1; k < game.actors.size(); k++) if (game.actors[k].id == id) return (int)k; return -1; };
+@@ -1170,7 +1223,7 @@ int main(int argc, char** argv) {
+       runCmd(script[scriptNext++]);
+       if (walk.on || extRun.e) return;
+     }
+-    if (scriptNext >= script.size() && held.empty() && lifts.empty()) {
++    if (!witness && scriptNext >= script.size() && held.empty() && lifts.empty()) {
+       if (scriptEndT < 0) scriptEndT = scriptT;
+       if (scriptT - scriptEndT > 2.0f) { std::printf("script: end of script\n"); running = false; }
+     }
+@@ -1220,6 +1273,25 @@ int main(int argc, char** argv) {
+     }
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
++#ifdef EMB_WITNESS
++      if (witness_recording()) {   // in Witness names and logical pixels (F8 marks the moment)
++        if ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) && !e.key.repeat) {
++          char k[32];
++          witness_record_key(witness_key_normalize(SDL_GetScancodeName(e.key.scancode), k, sizeof k), e.type == SDL_EVENT_KEY_DOWN);
++        } else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP || e.type == SDL_EVENT_MOUSE_MOTION) {
++          const bool motion = e.type == SDL_EVENT_MOUSE_MOTION;
++          float lx = 0, ly = 0;
++          pix.windowToLogical(motion ? e.motion.x : e.button.x, motion ? e.motion.y : e.button.y, lx, ly);
++          const int b = motion ? -1 : e.button.button == SDL_BUTTON_LEFT ? 0 : e.button.button == SDL_BUTTON_MIDDLE ? 1 : 2;
++          witness_record_mouse(lx, ly, b, e.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
++        } else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
++          witness_event w{};
++          w.type = WITNESS_EV_WHEEL; w.down = -1; w.button = -1;
++          w.dx = -e.wheel.x * 100.0; w.dy = -e.wheel.y * 100.0;   // the protocol's sign: + is down / zoom out
++          witness_record_event(&w);
++        }
++      }
++#endif
+       switch (e.type) {
+         case SDL_EVENT_QUIT: running = false; break;
+         case SDL_EVENT_WILL_ENTER_BACKGROUND: if (!noSave) writeSave(game); break;
+@@ -1268,6 +1340,9 @@ int main(int argc, char** argv) {
+         if (!noSave) writeSave(game);
+         hasSave = !noSave;
+         view.snap(game);
++#ifdef EMB_WITNESS
++        recordBegin("{\"creator\":true,\"background\":" + std::to_string((int)game.background) + ",\"name\":" + jsonStr(game.app.name) + "}");
++#endif
+       }
+       prevMode = game.mode;
+     }
+@@ -1332,6 +1407,9 @@ int main(int argc, char** argv) {
+       bool first = true;
+       while (acc >= SIM_DT && steps < 8) {
+         game.update(SIM_DT, in);
++#ifdef EMB_WITNESS
++        witness_record_frame(SIM_DT);
++#endif
+         if (first) { in.attack = in.bow = in.spell = in.roll = in.interact = in.potion = in.swapSpell = false; in.castSlot = -1; in.sneak = false; first = false; }
+         acc -= SIM_DT; steps++;
+       }
+@@ -1342,6 +1420,10 @@ int main(int argc, char** argv) {
+     } else {
+       acc = 0;
+       if (game.mode == Mode::Title) game.time += (float)frameDt;
++#ifdef EMB_WITNESS
++      // menus and dialogue: the keys in order, no sim step (a pause from a lost focus is not the player's input: skipped)
++      if (game.mode != Mode::Title && game.mode != Mode::Paused) witness_record_frame(frameDt);
++#endif
+     }
+     const Uint64 simT1 = SDL_GetPerformanceCounter();
+     view.update(game, (float)frameDt);
+@@ -1386,6 +1468,222 @@ int main(int argc, char** argv) {
+   static std::function<void()>* loopFn = new std::function<void()>(frame);
+   emscripten_set_main_loop([] { (*loopFn)(); }, 0, 1);
+ #else
++#ifdef EMB_WITNESS
++  if (witness) {
++    // ---- Witness (engine/witness.h; github.com/Josh17400/witness): a harness launched this run with WITNESS_ADDR set
++    // (or --witness) and drives it over a local socket. The game steps only when told to, at the dt it is given (no
++    // clock, no vsync); input goes through the script driver's paths (pushed SDL events, View::scriptHold); the mixer is
++    // rendered into the capture buffer each step (no audio device); a frame is drawn only for a screenshot (the window
++    // is hidden). `call` runs any script command, built in (runCmd) or registered (rpg/view/script_api.h); one that takes
++    // time (walkto, talkto, a registered command that waits) carries on over the next steps (state.script.busy) and a
++    // later failure is logged as an error (it fails the test).
++    std::vector<SDL_Scancode> wHeld;   // keys the harness holds down
++    std::vector<float> wMix;
++    std::vector<uint8_t> wShot;
++    auto drawFrame = [&]() { screen::frame(pix); view.settleBakes(); view.draw(game, false); };
++    auto pushMouse = [&](SDL_EventType type, float lx, float ly, int button) {
++      float wx, wy;
++      toWindow(lx, ly, wx, wy);
++      SDL_Event ev;
++      SDL_zero(ev);
++      ev.type = type;
++      if (type == SDL_EVENT_MOUSE_MOTION) {
++        ev.motion.windowID = SDL_GetWindowID(pix.window());
++        ev.motion.x = wx; ev.motion.y = wy;
++      } else {
++        ev.button.windowID = SDL_GetWindowID(pix.window());
++        ev.button.button = (Uint8)(button == 1 ? SDL_BUTTON_MIDDLE : button == 2 ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT);
++        ev.button.down = type == SDL_EVENT_MOUSE_BUTTON_DOWN;
++        ev.button.clicks = 1;
++        ev.button.x = wx; ev.button.y = wy;
++      }
++      SDL_PushEvent(&ev);
++    };
++    double mouseX = 0, mouseY = 0;
++    WitnessExtra wStart;   // where the reset put the player
++
++    witness::Handlers h;
++    h.reset = [&](long long s, const char* scene, witness::Value params) {
++      // nothing of the last run may leak into this one: held keys, a walk, a waiting command, queued events
++      for (SDL_Scancode sc : wHeld) view.scriptHold(sc, false);
++      for (const Held& hd : held) view.scriptHold(hd.sc, false);
++      wHeld.clear(); held.clear(); lifts.clear(); drags.clear();
++      setMove(false, false, false, false);
++      walk = Walk(); extRun = ExtRun();
++      heard.clear(); pendingShot.clear(); lastFail.clear();
++      scriptFails = 0; scriptT = 0;
++      SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
++      startSeed = (uint64_t)s;
++      // a brand-new Game: no timer, id counter or cache of the last run carries over (a run in a long-lived process
++      // matches the first run of a fresh one)
++      game.~Game();
++      new (&game) Game(startSeed);
++      game.streamThreads = false;
++      game.syncStreams = true;
++      startNew(startSeed);
++      if (params["creator"].boolean()) {   // a recorded new game: the creator's choices that change play
++        game.app.name = params["name"].str("");
++        game.background = (Background)params["background"].integer(0);
++        game.finishCreator();
++      }
++      game.godMode = params["god"].boolean();
++      const std::string where = scene && *scene ? scene : params["scene"].str("");
++      if (!where.empty()) doGoto(where, params["enter"].boolean());
++      if (params["hour"].exists()) game.hour = (float)params["hour"].num();   // after the journey's hours
++      if (params["fight"].exists()) doFight(params["fight"].str(""), (int)params["count"].integer(0));
++      view.snap(game);
++      wStart.hasStart = !game.inside;
++      wStart.startGX = game.world.ox + (int)std::floor(game.pl().p.x / TILE);
++      wStart.startGY = game.world.oy + (int)std::floor((game.pl().p.y - 2) / TILE);
++    };
++    h.input = [&](const witness_event& e) {
++      if (e.type == WITNESS_EV_KEY && e.down >= 0) {
++        const SDL_Scancode sc = keyFromName(e.name);
++        if (sc == SDL_SCANCODE_UNKNOWN) { witness_log(WITNESS_WARN, "witness: unknown key '%s'", e.name); return; }
++        const bool down = e.down == 1;
++        pushKey(sc, down);          // one-shot presses (View::event)
++        view.scriptHold(sc, down);  // and the held state (View::input)
++        wHeld.erase(std::remove(wHeld.begin(), wHeld.end(), sc), wHeld.end());
++        if (down) wHeld.push_back(sc);
++      } else if (e.type == WITNESS_EV_MOUSE) {
++        if (e.has_pos) { mouseX = e.x; mouseY = e.y; pushMouse(SDL_EVENT_MOUSE_MOTION, (float)mouseX, (float)mouseY, 0); }
++        if (e.down >= 0) pushMouse(e.down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP, (float)mouseX, (float)mouseY, e.button);
++      } else if (e.type == WITNESS_EV_WHEEL) {
++        SDL_Event ev;
++        SDL_zero(ev);
++        ev.type = SDL_EVENT_MOUSE_WHEEL;
++        ev.wheel.windowID = SDL_GetWindowID(pix.window());
++        ev.wheel.x = (float)(-e.dx / 100.0); ev.wheel.y = (float)(-e.dy / 100.0);   // the protocol's + is down
++        SDL_PushEvent(&ev);
++      } else {
++        witness_log(WITNESS_WARN, "witness: input type %d is not used by Embervale (keys, mouse and wheel are)", (int)e.type);
++      }
++    };
++    h.step = [&](double dt) {
++      const float fdt = (float)dt;
++      scriptStep(fdt);   // held keys, a walk or a registered command under way (script time)
++      SDL_Event ev;
++      while (SDL_PollEvent(&ev)) {
++        if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_FOCUS_LOST || ev.type == SDL_EVENT_WINDOW_HIDDEN ||
++            ev.type == SDL_EVENT_WILL_ENTER_BACKGROUND) continue;   // the hidden window's own: never a pause
++        view.event(ev, game);
++      }
++      view.wantSave = false;
++      if (view.wantsQuit) { view.wantsQuit = false; game.mode = Mode::Title; }
++      if (view.wantNewGame || view.wantContinue) { view.wantNewGame = view.wantContinue = false; startNew(startSeed); }
++      game.sleepHalfW = std::max(22.0f, Pix::W * 0.5f / TILE + 4.0f);   // as frame(): the NPC LOD follows the canvas
++      game.sleepHalfH = std::max(13.0f, Pix::H * 0.5f / TILE + 4.0f);
++      Input in = view.input(game);
++      if (game.mode == Mode::Play) game.update(fdt, in);
++      else if (game.mode == Mode::Title) game.time += fdt;
++      view.update(game, fdt);
++      const int n = witness_audio_frames_for_step(dt);   // exactly the samples this step covers
++      wMix.resize((size_t)n);
++      for (int k = 0; k < n; k += 1024) audio.render(wMix.data() + k, std::min(1024, n - k));
++      witness_audio_write(wMix.data(), n);
++    };
++    h.snapshot = [&](witness::Json& j) {
++      WitnessExtra x = wStart;
++      x.scriptBusy = walk.on || extRun.e != nullptr;
++      x.scriptFails = scriptFails;
++      x.lastFail = lastFail;
++      x.savesWritten = g_savesWritten;
++      x.saveEnabled = !noSave;
++      witnessState(j, game, view, x);
++    };
++    h.screenshot = [&](witness_image& img) -> bool {
++      drawFrame();
++      int w = 0, hh = 0;
++      const bool ok = pix.readCanvas(wShot, w, hh);
++      pix.end();
++      if (!ok) { witness::fail(std::string("screenshot: ") + SDL_GetError()); return false; }
++      img.rgba = wShot.data(); img.width = w; img.height = hh;
++      return true;
++    };
++    h.call = [&](const char* name, witness::Value args, witness::Json& result) {
++      ScriptCmd c;
++      c.a.push_back(name);
++      for (auto& ch : c.a[0]) ch = (char)std::tolower((unsigned char)ch);
++      for (size_t i = 0; i < args.size(); i++) {
++        const witness::Value v = args.at(i);
++        if (v.type() == WITNESS_STRING) { c.a.push_back(v.str()); continue; }
++        char b[40];
++        const double d = v.num();
++        if (d == std::floor(d) && std::fabs(d) < 1e15) std::snprintf(b, sizeof b, "%lld", (long long)d);
++        else std::snprintf(b, sizeof b, "%g", d);
++        c.a.push_back(b);
++      }
++      for (size_t k = 0; k < c.a.size(); k++) { if (k) c.text += ' '; c.text += c.a[k]; }
++      if (c.a[0] == "quit") { witness::fail("quit: the harness ends the run (its quit command)"); return; }
++      if (walk.on || extRun.e) { witness::fail("busy: the last call is still running (step until state.script.busy is false)"); return; }
++      const int fails0 = scriptFails;
++      witnessInCall = true;
++      runCmd(c);
++      witnessInCall = false;
++      if (scriptFails > fails0) { witness::fail(lastFail); return; }
++      if (!pendingShot.empty()) {   // `shot file.png`: this frame, to a file
++        drawFrame();
++        const bool ok = pix.screenshot(pendingShot.c_str());
++        pix.end();
++        const std::string path = pendingShot;
++        pendingShot.clear();
++        if (!ok) { witness::fail("shot " + path + ": " + SDL_GetError()); return; }
++      }
++      result.begin_object().field("busy", walk.on || extRun.e != nullptr).field("mode", (int)game.mode).end_object();
++    };
++
++    // the calls: the built-in script commands, then every registered one (the registry's expect checks ride on `expect`)
++    static const struct { const char* name; const char* args; const char* help; } builtin[] = {
++        {"goto", "city|town|village|cave|ruin|camp|lair|shrine|capital|market [enter]", "fast travel to the nearest such place"},
++        {"walkto", "inn|shop|innkeeper|giver|exit|NAME|x y [timeout]", "autopilot (takes steps: state.script.busy)"},
++        {"talkto", "NAME|role [timeout]", "walk to someone and talk to them"},
++        {"talk", "0|1|2", "the innkeeper: greeting, job offer, shop"},
++        {"choose", "words", "choose the open dialogue's option containing the words"},
++        {"fight", "wolf|boar|bear|...|dragon [n]", "spawn monsters nearby (gives the test kit if unarmed)"},
++        {"enter", "inn|shop|smithy|temple|house|... [floor] [n]", "step into the n-th nearest building of that type"},
++        {"floor", "n", "inside a building: go to that floor"},
++        {"at", "gx gy", "teleport to a global tile"},
++        {"hour", "h", "set the time of day"},
++        {"god", "[0|1]", "invulnerability"},
++        {"kit", "", "the test kit: sword, bow, arrows, potions"},
++        {"gear", "band [weapon]", "a full armour set of band 1..7"},
++        {"strip", "", "take off every piece of equipment"},
++        {"menu", "tab", "open the menu on a tab"},
++        {"newgame", "", "a fresh world (the reset seed)"},
++        {"key", "name", "press and release a key"},
++        {"hold", "key secs", "hold a key"},
++        {"walk", "east|west|north|south secs", "hold a direction"},
++        {"tap", "x y", "a touch tap at logical coordinates"},
++        {"click", "x y", "a left click at logical coordinates"},
++        {"chestgo", "[hoard|explore|chest]", "stand beside the nearest closed chest"},
++        {"pos", "[map]", "print where the player is (game output)"},
++        {"shot", "file.png", "save this frame to a file"},
++        {"expect", "mode|gold|quest|heard|option|inside|... args", "a script check (fails the call)"}};
++    std::vector<witness_call_info> calls;
++    for (const auto& b : builtin) calls.push_back({b.name, b.args, b.help});
++    for (const ScriptExt& e : scriptExts())
++      if (std::strncmp(e.name, "expect:", 7) != 0) calls.push_back({e.name, nullptr, e.help});
++    static const char* const keys[] = {"w", "a", "s", "d", "up", "down", "left", "right", "space", "e", "j", "z", "q", "f", "r",
++                                       "i", "m", "tab", "escape", "enter", "shift", "alt", "1", "2", "3", "4"};
++    witness_hello hello = witness_hello();
++    hello.name = "Embervale";
++    hello.engine = "custom C++/SDL3";
++    hello.language = "c++";
++    hello.fps = 60;
++    screen::frame(pix);   // the canvas size (Pix::W x Pix::H) the harness sees
++    hello.width = Pix::W;
++    hello.height = Pix::H;
++    hello.calls = calls.data();
++    hello.call_count = (int)calls.size();
++    hello.keys = keys;
++    hello.key_count = (int)(sizeof keys / sizeof keys[0]);
++    hello.audio_sample_rate = Audio::kSampleRate;
++    hello.audio_channels = 1;
++    if (witness::connect(hello, h)) witness_run();
++    else std::printf("witness: could not connect to the harness\n");
++    witness_shutdown();
++  } else
++#endif
+   while (running) frame();
+ #endif
+ 
+@@ -1394,6 +1692,9 @@ int main(int argc, char** argv) {
+   audio.shutdown();
+   pix.shutdown();
+   SDL_Quit();
++#ifdef EMB_WITNESS
++  witness_record_stop();
++#endif
+   if (perf || scripted) printSummary();
+   if (scripted) {
+     std::printf("script: %d failure(s)\n", scriptFails);
+diff --git a/rpg/sim/foes_game.cpp b/rpg/sim/foes_game.cpp
+index ba9144a..e9ed56a 100644
+--- a/rpg/sim/foes_game.cpp
++++ b/rpg/sim/foes_game.cpp
+@@ -657,6 +657,7 @@ void Game::foeStep(float dt) {
+     bool& coldBoss = foeWarmedTick_;
+     auto namedWarm = [&](int32_t x, int32_t y) {
+       if (foes::namedReady(src, x, y)) return true;
++      if (syncStreams) { (void)foes::namedInRegion(src, x, y); return true; }
+       if (warmOffThread(src, false, x, y)) return false;
+       if (coldNamed) return false;
+       coldNamed = true;
+@@ -665,6 +666,7 @@ void Game::foeStep(float dt) {
+     };
+     auto bossWarm = [&](int32_t x, int32_t y) {
+       if (foes::bossReady(src, x, y)) return true;
++      if (syncStreams) { for (int k = 0; k < 4 && !foes::bossWarmStep(src, x, y); k++) {} return foes::bossReady(src, x, y); }
+       if (warmOffThread(src, true, x, y)) return false;
+       if (coldBoss) return false;
+       coldBoss = true;
+@@ -771,6 +773,7 @@ void Game::foeStep(float dt) {
+     for (int dy = -2; dy <= 2; dy++)
+       for (int dx = -2; dx <= 2; dx++)
+         if (!foes::bossReady(src, wkx + dx, wky + dy)) {
++          if (syncStreams) { for (int k = 0; k < 4 && !foes::bossWarmStep(src, wkx + dx, wky + dy); k++) {} continue; }
+           if (warmOffThread(src, true, wkx + dx, wky + dy)) return;   // (fixer round 2) the worker makes it
+           if (foeWarmedTick_) return;   // (M6 fixer r3) this tick already generated one: the next tick warms this
+           (void)foes::bossWarmStep(src, wkx + dx, wky + dy);   // (fixer r4) one slice a tick
+@@ -873,7 +876,7 @@ bool Game::foeChoose(const DlgOpt& o) {
+   // (M6 fixer r2) only the regions already generated (foeStep warms the 5x5 one per tick): asking never stalls a frame
+   for (int dy = -2; dy <= 2; dy++)
+     for (int dx = -2; dx <= 2; dx++) {
+-      if (!foes::namedReady(src, rx + dx, ry + dy)) continue;
++      if (!syncStreams && !foes::namedReady(src, rx + dx, ry + dy)) continue;
+       for (const foes::NamedUnique& u : foes::namedInRegion(src, rx + dx, ry + dy))
+         if (!FoeOps::slainNamed(*this, u.id)) found.push_back(u);
+     }
+diff --git a/rpg/sim/game.h b/rpg/sim/game.h
+index 9e67b14..9e03549 100644
+--- a/rpg/sim/game.h
++++ b/rpg/sim/game.h
+@@ -727,6 +727,10 @@ class Game {
+   bool godMode = false;
+   bool noWildSpawns = false;           // metrics arenas: no roaming spawns or dens
+   bool streamThreads = true;           // false: stream as the web build does (no worker; frameWork generates); tests
++  // (Witness) a harness that compares runs: every cold generation the foes step would leave to a worker or spread over
++  // ticks (named uniques, world bosses) is made at once on this thread, so a run never depends on thread timing or on
++  // what an earlier run in the same process left in the memo
++  bool syncStreams = false;
+   void debugSpawn(art::Monster m, int n, float dist);
+   int debugSpawnAt(art::Monster m, Vec2 at, int level);   // returns the actor id (already aggro)
+   // (M6 fixer r2) a free spot with every tile within `rad` of it free too (a big body: a world boss is not stood on a wall)
+diff --git a/rpg/view/terrain.cpp b/rpg/view/terrain.cpp
+index 8d9161c..8dc2040 100644
+--- a/rpg/view/terrain.cpp
++++ b/rpg/view/terrain.cpp
+@@ -5831,6 +5831,23 @@ void View::workerLoop() {
+   }
+ }
+ 
++void View::settleBakes() {
++  if (singleThread()) return;
++  for (int i = 0; i < 5000; i++) {
++    {
++      std::lock_guard<std::mutex> lk(mu_);
++      bool busy = false;
++      for (uint64_t k : pending_) {   // queued, or being painted (pending, not finished)
++        bool finished = false;
++        for (const BakeDone& d : done_) if (d.key == k) { finished = true; break; }
++        if (!finished) { busy = true; break; }
++      }
++      if (!busy) return;
++    }
++    std::this_thread::sleep_for(std::chrono::milliseconds(1));
++  }
++}
++
+ void View::clearChunks() {
+   for (auto& ch : chunks_) pix_->destroy(ch.tex);
+   chunks_.clear();
+diff --git a/rpg/view/view.h b/rpg/view/view.h
+index 7e44205..176a27f 100644
+--- a/rpg/view/view.h
++++ b/rpg/view/view.h
+@@ -50,6 +50,10 @@ class View {
+   int urbKerbCheck(const Game& g, int r, int& faces);
+   Vec2 camera() const { return cam_; }   // M2: top-left of the view in world pixels (scripts tap world things)
+   void openMenu(Game& g, int tab) { g.mode = Mode::Menu; menuTab_ = tab; menuSel_ = 0; }
++  int menuTab() const { return menuTab_; }   // the open menu's page (Mode::Menu; the Witness harness reports it)
++  // (Witness) wait (up to 5 s) until the terrain bakers are idle, so the next draw shows every chunk asked for: a
++  // harness screenshot never depends on how fast the worker threads were
++  void settleBakes();
+   bool wantsQuit = false;
+   bool wantNewGame = false, wantContinue = false, wantSave = false;
+   bool touchUI = false;                  // show on-screen controls
+diff --git a/rpg/view/witness_state.cpp b/rpg/view/witness_state.cpp
+new file mode 100644
+index 0000000..ff78330
+--- /dev/null
++++ b/rpg/view/witness_state.cpp
+@@ -0,0 +1,136 @@
++// The Witness snapshot (witness_state.h). Positions are in tiles of the current map (float; the player's pixel
++// position too), so tests can use dist(); state.entities lists the people and beasts within 40 tiles, nearest first.
++#ifdef EMB_WITNESS
++#include "rpg/view/witness_state.h"
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++#include "rpg/sim/factions.h"
++#include "rpg/sim/game.h"
++#include "rpg/view/view.h"
++
++namespace {
++const char* roleName(Role r) {
++  static const char* n[] = {"Villager", "Guard", "Merchant", "Smith", "Innkeeper", "Priest", "Jarl", "Farmer", "Child", "Mage", "Bandit", "King",
++                            "Hunter", "Fisher", "Herbalist", "Traveller", "Herald", "Soldier", "Captain", "Refugee",
++                            "Harbourmaster", "Shipwright", "Sailor", "Pirate", "Steward", "Warlord", "Envoy"};
++  static_assert(sizeof(n) / sizeof(n[0]) == (size_t)Role::COUNT, "a name for every role");
++  return (int)r < (int)Role::COUNT ? n[(int)r] : "Person";
++}
++// the script driver's `fight` names, capitalised: what count('Wolf') matches
++const char* monsterType(art::Monster m) {
++  static const char* n[] = {"Wolf", "Boar", "Bear", "Slime", "Spider", "Bat", "Skeleton", "Draugr", "Goblin", "Troll", "Wraith", "Mudcrab",
++                            "Icewolf", "Frostspider", "Sandworm", "Dragon", "Scorpion", "Hyena", "Lurker", "Yeti", "Wisp", "Emberhound",
++                            "Blightspawn", "Harpy", "Golem", "Seaserpent", "Kraken", "Merrow"};
++  static_assert(sizeof(n) / sizeof(n[0]) == (size_t)art::Monster::COUNT, "a type for every monster");
++  return (int)m < (int)art::Monster::COUNT ? n[(int)m] : "Monster";
++}
++const char* modeName(Mode m) {
++  static const char* n[] = {"title", "play", "dialogue", "menu", "shop", "levelup", "dead", "paused", "creator", "forge", "build"};
++  return (size_t)m < sizeof(n) / sizeof(n[0]) ? n[(int)m] : "other";
++}
++const char* stateName(AState s) {
++  static const char* n[] = {"idle", "walk", "windup", "strike", "recover", "roll", "hurt", "dead", "cast", "down"};
++  return (size_t)s < sizeof(n) / sizeof(n[0]) ? n[(int)s] : "other";
++}
++const char* questState(QState s) { return s == QState::Active ? "active" : s == QState::Complete ? "complete" : "done"; }
++// to 1/100 (positions in tiles, hp, the hour): the double nearest the 2-decimal value, so the JSON stays short
++double r2(double v) {
++  char b[48];
++  std::snprintf(b, sizeof b, "%.2f", v);
++  return std::strtod(b, nullptr);
++}
++void tilePos(witness::Json& j, Vec2 p) { j.vec(r2(p.x / TILE), r2(p.y / TILE)); }
++}  // namespace
++
++void witnessState(witness::Json& j, const Game& g, const View& v, const WitnessExtra& x) {
++  const Actor& P = g.pl();
++  j.begin_object();
++  j.field("mode", modeName(g.mode)).field("day", g.day).field("hour", r2(g.hour)).field("time", r2(g.time));
++  if (g.mode == Mode::Menu) j.field("menu", v.menuTab());
++  if (g.mode == Mode::Dialogue) {
++    j.key("dialogue").begin_object().field("speaker", g.dlg.speaker).field("text", g.dlg.text.substr(0, 400)).key("options").begin_array();
++    for (const DlgOpt& o : g.dlg.opts) j.value(o.label);
++    j.end_array().end_object();
++  }
++  if (g.noticeT > 0 && !g.notice.empty()) j.field("notice", g.notice);
++
++  // the player
++  auto eq = [&](int i) -> std::string { return i >= 0 && i < (int)g.inv.size() ? g.inv[(size_t)i].name : std::string(); };
++  j.key("player").begin_object().field("id", P.id).field("type", "Player").field("name", g.app.name.empty() ? std::string("YOU") : g.app.name);
++  j.key("pos"); tilePos(j, P.p);
++  j.key("px").vec(r2(P.p.x), r2(P.p.y));
++  if (!g.inside) {
++    const int gx = g.world.ox + (int)std::floor(P.p.x / TILE), gy = g.world.oy + (int)std::floor((P.p.y - 2) / TILE);
++    j.key("global").vec(gx, gy);
++    // tests have no memory between steps: how far the player is from where the reset put them (global tiles)
++    if (x.hasStart) j.key("start").vec(x.startGX, x.startGY).field("moved", r2(std::hypot(gx - x.startGX, gy - x.startGY)));
++  }
++  j.field("hp", r2(P.hp)).field("maxHp", r2(P.maxHp)).field("magicka", r2(g.mp)).field("maxMagicka", r2(g.maxMp))
++      .field("stamina", r2(g.stamina)).field("maxStamina", r2(g.maxSt)).field("state", stateName(P.st))
++      .field("gold", g.gold).field("level", g.plLevel).field("xp", g.plXp).field("xpNext", g.xpForNext())
++      .field("kills", g.kills).field("god", g.godMode).field("inside", g.inside).field("floor", g.subFloor);
++  j.key("equipped").begin_object().field("weapon", eq(g.eqWeapon)).field("bow", eq(g.eqBow)).field("armor", eq(g.eqArmor))
++      .field("helmet", eq(g.eqHelmet)).field("shield", eq(g.eqShield)).end_object();
++  j.field("items", (int)g.inv.size());
++  j.end_object();
++
++  // quests (the tracked one first, then by id)
++  j.key("quests").begin_array();
++  std::vector<const Quest*> qs;
++  for (const Quest& q : g.quests) qs.push_back(&q);
++  std::stable_sort(qs.begin(), qs.end(), [&](const Quest* a, const Quest* b) { return (a->id == g.trackedQuest) > (b->id == g.trackedQuest); });
++  for (size_t i = 0; i < qs.size() && i < 24; i++) {
++    const Quest& q = *qs[i];
++    j.begin_object().field("id", q.id).field("title", q.title).field("type", (int)q.type).field("state", questState(q.state))
++        .field("have", q.have).field("need", q.need).field("giver", q.giverName).field("tracked", q.id == g.trackedQuest).end_object();
++  }
++  j.end_array();
++
++  // where
++  j.key("location").begin_object().field("region", g.locName);
++  const int si = g.inside && g.subBldg >= 0 ? g.world.over.bldgs[(size_t)g.subBldg].site : g.inside ? g.subSite : g.curSite;
++  if (si >= 0 && si < (int)g.world.sites.size()) {
++    const Site& s = g.world.sites[(size_t)si];
++    j.field("site", s.name).field("siteType", siteTypeName(s.type)).field("capital", s.capital);
++    if (const Kingdom* K = g.world.kingdomOf(si)) j.field("kingdom", K->name);
++  }
++  j.end_object();
++  if (g.mode == Mode::Play || g.mode == Mode::Dialogue) j.field("scene", g.inside ? "inside" : "overworld");
++
++  // the people and beasts within 40 tiles, nearest first (at most 60)
++  std::vector<std::pair<float, const Actor*>> near;
++  for (size_t k = 1; k < g.actors.size(); k++) {
++    const Actor& a = g.actors[k];
++    const float d = len(a.p - P.p) / TILE;
++    if (d <= 40.0f) near.push_back({d, &a});
++  }
++  std::stable_sort(near.begin(), near.end(), [](const auto& a, const auto& b) { return a.first < b.first || (a.first == b.first && a.second->id < b.second->id); });
++  j.key("entities").begin_array();
++  j.begin_object().field("id", P.id).field("type", "Player").key("pos"); tilePos(j, P.p); j.field("hp", r2(P.hp)).end_object();
++  int hostiles = 0;
++  for (size_t i = 0; i < near.size() && i < 60; i++) {
++    const Actor& a = *near[i].second;
++    const bool person = a.npc || a.human;
++    if (a.hostile && a.st != AState::Dead) hostiles++;
++    j.begin_object().field("id", a.id).field("type", person ? roleName(a.role) : monsterType(a.mon))
++        .field("kind", a.comp ? "companion" : person ? "person" : "beast").field("name", a.name);
++    j.key("pos"); tilePos(j, a.p);
++    j.field("dist", r2(near[i].first)).field("hp", r2(a.hp)).field("maxHp", r2(a.maxHp)).field("level", a.level)
++        .field("hostile", a.hostile).field("aggro", a.aggro).field("faction", factionName(a.faction)).field("state", stateName(a.st));
++    j.end_object();
++  }
++  j.end_array();
++
++  // counts (as --perf and the CI suites track them) and the harness's own facts
++  j.key("counts").begin_object().field("actors", (int)g.actors.size()).field("nearby", (int)near.size()).field("hostilesNearby", hostiles)
++      .field("npcAwake", g.perf.npcAwake).field("npcAsleep", g.perf.npcAsleep).field("hostiles", g.perf.hostiles)
++      .field("activeSites", g.perf.activeSites).field("pickups", (int)g.pickups.size()).field("projectiles", (int)g.projs.size())
++      .field("quests", (int)g.quests.size()).field("dungeonsCleared", g.dungeonsCleared).end_object();
++  j.key("script").begin_object().field("busy", x.scriptBusy).field("fails", x.scriptFails).field("lastFail", x.lastFail).end_object();
++  j.key("save").begin_object().field("enabled", x.saveEnabled).field("written", x.savesWritten).end_object();
++  j.end_object();
++}
++#endif
+diff --git a/rpg/view/witness_state.h b/rpg/view/witness_state.h
+new file mode 100644
+index 0000000..bac4407
+--- /dev/null
++++ b/rpg/view/witness_state.h
+@@ -0,0 +1,23 @@
++// The Witness harness's view of the game (rpg/main.cpp witness mode; engine/witness.h): the snapshot a test reads as
++// `state`. Desktop builds with EMBERVALE_WITNESS only.
++#pragma once
++#ifdef EMB_WITNESS
++#include <string>
++#include "engine/witness.h"
++
++class Game;
++class View;
++
++struct WitnessExtra {        // what only the platform layer knows
++  bool scriptBusy = false;   // a `call` that takes time (walkto, a registered command) is still under way
++  int scriptFails = 0;       // script failures since the reset (expects, walks)
++  std::string lastFail;
++  int savesWritten = 0;      // saves written to disk this session (witness mode never writes one)
++  bool saveEnabled = false;
++  bool hasStart = false;     // the global tile the player stood on at the reset (state.player.start / moved)
++  int startGX = 0, startGY = 0;
++};
++
++// state: mode, clock, player, quests, location, nearby entities (state.entities), UI and counts; JSON-safe, small
++void witnessState(witness::Json& j, const Game& g, const View& v, const WitnessExtra& x);
++#endif
+diff --git a/witness.json b/witness.json
+new file mode 100644
+index 0000000..86ac120
+--- /dev/null
++++ b/witness.json
+@@ -0,0 +1,8 @@
++{
++  "name": "embervale",
++  "build": "tools\build.bat embervale",
++  "launch": { "command": "build/embervale", "args": ["--witness"] },
++  "tests": "witness",
++  "seed": 1,
++  "timeout": 120
++}
+diff --git a/witness/.gitignore b/witness/.gitignore
+new file mode 100644
+index 0000000..70e3a34
+--- /dev/null
++++ b/witness/.gitignore
+@@ -0,0 +1,2 @@
++shots/
++replays/
+diff --git a/witness/embervale.witness.json b/witness/embervale.witness.json
+new file mode 100644
+index 0000000..009ae42
+--- /dev/null
++++ b/witness/embervale.witness.json
+@@ -0,0 +1,40 @@
++[
++  { "name": "walking east moves the player",
++    "input": "d@0.2-2.2",
++    "steps": [ { "at": 1, "expect": ["state.mode == 'play'", "state.player.state == 'walk'"] },
++               { "at": 2.5, "expect": ["state.player.moved >= 4", "state.player.state == 'idle'"] } ] },
++  { "name": "the start village has people about",
++    "steps": [ { "at": 1, "expect": ["entities.filter(e => e.kind == 'person').length >= 3", "state.location.region != ''"] } ] },
++  { "name": "fast travel into a town",
++    "scene": "town",
++    "steps": [ { "at": 1, "expect": ["state.location.siteType == 'TOWN'", "entities.filter(e => e.kind == 'person').length >= 5"], "shot": "town.png" } ] },
++  { "name": "a wolf fight costs the wolves hp and earns xp",
++    "seed": 2, "scene": "cave", "params": { "god": true, "fight": "wolf", "count": 2, "hour": 10 },
++    "input": "j@0.4-14",
++    "steps": [ { "at": 0.3, "expect": ["count('Wolf') == 2", "state.player.xp == 0"] },
++               { "at": 4, "expect": "all('Wolf').some(w => w.hp < w.maxHp)" },
++               { "at": 14, "expect": ["state.player.kills >= 1", "state.player.xp > 0"] } ] },
++  { "name": "dialogue, a quest and its completion through calls",
++    "seed": 8, "params": { "god": true, "hour": 10 },
++    "steps": [ { "at": 0.2, "call": ["talkto", "giver", 40], "expect": "state.script.busy" },
++               { "at": 15, "expect": ["state.mode == 'dialogue'", "!state.script.busy", "state.dialogue.options.length > 1"] },
++               { "at": 15.2, "call": ["key", "Escape"] },
++               { "at": 15.5, "call": [["givequest", "hunt", "wolf", 1], ["gotosite", "start"], ["fightquest"]],
++                 "expect": ["state.mode == 'play'", "state.quests.some(q => q.title == 'THE HUNT' && q.state == 'active' && q.tracked)"] },
++               { "at": 15.6, "input": "j@0-20" },
++               { "at": 36, "expect": ["state.quests.some(q => q.title == 'THE HUNT' && q.state == 'complete')"] },
++               { "at": 70, "call": ["talkto", "giver", 90] },
++               { "at": 110, "expect": ["state.mode == 'dialogue'", "state.dialogue.options.some(o => o.includes('COLLECT'))"] },
++               { "at": 110.1, "call": ["choose", "COLLECT"],
++                 "expect": ["state.quests.some(q => q.title == 'THE HUNT' && q.state == 'done')", "state.player.xp >= 50", "state.script.fails == 0"] } ] },
++  { "name": "time passing moves the clock",
++    "params": { "hour": 8 },
++    "steps": [ { "at": 0.1, "expect": "approx(state.hour, 8, 0.05)" },
++               { "at": 30, "expect": ["state.hour > 8.2", "state.day == 1"] } ] },
++  { "name": "a witness run never writes the save",
++    "input": "d@1-3, escape@4",
++    "steps": [ { "at": 25, "expect": ["state.save.enabled == false", "state.save.written == 0"] } ] },
++  { "name": "the same seed gives the same world",
++    "seed": 7,
++    "steps": [ { "at": 0.1, "expect": ["JSON.stringify(state.player.start) == '[-165,-431]'", "state.location.site == 'OSLARS'", "state.location.kingdom == 'VONTVE'"] } ] }
++]
+-- 
+2.52.0.windows.1
+
