@@ -50,10 +50,10 @@ order, with `{"id": <n>, "ok": true, ...result}` or
 
 | cmd | args | result | notes |
 |---|---|---|---|
-| `reset` | `seed` (int), `scene?` (string), `params?` (object) | `{}` | Return the game to a deterministic initial state: the same seed and the same inputs must always give the same snapshots. Without `reset`, the CLI restarts the process for each run. |
+| `reset` | `seed` (int), `scene?` (string), `params?` (object) | `{}` | Return the game to a deterministic initial state: the same seed and the same inputs must always give the same snapshots, screenshots and audio, **whatever ran before in the same process** (see §6). Without `reset`, the CLI restarts the process for each run. Reserved `params` (honour them if the game can vary them per run): `window: [w, h]` (window/backbuffer size in device pixels) and `dpi` (device pixel ratio); the CLI sends them for `--window 1920x1080` / `--dpi 2`. |
 | `input` | `events: [Event]` | `{}` | Queue input events. Each has `frame` (absolute frame number at which to apply it; apply at the start of that frame). Events for a past or current frame apply at the next step. |
 | `step` | `frames` (int ≥ 1), `dt?` (seconds, default `1/fps`), `dts?` (an array of per-frame dt, used by replays; overrides `dt`) | `{"frame": f, "time": t}` | Advance exactly that many fixed frames, applying queued inputs at their frames. |
-| `snapshot` | `paths?` (array of strings, optional filter) | `{"frame", "time", "state": {...}}` | Game-defined JSON describing its state. Conventions (optional but unlocking helpers): `state.entities = [{"id", "type", "pos": [x, y(, z)], ...}]`, `state.scene`, `state.player`. Values must be JSON-safe (no NaN; use `"NaN"`). |
+| `snapshot` | `paths?` (array of strings, optional filter) | `{"frame", "time", "state": {...}}` | Game-defined JSON describing its state. Conventions (optional but unlocking helpers): `state.entities = [{"id", "type", "pos": [x, y(, z)], ...}]`, `state.scene`, `state.player`. Values must be JSON-safe (no NaN; use `"NaN"`). Optional `digest` (in the reply or in `state`): a string hash of the game's full internal state (every actor, RNG states, timers), so comparisons also catch hidden state the snapshot doesn't show. |
 | `screenshot` | `scale?` (number) | `{"width", "height", "format": "rgba8" \| "png", "data": "<base64>"}` | The frame as currently rendered. `rgba8` = raw top-to-bottom rows; the CLI encodes the PNG. Adapters may also write a file and return `{"path": "..."}`. |
 | `audio` | — | `{"sampleRate", "channels", "format": "f32" \| "s16", "data": "<base64>"}` | Interleaved PCM of everything the game mixed since the last `audio` call or reset, synchronized with simulated time (one step of dt = dt × sampleRate frames). |
 | `call` | `name`, `args: []` | `{"result": any}` | Game-specific commands (teleport, give item, open menu, spawn …). |
@@ -95,7 +95,7 @@ When the game runs normally (a human playing) with `WITNESS_RECORD=<file.jsonl>`
 adapter writes a replay:
 
 ```
-{"replay": 1, "name": "...", "seed": 123, "fps": 60, "started": "2026-10-17T20:00:00Z"}
+{"replay": 1, "name": "...", "seed": 123, "fps": 60, "started": "2026-10-17T20:00:00Z", "scene": null, "params": {...}}
 {"f": 0, "dt": 0.016667, "in": [{"type": "key", "key": "d", "down": true}]}
 {"f": 1, "dt": 0.016671}
 {"f": 2, "dt": 0.016660, "mark": "F8"}
@@ -107,7 +107,17 @@ adapter writes a replay:
   moment.
 * The game must seed its randomness with the recorded seed. Adapters expose
   `seed()` / `on_reset` helpers for this.
-* `witness replay` plays the file back through `reset(seed)` + `input` + `step(dts)`.
+* `scene` and `params` (optional) describe how the session started (a menu choice, a character background, a
+  saved id counter...). `witness replay` and `trace --replay` pass them to `reset`, so `reset(seed, scene, params)`
+  must reproduce exactly the state the recording started from — including counters a real start leaves
+  behind (e.g. a title screen that built a world first).
+* Record the simulation steps that actually ran, with their dt; a paused frame that doesn't step the
+  simulation is not a frame. Input that arrives while paused rides on the next recorded frame. On focus
+  loss, record releases for every key/button/finger still held, so the replay doesn't keep them down.
+* At the end of a recording a game may write `<file.jsonl>.state.json`: its final snapshot (or just its
+  `state`). `witness replay` then compares the replay's final state to it field by field and fails on any
+  difference — the proof that the recording replays exactly.
+* `witness replay` plays the file back through `reset(seed, scene, params)` + `input` + `step(dts)`.
 
 ## 6. Determinism checklist (for adapter authors and game code)
 
@@ -115,10 +125,19 @@ adapter writes a replay:
    `time()` in gameplay.
 2. Simulate only on `step`, with the given dt. Never read real elapsed time in witness mode.
 3. Iterate collections in a stable order: hash maps with randomized ordering need care.
-4. Asynchronous work (worker threads, loading) must finish before `step` returns, or be
-   joined per frame.
-5. `witness doctor` checks this: two runs with the same seed and inputs must give
-   byte-identical snapshots.
+4. Asynchronous work (worker threads, loading, streaming, texture baking) must finish before
+   `step` returns, or be joined per frame. Never budget work by wall-clock milliseconds in witness
+   mode (a "do 8 ms of work per frame" loop does a different amount each run): do it all, or a fixed
+   count.
+5. `reset` must clear **everything** a run can leave behind: timers, id counters, caches, particle
+   clocks, UI/menu state, held keys and fingers, audio voices, and any texture or render cache whose
+   contents depend on what was drawn. Rebuilding the game/view objects from scratch is the safe way.
+6. Pin anything that comes from the machine: window/canvas size (settings files, environment
+   variables, the display), locale, the save folder.
+7. `witness doctor` checks this: a scripted run, a *different* run, then the first run again in the
+   same process must give identical state, `digest`, screenshot and audio. For long scenarios (a
+   journey, a fight) use `"match"` steps in tests or `witness test --repeat 2`, which compares every
+   step of every test against the first pass.
 
 ## 7. Optional stdio transport
 

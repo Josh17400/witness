@@ -1,0 +1,36 @@
+[
+ {
+  "name": "a plain start (reference)",
+  "seed": 3,
+  "input": "right@0-0.4",
+  "steps": [
+   {
+    "at": 0.5,
+    "match": "start",
+    "expect": "state.score == 1"
+   }
+  ]
+ },
+ {
+  "name": "the same start again matches",
+  "seed": 3,
+  "input": "right@0-0.4",
+  "steps": [
+   {
+    "at": 0.5,
+    "match": "start"
+   }
+  ]
+ },
+ {
+  "name": "a different start does not match",
+  "seed": 3,
+  "input": "right@0-0.2",
+  "steps": [
+   {
+    "at": 0.5,
+    "match": "start"
+   }
+  ]
+ }
+]

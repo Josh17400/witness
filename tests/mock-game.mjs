@@ -5,6 +5,9 @@ import net from "node:net";
 const FPS = 60, W = 320, H = 180, SR = 22050;
 let rngState = 1, frame = 0, time = 0, queue = [], keys = new Set(), logs = [], audioBuf = [];
 let player, coins, score;
+// MOCK_LEAK=1: a "particle clock" that reset() forgets, so screenshots depend on earlier runs while the snapshot
+// stays identical (the classic leak only screenshot/audio comparison catches)
+let leakT = 0;
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
 function reset(seed = 1) {
@@ -36,7 +39,7 @@ function stepOnce(dt) {
   // audio advances with simulated time
   const want = Math.round((time + dt) * SR);
   while (audioBuf.length < want) audioBuf.push(0);
-  frame++; time += dt;
+  frame++; time += dt; leakT++;
   if (process.env.MOCK_CRASH_AT && frame === +process.env.MOCK_CRASH_AT) logs.push({ frame, level: "error", message: "boom: something broke" });
 }
 
@@ -47,6 +50,7 @@ function screenshot() {
   const blob = (p, r, c) => { for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= r * r) put(Math.round(p[0]) + x, Math.round(p[1]) + y, ...c); };
   coins.forEach((c) => blob(c.pos, 5, [255, 210, 60]));
   blob(player.pos, 7, [80, 200, 255]);
+  if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
   return { width: W, height: H, format: "rgba8", data: px.toString("base64") };
 }
 

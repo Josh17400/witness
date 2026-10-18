@@ -7,6 +7,8 @@
 //             plus Lumen's analysis core (analyzeEvent, analyzeMusic, analyzeMix, ...)  (witness listen)
 //   pictures  timelinePNG, soundSheetPNG                     (witness listen)
 //   diff      diffImages                                     (witness shot --diff)
+//   measure   blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo,
+//             maskStats, ringMask, contrast, motion           (witness measure)
 
 export { encodePNG, decodePNG, isPNG } from "./png.js";
 export { Raster, parseColor, withAlpha, mixColor } from "./raster.js";
@@ -21,3 +23,7 @@ export {
 } from "./audio-analysis.js";
 export { timelinePNG, soundSheetPNG } from "./spectrogram.js";
 export { diffImages } from "./diff.js";
+export {
+  blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
+  ringMask, contrast, motion,
+} from "./measure.js";

@@ -1,40 +1,23 @@
 # Witness in Embervale
 
-`embervale-witness.patch` adds Witness mode to Embervale (github.com/Josh17400/embervale). Once it's applied, Claude
-can drive the game headless and deterministically: run tests, read the state, take screenshots, listen to the mix,
-trace values, and replay recorded play sessions.
+Embervale (github.com/Josh17400/embervale) has Witness mode built in since commit `90633ad` ("Witness mode", on
+`main`). Claude can drive the game headless and deterministically: run tests, read the state, take screenshots,
+listen to the mix, trace values, and replay recorded play sessions exactly.
 
-It is one commit on top of `main` at `8c0dcaf` ("P1 Fresh Roads"): 17 files, of which 2,088 lines are the vendored
-single header `engine/witness.h`. The Embervale-side change is 603 lines added and 13 removed. Nothing changes for
-players or for the web build.
-
-## Apply it (on the desktop PC)
-
-```bat
-cd "C:\path\to\embervale"
-git checkout main
-git pull
-git checkout -b witness
-git am "C:\path\to\witness\integrations\embervale\embervale-witness.patch"
-tools\build.bat embervale
-```
-
-* If `main` has moved on and `git am` stops on a conflict, run `git am --abort`, then
-  `git apply --3way <patch>` and fix the few hunks by hand. Almost all of the change is in `rpg/main.cpp`, next to
-  the script driver.
-* The first build after applying reconfigures CMake (the new `EMBERVALE_WITNESS` option) and recompiles whatever
-  includes `rpg/sim/game.h`.
-* The Witness CLI needs Node 18 or newer. From the Embervale root:
-  `node C:\path\to\witness\bin\witness.js doctor`, or put `witness\bin` on the PATH.
+`embervale-witness.patch` is that commit as a patch (`git format-patch` of `90633ad`, on top of `5b9bcc5`), kept
+here as a worked example of wiring Witness into a custom C++/SDL3 engine. Embervale's `main` already contains it, so
+**don't apply it there**. Of its 29 files, 2,088 lines are the vendored single header `engine/witness.h`, identical to
+`adapters/cpp/witness.h`. Nothing changes for players or for the web build.
 
 ## Use it
 
-Run these from the Embervale root, where `witness.json` lives. Each command starts the game in a hidden window,
-drives it, and quits it.
+The Witness CLI needs Node 18 or newer. Run these from the Embervale root, where `witness.json` lives. Each command
+starts the game in a hidden window, drives it, and quits it.
 
 ```
 witness doctor                                    # all good: connection, determinism, screenshot, audio
-witness test                                      # witness/embervale.witness.json: 8 tests
+witness test                                      # witness/*.witness.json: 17 tests (8 gameplay + 9 determinism)
+witness test --repeat 2                           # every step of every test must repeat pass 1 exactly
 witness eval --keys                               # every snapshot path
 witness shot --at 1 --scene town --params "{\"hour\":21.5}"
 witness listen --time 8 --scene cave --params "{\"god\":true,\"fight\":\"wolf\",\"count\":3}" --input "j@0.3-7"
@@ -43,14 +26,18 @@ witness call goto town --at 0.5
 ```
 
 * **reset:** `seed`. The scene is a `goto` target (`city|town|village|cave|ruin|camp|lair|shrine|capital|market`).
-  Params: `enter`, `hour`, `god`, `fight` + `count`, and `creator` + `background` + `name` (a recorded new game).
+  Params: `enter`, `hour`, `god`, `fight` + `count`, `at` (a global tile), `talk`, `menu`, `creator` + `background`
+  + `name` (a recorded new game), and `ids` (a recording's actor-id counter at its start).
 * **input:** Witness key names go through the script driver's paths (an SDL key event plus `View::scriptHold`), so
   WASD/arrows, `j`/`space` (attack, held), `e` (talk), `escape`, and so on behave as on a keyboard. Mouse and wheel
-  events are supported too.
+  events are supported too. A reset releases every finger and button still down.
 * **call:** every script command, built in (`goto`, `walkto`, `talkto`, `choose`, `fight`, `hour`, `enter`, `kit`,
-  `expect ...`) or registered (`givequest`, `gotosite`, `fightquest`, `gate`, and the rest of the
-  `embervale --script-help` list). A call that takes time (`walkto`, `talkto`, or a registered command that waits)
-  keeps running over the next steps, and `state.script.busy` says when it's done. A failed `expect` fails the call.
+  `travel`, `waittravel`, `swipe`, `expect ...`) or registered (`givequest`, `gotosite`, `fightquest`, `gate`, and
+  the rest of the `embervale --script-help` list). A call that takes time keeps running over the next steps, and
+  `state.script.busy` says when it's done. A failed `expect` fails the call.
+  * Witness-only: `statematch`, `shotmatch` and `audiomatch <label>` compare this moment with the first run of the
+    same label in the process. Witness now does the same thing generically with a test step's `"match": "label"`
+    (state, `digest`, screenshot and audio), so new tests can use that instead.
 * **snapshot (`state`):**
   * `mode`, `day`, `hour`, `time`, `notice`, plus `dialogue` (speaker, text, options) while a dialogue is open, and
     `menu` while a menu is open
@@ -59,8 +46,9 @@ witness call goto town --at 0.5
   * `entities`: the player plus everyone within 40 tiles, nearest first (id, type such as `Wolf` or `Guard`, kind,
     name, pos, dist, hp, level, hostile, faction, state)
   * `counts`, `script` (busy, fails, lastFail), `save` (enabled, written)
-* **screenshot:** the 480×270 logical canvas, read back from the hidden window's renderer. The terrain bakers are
-  waited on first, so shots don't depend on thread timing.
+  * `digest`: a hash covering every actor exactly, so comparisons catch state the snapshot doesn't list
+* **screenshot:** the 480×270 logical canvas (pinned, whatever the settings file or `EMB_SCREEN`/`EMB_BORDER`/
+  `EMB_HUD`/`EMB_SAFE` say), read back from the hidden window's renderer after every bake and paint has finished.
 * **audio:** the synth mix at 48 kHz mono, rendered per step instead of to a device (`witness listen` analyses it).
 
 ## Record a session (normal play)
@@ -70,33 +58,32 @@ set WITNESS_RECORD=witness\replays\session.jsonl
 build\embervale.exe
 ```
 
-Play as usual; F8 marks a moment. The replay starts when play does (after the character creator, or straight away
-with `--play`), with one line per sim step. Then run `witness replay last --watch "state.player.hp"` to re-simulate it.
+* Play as usual; F8 marks a moment. A recording session runs the way witness mode does (no stream worker, inline
+  bakes, the pinned canvas), so it can stutter where arrivals or crowded scenes are generated.
+* The header carries the seed and the start's params (`at`, `talk`, `menu`, `count`, `ids`, the creator choices).
+  Each line is one sim step; key auto-repeat is dropped.
+* At exit the game writes `session.jsonl.state.json`, the state the session ended in.
+* `witness replay last` re-simulates it from the header's seed and params, and checks that the replay ends in exactly
+  that state. Two sessions (4,776 and 576 frames) replay field for field.
 
 ## What witness mode changes (and why)
 
 | change | why |
 |---|---|
-| `EMBERVALE_WITNESS` CMake option, ON for desktop and OFF for Emscripten | the web build has no sockets; `engine/witness_impl.cpp` and every `EMB_WITNESS` block are left out of it |
+| `EMBERVALE_WITNESS` CMake option, ON for desktop and OFF for Emscripten | the web build has no sockets; `engine/witness_impl.cpp` and every witness block are left out of it |
 | a hidden 960×540 window, no vsync, no audio device, no save or settings file | no visible window or dialog during tests; tests never touch the player's files |
-| a fresh `Game` per reset | private timers and the actor id counter carried over between resets (the wild spawn timer gave a second run different wolves) |
-| `Game::streamThreads = false`, no prefetch worker | every chunk is made on demand, in order, never "whenever the worker finished" |
-| `Game::syncStreams` (foes_game.cpp) | named uniques and world bosses used to wait for a worker thread, and the foes memo is process-global: a second run in the same process saw them earlier than the first |
-| `View::settleBakes()` before a screenshot | the terrain bake threads |
+| reset builds a fresh `Game`, `View` and `Audio`, and frees textures made since startup | private timers, the actor id counter, particles, fades, UI state and cached pixels used to carry over, so screenshots and audio depended on which tests ran first |
+| one `applyStart` shared by reset and a recorded `--play` start; the id counter is recorded | a real start built the title world first, so actor ids (which feed foe ranks, affixes and loot) differed on replay |
+| `Game::syncStreams`: no prefetch worker, immediate foe warming | chunks, named uniques and world bosses used to wait for worker threads |
+| journeys: the whole wish list generated on the first black step, a fixed 0.5 s arrive hold, `View::witness` bakes and paints inline | gather and arrive waited on wall-clock caps, millisecond budgets and threads, so the same journey ended at different game times with different spawns |
+| the canvas pinned at 480×270 | settings and environment variables changed its size, and NPC sleep distance with it |
 | `Pix::readCanvas`, `Pix::init(..., hidden)`, `Audio::kSampleRate` | the screenshot readback, the hidden window, and the capture format |
-
-Determinism was checked beyond `witness doctor`. Three scenarios (a long walk across window shifts, a town at
-night, a three-wolf fight), each run three times in one process and again in a second process, gave identical
-snapshot hashes every time.
 
 ## Known limits
 
-* `witness replay` passes only the header's seed to `reset`, not its `params`. A recorded new game whose creator
-  background changes play (Novice, Sailor, Marked, ...) can therefore drift on replay until the CLI forwards header
-  params. `--play` sessions and background-None games replay exactly.
-* Touch input and the creator's text entry aren't recorded or injected. Alt-tabbing away (which pauses the game)
-  during a recording breaks the replay at that point.
-* Screenshots taken during the UI fast-travel fade (the map's journey) can show buildings that aren't painted yet.
-  The tests use `goto` (immediate fast travel).
+* World-map tab screenshots still paint tiles on a 5 ms budget, so they can vary from run to run.
+* Touch input and the creator's text entry aren't recorded yet. Witness now has a protocol `touch` event (inject and
+  record); Embervale's side still has to deliver and record it. Alt-tabbing away during a recording can break the
+  replay: the protocol now asks games to record releases for everything held on focus loss.
 * The Linux and macOS desktop builds with Witness compile by inspection only. CI's native job builds `rpg_test` and
-  `save_test`, never `embervale`.
+  `save_test`, never `embervale`. MinGW needs `ws2_32` linked explicitly (the `#pragma comment` is MSVC-only).

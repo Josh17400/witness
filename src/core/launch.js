@@ -8,6 +8,20 @@ export const CONFIG_NAME = "witness.json";
 export const DEFAULT_ATTACH_PORT = 7357;
 
 /** Walk up from `start` to find witness.json. Returns {config, root, file} or null. */
+// A Windows path written with single backslashes is still valid JSON but silently wrong: "tools\build.bat" holds a
+// backspace (\b), "src\new" a newline. No real command or path contains control characters, so refuse them.
+function checkControlChars(v, file, at = "") {
+  if (typeof v === "string") {
+    const m = /[\u0000-\u001f]/.exec(v);
+    if (m) {
+      const shown = JSON.stringify(v), esc = { "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t" }[m[0]] || `\\u${m[0].charCodeAt(0).toString(16).padStart(4, "0")}`;
+      throw new WitnessError(`${file}: ${at || "a value"} is ${shown}: it contains ${esc}, which JSON reads as a control character — ` +
+        "a Windows path needs doubled backslashes (\"tools\\\\build.bat\") or forward slashes (\"tools/build.bat\")");
+    }
+  } else if (Array.isArray(v)) v.forEach((x, i) => checkControlChars(x, file, `${at}[${i}]`));
+  else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) checkControlChars(x, file, at ? `${at}.${k}` : k);
+}
+
 export function findConfig(start = process.cwd()) {
   let dir = path.resolve(start);
   if (fs.existsSync(dir) && fs.statSync(dir).isFile()) dir = path.dirname(dir);
@@ -17,6 +31,7 @@ export function findConfig(start = process.cwd()) {
       let config;
       try { config = JSON.parse(fs.readFileSync(f, "utf8")); }
       catch (e) { throw new WitnessError(`${f} isn't valid JSON: ${e.message}`); }
+      checkControlChars(config, f);
       return { config: normalize(config), root: dir, file: f };
     }
     const up = path.dirname(dir);

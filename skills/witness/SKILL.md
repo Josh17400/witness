@@ -33,8 +33,12 @@ Run it from the game project (it finds `witness.json` in the current or a parent
 3. Set `"launch"` in `witness.json` to start the built game (`"build"` optionally runs first
    with `--build`).
 4. `witness doctor` must say **"all good"**. It checks the connection, capabilities, a
-   step and a snapshot, **determinism** (same seed + same input ⇒ identical state),
-   screenshots and audio. Fix anything it reports before writing tests.
+   step and a snapshot, screenshots, audio and **determinism**: a run, a different run, then
+   the first run again in the same process must give identical state, screenshot and audio.
+   Fix anything it reports before writing tests. Doctor's run is short, so also run
+   `witness test --repeat 2` once you have tests: the game's real scenarios (journeys, fights,
+   menus) must repeat exactly too. Optionally expose a snapshot `digest` (hash of the full
+   internal state) so hidden state is compared as well.
 
 ## 2. The loop: always verify your work
 
@@ -48,7 +52,15 @@ witness shot --at 3 --diff witness/shots/before.png   # what changed visually
 witness listen --time 8                        # audio report + spectrogram PNGs
 witness replay last --shot                     # what the human saw when they hit the bug
 witness call teleport 100 200 --at 1           # run a game command, then print the state
+witness test --repeat 2                        # prove every step repeats exactly (state, screenshot, audio)
+witness measure scale shot.png                 # integer-scale / blur test (pixel art)
+witness measure box with.png without.png       # exact box/height of whatever differs (a sprite's silhouette)
+witness measure contrast shot.png --a "#202020" --b ring:2    # WCAG ratio + ΔE (outline vs ground)
+witness measure motion --at 1 --time 0.5 --input "right@0-2"  # per-frame box/centroid/steps (foot slide, jitter)
 ```
+
+* **Measure instead of eyeballing** when a judgement can be a number: sprite height, blur from
+  fractional scaling, outline contrast, foot slide. `witness help measure` has the details.
 
 * **Scripted input** (`--input` and test `input`): `key@t` taps, `key@a-b` holds,
   `click:x,y@t` (or `@a-b` to hold), `mouse:x,y@t`, `drag:x1,y1->x2,y2@a-b`, `wheel:+3@t`,
@@ -76,7 +88,10 @@ witness call teleport 100 200 --at 1           # run a game command, then print 
 ]
 ```
 
-* Each step at time `at`: `call` → `input` → `expect` → `probe` → `shot`.
+* Each step at time `at`: `call` → `input` → `expect` → `probe` → `shot` → `match`.
+* `"match": "label"`: the first capture of a label (state, digest, screenshot, audio) is the
+  reference; any later capture of the same label in the run must be identical. Use it to prove
+  the same scenario gives the same result after other tests ran.
 * Expressions are JavaScript over the snapshot, with helpers: `state.*`, `count(type)`,
   `first(type)`, `all(type)`, `byId(id)`, `near(pos, type)`, `dist(a, b)`, `len(x)`,
   `approx(a, b, eps)`, `sum(list)`, `frame`, `time`, `prev` (the previous snapshot).
@@ -92,6 +107,8 @@ records seed, frame times and inputs (F8 marks a moment). Then:
 2. `witness replay last --at <marker time> --shot`, or `witness trace --replay last --watch "…"`,
    shows exactly what they saw.
 3. Fix the bug, then add a test that reproduces it.
+4. If the game writes `<file.jsonl>.state.json` at the end of a recording, `witness replay`
+   checks the replay ends in exactly that state; recorded `scene`/`params` go to `reset`.
 
 ## 5. Troubleshooting
 

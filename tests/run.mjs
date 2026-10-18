@@ -68,7 +68,7 @@ if (adapters.length) {
 }
 
 // ---- end-to-end against the mock game
-const cli = (args) => spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), ...args, "--cmd", `"${process.execPath}" "${path.join(here, "mock-game.mjs")}"`], { encoding: "utf8", timeout: 120000 });
+const cli = (args, env = {}) => spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), ...args, "--cmd", `"${process.execPath}" "${path.join(here, "mock-game.mjs")}"`], { encoding: "utf8", timeout: 120000, env: { ...process.env, ...env } });
 let r = cli(["doctor"]);
 ok("e2e doctor all good", r.status === 0 && /all good/.test(r.stdout), r.stdout + r.stderr);
 ok("e2e doctor deterministic", /deterministic/.test(r.stdout));
@@ -93,6 +93,45 @@ if (fs.existsSync(path.join(root, "src", "media", "index.js"))) {
   r = cli(["listen", "--time", "1", "--input", "right@0-0.5", "--out", tmp]);
   ok("e2e listen hears the ding", r.status === 0 && fs.existsSync(path.join(tmp, "timeline.png")), r.stdout + r.stderr);
 }
+
+// ---- determinism checks that go beyond the snapshot
+if (fs.existsSync(path.join(root, "src", "media", "index.js"))) {
+  r = cli(["doctor"], { MOCK_LEAK: "1" });
+  ok("e2e doctor catches a leak only the screenshot shows", r.status === 1 && /NOT deterministic/.test(r.stdout) && /screenshot differs: 1 px/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["test", path.join(root, "examples", "coins.witness.json"), "--repeat", "2"]);
+  ok("e2e test --repeat 2 identical", r.status === 0 && /all 2 passes were identical/.test(r.stdout) && /10 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["test", path.join(root, "examples", "coins.witness.json"), "--repeat", "2"], { MOCK_LEAK: "1" });
+  ok("e2e test --repeat catches the leak", r.status === 1 && /repeat: screenshot differs/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["test", path.join(here, "mock", "match.witness.json")]);
+  ok("e2e match labels", r.status === 1 && /2 passed, 1 failed/.test(r.stdout) && /match "start": state differs/.test(r.stdout), r.stdout + r.stderr);
+}
+// ---- measure (drives the game, screenshots every frame)
+if (fs.existsSync(path.join(root, "src", "media", "measure.js"))) {
+  r = cli(["measure", "motion", "--at", "0", "--time", "0.1", "--input", "right@0-1", "--json"]);
+  try {
+    const mo = JSON.parse(r.stdout);
+    // background "first": frame 0 holds the player, so the mask is old+new position; its leading edge is exact
+    ok("e2e measure motion: the player's leading edge moves 2 px a frame", mo.frames.length === 7 && mo.frames.slice(2).every((f, i) => f.lowestRowSpan.x1 - mo.frames[i + 1].lowestRowSpan.x1 === 2), r.stdout.slice(0, 400));
+  } catch (e) { ok("e2e measure motion", false, `${e.message}
+${r.stdout}${r.stderr}`); }
+}
+// ---- replays checked against the recorded end state
+fs.copyFileSync(path.join(here, "mock", "session.jsonl"), path.join(tmp, "s.jsonl"));
+fs.writeFileSync(path.join(tmp, "s.jsonl.state.json"), JSON.stringify({ score: 0, scene: "level1", player: { id: 1, type: "Player", pos: [0, 0], hp: 3 } }));
+r = cli(["replay", path.join(tmp, "s.jsonl")]);
+ok("e2e replay end state mismatch reported", r.status === 1 && /end state differs/.test(r.stdout) && /state\.player\.pos\[0\]/.test(r.stdout), r.stdout + r.stderr);
+r = cli(["trace", "--replay", path.join(tmp, "s.jsonl"), "--watch", "state", "--time", String(rp.duration), "--every", String(rp.duration), "--json"]);
+try {
+  const series = JSON.parse(r.stdout).state;
+  fs.writeFileSync(path.join(tmp, "s.jsonl.state.json"), JSON.stringify(series[series.length - 1][1]));
+  r = cli(["replay", path.join(tmp, "s.jsonl")]);
+  ok("e2e replay end state match", r.status === 0 && /ended in exactly the recorded end state/.test(r.stdout), r.stdout + r.stderr);
+} catch (e) { ok("e2e replay end state match", false, `${e.message}\n${r.stdout}${r.stderr}`); }
+// ---- witness.json with a single-backslash Windows path
+fs.mkdirSync(path.join(tmp, "cc"));
+fs.writeFileSync(path.join(tmp, "cc", "witness.json"), '{ "build": "tools\\build.bat", "launch": { "command": "x" } }');
+r = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "doctor"], { cwd: path.join(tmp, "cc"), encoding: "utf8", timeout: 30000 });
+ok("config control character refused", r.status !== 0 && /control character/.test(r.stdout + r.stderr) && /tools\\\\build\.bat/.test(r.stdout + r.stderr), r.stdout + r.stderr);
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // media suites (separate runner)

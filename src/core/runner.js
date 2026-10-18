@@ -99,16 +99,23 @@ export async function loadTests(file) {
  * Run one test on a session. Test shape:
  *  { name, seed?, scene?, params?, input?: "spec" | [events],
  *    steps: [ { at: seconds, call?: [name, ...args] | [[...], ...], input?: "spec", expect?: "expr" | [...],
- *               probe?: "expr" | [...], shot?: "file.png" } ] }
- * Within a step: call → input → expect → probe → shot.
+ *               probe?: "expr" | [...], shot?: "file.png", match?: "label" | [...] } ] }
+ * Within a step: call → input → expect → probe → shot → match.
+ * `match`: the first capture of a label (state, digest, and screenshot/audio when the adapter has them) is the
+ * reference; every later capture of that label in the same `witness test` run must equal it exactly.
+ * `matcher` + `matchAll`: `witness test --repeat N` matches every step against the same step of pass 1.
  */
-export async function runTest(session, test, { shotDir, onShot } = {}) {
+export async function runTest(session, test, { shotDir, onShot, matcher, matchAll = false, matchMedia = { shot: true, audio: true } } = {}) {
   const fps = session.fps;
   const res = { name: test.name, file: test.file, ok: true, expects: { passed: 0, failed: 0 }, failures: [], probes: {}, shots: [] };
   const state = await begin(session, test);
   let snap = null, lastSnap = null;   // lastSnap = the snapshot taken at the previous step (exposed as `prev`)
-  const steps = [...(test.steps || [])].sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  const steps = [...(test.steps || [])].map((st, i) => ({ ...st, _i: i })).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   if (!steps.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
+  const matching = matcher && (matchAll || steps.some((st) => st.match));
+  const useAudio = matching && matchMedia.audio && session.has("audio");
+  const useShot = matching && matchMedia.shot && session.has("screenshot");
+  if (useAudio) await session.audio();   // drop anything mixed before this test's reset: audio is compared per test
   for (const st of steps) {
     await stepTo(session, state, frameAt(st.at ?? 0, fps, state.dts), state.dts);
     snap = null;
@@ -151,6 +158,24 @@ export async function runTest(session, test, { shotDir, onShot } = {}) {
         await onShot(await session.screenshot(), file);
         res.shots.push(file);
       }
+      const labels = [].concat(st.match || []).map((l) => `match:${l}`);
+      if (matching && matchAll) labels.push(`step:${test.file}#${test.index}@${st._i}`);
+      if (labels.length) {
+        const cap = { snap: await getSnap() };
+        if (useShot) cap.shot = await session.screenshot();
+        if (useAudio) { const a = await session.audio(); if (a && a.data) cap.audio = a; }
+        for (const label of labels) {
+          const r = await matcher.check(label, cap, `"${test.name}" ${where}`);
+          if (!r.ok) {
+            const what = label.startsWith("match:") ? `match "${label.slice(6)}"` : "repeat";
+            for (const p of r.problems) res.failures.push({ kind: "match", at: st.at, message: `${what}: ${p}` });
+            if (r.shots && onShot && shotDir) {
+              const base = path.resolve(shotDir, `mismatch-${String(label.slice(6)).replace(/[^\w.-]+/g, "_").slice(-60)}`);
+              try { await onShot(r.shots[0], `${base}-first.png`); await onShot(r.shots[1], `${base}-now.png`); res.shots.push(`${base}-first.png`, `${base}-now.png`); } catch { /* best effort */ }
+            }
+          }
+        }
+      }
     } catch (e) {
       res.failures.push({ kind: "error", at: st.at, message: `${where}: ${e.message}` });
       if (session.closed) break;
@@ -160,7 +185,7 @@ export async function runTest(session, test, { shotDir, onShot } = {}) {
   for (const l of await session.drainLogs()) {
     if (l.level === "error") res.failures.push({ kind: "error", message: `game error${l.frame != null ? ` (frame ${l.frame})` : ""}: ${l.message}` });
   }
-  res.ok = !res.failures.some((f) => f.kind === "expect" || f.kind === "error");
+  res.ok = !res.failures.some((f) => f.kind === "expect" || f.kind === "error" || f.kind === "match");
   return res;
 }
 

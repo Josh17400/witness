@@ -12,11 +12,13 @@ game work** instead of guessing, but it works just as well in CI or for a human.
 ```bash
 witness doctor                                   # is the game wired up and deterministic?
 witness test                                     # run witness/*.witness.json gameplay tests
+witness test --repeat 2                          # every step must repeat exactly: state, screenshot, audio
 witness eval --at 2 "state.player.hp" "count('Enemy')"
 witness trace --watch "state.player.pos[1], state.score" --time 4 --input "space@1"   # → chart PNG
 witness shot --at 1,4 --diff witness/shots/before.png
 witness listen --time 8                          # audio report + spectrogram PNGs
 witness replay last --shot                       # what the human saw when they pressed F8
+witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
 ```
 
 ## Install
