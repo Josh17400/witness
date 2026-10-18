@@ -30,6 +30,7 @@ jobs:
         run: |
           REL=""
           if javac --release 8 -version >/dev/null 2>&1; then REL="--release 8"; fi
+          mkdir -p adapters/java/build examples/java/build   # Java 8's javac won't create -d directories
           javac $REL -Xlint:all -encoding UTF-8 -d adapters/java/build adapters/java/Witness.java adapters/java/tests/SelfTest.java
           javac $REL -encoding UTF-8 -d examples/java/build adapters/java/Witness.java examples/java/src/coins/CoinsGame.java examples/java/src/coins/Main.java
       - name: unit checks
