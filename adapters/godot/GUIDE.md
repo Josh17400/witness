@@ -43,8 +43,9 @@ Witness="*res://addons/witness/Witness.gd"
   physics and process, with no wall clock involved. Match the project's
   `physics/common/physics_ticks_per_second`.
 * `--write-movie user://witness.avi` (recommended): Movie Maker mode makes the AudioServer mix
-  exactly 1/60 s of audio per frame, so captured audio is frame-exact (section 8). It writes a
-  small MJPEG file in `user://`, overwritten each launch. Leave it out if you don't need audio.
+  exactly 1/60 s of audio per frame, so captured audio is exact and identical across resets
+  (section 8). It writes a small MJPEG file in `user://`, overwritten each launch. Leave it out
+  if you don't need audio.
 * `--rendering-driver opengl3` (or the project's renderer): needed for screenshots and Movie
   Maker. For the fastest runs with no screenshots or audio, use `["--path", ".", "--headless",
   "--fixed-fps", "60"]`; `screenshot` is then not advertised. On Linux CI, wrap the whole
@@ -69,10 +70,16 @@ iteration:
    physics, process and the render) is frame 1. At the start of each following iteration it
    counts the frame done and injects the next frame's input. After N frames it replies and goes
    idle again.
-3. **reset**: it seeds, releases held input, calls `get_tree().reload_current_scene()` (or
-   `change_scene_to_file(scene)` when the test passes `scene`), pauses the tree for the
-   deferred scene swap, then calls `witness_reset(seed, scene, params)` on nodes in the
-   `"witness"` group and replies.
+3. **reset**: it clears the logs and releases held input. With Movie Maker (`--write-movie`)
+   it then pauses the tree, stops the sound players of the scene it is about to free, and waits
+   (paused, at most 2 × 16 frames at 48000 Hz and 60 fps) until the audio mixer is at the same
+   point of its 512-frame block cycle as on every reset (section 8). Then it seeds, re-creates
+   the audio bus effects, calls `get_tree().reload_current_scene()` (or
+   `change_scene_to_file(scene)` when the test passes `scene`), keeps the tree paused for the
+   deferred scene swap, and calls `witness_reset(seed, scene, params)` on nodes in the
+   `"witness"` group. With Movie Maker, one more paused frame mixes (and drops) the fade-out of
+   any sound `witness_reset` stopped. Then it replies. What the reset logs (the new scene's
+   `_ready`, `witness_reset`) belongs to the new run.
 
 Web exports can't block (browsers are single-threaded), so there the autoload pauses the tree
 (`get_tree().paused`) between steps instead. It connects with `WebSocketPeer` to the address
@@ -134,6 +141,9 @@ Never call `randomize()` in witness mode (`if not Witness.active: randomize()`).
 * **Autoload state** (score, inventory, save data in other singletons) survives a reload, so
   reset it in a `witness_reset(seed, scene, params)` method on a node in the `"witness"` group,
   or let the singleton join the group itself.
+* **Sounds that outlive a reload** (music players in autoloads, every player with
+  `reload_on_reset = false`) are yours to stop (or restart from 0) in `witness_reset`. The
+  adapter drops their fade-out before the run starts (section 8).
 * **Scene names:** `reset` with `scene: "level2"` loads `res://level2.tscn` (or a full `res://`
   path).
 * **No reload:** `Witness.reload_on_reset = false` (set in an autoload's `_ready`). Then only
@@ -181,16 +191,42 @@ available with `--headless` (the dummy renderer has no textures).
 
 ## 8. Audio capture
 
-In witness mode the adapter adds an `AudioEffectCapture` to the **Master** bus and returns
-everything captured since the last call as interleaved stereo f32 at
+In witness mode the adapter adds an `AudioEffectCapture` to the **Master** bus. `audio` returns
+what was mixed since the last `audio` call or reset, as interleaved stereo f32 at
 `AudioServer.get_mix_rate()`.
 
-* **With `--write-movie`** (Movie Maker), the audio driver doesn't run in real time: the engine
-  mixes exactly `mix_rate / fps` frames per iteration, so audio is synchronized with simulated
-  frames to within one 512-frame mix block (about 10 ms). Coins measures its ding 3 ms after the
-  pickup frame.
-* **Without it**, audio is captured in real time (the dummy driver's thread), which is useless
-  for timing. The adapter logs a warning once.
+* **With `--write-movie`** (Movie Maker), the audio driver doesn't run in real time: every frame
+  the engine mixes exactly `mix_rate / fps` frames (800 at Movie Maker's default
+  `editor/movie_writer/mix_rate` of 48000 and 60 fps). Audio is then exact:
+  * a reply holds exactly the simulated time × rate frames: frame × rate / fps in total since
+    the reset, with the fraction carried over to the next reply (3 s → 144000 frames);
+  * the same seed and input give **byte-identical** audio whatever ran before in the process
+    (`witness doctor` and `witness test --repeat 2` check this).
+
+  How: Godot mixes in 512-frame blocks, so the mixer runs up to one block ahead of the frames
+  output so far (its lookahead), and a sound started during a frame begins at the next block
+  boundary. The adapter follows where the mixer is in its block cycle (from how many blocks the
+  capture receives each frame) and `reset` waits, paused, until it is at the same point every
+  time, so each run starts on a block boundary. The lookahead waits in the adapter for the next
+  reply.
+* **Sound timing**: a sound started during frame k (samples k × 800 onward) begins at the first
+  block boundary at or after sample k × 800, plus Godot's constant mixing latency of about 64
+  frames: up to 10.7 ms late, identically every run. For sample-exact starts, set
+  `editor/movie_writer/mix_rate` to a multiple of 512 × fps (61440 or 30720 at 60 fps), so every
+  frame is whole blocks. Avoid rates where `mix_rate / fps` isn't a multiple of 64 (44100 at
+  60 fps = 735): the block cycle is then 512 frames long and every reset waits seconds for it
+  (the adapter warns).
+* **Without it** (`--headless`, or no `--write-movie`), audio is captured on the wall clock (the
+  dummy driver's thread), which is useless for timing and differs between runs. The hello then
+  says `"audio_exact": false` and the adapter logs a warning once.
+* **Reset and sounds**: the adapter stops every `AudioStreamPlayer`/`2D`/`3D` in the scene a
+  reset frees (one frame early, so the fade-out is mixed and dropped during the reset) and
+  re-creates every bus effect instance, so reverb, delay and compressor tails of one run never
+  reach the next. Players that survive the reset are the game's: stop them in `witness_reset`
+  (section 5). Re-creating effects means an `AudioEffectInstance` fetched with
+  `AudioServer.get_bus_effect_instance()` before the reset (a spectrum analyzer kept in an
+  autoload) goes stale: fetch it again in `witness_reset`/`_ready`, or set
+  `Witness.reset_audio_effects = false` (effect tails may then leak between runs).
 * Sounds must reach Master: `AudioStreamPlayer`/`2D`/`3D` on buses that route to Master.
   Captured audio is post-effects (reverb, limiter …), exactly what a player hears.
 
@@ -219,7 +255,10 @@ a scripted session that CI records and replays exactly.
   before using results in gameplay, or load synchronously in witness mode.
 * GPU particles and shader `TIME` only affect visuals, but `GPUParticles` collision or
   readback must not feed gameplay.
-* State in autoloads survives `reload_current_scene()` (see section 5).
+* State in autoloads survives `reload_current_scene()` (see section 5), and so do sound
+  players in autoloads: stop them in `witness_reset`, or the next run's audio differs.
+* "audio differs" from `doctor` without `--write-movie` is expected (real-time audio, see
+  section 8); with it, look for players that outlive the reset.
 * Physics: Godot Physics and Jolt are deterministic for the same step sequence in the same
   build. Don't change `physics_ticks_per_second` at runtime.
 * Iterating a `Dictionary` is insertion-ordered (stable). `get_children()` order changes when

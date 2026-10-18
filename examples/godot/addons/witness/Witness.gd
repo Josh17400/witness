@@ -21,6 +21,8 @@ extends Node
 
 const PROTOCOL := 1
 const DEFAULT_ADDR := "127.0.0.1:7357"
+## Godot's AudioServer mixes (and runs bus effects, including the capture) 512 frames at a time.
+const _MIX_BLOCK := 512
 
 ## True while the CLI drives the game.
 var active := false
@@ -35,6 +37,9 @@ var frame := 0
 var time := 0.0
 ## Reload the current scene on reset (set false if your nodes implement witness_reset fully).
 var reload_on_reset := true
+## Re-create every audio bus effect instance on reset, so reverb/delay/compressor tails of one
+## run never reach the next (set false if an autoload keeps an AudioEffectInstance it fetched).
+var reset_audio_effects := true
 
 var _peer: StreamPeerTCP
 var _ws: WebSocketPeer
@@ -64,6 +69,15 @@ var _old_scene_id := 0
 var _flush_iterations := 0
 var _dirty := true             # state changed since the last rendered frame
 var _capture: AudioEffectCapture
+var _movie := false            # Movie Maker mode: the engine mixes exactly _mix_step frames per frame
+var _mix_step := 0             # mix_rate / fps
+var _mix_period := 1           # frames after which the mixer's 512-frame block pattern repeats
+var _mix_lo := 0               # the mixer's lookahead (frames mixed beyond those output so far)
+var _mix_hi := _MIX_BLOCK - 1  #   lies in [_mix_lo, _mix_hi]; every frame's block count narrows it
+var _mix_total := -1           # frames the capture had seen (pushed + discarded) at the last frame
+var _audio_pending := PackedVector2Array()   # captured frames not sent yet
+var _audio_sent := 0           # frames sent since the reset
+var _audio_dropped := 0        # capture frames lost to a full buffer, as of the last drain
 var _warned := {}
 var _perf := {"frame_ms": 0.0, "update_ms": 0.0, "render_ms": 0.0}
 var _step_t0 := 0
@@ -133,6 +147,7 @@ func _ready() -> void:
 	_capture = AudioEffectCapture.new()
 	_capture.buffer_length = 30.0
 	AudioServer.add_bus_effect(0, _capture)
+	_movie = OS.has_feature("movie")
 
 
 func _exit_tree() -> void:
@@ -300,6 +315,9 @@ func _hello() -> Dictionary:
 	# input_devices/pointing/emulate_mouse_from_touch off: the game handles touch itself (no mouse fallback)
 	if not Input.is_emulating_mouse_from_touch():
 		hello["touch"] = true
+	# without Movie Maker (--write-movie) the mixer runs on the wall clock: audio isn't frame-exact
+	if not OS.has_feature("movie"):
+		hello["audio_exact"] = false
 	return hello
 
 
@@ -311,15 +329,18 @@ func _physics_process(_delta: float) -> void:
 		return
 	if _closing:
 		return
+	if _movie:
+		_track_mix()
 	if not _connected:
 		_connected = true      # first frame: every node is ready, so calls can be discovered
 		if not _connect():
 			_closing = true
 			get_tree().quit(1)
 			return
+		_audio_restart()       # audio before the hello isn't part of any run
 	if not _reset_pending.is_empty():
-		if not _finish_reset():
-			return             # the scene change needs another (paused) iteration
+		if not _advance_reset():
+			return             # the reset needs another (paused) iteration
 	if _remaining > 0:
 		if _step_started:
 			_end_frame()
@@ -465,24 +486,64 @@ func _quit() -> void:
 
 # ------------------------------------------------------------------------------ reset
 
-## Returns true when the reset completed (or failed) right away, false while a scene loads.
+## Returns true when the reset completed (or failed) right away, false while it needs more
+## (paused) engine iterations; _advance_reset() then runs once per iteration until it replies.
+##
+## Stages: 0 (Movie Maker only) wait, paused, until the mixer is at the same point of its 512-frame
+## block cycle on every reset, so each run's sounds land on the same samples; 1 swap or reload the
+## scene and wait until it's ready, then witness_reset(); 2 (Movie Maker only) one more paused
+## frame mixes the fade-out of voices witness_reset() stopped; then reply.
 func _start_reset(id, msg: Dictionary) -> bool:
 	seed = int(msg.get("seed", 1))
-	globalscope_seed(seed)
+	_log_mutex.lock()
+	_logs = []                 # what the reset itself logs (scene _ready, witness_reset) belongs to the new run
+	_log_mutex.unlock()
 	_release_all()
 	_queue = []
 	_due = []
 	frame = 0
 	time = 0.0
-	_reset_pending = {"id": id, "scene": msg.get("scene", ""), "params": msg.get("params", {})}
+	_reset_pending = {"id": id, "scene": msg.get("scene", ""), "params": msg.get("params", {}), "stage": 0}
+	_flush_iterations = 0
+	if not _movie:
+		return _swap_scene()
+	_stop_scene_audio()        # their fade-out is mixed (and dropped) while the reset waits
+	get_tree().paused = true
+	return false
+
+
+func _advance_reset() -> bool:
+	_flush_iterations += 1
+	match int(_reset_pending["stage"]):
+		0:
+			if _mix_period > 64:
+				_warn_once("mix-period", "Witness: %d audio frames per frame line up with 512-frame mix blocks only every %d frames, so each reset waits up to that long; editor/movie_writer/mix_rate = 48000 is faster" % [_mix_step, _mix_period])
+			if not _mix_aligned():
+				if _flush_iterations < 2 * _mix_period + 8:
+					return false
+				_warn_once("mix-align", "Witness: couldn't line the audio mixer up (launch with --fixed-fps %d, the project's physics ticks per second); audio may differ between runs" % _fps)
+			return _swap_scene()
+		1:
+			return _finish_reset()
+		_:
+			return _reply_reset()
+
+
+func _swap_scene() -> bool:
+	_reset_pending["stage"] = 1
+	_flush_iterations = 0
+	globalscope_seed(seed)     # right before the new scene's _ready
+	if reset_audio_effects:
+		_renew_bus_effects()
 	var scene := str(_reset_pending["scene"])
 	var tree := get_tree()
 	_old_scene_id = tree.current_scene.get_instance_id() if tree.current_scene else 0
-	_flush_iterations = 0
 	if scene != "":
 		var path := scene if scene.begins_with("res://") else "res://%s.tscn" % scene
 		if tree.change_scene_to_file(path) != OK:
+			var id = _reset_pending["id"]
 			_reset_pending = {}
+			tree.paused = false
 			_send({"id": id, "ok": false, "error": "can't load scene '%s'" % path})
 			return true
 	elif reload_on_reset and tree.current_scene:
@@ -498,7 +559,6 @@ func _finish_reset() -> bool:
 	var tree := get_tree()
 	var current := tree.current_scene
 	if _old_scene_id != 0 and (current == null or current.get_instance_id() == _old_scene_id or not current.is_node_ready()):
-		_flush_iterations += 1
 		if _flush_iterations < 30:
 			return false
 		log_line("error", "Witness: the scene didn't reload within 30 frames")
@@ -506,15 +566,42 @@ func _finish_reset() -> bool:
 	for node in tree.get_nodes_in_group("witness"):
 		if node.has_method("witness_reset"):
 			node.witness_reset(seed, _reset_pending["scene"], _reset_pending["params"])
-	tree.paused = false
-	if _capture:
-		_capture.clear_buffer()
+	if _movie:
+		_reset_pending["stage"] = 2
+		return false
+	return _reply_reset()
+
+
+func _reply_reset() -> bool:
+	get_tree().paused = false
+	_audio_restart()
 	_dirty = true
 	var id = _reset_pending["id"]
 	_reset_pending = {}
-	_logs = []
 	_send({"id": id, "ok": true})
 	return true
+
+
+# Stop the sounds of the scene a reset is about to free one frame early, so their short fade-out
+# is mixed during the reset (and dropped) instead of leaking into the next run.
+func _stop_scene_audio() -> void:
+	var tree := get_tree()
+	var current := tree.current_scene
+	if current == null or (str(_reset_pending["scene"]) == "" and not reload_on_reset):
+		return
+	var nodes: Array = current.find_children("*", "", true, false)
+	nodes.append(current)
+	for node in nodes:
+		if node.is_class("AudioStreamPlayer") or node.is_class("AudioStreamPlayer2D") or node.is_class("AudioStreamPlayer3D"):
+			node.call("stop")
+
+
+# AudioServer re-creates a bus's effect instances when its effects are reordered: new instances
+# start with empty reverb/delay/compressor state. (This also empties the capture's buffer.)
+func _renew_bus_effects() -> void:
+	for bus in AudioServer.bus_count:
+		if AudioServer.get_bus_effect_count(bus) > 0:
+			AudioServer.swap_bus_effects(bus, 0, 0)
 
 
 func _release_all() -> void:
@@ -782,12 +869,25 @@ func _screenshot(scale: float) -> Dictionary:
 		"data": Marshalls.raw_to_base64(img.get_data())}
 
 
+## Everything mixed since the last `audio` call or reset. With Movie Maker the reply holds exactly
+## frame * rate / fps frames in total since the reset (the fraction carries over to the next
+## reply); the mixer's lookahead (it runs up to one 512-frame block ahead) waits for the next one.
 func _audio() -> Dictionary:
 	var rate := int(AudioServer.get_mix_rate())
-	if not OS.has_feature("movie"):
+	_audio_pending.append_array(_drain_capture())
+	var stereo := _audio_pending
+	_audio_pending = PackedVector2Array()
+	if _movie:
+		var want := _div(frame * rate, _fps) - _audio_sent
+		if stereo.size() >= want:
+			_audio_pending = stereo.slice(want)
+			stereo = stereo.slice(0, want)
+		else:
+			_warn_once("audio-short", "Witness: the mixer produced fewer frames than the simulated time (mix rate %d isn't a multiple of %d fps?); the rest is silence" % [rate, _fps])
+			stereo.append_array(_silence(want - stereo.size()))
+		_audio_sent += want
+	else:
 		_warn_once("audio", "Witness: audio is captured in real time; add --write-movie user://witness.avi (with a rendering driver) for frame-exact audio")
-	var frames := _capture.get_frames_available()
-	var stereo := _capture.get_buffer(frames) if frames > 0 else PackedVector2Array()
 	var bytes: PackedByteArray
 	if OS.has_feature("double"):   # double-precision builds: Vector2 holds float64
 		var f := PackedFloat32Array()
@@ -800,6 +900,93 @@ func _audio() -> Dictionary:
 		bytes = stereo.to_byte_array()   # Vector2 = two float32: already interleaved stereo f32
 	return {"sampleRate": rate, "channels": 2, "format": "f32",
 		"data": Marshalls.raw_to_base64(bytes) if not bytes.is_empty() else ""}
+
+
+# A new run's audio starts now: drop everything captured so far except the mixer's lookahead,
+# which is already the start of this run.
+func _audio_restart() -> void:
+	if not _capture:
+		return
+	var got := _drain_capture()
+	var keep := _mix_lo if _movie and _mix_known() else 0
+	_audio_pending = got.slice(maxi(0, got.size() - keep))
+	if _audio_pending.size() < keep:
+		var head := _silence(keep - _audio_pending.size())
+		head.append_array(_audio_pending)
+		_audio_pending = head
+	_audio_sent = 0
+
+
+# Everything the capture holds. With Movie Maker, frames it dropped because it was full (always
+# the newest) come back as silence at the end, so the timing stays exact.
+func _drain_capture() -> PackedVector2Array:
+	var n := _capture.get_frames_available()
+	var got := _capture.get_buffer(n) if n > 0 else PackedVector2Array()
+	var dropped := _capture.get_discarded_frames()
+	if dropped > _audio_dropped and _movie:
+		_warn_once("audio-full", "Witness: more than %d s of audio between two audio calls; the overflow is replaced with silence" % int(_capture.buffer_length))
+		got.append_array(_silence(dropped - _audio_dropped))
+	_audio_dropped = dropped
+	return got
+
+
+## a / b rounded down, for a >= 0 (exact below 2^53; avoids the integer-division warning).
+static func _div(a: int, b: int) -> int:
+	return floori(float(a) / float(b))
+
+
+func _silence(n: int) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	out.resize(n)
+	out.fill(Vector2.ZERO)
+	return out
+
+
+# Movie Maker mode, once per engine frame: the engine mixed _mix_step frames for the last frame,
+# in whole 512-frame blocks (the rest of the last block stays mixed ahead: the lookahead). The
+# number of blocks the capture received tells which lookahead values were possible before the
+# frame; following that from frame to frame pins the lookahead down within one block cycle.
+func _track_mix() -> void:
+	if _mix_step == 0:   # read here, not in _ready: Movie Maker sets its mix rate after the autoloads load
+		_mix_step = _div(int(AudioServer.get_mix_rate()), _fps)
+		var g := _MIX_BLOCK
+		var b := _mix_step
+		while b != 0:
+			var t := g % b
+			g = b
+			b = t
+		_mix_period = _div(_MIX_BLOCK, maxi(g, 1))
+	var total := _capture.get_pushed_frames() + _capture.get_discarded_frames()
+	if _mix_total >= 0:
+		var d := total - _mix_total
+		var blocks := _div(d, _MIX_BLOCK)
+		# `blocks` blocks covered the _mix_step - lookahead frames the frame still needed
+		var lo := maxi(_mix_lo, _mix_step - blocks * _MIX_BLOCK)
+		var hi := _mix_hi if blocks == 0 else mini(_mix_hi, _mix_step - (blocks - 1) * _MIX_BLOCK - 1)
+		if d % _MIX_BLOCK == 0 and lo <= hi:
+			_mix_lo = lo + d - _mix_step
+			_mix_hi = hi + d - _mix_step
+		else:
+			if _mix_known():
+				_warn_once("mix-track", "Witness: the engine didn't mix %d audio frames for a frame (launch with --fixed-fps %d, the project's physics ticks per second); audio may differ between runs" % [_mix_step, _fps])
+			_mix_lo = 0
+			_mix_hi = _MIX_BLOCK - 1
+	_mix_total = total
+
+
+# The lookahead is known once the range is narrower than its step (it moves in multiples of
+# gcd(_mix_step, 512)).
+func _mix_known() -> bool:
+	return _mix_hi - _mix_lo < _div(_MIX_BLOCK, _mix_period)
+
+
+# True when the mixer is where every reset starts from: when the reset replies (two frames from
+# now: the scene swap, then the fade-out frame; one without a swap) its lookahead will be 0, so
+# every run's audio starts on a block boundary and each sound lands on the same sample every run.
+func _mix_aligned() -> bool:
+	var swaps := str(_reset_pending["scene"]) != "" or (reload_on_reset and get_tree().current_scene != null)
+	var target := ((2 if swaps else 1) * _mix_step) % _MIX_BLOCK
+	return _mix_known() and _mix_lo == target
 
 
 func _call_list() -> Array:

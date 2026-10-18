@@ -219,13 +219,15 @@ const commands = {
         const scriptA = "right@0.1-1.2, space@0.3, up@1.3-1.8, mouse:100,100@0.5, click:120,90@0.8, left@1.9-2.4, down@2.5-2.9, space@2.6";
         const scriptB = "left@0.1-0.9, down@0.4-1.4, click:60,40@0.6, right@1.5-2.6, space@1.1, up@2.7-3";
         const matcher = new Matcher();
+        const exactAudio = caps.includes("audio") && h.audio_exact !== false;
+        if (caps.includes("audio") && !exactAudio) report.push("  (hello says audio_exact: false — audio follows real time here, so it isn't compared)");
         const run = async (seed, input) => {
           const st2 = await begin(s, { seed, input });
           if (caps.includes("audio")) await s.audio();
           await stepTo(s, st2, Math.round(T * s.fps));
           const cap = { snap: await s.snapshot() };
           if (caps.includes("screenshot")) { try { cap.shot = await s.screenshot(); } catch { /* reported below */ } }
-          if (caps.includes("audio")) { try { const au = await s.audio(); if (au && au.data) cap.audio = au; } catch { /* reported below */ } }
+          if (caps.includes("audio")) { try { const au = await s.audio(); if (au && au.data && exactAudio) cap.audio = au; } catch { /* reported below */ } }
           return cap;
         };
         const first = await run(7, scriptA);

@@ -41,6 +41,9 @@ Right after connecting, the adapter sends:
 
 `capabilities` lists which commands below are implemented. `calls` advertises custom
 commands for `call`, and `keys` (optional) lists the keys the game actually uses.
+`audio_exact: false` (optional; default true) says the adapter can only capture audio in real
+time in this launch mode (e.g. Godot without `--write-movie`): the audio is still useful to
+`listen` to, but the CLI won't require it to repeat sample for sample.
 
 ## 3. Commands
 

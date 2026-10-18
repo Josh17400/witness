@@ -22,8 +22,9 @@ node ../../bin/witness.js test
 `godot --path . --rendering-driver opengl3 --fixed-fps 60 --write-movie user://witness.avi`:
 
 * `--fixed-fps 60`: one engine iteration = one exact 1/60 s step (required);
-* `--write-movie`: Movie Maker mode, so audio is mixed frame-by-frame and the captured ding is
-  in sync (a few MB AVI in `user://`, overwritten each launch);
+* `--write-movie`: Movie Maker mode, so audio is mixed frame-by-frame: each `audio` reply is
+  exactly the simulated time long and the same run gives byte-identical audio after any other
+  (a few MB AVI in `user://`, overwritten each launch);
 * a real renderer, for screenshots. The window is borderless and moved off-screen.
 
 If `godot` isn't on PATH (Windows), pass the console binary:

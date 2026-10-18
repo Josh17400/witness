@@ -113,7 +113,8 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
   const steps = [...(test.steps || [])].map((st, i) => ({ ...st, _i: i })).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   if (!steps.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
   const matching = matcher && (matchAll || steps.some((st) => st.match));
-  const useAudio = matching && matchMedia.audio && session.has("audio");
+  // hello "audio_exact": false — the adapter can only capture audio in real time, so it isn't compared
+  const useAudio = matching && matchMedia.audio && session.has("audio") && session.hello?.audio_exact !== false;
   const useShot = matching && matchMedia.shot && session.has("screenshot");
   if (useAudio) await session.audio();   // drop anything mixed before this test's reset: audio is compared per test
   for (const st of steps) {
