@@ -6,8 +6,26 @@ listen to the mix, trace values, and replay recorded play sessions exactly.
 
 `embervale-witness.patch` is that commit as a patch (`git format-patch` of `90633ad`, on top of `5b9bcc5`), kept
 here as a worked example of wiring Witness into a custom C++/SDL3 engine. Embervale's `main` already contains it, so
-**don't apply it there**. Of its 29 files, 2,088 lines are the vendored single header `engine/witness.h`, identical to
-`adapters/cpp/witness.h`. Nothing changes for players or for the web build.
+**don't apply it there**. Most of its 29 files' lines are the vendored single header `engine/witness.h` (the 0.2.0
+`adapters/cpp/witness.h`). Nothing changes for players or for the web build.
+
+**Since then (October 2026), Embervale adopted Witness 0.3.0 itself:**
+- the header is re-vendored;
+- touch is injected and recorded (`hello.touch = 1`, SDL's synthesized `SDL_TOUCH_MOUSEID` mouse events skipped,
+  FINGER_CANCELED recorded as up);
+- focus loss records releases for everything held, and the game's own pause on focus loss is recorded as
+  `{"type":"action","action":"pause"}`, so replays stay aligned;
+- `"match"` test steps replace the old `statematch`/`shotmatch` calls;
+- MinGW links `ws2_32`;
+- the play config is merged, with people found by a `talk` entity flag (`npc: e.talk`);
+- `state.map` is a 41-row walkability window around the player (`{id, cell: 1, origin, rows, solid: "#"}`);
+- animals are typed (Hen, Rooster, Dog; kind `animal`), and `scene` is set in every in-world mode;
+- recordings set `params.recorded`, so window-dependent fields stay out of the replay end-state check. Witness 0.4.0
+  adds `replay.ignore` for exactly that.
+
+Results: doctor's A/B/A determinism passes, `witness test --repeat 2` is 84/84, and play smoke runs work. One talked
+to a real villager and explored with 0 stuck incidents on the map. Another won against 3 wolves in 3.9 s, avoiding 4 of
+5 windups. Each replayed exactly.
 
 ## Use it
 
@@ -35,9 +53,9 @@ witness call goto town --at 0.5
   `travel`, `waittravel`, `swipe`, `expect ...`) or registered (`givequest`, `gotosite`, `fightquest`, `gate`, and
   the rest of the `embervale --script-help` list). A call that takes time keeps running over the next steps, and
   `state.script.busy` says when it's done. A failed `expect` fails the call.
-  * Witness-only: `statematch`, `shotmatch` and `audiomatch <label>` compare this moment with the first run of the
-    same label in the process. Witness now does the same thing generically with a test step's `"match": "label"`
-    (state, `digest`, screenshot and audio), so new tests can use that instead.
+  * Witness-only (the 0.2.0 patch): `statematch`, `shotmatch` and `audiomatch <label>` compare this moment with the
+    first run of the same label in the process. Embervale's tests now use Witness's generic `"match": "label"` test
+    steps (state, `digest`, screenshot and audio) instead.
 * **snapshot (`state`):**
   * `mode`, `day`, `hour`, `time`, `notice`, plus `dialogue` (speaker, text, options) while a dialogue is open, and
     `menu` while a menu is open
@@ -62,7 +80,8 @@ witness call goto town --at 0.5
 * `dead` from `mode`, the tracked quest as the goal line, gold/level/stamina/region as stats;
 * people as NPCs (`kind == 'person'`).
 
-There's no `state.map`, so walls are learned by bumping into them.
+When this config was written there was no `state.map`, so walls were learned by bumping into them. Embervale has exposed a
+walkability window since its 0.3.0 adoption (see above).
 
 ```
 witness play start --scene village --params "{\"fight\":\"wolf\",\"count\":3}" --goal "survive the wolves"
@@ -84,8 +103,8 @@ the three den wolves before dying and respawning. What it reported about the gam
 
 The harness fixes that came out of this run: a fight leash, falling back to the roll when "block" was asked for,
 dead corpses, and stale remembered NPCs. Without a `state.map`, walking through the village still bumps into buildings
-and sometimes through doors (20 short stuck incidents, all resolved). A walkability map in the snapshot would fix
-that.
+and sometimes through doors (20 short stuck incidents, all resolved). The walkability window Embervale added since fixes
+that: an `explore` on the map had 0 stuck incidents.
 
 ## Record a session (normal play)
 
@@ -118,8 +137,6 @@ build\embervale.exe
 ## Known limits
 
 * World-map tab screenshots still paint tiles on a 5 ms budget, so they can vary from run to run.
-* Touch input and the creator's text entry aren't recorded yet. Witness now has a protocol `touch` event (inject and
-  record); Embervale's side still has to deliver and record it. Alt-tabbing away during a recording can break the
-  replay: the protocol now asks games to record releases for everything held on focus loss.
+* The creator's text entry isn't recorded yet. (Touch and focus-loss releases are, since the 0.3.0 adoption.)
 * The Linux and macOS desktop builds with Witness compile by inspection only. CI's native job builds `rpg_test` and
   `save_test`, never `embervale`. MinGW needs `ws2_32` linked explicitly (the `#pragma comment` is MSVC-only).

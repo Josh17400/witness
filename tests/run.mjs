@@ -149,6 +149,12 @@ try {
   fs.writeFileSync(path.join(tmp, "s.jsonl.state.json"), JSON.stringify(series[series.length - 1][1]));
   r = cli(["replay", path.join(tmp, "s.jsonl")]);
   ok("e2e replay end state match", r.status === 0 && /ended in exactly the recorded end state/.test(r.stdout), r.stdout + r.stderr);
+  // window-dependent fields: left out with --ignore (or witness.json replay.ignore)
+  const end = series[series.length - 1][1];
+  fs.writeFileSync(path.join(tmp, "s.jsonl.state.json"), JSON.stringify({ ...end, view: { w: 1, h: 2 }, player: { ...end.player, pos: [-9, -9] } }));
+  r = cli(["replay", path.join(tmp, "s.jsonl")]);
+  const r2 = cli(["replay", path.join(tmp, "s.jsonl"), "--ignore", "view, player.pos"]);
+  ok("e2e replay --ignore leaves paths out of the end-state check", r.status === 1 && /state\.view/.test(r.stdout) && r2.status === 0 && /ignoring view, player\.pos/.test(r2.stdout), r.stdout + r2.stdout + r2.stderr);
 } catch (e) { ok("e2e replay end state match", false, `${e.message}\n${r.stdout}${r.stderr}`); }
 // ---- witness.json with a single-backslash Windows path
 fs.mkdirSync(path.join(tmp, "cc"));

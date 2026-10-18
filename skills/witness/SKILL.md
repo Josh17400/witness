@@ -109,7 +109,8 @@ records seed, frame times and inputs (F8 marks a moment). Then:
    shows exactly what they saw.
 3. Fix the bug, then add a test that reproduces it.
 4. If the game writes `<file.jsonl>.state.json` at the end of a recording, `witness replay`
-   checks the replay ends in exactly that state; recorded `scene`/`params` go to `reset`.
+   checks the replay ends in exactly that state; recorded `scene`/`params` go to `reset`. Fields that legitimately
+   differ (window-dependent ones) go in witness.json `"replay": {"ignore": ["view", "entities[*].dist"]}` or `--ignore`.
 
 ## 5. Run an agent playtest
 
