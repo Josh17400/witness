@@ -52,7 +52,8 @@ witness call teleport 100 200 --at 1           # run a game command, then print 
 
 * **Scripted input** (`--input` and test `input`): `key@t` taps, `key@a-b` holds,
   `click:x,y@t` (or `@a-b` to hold), `mouse:x,y@t`, `drag:x1,y1->x2,y2@a-b`, `wheel:+3@t`,
-  `action:jump@t` (games with input mapping), `pad:a@t`. Times are seconds. Keys are lowercase
+  `action:jump@t` (games with input mapping), `pad:a@t`, `touch:x,y@t` (finger tap; `@a-b`
+  holds, `touch2:` = second finger), `swipe:x1,y1->x2,y2@a-b`. Times are seconds. Keys are lowercase
   names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `left`, `right`, `up`, `down`, `shift` ….
 * Runs are deterministic: the same command gives the same result, so a failing test is a
   real bug, not flakiness.

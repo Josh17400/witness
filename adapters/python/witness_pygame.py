@@ -51,9 +51,50 @@ def key_name(code):
     return _REVERSE.get(name, name)
 
 
-def event_to_witness(e):
-    """A real pygame event -> a protocol input event (or None), for witness.record_frame()."""
+_FINGER_SLOTS = {}   # (touch_id, finger_id) -> small Witness finger id, while the finger is down
+
+
+def _finger_slot(key, allocate):
+    slot = _FINGER_SLOTS.get(key)
+    if slot is None and allocate:
+        used = set(_FINGER_SLOTS.values())
+        slot = next(i for i in range(len(used) + 1) if i not in used)   # lowest free: 0 = first finger
+        _FINGER_SLOTS[key] = slot
+    return slot
+
+
+def _finger_phases():
     import pygame
+    return {getattr(pygame, "FINGERDOWN", -1): "down", getattr(pygame, "FINGERMOTION", -2): "move",
+            getattr(pygame, "FINGERUP", -3): "up"}
+
+
+def event_to_witness(e, size=None):
+    """A real pygame event -> a protocol input event (or None), for witness.record_frame().
+
+    FINGERDOWN/MOTION/UP become touch events in logical pixels (pygame's 0..1 coordinates times
+    `size`, default the display surface's size) with small finger ids (0 = first finger down).
+    Mouse events pygame synthesizes from a finger (`event.touch`) return None: replay recreates
+    them from the touch through the mouse fallback."""
+    import pygame
+    phase = _finger_phases().get(e.type)
+    if phase is not None:
+        key = (getattr(e, "touch_id", 0), e.finger_id)
+        slot = _finger_slot(key, phase != "up")
+        if slot is None:
+            return None   # lifted a finger that went down before recording started
+        if phase == "up":
+            _FINGER_SLOTS.pop(key, None)
+        if size is None:
+            surf = pygame.display.get_surface()
+            size = surf.get_size() if surf is not None else (1, 1)
+        out = {"type": "touch", "id": slot, "x": e.x * size[0], "y": e.y * size[1], "phase": phase}
+        p = getattr(e, "pressure", None)
+        if p is not None and 0 < p != 1:
+            out["pressure"] = p
+        return out
+    if e.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION) and getattr(e, "touch", False):
+        return None
     if e.type in (pygame.KEYDOWN, pygame.KEYUP):
         return {"type": "key", "key": key_name(e.key), "down": e.type == pygame.KEYDOWN}
     if e.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and e.button in (1, 2, 3):
@@ -106,8 +147,12 @@ class FixedClock:
 class Bridge:
     """Routes Witness input through pygame's own event queue and exposes screenshots/audio.
 
-    * inject(event)   posts KEYDOWN/KEYUP/MOUSE*/TEXTINPUT events with pygame.event.post, so the
-                      game's normal `for e in pygame.event.get()` loop sees them.
+    * inject(event)   posts KEYDOWN/KEYUP/MOUSE*/TEXTINPUT/FINGER* events with pygame.event.post, so
+                      the game's normal `for e in pygame.event.get()` loop sees them. Touch becomes
+                      FINGERDOWN/FINGERMOTION/FINGERUP with pygame's normalized 0..1 x/y/dx/dy (the
+                      pixel coordinates divided by `size`: Bridge(size=...), else the hello size,
+                      else the surface's size); finger 0's mouse fallback arrives as MOUSE* events
+                      with touch=True, like pygame's own mouse-from-touch events.
     * install()       (called by the constructor in witness mode) patches pygame.key.get_pressed,
                       pygame.key.get_mods, pygame.mouse.get_pos/get_pressed and
                       pygame.time.get_ticks so polled input and timers follow simulated time.
@@ -116,15 +161,26 @@ class Bridge:
                       otherwise: sound.play().
     """
 
-    def __init__(self, surface=None, capture=None, install=True):
+    def __init__(self, surface=None, capture=None, install=True, size=None):
         self.surface = surface
         self.capture = capture
+        self.size = tuple(size) if size else None   # logical size touch coordinates are normalized by
         self.codes = set()       # pygame key codes held
         self.buttons = [False, False, False]
         self.mouse = (0, 0)
+        self.fingers = {}        # Witness finger id -> last (x, y) in pixels, while down
         self._orig = {}
         if install and witness.active():
             self.install()
+
+    def logical_size(self):
+        """(w, h) that touch pixel coordinates are divided by for pygame's normalized 0..1 values."""
+        size = self.size or getattr(witness._A, "size", None)
+        if not size:
+            import pygame
+            surf = self.surface or pygame.display.get_surface()
+            size = surf.get_size() if surf is not None else (1, 1)
+        return max(1, size[0]), max(1, size[1])
 
     # ------------------------------------------------------------------ input
     def inject(self, ev):
@@ -144,18 +200,33 @@ class Bridge:
                                                  key=code, mod=self.mods(), unicode=uni if down else "",
                                                  scancode=0))
         elif t == "mouse":
+            touch = bool(ev.get("from_touch"))   # the mouse fallback of finger 0 (pygame's event.touch)
             pos = (int(ev.get("x", self.mouse[0])), int(ev.get("y", self.mouse[1])))
             if pos != self.mouse:
                 rel = (pos[0] - self.mouse[0], pos[1] - self.mouse[1])
                 self.mouse = pos
                 pygame.event.post(pygame.event.Event(pygame.MOUSEMOTION, pos=pos, rel=rel,
-                                                     buttons=tuple(int(b) for b in self.buttons)))
+                                                     buttons=tuple(int(b) for b in self.buttons), touch=touch))
             if "down" in ev:
                 b = int(ev.get("button", 0))
                 if 0 <= b <= 2:
                     self.buttons[b] = bool(ev["down"])
                 kind = pygame.MOUSEBUTTONDOWN if ev["down"] else pygame.MOUSEBUTTONUP
-                pygame.event.post(pygame.event.Event(kind, pos=pos, button=b + 1))
+                pygame.event.post(pygame.event.Event(kind, pos=pos, button=b + 1, touch=touch))
+        elif t == "touch":
+            phase = ev.get("phase", "move")
+            kind = {"down": pygame.FINGERDOWN, "up": pygame.FINGERUP}.get(phase, pygame.FINGERMOTION)
+            fid = int(ev.get("id", 0) or 0)
+            x, y = float(ev.get("x", 0)), float(ev.get("y", 0))
+            px, py = (x, y) if phase == "down" else self.fingers.get(fid, (x, y))
+            if phase == "up":
+                self.fingers.pop(fid, None)
+            else:
+                self.fingers[fid] = (x, y)
+            w, h = self.logical_size()
+            pygame.event.post(pygame.event.Event(kind, touch_id=0, finger_id=fid, x=x / w, y=y / h,
+                                                 dx=(x - px) / w, dy=(y - py) / h,
+                                                 pressure=float(ev.get("pressure", 1.0))))
         elif t == "wheel":
             pygame.event.post(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-int(round(ev.get("dy", 0) / 100)),
                                                  flipped=False))
@@ -201,6 +272,7 @@ class Bridge:
         self.codes.clear()
         self.buttons = [False, False, False]
         self.mouse = (0, 0)
+        self.fingers = {}
         pygame.event.clear()
 
     # ------------------------------------------------------------------ screenshots

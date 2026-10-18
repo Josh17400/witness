@@ -1,0 +1,6 @@
+{"replay": 1, "name": "Mock Coins", "seed": 1, "fps": 60}
+{"f": 0, "dt": 0.016667, "in": [{"type": "touch", "id": 0, "x": 40, "y": 90, "phase": "down"}]}
+{"f": 10, "dt": 0.016667, "in": [{"type": "touch", "id": 0, "x": 70, "y": 90, "phase": "move"}]}
+{"f": 20, "dt": 0.016667, "in": [{"type": "touch", "id": 0, "x": 100, "y": 60, "phase": "move", "pressure": 0.5}, {"type": "touch", "id": 1, "x": 5, "y": 5, "phase": "down"}]}
+{"f": 30, "dt": 0.016667, "in": [{"type": "touch", "id": 0, "x": 100, "y": 60, "phase": "up"}, {"type": "touch", "id": 1, "x": 5, "y": 5, "phase": "up"}]}
+{"f": 40, "dt": 0.016667}

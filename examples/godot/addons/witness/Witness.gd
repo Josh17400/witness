@@ -45,6 +45,7 @@ var _due: Array = []           # events applied this frame
 var _held_keys := {}           # Key -> true
 var _held_buttons := {}        # MouseButton -> true
 var _held_actions := {}        # action -> true
+var _touches := {}             # finger index -> Vector2 (injected fingers that are down)
 var _mouse := Vector2.ZERO
 var _logs: Array = []
 var _log_mutex := Mutex.new()
@@ -91,6 +92,8 @@ const _AXES := {
 	"righty": JOY_AXIS_RIGHT_Y, "lefttrigger": JOY_AXIS_TRIGGER_LEFT,
 	"righttrigger": JOY_AXIS_TRIGGER_RIGHT,
 }
+## InputEvent.DEVICE_ID_EMULATION: mouse events Godot synthesizes from touch (emulate_mouse_from_touch).
+const _DEVICE_EMULATION := -1
 
 
 func _enter_tree() -> void:
@@ -288,12 +291,16 @@ func _hello() -> Dictionary:
 		caps.append("screenshot")
 	var size := get_viewport().get_visible_rect().size
 	var info := Engine.get_version_info()
-	return {
+	var hello := {
 		"protocol": PROTOCOL,
 		"name": str(ProjectSettings.get_setting("application/config/name", "Godot game")),
 		"engine": "Godot %s" % info.string, "language": "gdscript", "fps": _fps,
 		"size": [int(size.x), int(size.y)], "capabilities": caps, "calls": _call_list(),
 	}
+	# input_devices/pointing/emulate_mouse_from_touch off: the game handles touch itself (no mouse fallback)
+	if not Input.is_emulating_mouse_from_touch():
+		hello["touch"] = true
+	return hello
 
 
 # ------------------------------------------------------------------------------ main loop
@@ -526,9 +533,16 @@ func _release_all() -> void:
 		Input.parse_input_event(b)
 	for action in _held_actions.keys():
 		Input.action_release(action)
+	for index in _touches.keys():   # lift every finger (also ends Godot's touch-to-mouse emulation)
+		var t := InputEventScreenTouch.new()
+		t.index = index
+		t.position = _touches[index]
+		t.pressed = false
+		Input.parse_input_event(t)
 	_held_keys = {}
 	_held_buttons = {}
 	_held_actions = {}
+	_touches = {}
 	Input.flush_buffered_events()
 
 
@@ -588,6 +602,35 @@ func _inject(e: Dictionary) -> void:
 					_held_buttons.erase(b.button_index)
 				b.button_mask = _button_mask()
 				Input.parse_input_event(b)
+		"touch":
+			# Godot's touch path; with emulate_mouse_from_touch (default on) Godot itself also sends
+			# the first finger as mouse events (device -1): that is the protocol's mouse fallback.
+			var index := int(e.get("id", 0))
+			var tpos := Vector2(float(e.get("x", 0.0)), float(e.get("y", 0.0)))
+			var phase := str(e.get("phase", "move"))
+			if phase == "down" or phase == "up":
+				var t := InputEventScreenTouch.new()
+				t.index = index
+				t.position = tpos
+				t.pressed = phase == "down"
+				if t.pressed:
+					_touches[index] = tpos
+				else:
+					_touches.erase(index)
+				Input.parse_input_event(t)
+			else:
+				var prev: Vector2 = _touches.get(index, tpos)
+				var d := InputEventScreenDrag.new()
+				d.index = index
+				d.position = tpos
+				d.relative = tpos - prev
+				d.velocity = d.relative * _fps
+				d.set("pressure", float(e.get("pressure", 1.0)))   # set(): a no-op on versions without it
+				if _touches.has(index):
+					_touches[index] = tpos
+				Input.parse_input_event(d)
+			if index == 0 and Input.is_emulating_mouse_from_touch():
+				_mouse = tpos   # where Godot's emulated mouse now is
 		"wheel":
 			var dy := float(e.get("dy", 0))
 			for pressed in [true, false]:
@@ -827,6 +870,17 @@ func _on_window_input(event: InputEvent) -> void:
 				mark("F8")
 			return
 		_rec_events.append({"type": "key", "key": OS.get_keycode_string(code).to_lower(), "down": event.pressed})
+	elif (event is InputEventMouseButton or event is InputEventMouseMotion) and event.device == _DEVICE_EMULATION:
+		pass   # synthesized from touch: replay recreates it from the recorded touch, so don't record it twice
+	elif event is InputEventScreenTouch:
+		_rec_events.append({"type": "touch", "id": event.index, "x": event.position.x, "y": event.position.y,
+			"phase": "down" if event.pressed else "up"})
+	elif event is InputEventScreenDrag:
+		var drag := {"type": "touch", "id": event.index, "x": event.position.x, "y": event.position.y, "phase": "move"}
+		var pressure = event.get("pressure")
+		if pressure != null and float(pressure) > 0.0 and absf(float(pressure) - 1.0) > 1e-6:
+			drag["pressure"] = float(pressure)
+		_rec_events.append(drag)
 	elif event is InputEventMouseButton:
 		var b := {MOUSE_BUTTON_LEFT: 0, MOUSE_BUTTON_MIDDLE: 1, MOUSE_BUTTON_RIGHT: 2}
 		if b.has(event.button_index):

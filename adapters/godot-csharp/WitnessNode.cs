@@ -10,6 +10,9 @@
 // (one physics tick + one process call each, dt via Engine.TimeScale), injects input through
 // Input.ParseInputEvent at the start of each frame, reloads the scene on `reset` (seeding GD.Seed),
 // captures the viewport for screenshots and forwards engine errors to the CLI.
+// Touch: "touch" events become InputEventScreenTouch / InputEventScreenDrag. The mouse fallback is Godot's
+// own (Project Settings > Input Devices > Pointing > Emulate Mouse From Touch, on by default); turning it
+// off is the opt-out, and the hello then says "touch": true.
 // When inactive it disables its own processing: zero per-frame cost.
 using System;
 using System.Collections.Generic;
@@ -51,6 +54,7 @@ public partial class WitnessNode : Node
     private bool _started;
     private Vector2 _mouse;
     private MouseButtonMask _buttons;
+    private readonly Dictionary<int, Vector2> _fingers = new Dictionary<int, Vector2>();   // finger id -> last position
     private readonly List<WitnessEvent> _recordEvents = new List<WitnessEvent>();
 
     /// <summary>Registers a custom command for `witness call name args`. Safe to call again after a scene reload.</summary>
@@ -138,7 +142,9 @@ public partial class WitnessNode : Node
         Serve();
     }
 
-    // Normal play with WITNESS_RECORD: collect this frame's input for the replay.
+    // Normal play with WITNESS_RECORD: collect this frame's input for the replay. Emulated events (Device -1,
+    // InputEvent.DeviceIdEmulation: the mouse Godot makes from touch, or touch made from the mouse) are skipped;
+    // on replay Godot emulates them again from the recorded real events.
     public override void _Input(InputEvent e)
     {
         var key = e as InputEventKey;
@@ -146,6 +152,19 @@ public partial class WitnessNode : Node
         {
             if (key.Pressed && key.Keycode == Key.F8) { Witness.Mark("F8"); return; }
             _recordEvents.Add(WitnessEvent.KeyEvent(WitnessKeys.Normalize(key.Keycode.ToString()), key.Pressed));
+            return;
+        }
+        if (e.Device == -1) return;
+        var st = e as InputEventScreenTouch;
+        if (st != null)
+        {
+            _recordEvents.Add(WitnessEvent.TouchEvent(st.Index, st.Position.X, st.Position.Y, st.Pressed ? WitnessTouchPhase.Down : WitnessTouchPhase.Up));
+            return;
+        }
+        var sd = e as InputEventScreenDrag;
+        if (sd != null)
+        {
+            _recordEvents.Add(WitnessEvent.TouchEvent(sd.Index, sd.Position.X, sd.Position.Y, WitnessTouchPhase.Move, sd.Pressure > 0 ? sd.Pressure : 1));
             return;
         }
         var mb = e as InputEventMouseButton;
@@ -177,6 +196,8 @@ public partial class WitnessNode : Node
     {
         if (string.IsNullOrEmpty(Hello.Engine) || Hello.Engine == "custom") Hello.Engine = "Godot " + (string)Engine.GetVersionInfo()["string"] + " (.NET)";
         Hello.Fps = Engine.PhysicsTicksPerSecond;
+        // Godot makes the mouse from touch itself; with that off the game reads touch natively (no fallback)
+        Hello.Touch = !(bool)ProjectSettings.GetSetting("input_devices/pointing/emulate_mouse_from_touch", true);
         if (Hello.Width <= 0)
         {
             Hello.Width = (int)ProjectSettings.GetSetting("display/window/size/viewport_width", 1152);
@@ -295,6 +316,7 @@ public partial class WitnessNode : Node
             }
             case "mouse":
             {
+                if (e.FromTouch) return;   // Godot emulates the mouse from the touch itself (emulate_mouse_from_touch)
                 var pos = new Vector2((float)e.X, (float)e.Y);
                 if (e.Down.HasValue)
                 {
@@ -309,6 +331,25 @@ public partial class WitnessNode : Node
                     Input.ParseInputEvent(new InputEventMouseMotion { Position = pos, GlobalPosition = pos, Relative = pos - _mouse, ButtonMask = _buttons });
                 }
                 _mouse = pos;
+                break;
+            }
+            case "touch":
+            {
+                // Same coordinates as the mouse. Godot turns the first finger into mouse events when
+                // emulate_mouse_from_touch is on (emulated events have Device == -1).
+                var pos = new Vector2((float)e.X, (float)e.Y);
+                Vector2 last;
+                bool known = _fingers.TryGetValue(e.Id, out last);
+                if (e.Phase != WitnessTouchPhase.Down && !known) return;   // a move or lift without a down
+                if (e.Phase == WitnessTouchPhase.Move || (e.Phase == WitnessTouchPhase.Up && pos != last))
+                {
+                    var rel = pos - last;
+                    Input.ParseInputEvent(new InputEventScreenDrag { Index = e.Id, Position = pos, Relative = rel, Velocity = rel * _fps, Pressure = (float)e.Pressure });
+                }
+                if (e.Phase != WitnessTouchPhase.Move)
+                    Input.ParseInputEvent(new InputEventScreenTouch { Index = e.Id, Position = pos, Pressed = e.Phase == WitnessTouchPhase.Down });
+                if (e.Phase == WitnessTouchPhase.Up) _fingers.Remove(e.Id);
+                else _fingers[e.Id] = pos;
                 break;
             }
             case "wheel":
@@ -346,11 +387,13 @@ public partial class WitnessNode : Node
         }
     }
 
-    // A reset must not leave keys held from the previous run.
+    // A reset must not leave keys, buttons or fingers held from the previous run.
     private void ReleaseHeldInput()
     {
         foreach (var key in HeldKeys) Input.ParseInputEvent(new InputEventKey { Keycode = key, PhysicalKeycode = key, Pressed = false });
         HeldKeys.Clear();
+        foreach (var kv in _fingers) Input.ParseInputEvent(new InputEventScreenTouch { Index = kv.Key, Position = kv.Value, Pressed = false });
+        _fingers.Clear();
         if (_buttons != 0)
         {
             foreach (var b in new[] { MouseButton.Left, MouseButton.Right, MouseButton.Middle })

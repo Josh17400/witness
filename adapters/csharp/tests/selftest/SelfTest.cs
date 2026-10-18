@@ -97,6 +97,45 @@ internal static class SelfTest
         var pad = WitnessEvent.FromJson((Dictionary<string, object>)WitnessJson.Parse("{\"frame\":1,\"type\":\"pad\",\"button\":\"a\",\"down\":true}"));
         Eq("a", pad.PadButton, "pad button name");
 
+        // Touch events
+        var touch = WitnessEvent.FromJson((Dictionary<string, object>)WitnessJson.Parse("{\"frame\":5,\"type\":\"touch\",\"id\":1,\"x\":10.5,\"y\":20,\"phase\":\"down\",\"pressure\":0.5}"));
+        Eq(5, touch.Frame, "touch frame");
+        Eq(1, touch.Id, "touch id");
+        Eq(WitnessTouchPhase.Down, touch.Phase, "touch phase down");
+        Eq(0.5, touch.Pressure, "touch pressure");
+        Eq(true, touch.IsDown, "touch down sets Down");
+        Eq("{\"type\":\"touch\",\"id\":1,\"x\":10.5,\"y\":20,\"phase\":\"down\",\"pressure\":0.5}", WitnessJson.Write(touch.ToJson(false)), "touch replay shape");
+        var touchMove = WitnessEvent.FromJson((Dictionary<string, object>)WitnessJson.Parse("{\"frame\":6,\"type\":\"touch\",\"id\":0,\"x\":1,\"y\":2}"));
+        Eq(WitnessTouchPhase.Move, touchMove.Phase, "touch without phase is a move");
+        Eq(1.0, touchMove.Pressure, "touch pressure defaults to 1");
+        Eq(null, touchMove.Down, "touch move has no down");
+        Eq("{\"type\":\"touch\",\"id\":0,\"x\":1,\"y\":2,\"phase\":\"move\"}", WitnessJson.Write(touchMove.ToJson(false)), "touch move shape (no pressure, no down)");
+        Eq("{\"type\":\"touch\",\"id\":2,\"x\":3,\"y\":4,\"phase\":\"up\"}", WitnessJson.Write(WitnessEvent.TouchEvent(2, 3, 4, WitnessTouchPhase.Up).ToJson(false)), "TouchEvent factory");
+
+        // Mouse fallback: finger 0 also arrives as the mouse, right after its touch; other fingers don't
+        Witness.ResetClock(1);
+        Witness.QueueInput((List<object>)WitnessJson.Parse("[{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":40,\"y\":90,\"phase\":\"down\"}," +
+            "{\"frame\":0,\"type\":\"touch\",\"id\":1,\"x\":7,\"y\":8,\"phase\":\"down\"}," +
+            "{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":50,\"y\":91,\"phase\":\"move\"}," +
+            "{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":50,\"y\":91,\"phase\":\"up\"}]"));
+        var due = Witness.BeginFrame();
+        Eq(7, due.Count, "4 touches + 3 fallback mouse events");
+        Eq("touch", due[0].Type, "touch first");
+        Eq("mouse", due[1].Type, "then its mouse event");
+        Eq(true, due[1].FromTouch, "fallback mouse is flagged FromTouch");
+        Eq(true, due[1].IsDown, "touch down -> button down");
+        Eq(0, due[1].Button, "fallback uses button 0");
+        Eq(40.0, due[1].X, "fallback mouse x");
+        Eq(1, due[2].Id, "finger 1 makes no mouse event");
+        Eq("touch", due[3].Type, "finger 0 move");
+        Eq(null, due[4].Down, "touch move -> mouse move");
+        Eq(50.0, due[4].X, "mouse move x");
+        Eq(false, due[6].Down, "touch up -> button up");
+        Eq("{\"type\":\"mouse\",\"x\":50,\"y\":91,\"button\":0,\"down\":false}", WitnessJson.Write(due[6].ToJson(false)), "fallback mouse shape");
+        Eq(7, Witness.FrameEvents.Count, "pull-style FrameEvents include the fallback");
+        Witness.ResetClock(1);
+        Eq(0, Witness.FrameEvents.Count, "reset clears frame events");
+
         // Images
         var img = WitnessImage.FromRgba(2, 2, new byte[] { 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4 }, bottomUp: true);
         Eq((byte)3, img.Rgba[0], "bottom-up flip");
@@ -119,6 +158,17 @@ internal static class SelfTest
                 if (f == 0) evs.Add(WitnessEvent.KeyEvent("right", true));
                 if (f == 30) evs.Add(WitnessEvent.KeyEvent("right", false));
                 if (f == 20) Witness.Mark("F8");
+                if (f == 40)
+                {
+                    // a tap after the walk: touches are recorded, mouse events synthesized from them are not
+                    Witness.RecordTouch(0, 5, 6, WitnessTouchPhase.Down);
+                    Witness.RecordEvent(new WitnessEvent { Type = "mouse", X = 5, Y = 6, Button = 0, Down = true, FromTouch = true });
+                }
+                if (f == 41)
+                {
+                    evs.Add(WitnessEvent.TouchEvent(0, 5, 6, WitnessTouchPhase.Up));
+                    evs.Add(new WitnessEvent { Type = "mouse", X = 5, Y = 6, Button = 0, Down = false, FromTouch = true });
+                }
                 Witness.RecordFrame(1.0 / 60, evs);
             }
             Witness.StopRecording();
@@ -129,6 +179,8 @@ internal static class SelfTest
             Eq((long)Witness.Seed, head["seed"], "replay seed");
             Eq("F8", ((Dictionary<string, object>)WitnessJson.Parse(lines[21]))["mark"], "mark on frame 20");
             Eq("{\"f\":0,\"dt\":0.016666666666666666,\"in\":[{\"type\":\"key\",\"key\":\"right\",\"down\":true}]}", lines[1], "frame line shape");
+            Eq("{\"f\":40,\"dt\":0.016666666666666666,\"in\":[{\"type\":\"touch\",\"id\":0,\"x\":5,\"y\":6,\"phase\":\"down\"}]}", lines[41], "RecordTouch line (FromTouch mouse skipped)");
+            Eq("{\"f\":41,\"dt\":0.016666666666666666,\"in\":[{\"type\":\"touch\",\"id\":0,\"x\":5,\"y\":6,\"phase\":\"up\"}]}", lines[42], "touch in RecordFrame events (FromTouch mouse skipped)");
         }
         else
         {

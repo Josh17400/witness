@@ -9,14 +9,19 @@ Witness for LÖVE 11.x: builds the whole adapter from the game's normal love.* c
       snapshot = function() return {...} end,        -- JSON-able state; expose .entities = {{id,type,pos}}
       calls = { teleport = function(x, y) ... end },
       audio = mixer,                                 -- optional: wl.newMixer(...) (see GUIDE.md)
+      touch = false,                                 -- true: the game handles love.touch* itself, so
+                                                     -- finger 0 doesn't also fire love.mouse* (istouch)
     }
 
 * Witness mode (WITNESS_ADDR set or --witness): replaces love.run with a loop that only advances
   on `step`, at a fixed dt. Input goes through love.handlers (so love.keypressed & co fire as
-  usual) and love.keyboard.isDown / love.mouse.* / love.timer.* report the injected, simulated
-  state. Screenshots render love.draw and capture the backbuffer.
+  usual) and love.keyboard.isDown / love.mouse.* / love.touch.* / love.timer.* report the
+  injected, simulated state. Touch fires love.touchpressed/moved/released (integer ids, 0 = first
+  finger) and, for finger 0, love.mousepressed/moved/released with istouch = true like a phone.
+  Screenshots render love.draw and capture the backbuffer.
 * Recording (WITNESS_RECORD=<file.jsonl>, normal play): wraps the default loop to write a replay
-  (dt + input per frame, F8 = marker) and seeds love.math/math.random with the replay seed.
+  (dt + input per frame, F8 = marker; touches as small integer finger ids, mouse events with
+  istouch skipped) and seeds love.math/math.random with the replay seed.
 * Otherwise setup() does nothing at all.
 --]]
 
@@ -138,13 +143,35 @@ end
 
 -------------------------------------------------------------------------------- witness mode
 
-local W = { keys = {}, scancodes = {}, buttons = {}, mx = 0, my = 0, dt = 1 / 60 }
+local W = { keys = {}, scancodes = {}, buttons = {}, touches = {}, mx = 0, my = 0, dt = 1 / 60 }
+
+-- love.handlers[name](...) when LÖVE has that handler, else the love.<name> callback directly.
+local function fire(name, ...)
+  local f = love.handlers and love.handlers[name]
+  if f then return f(...) end
+  if love[name] then return love[name](...) end
+end
 
 -- Injected input, delivered through love.handlers exactly like the default love.run does.
 local function inject(ev, user_input)
   local h = love.handlers
   local t = ev.type
-  if t == "key" then
+  if t == "touch" then
+    -- integer ids (0 = first finger); LÖVE games treat touch ids as opaque keys
+    local id, x, y, p = ev.id or 0, ev.x or 0, ev.y or 0, ev.pressure or 1
+    local prev = W.touches[id]
+    if ev.phase == "down" then
+      W.touches[id] = { x = x, y = y, pressure = p }
+      fire("touchpressed", id, x, y, 0, 0, p)
+    elseif ev.phase == "up" then
+      W.touches[id] = nil
+      fire("touchreleased", id, x, y, prev and x - prev.x or 0, prev and y - prev.y or 0, p)
+    else
+      W.touches[id] = { x = x, y = y, pressure = p }
+      fire("touchmoved", id, x, y, prev and x - prev.x or 0, prev and y - prev.y or 0, p)
+    end
+    -- finger 0's mouse fallback arrives next as a "mouse" event with from_touch = true (witness.lua)
+  elseif t == "key" then
     local key = wl.love_key(ev.key)
     if ev.down then
       local repeated = W.keys[key] == true
@@ -156,15 +183,16 @@ local function inject(ev, user_input)
     end
   elseif t == "mouse" then
     local x, y = ev.x or W.mx, ev.y or W.my
+    local istouch = ev.from_touch == true -- the finger-0 fallback: LÖVE's istouch argument
     if x ~= W.mx or y ~= W.my then
       local dx, dy = x - W.mx, y - W.my
       W.mx, W.my = x, y
-      h.mousemoved(x, y, dx, dy, false)
+      h.mousemoved(x, y, dx, dy, istouch)
     end
     if ev.down ~= nil then
       local b = BUTTON_TO_LOVE[ev.button or 0] or 1
-      if ev.down then W.buttons[b] = true; h.mousepressed(x, y, b, false, 1)
-      else W.buttons[b] = nil; h.mousereleased(x, y, b, false, 1) end
+      if ev.down then W.buttons[b] = true; h.mousepressed(x, y, b, istouch, 1)
+      else W.buttons[b] = nil; h.mousereleased(x, y, b, istouch, 1) end
     end
   elseif t == "wheel" then
     h.wheelmoved(0, -(ev.dy or 0) / 100) -- Witness: + = scroll down; LÖVE: + = up
@@ -194,6 +222,21 @@ local function patch_love()
       for i = 1, select("#", ...) do if W.buttons[select(i, ...)] then return true end end
       return false
     end
+  end
+  if love.touch then
+    love.touch.getTouches = function()
+      local ids = {}
+      for id in pairs(W.touches) do ids[#ids + 1] = id end
+      table.sort(ids) -- stable order: determinism
+      return ids
+    end
+    local function active(id)
+      local t = W.touches[id]
+      if not t then error("Invalid active touch ID: " .. tostring(id), 3) end
+      return t
+    end
+    love.touch.getPosition = function(id) local t = active(id); return t.x, t.y end
+    love.touch.getPressure = function(id) return active(id).pressure end
   end
   if love.timer then
     love.timer.getDelta = function() return W.dt end
@@ -259,8 +302,9 @@ local function run_witness(opts)
     call_args = opts.call_args, call_help = opts.call_help, env = opts.env, perf = opts.perf,
     snapshot = opts.snapshot,
     audio = opts.audio and (opts.audio.capture or opts.audio) or nil,
+    touch = opts.touch,
     reset = function(seed, scene, params)
-      W.keys, W.scancodes, W.buttons, W.mx, W.my = {}, {}, {}, 0, 0
+      W.keys, W.scancodes, W.buttons, W.touches, W.mx, W.my = {}, {}, {}, {}, 0, 0
       seed_rng(seed)
       if user_reset then user_reset(seed, scene, params)
       elseif love.load then love.load({}, {}) end
@@ -303,12 +347,34 @@ end
 
 -------------------------------------------------------------------------------- recording
 
-local function to_event(name, a, b, c)
+-- LÖVE touch ids (light userdata) -> small integer finger ids: 0 = first finger down, and a
+-- slot is reused once its finger lifts (what Witness touch events and replays use).
+local touch_slots = {}
+local function touch_slot(id)
+  local s = touch_slots[id]
+  if s == nil then
+    local used = {}
+    for _, v in pairs(touch_slots) do used[v] = true end
+    s = 0
+    while used[s] do s = s + 1 end
+    touch_slots[id] = s
+  end
+  return s
+end
+local TOUCH_PHASE = { touchpressed = "down", touchmoved = "move", touchreleased = "up" }
+
+local function to_event(name, a, b, c, d, e, f)
   if name == "keypressed" or name == "keyreleased" then
     return { type = "key", key = wl.witness_key(a), down = name == "keypressed" }
+  elseif TOUCH_PHASE[name] then -- touch*(id, x, y, dx, dy, pressure)
+    local ev = { type = "touch", id = touch_slot(a), x = b, y = c, phase = TOUCH_PHASE[name], pressure = f }
+    if name == "touchreleased" then touch_slots[a] = nil end
+    return ev
   elseif name == "mousepressed" or name == "mousereleased" then
+    if d then return nil end -- istouch: synthesized from a finger; replay recreates it from the touch
     return { type = "mouse", x = a, y = b, button = BUTTON_FROM_LOVE[c] or 0, down = name == "mousepressed" }
   elseif name == "mousemoved" then
+    if e then return nil end -- istouch
     return { type = "mouse", x = a, y = b }
   elseif name == "wheelmoved" then
     return { type = "wheel", dy = -b * 100 }
@@ -336,7 +402,7 @@ function wl.record(opts)
           end
           if name == "keypressed" and a == "f8" then witness.mark("F8")
           elseif name ~= "keypressed" or not c then -- skip OS key repeats
-            local ev = to_event(name, a, b, c)
+            local ev = to_event(name, a, b, c, d, e, f)
             if ev and not (ev.type == "key" and ev.key == "f8") then events[#events + 1] = ev end
           end
           love.handlers[name](a, b, c, d, e, f)

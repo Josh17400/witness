@@ -96,7 +96,7 @@ started by the game must finish before `update` returns.
 ## 4. Input through the game's normal path
 
 `on_input(event)` gets protocol events (`{"type": "key", "key": "right", "down": True}`, `mouse`,
-`wheel`, `text`, `action`, `pad`, `axis`; see docs/PROTOCOL.md §4) at the start of their frame,
+`wheel`, `text`, `action`, `pad`, `axis`, `touch`; see docs/PROTOCOL.md §4) at the start of their frame,
 before `update(dt)`. Feed them into whatever the game already uses:
 
 * Own key set: `self.keys.add(e["key"])` / `discard` (coins.py does this).
@@ -107,6 +107,17 @@ before `update(dt)`. Feed them into whatever the game already uses:
 No handler? Poll `witness.is_down("space")` or read `witness.input_events()` inside `update`.
 Mouse coordinates are logical game pixels with the origin at the top left. If the window is
 scaled, the game must undo the scale when it records input.
+
+**Touch.** `{"type": "touch", "id": 0, "x": 160.0, "y": 90.0, "phase": "down", "pressure": 1.0}`:
+`id` is the finger (0 = first finger down), `x`/`y` are the same logical pixels as the mouse,
+`phase` is `"down"` / `"move"` / `"up"` (fields are defaulted for you). By default finger 0 is also
+delivered as the matching mouse event right after it (`down` → button 0 down, `move` → move, `up` →
+button 0 up), marked `"from_touch": True`, so touch tests (`touch:160,90@1`,
+`swipe:40,90->200,90@1-1.5`) drive mouse-only games. A game with its own touch handling passes
+`witness.run(..., touch=True)`: it then gets only the touch events, and the hello says
+`"touch": true`. With `witness_pygame.Bridge`, touch arrives as real `FINGERDOWN` / `FINGERMOTION` /
+`FINGERUP` events (normalized 0..1 `x`/`y`/`dx`/`dy`, `finger_id` = the Witness id) and the fallback as
+`MOUSE*` events with `touch=True`, exactly like pygame on a phone.
 
 ## 5. RNG seeding
 
@@ -203,7 +214,11 @@ witness.run(..., on_input=bridge.inject, update=frame, screenshot=bridge.screens
   did `from pygame.key import get_pressed` keeps the original, so change it to
   `pygame.key.get_pressed()`.
 * Key names map through `wp.key_code(name)` / `wp.key_name(code)`. `wp.event_to_witness(e)`
-  converts real events for recording.
+  converts real events for recording: `FINGER*` become touch events in logical pixels (pass
+  `size=` if the display surface isn't the logical size) with small ids, and mouse events with
+  `e.touch` set return `None` (replay recreates them from the touch).
+* Touch normalization: `wp.Bridge(..., size=(W, H))` sets the size injected touch pixels are divided
+  by; by default the hello `size`, else the surface's size.
 * `wp.FixedClock(60)` is a drop-in for `pygame.time.Clock` whose `tick()` never sleeps. Use it in
   witness mode if `clock.tick()` is buried deep in the code.
 * `pygame.mixer` output can't be captured, hence `bridge.play`. If the game calls
@@ -254,6 +269,13 @@ while running:
 
 All of these are no-ops unless `witness.recording()` is true. The replay applies each frame's
 events **before** that frame's update, so record them in the same frame you applied them.
+From an event pump you can also queue events as they arrive with `witness.record_event(e)` /
+`witness.record_touch(id, x, y, phase)`; the next `record_frame` writes them first.
+
+Touch: record the fingers (logical pixels, ids from 0, stable until `"up"`) and never the mouse
+events the platform synthesizes from them (pygame: skip events with `e.touch`; `wp.event_to_witness`
+does both). On replay the mouse fallback recreates those mouse events, so recording both would
+deliver them twice. Mouse events marked `"from_touch"` are dropped by `record_frame` for you.
 `coins.py --demo` is a scripted example that CI replays and compares to 4 decimal places.
 
 ## 12. Determinism pitfalls (Python-specific)

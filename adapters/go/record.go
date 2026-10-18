@@ -70,9 +70,10 @@ func (r *Recorder) Seed() int64 {
 	return r.seed
 }
 
-// Input queues an event for the current frame. A key press of F8 becomes a mark instead.
+// Input queues an event for the current frame. A key press of F8 becomes a mark instead, and a
+// mouse event made from finger 0 (FromTouch) is skipped: the replay's mouse fallback recreates it.
 func (r *Recorder) Input(e Event) {
-	if r == nil {
+	if r == nil || (e.Type == "mouse" && e.FromTouch) {
 		return
 	}
 	if e.Type == "key" && e.Key == "f8" {
@@ -92,6 +93,14 @@ func (r *Recorder) Key(key string, down bool) {
 // Mouse queues a mouse event; button < 0 means a move.
 func (r *Recorder) Mouse(x, y float64, button int, down bool) {
 	r.Input(Event{Type: "mouse", X: x, Y: y, HasPos: true, Button: button, Down: down, HasDown: button >= 0})
+}
+
+// Touch queues a finger event: id 0 = the first finger down (keep it until TouchUp), x/y in
+// logical pixels (convert from the engine's normalized 0..1 coordinates). Don't also record the
+// mouse events the platform synthesizes from touch: replay recreates them from the touch.
+func (r *Recorder) Touch(id int, x, y float64, phase TouchPhase) {
+	r.Input(Event{Type: "touch", ID: id, X: x, Y: y, HasPos: true, Phase: phase, Pressure: 1, Button: -1,
+		Down: phase == TouchDown, HasDown: phase != TouchMove})
 }
 
 // Mark flags the current frame (shown by witness replay / trace).

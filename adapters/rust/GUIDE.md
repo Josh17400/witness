@@ -107,17 +107,29 @@ fn input(&mut self, e: &witness::Input) {
     use witness::Input::*;
     match e {
         Key { key, down } => self.input.on_key(key_from_witness(key), *down),
-        Mouse { pos, button, down } => {
+        Mouse { pos, button, down, .. } => {
             if let Some((x, y)) = pos { self.input.on_cursor(*x as f32, *y as f32); }
             if let (Some(b), Some(d)) = (button, down) { self.input.on_button(*b, *d); }
         }
         Wheel { dy, .. } => self.input.on_wheel(*dy as f32),
         Text(t) => self.input.on_text(t),
         Action { action, down } => self.input.on_action(action, *down),
+        Touch { id, x, y, phase, pressure } => self.input.on_finger(*id, *x as f32, *y as f32, *phase, *pressure as f32),
         _ => {}
     }
 }
 ```
+
+**Touch.** `Input::Touch { id, x, y, phase, pressure }` is one finger: `id` 0 is the first finger
+down (it keeps its id until `TouchPhase::Up`), `x`/`y` are logical pixels like the mouse,
+`phase` is `TouchPhase::Down` / `Move` / `Up`, `pressure` is 0..1 (1 when not given). By default
+finger 0 is **also** delivered as `Input::Mouse` right after each touch event (down → button 0
+down, move → move, up → button 0 up) with `from_touch: true`, so touch tests
+(`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games too. A game with real
+touch handling (on-screen sticks, gestures) calls `Hello::touch()`: it then gets only the
+touch events (the hello says `"touch": true`). If the engine wants normalized 0..1 touch
+coordinates (winit gives window pixels, SDL normalized), convert from the logical size.
+Polling games can read `s.touch(id)` (`Some((x, y))` while the finger is down).
 
 * Key names are lowercase Witness names (`a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `left`, `f1` ...).
   `witness::normalize_key(&format!("{:?}", key))` maps most engine names (winit
@@ -217,6 +229,14 @@ while acc >= FIXED_DT { world.update(FIXED_DT, &input); if let Some(r) = &mut re
 One `frame(dt)` per **simulation step**, with the dt that step used. Queued events go into the
 next frame line. Lines are flushed per frame, so crashes keep the replay. Play it back with
 `witness replay last`.
+
+Touch (phones, tablets, touchscreens): record each finger with
+`r.touch(id, x, y, witness::TouchPhase::Down | Move | Up)` in logical pixels, with small ids
+(0 = first finger down; map winit's `Touch::id` / SDL finger ids to slots and reuse a slot
+after its finger lifts). Don't also record the mouse events the platform synthesizes from
+touch (SDL `which == SDL_TOUCH_MOUSEID`, winit/browser emulated mouse): on replay the mouse
+fallback recreates them, so recording both would deliver them twice. `r.input(&e)` skips
+`Input::Mouse { from_touch: true, .. }` for you.
 
 ## 10. Determinism checklist (Rust-specific items first)
 
@@ -325,9 +345,10 @@ witness shot --at 1       # look at the PNG
 | `witness::run(&Hello, &mut impl Game)` | connect + serve until quit |
 | `Connection::connect(&Hello)` / `.poll(&mut game, timeout)` | pumped variant |
 | `trait Game { reset, input, step, snapshot, screenshot, call, eval, perf }` | the hooks |
-| `Step { dt, frame, time, events }`, `.key_down()`, `.mouse()`, `.audio_frames()`, `.write_audio()` | per-step context |
-| `Hello::new(name).fps().size().call().keys().screenshot().audio().eval().perf()` | the hello |
+| `Step { dt, frame, time, events }`, `.key_down()`, `.mouse()`, `.touch(id)`, `.audio_frames()`, `.write_audio()` | per-step context |
+| `Input::{Key, Mouse, Wheel, Text, Action, Pad, Axis, Other, Touch}`, `TouchPhase`, `Input::is_from_touch()` | input events |
+| `Hello::new(name).fps().size().call().keys().screenshot().audio().eval().perf().touch()` | the hello (`touch()`: no mouse fallback for finger 0) |
 | `Value`, `obj!`, `arr!` | JSON |
 | `witness::info/warn/error/log` | logs (errors fail tests) |
-| `Recorder::from_env(name, fps)`, `.seed()`, `.key()`, `.mouse()`, `.input()`, `.mark()`, `.frame(dt)` | replays |
+| `Recorder::from_env(name, fps)`, `.seed()`, `.key()`, `.mouse()`, `.touch()`, `.input()`, `.mark()`, `.frame(dt)` | replays |
 | `witness::seed()`, `witness::normalize_key()`, `witness::base64()` | helpers |

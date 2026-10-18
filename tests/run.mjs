@@ -38,6 +38,22 @@ ok("input text", ev.some((e) => e.type === "text" && e.text === "hi" && e.frame 
 ok("input digits after commas", ev.some((e) => e.key === "1") && ev.some((e) => e.key === "2"));
 ok("input sorted", ev.every((e, i) => i === 0 || ev[i - 1].frame <= e.frame));
 ok("input bad item throws", (() => { try { parseWitnessInput("rite@@1", 60); return false; } catch { return true; } })());
+const throwsLike = (spec, re) => { try { parseWitnessInput(spec, 60); return false; } catch (e) { return re.test(e.message); } };
+const tv = parseWitnessInput("touch:100,50@1, touch:10,20@2-2.5, touch2:30,40@1, right@0.5, swipe3:5,5->6,6@3-3.1", 60);
+const phases = (f) => tv.filter((e) => e.type === "touch" && f(e)).map((e) => `${e.phase}@${e.frame}`).join(" ");
+ok("input touch tap (up one frame later)", phases((e) => e.id === 0 && e.x === 100 && e.y === 50) === "down@60 up@61", phases((e) => e.x === 100));
+ok("input touch hold", phases((e) => e.id === 0 && e.x === 10 && e.y === 20) === "down@120 up@150");
+ok("input touchN is finger N-1", phases((e) => e.id === 1) === "down@60 up@61" && tv.filter((e) => e.id === 1).every((e) => e.x === 30 && e.y === 40));
+ok("input swipeN finger id", tv.filter((e) => e.type === "touch" && e.id === 2).length === 2 + 6);
+ok("input touch mixes with keys", tv.some((e) => e.type === "key" && e.key === "right" && e.frame === 30) && tv.every((e, i) => i === 0 || tv[i - 1].frame <= e.frame));
+const sw = parseWitnessInput("swipe:0,0->60,30@0-1", 60), moves = sw.filter((e) => e.phase === "move");
+ok("input swipe down/moves/up", sw[0].phase === "down" && sw[0].frame === 0 && sw[0].x === 0 && sw.at(-1).phase === "up" && sw.at(-1).frame === 60 && sw.at(-1).x === 60 && sw.at(-1).y === 30 && sw.every((e) => e.type === "touch" && e.id === 0));
+ok("input swipe moves every frame, interpolated", moves.length === 60 && moves.every((e, i) => e.frame === i + 1 && Math.abs(e.x - (i + 1)) < 1e-9 && Math.abs(e.y - (i + 1) / 2) < 1e-9));
+ok("input swipe last move lands before the up", sw.at(-2).phase === "move" && sw.at(-2).x === 60 && sw.at(-2).frame === 60);
+ok("input touch needs a position", throwsLike("touch@1", /needs a position/));
+ok("input swipe needs a range", throwsLike("swipe:0,0->1,1@1", /time range/));
+ok("input touch0 is rejected", throwsLike("touch0:1,1@1", /numbered from 1/));
+ok("input touch hold must end after start", throwsLike("touch:1,1@2-1", /end after/));
 
 // ---- replays
 const rp = loadReplay(path.join(here, "mock", "session.jsonl"));
@@ -84,6 +100,13 @@ r = cli(["call", "teleport", "50", "60"]);
 ok("e2e call", r.status === 0 && /\[50,60\]/.test(r.stdout), r.stdout + r.stderr);
 r = cli(["replay", path.join(here, "mock", "session.jsonl"), "--watch", "state.player.pos[0]"]);
 ok("e2e replay", r.status === 0 && /pos\[0\] = 120\.4/.test(r.stdout), r.stdout + r.stderr);
+// touch: finger 0 drives the mock's pointer like the mouse (drag-to-move), other fingers are counted
+r = cli(["eval", "--at", "0.6", "--input", "swipe:40,90->100,90@0-0.5", "state.player.pos[0]", "state.score", "state.pointer.down", "--json"]);
+ok("e2e swipe drags the player", r.status === 0 && (() => { const v = JSON.parse(r.stdout)[0].values; return Math.abs(v["state.player.pos[0]"] - 100) < 1e-6 && v["state.score"] === 1 && v["state.pointer.down"] === false; })(), r.stdout + r.stderr);
+r = cli(["eval", "--at", "0.3,0.6", "--input", "touch:10,10@0-1, touch2:20,20@0.2-0.5", "state.touches", "--json"]);
+ok("e2e multi-touch fingers", r.status === 0 && (() => { const j = JSON.parse(r.stdout); return j[0].values["state.touches"] === 2 && j[1].values["state.touches"] === 1; })(), r.stdout + r.stderr);
+r = cli(["replay", path.join(here, "mock", "touch-session.jsonl"), "--watch", "state.player.pos[0], state.player.pos[1], state.touches"]);
+ok("e2e replay with touch events", r.status === 0 && /pos\[0\] = 100\b/.test(r.stdout) && /pos\[1\] = 60\b/.test(r.stdout) && /state\.touches = 0/.test(r.stdout), r.stdout + r.stderr);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "witness-e2e-"));
 if (fs.existsSync(path.join(root, "src", "media", "index.js"))) {
   r = cli(["shot", "--at", "0.5", "--out", path.join(tmp, "s.png")]);

@@ -104,6 +104,9 @@ pub struct Hello {
     pub eval: bool,
     /// Advertise `perf` (implement [`Game::perf`]).
     pub perf: bool,
+    /// The game handles [`Input::Touch`] itself: finger 0 is not also delivered as
+    /// [`Input::Mouse`] (the default mouse fallback). Set with [`Hello::touch()`].
+    pub touch: bool,
 }
 
 impl Hello {
@@ -120,6 +123,7 @@ impl Hello {
             audio: None,
             eval: false,
             perf: false,
+            touch: false,
         }
     }
     pub fn engine(mut self, engine: &str) -> Self {
@@ -162,6 +166,12 @@ impl Hello {
         self.perf = true;
         self
     }
+    /// The game handles [`Input::Touch`] itself: don't also deliver finger 0 as mouse events.
+    /// Sends `"touch": true` in the hello.
+    pub fn touch(mut self) -> Self {
+        self.touch = true;
+        self
+    }
 
     fn to_json(&self) -> Value {
         let mut caps = vec!["reset", "step", "input", "snapshot"];
@@ -200,6 +210,9 @@ impl Hello {
                 self.keys.iter().map(String::as_str).collect::<Value>(),
             );
         }
+        if self.touch {
+            h.set("touch", true);
+        }
         obj! { "hello" => h }
     }
 }
@@ -215,10 +228,13 @@ pub enum Input {
         down: bool,
     },
     /// Logical pixels, top-left origin. `button`: 0 left, 1 middle, 2 right.
+    /// `from_touch`: synthesized from finger 0 by the mouse fallback (like SDL's
+    /// `SDL_TOUCH_MOUSEID`); skip it if the game also handles [`Input::Touch`]. Never recorded.
     Mouse {
         pos: Option<(f64, f64)>,
         button: Option<u8>,
         down: Option<bool>,
+        from_touch: bool,
     },
     Wheel {
         dx: f64,
@@ -240,9 +256,76 @@ pub enum Input {
     },
     /// Anything else, as sent.
     Other(Value),
+    /// One finger (docs/PROTOCOL.md §4): `id` 0 is the first finger down and keeps its id until
+    /// `Up`; `x`/`y` are logical pixels like the mouse; `pressure` is 0..1 (1 when not given).
+    Touch {
+        id: u32,
+        x: f64,
+        y: f64,
+        phase: TouchPhase,
+        pressure: f64,
+    },
+}
+
+/// The phase of an [`Input::Touch`] event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchPhase {
+    Down,
+    Move,
+    Up,
+}
+
+impl TouchPhase {
+    /// `"down"` / `"up"`; anything else (including a missing phase) is `Move`.
+    pub fn parse(phase: &str) -> TouchPhase {
+        match phase {
+            "down" => TouchPhase::Down,
+            "up" => TouchPhase::Up,
+            _ => TouchPhase::Move,
+        }
+    }
+    /// The protocol name: `"down"`, `"move"` or `"up"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TouchPhase::Down => "down",
+            TouchPhase::Move => "move",
+            TouchPhase::Up => "up",
+        }
+    }
 }
 
 impl Input {
+    /// True for a mouse event synthesized from finger 0 by the mouse fallback.
+    pub fn is_from_touch(&self) -> bool {
+        match self {
+            Input::Mouse { from_touch, .. } => *from_touch,
+            _ => false,
+        }
+    }
+
+    /// The mouse event finger 0 also produces (the mouse fallback): down -> button 0 down,
+    /// move -> move, up -> button 0 up. `None` for anything else.
+    fn mouse_from_touch(&self) -> Option<Input> {
+        match self {
+            Input::Touch {
+                id: 0, x, y, phase, ..
+            } => {
+                let down = match phase {
+                    TouchPhase::Down => Some(true),
+                    TouchPhase::Move => None,
+                    TouchPhase::Up => Some(false),
+                };
+                Some(Input::Mouse {
+                    pos: Some((*x, *y)),
+                    button: down.map(|_| 0),
+                    down,
+                    from_touch: true,
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn from_json(v: &Value) -> Input {
         let down = v["down"].as_bool();
         let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
@@ -255,6 +338,7 @@ impl Input {
                 pos: v["x"].as_f64().map(|x| (x, v["y"].as_f64().unwrap_or(0.0))),
                 button: v["button"].as_f64().map(|b| b as u8).or(down.map(|_| 0)),
                 down,
+                from_touch: false,
             },
             "wheel" => Input::Wheel {
                 dx: v["dx"].as_f64().unwrap_or(0.0),
@@ -273,6 +357,13 @@ impl Input {
                 axis: s("axis"),
                 value: v["value"].as_f64().unwrap_or(0.0),
             },
+            "touch" => Input::Touch {
+                id: v["id"].as_i64().unwrap_or(0).max(0) as u32,
+                x: v["x"].as_f64().unwrap_or(0.0),
+                y: v["y"].as_f64().unwrap_or(0.0),
+                phase: TouchPhase::parse(v["phase"].as_str().unwrap_or("")),
+                pressure: v["pressure"].as_f64().unwrap_or(1.0),
+            },
             _ => Input::Other(v.clone()),
         }
     }
@@ -283,7 +374,9 @@ impl Input {
             Input::Key { key, down } => {
                 obj! { "type" => "key", "key" => key.as_str(), "down" => *down }
             }
-            Input::Mouse { pos, button, down } => {
+            Input::Mouse {
+                pos, button, down, ..
+            } => {
                 let mut o = obj! { "type" => "mouse" };
                 if let Some((x, y)) = pos {
                     o.set("x", *x);
@@ -307,6 +400,19 @@ impl Input {
                 obj! { "type" => "axis", "axis" => axis.as_str(), "value" => *value }
             }
             Input::Other(v) => v.clone(),
+            Input::Touch {
+                id,
+                x,
+                y,
+                phase,
+                pressure,
+            } => {
+                let mut o = obj! { "type" => "touch", "id" => *id, "x" => *x, "y" => *y, "phase" => phase.as_str() };
+                if *pressure > 0.0 && *pressure != 1.0 {
+                    o.set("pressure", *pressure);
+                }
+                o
+            }
         }
     }
 }
@@ -459,6 +565,7 @@ pub struct Step<'a> {
     pub events: &'a [Input],
     held: &'a [String],
     mouse: (f64, f64, u8),
+    touches: &'a [(u32, f64, f64)],
     audio: &'a mut AudioCapture,
 }
 
@@ -471,6 +578,11 @@ impl Step<'_> {
     /// Mouse position and button bitmask (bit 0 left, 1 middle, 2 right).
     pub fn mouse(&self) -> (f64, f64, u8) {
         self.mouse
+    }
+    /// Position of finger `id` (0 = the first finger) while it is down, else `None`.
+    pub fn touch(&self, id: u32) -> Option<(f64, f64)> {
+        let t = self.touches.iter().find(|t| t.0 == id)?;
+        Some((t.1, t.2))
     }
     /// Sample frames to render this step so audio tracks simulated time exactly (0 without audio).
     pub fn audio_frames(&self) -> usize {
@@ -529,6 +641,8 @@ pub struct Connection {
     queue: Vec<Event>,
     held: Vec<String>,
     mouse: (f64, f64, u8),
+    touches: Vec<(u32, f64, f64)>,
+    touch_native: bool,
     audio: AudioCapture,
     quit: bool,
 }
@@ -567,6 +681,8 @@ impl Connection {
             queue: Vec::new(),
             held: Vec::new(),
             mouse: (0.0, 0.0, 0),
+            touches: Vec::new(),
+            touch_native: hello.touch,
             audio: AudioCapture {
                 rate: hello.audio.map_or(0, |a| a.0),
                 channels: hello.audio.map_or(1, |a| a.1),
@@ -685,6 +801,7 @@ impl Connection {
                 self.queue.clear();
                 self.held.clear();
                 self.mouse = (0.0, 0.0, 0);
+                self.touches.clear();
                 self.audio.clear();
                 FRAME.store(0, Ordering::Relaxed);
                 game.reset(seed, m["scene"].as_str(), &m["params"])?;
@@ -693,10 +810,13 @@ impl Connection {
             "input" => {
                 for e in m["events"].as_array() {
                     let frame = e["frame"].as_f64().unwrap_or(0.0).max(0.0) as u64;
-                    self.queue.push(Event {
-                        frame,
-                        input: Input::from_json(e),
-                    });
+                    let input = Input::from_json(e);
+                    // the mouse fallback: finger 0 is also the mouse unless the game handles touch
+                    let mouse = input.mouse_from_touch().filter(|_| !self.touch_native);
+                    self.queue.push(Event { frame, input });
+                    if let Some(input) = mouse {
+                        self.queue.push(Event { frame, input });
+                    }
                 }
                 Ok(obj! {})
             }
@@ -790,6 +910,7 @@ impl Connection {
             events: &events,
             held: &self.held,
             mouse: self.mouse,
+            touches: &self.touches,
             audio: &mut self.audio,
         };
         game.step(&mut step);
@@ -804,7 +925,9 @@ impl Connection {
                 self.held.push(key.clone())
             }
             Input::Key { key, down: false } => self.held.retain(|k| k != key),
-            Input::Mouse { pos, button, down } => {
+            Input::Mouse {
+                pos, button, down, ..
+            } => {
                 if let Some((x, y)) = pos {
                     self.mouse.0 = *x;
                     self.mouse.1 = *y;
@@ -817,6 +940,19 @@ impl Connection {
                             self.mouse.2 &= !(1 << b);
                         }
                     }
+                }
+            }
+            Input::Touch {
+                id, x, y, phase, ..
+            } => {
+                let slot = self.touches.iter().position(|t| t.0 == *id);
+                match (slot, phase) {
+                    (Some(i), TouchPhase::Up) => {
+                        self.touches.remove(i);
+                    }
+                    (Some(i), _) => self.touches[i] = (*id, *x, *y),
+                    (None, TouchPhase::Up) => {}
+                    (None, _) => self.touches.push((*id, *x, *y)),
                 }
             }
             _ => {}
@@ -961,5 +1097,64 @@ mod tests {
             t += 1.0 / 60.0;
         }
         assert_eq!(a.emitted, 220500);
+    }
+
+    fn finger(id: u32, phase: TouchPhase) -> Input {
+        Input::Touch {
+            id,
+            x: 5.0,
+            y: 6.0,
+            phase,
+            pressure: 1.0,
+        }
+    }
+
+    fn fallback(input: &Input) -> String {
+        match input.mouse_from_touch() {
+            Some(mouse) => mouse.to_json().to_string(),
+            None => String::new(),
+        }
+    }
+
+    #[test]
+    fn touch_parses_and_serializes() {
+        let t = r#"{"type":"touch","id":1,"x":10.5,"y":20,"phase":"down","pressure":0.5}"#;
+        let touch = Input::from_json(&Value::parse(t).unwrap());
+        assert_eq!(touch.to_json().to_string(), t);
+        // defaults: id 0, a missing phase is a move, pressure 1 (not written), never "down"
+        let bare = Input::from_json(&Value::parse(r#"{"type":"touch","x":1,"y":2}"#).unwrap());
+        let want = r#"{"type":"touch","id":0,"x":1,"y":2,"phase":"move"}"#;
+        assert_eq!(bare.to_json().to_string(), want);
+        assert_eq!(TouchPhase::parse("up").as_str(), "up");
+    }
+
+    #[test]
+    fn finger_zero_is_also_the_mouse() {
+        let down = r#"{"type":"mouse","x":5,"y":6,"button":0,"down":true}"#;
+        let up = r#"{"type":"mouse","x":5,"y":6,"button":0,"down":false}"#;
+        assert_eq!(fallback(&finger(0, TouchPhase::Down)), down);
+        assert_eq!(
+            fallback(&finger(0, TouchPhase::Move)),
+            r#"{"type":"mouse","x":5,"y":6}"#
+        );
+        assert_eq!(fallback(&finger(0, TouchPhase::Up)), up);
+        assert_eq!(fallback(&finger(1, TouchPhase::Down)), "");
+        let mouse = finger(0, TouchPhase::Down).mouse_from_touch().unwrap();
+        assert!(mouse.is_from_touch() && !finger(0, TouchPhase::Down).is_from_touch());
+    }
+
+    #[test]
+    fn recorder_writes_touch_and_skips_fallback_mouse() {
+        let name = format!("witness-touch-{}.jsonl", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        let mut r = Recorder::create(path.clone(), "touch", 60).unwrap();
+        r.touch(0, 10.0, 20.0, TouchPhase::Down);
+        r.input(&finger(0, TouchPhase::Down).mouse_from_touch().unwrap());
+        r.frame(0.5);
+        drop(r);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let w = r#"{"f":0,"dt":0.5,"in":[{"type":"touch","id":0,"x":10,"y":20,"phase":"down"}]}"#;
+        assert_eq!(text.lines().nth(1), Some(w));
     }
 }

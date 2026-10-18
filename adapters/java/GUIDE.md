@@ -72,16 +72,27 @@ crash elsewhere should print and `System.exit(1)`.
 
 ## 4. Input through the game's normal path
 
-`Witness.Event` has `type` (key / mouse / wheel / text / action / pad / axis), `key`, `down`
-(Boolean, null for moves), `x`, `y`, `button`, `dy`, `text`, `action`, `padButton`, `axis`, `value`.
-Feed it to the same input state the device code writes:
+`Witness.Event` has `type` (key / mouse / wheel / text / action / pad / axis / touch), `key`, `down`
+(Boolean, null for moves), `x`, `y`, `button`, `dy`, `text`, `action`, `padButton`, `axis`, `value`,
+and for touch `id`, `phase`, `pressure`. Feed it to the same input state the device code writes:
 
 ```java
 void apply(Witness.Event e) {
     if ("key".equals(e.type)) { int code = Witness.Keys.lookup(e.key, Input.Keys::valueOf); if (code >= 0) processor.keyEvent(code, e.isDown()); }
     else if ("mouse".equals(e.type)) { mouseX = (int) e.x; mouseY = (int) e.y; if (e.down != null) processor.button(e.button, e.isDown()); }
+    else if ("touch".equals(e.type)) processor.finger(e.id, (float) e.x, (float) e.y, e.phase);   // "down" | "move" | "up"
 }
 ```
+
+**Touch.** A `touch` event has `id` (finger, 0 = first finger down), `x`/`y` in the same logical pixels
+as the mouse, `phase` (`"down"` / `"move"` / `"up"`; `down` is also true / null / false) and `pressure`
+(1 when not given). By default finger 0 is also delivered as a mouse event right after each touch
+event (down → button 0 down, move → move, up → button 0 up) with `fromTouch = true`, so touch tests
+(`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games. A game with its own touch
+handling sets `new Witness.Hello(...).touch(true)`: it then receives only the touch events (and the
+hello says `"touch": true`). LibGDX games want this: LibGDX reports the mouse as pointer 0 too, so
+route `touch` to `touchDown/touchDragged/touchUp(x, y, e.id, Buttons.LEFT)` and keep `mouse` for the
+desktop path.
 
 `Witness.Keys.lookup(name, byName)` tries the engine's own name lookup with likely spellings
 (`right` → `Right`/`RIGHT`, `shift` → `L-Shift`/`LSHIFT`, `1` → `1`/`NUM_1`); `-1` when unknown.
@@ -136,9 +147,17 @@ mode.
 ## 9. Replay recording
 
 Normal play with `WITNESS_RECORD=run.jsonl`: `Witness.start(hello, null)` opens it; once per frame
-call `Witness.recordFrame(dt, eventsThisFrame)` with `Witness.Event.key(name, down)` etc.;
+call `Witness.recordFrame(dt, eventsThisFrame)` with `Witness.Event.key(name, down)`,
+`Witness.Event.mouse(x, y, button, down)` (down null = a move), `Witness.Event.touch(id, x, y, phase)`;
 `Witness.mark("F8")` on F8; `Witness.stopRecording()` on exit (a shutdown hook also flushes).
 Seed with `Witness.seed()`. `witness replay run.jsonl` plays it back.
+
+Touch recording: record real fingers in logical pixels with small ids (0 = first finger down) and
+never the mouse events a platform synthesizes from them (JavaFX: skip `MouseEvent.isSynthesized()`;
+events you flag `fromTouch = true` are skipped for you). On replay the mouse fallback recreates them,
+so recording both would deliver them twice. LibGDX on Android/iOS: record `touchDown/Dragged/Up`
+(`pointer` is the id) as touch, and on desktop record the same callbacks as mouse. AWT/Swing has no
+touch events (Windows turns touch into plain mouse events), so there it's mouse only.
 
 ## 10. Determinism pitfalls (JVM)
 
@@ -195,6 +214,11 @@ public class WitnessLauncher {
                         else if (e.isDown()) p.touchDown((int) e.x, (int) e.y, 0, e.button); else p.touchUp((int) e.x, (int) e.y, 0, e.button); break;
           case "wheel": p.scrolled(0, (float) (e.dy / 100)); break;
           case "text": for (char c : e.text.toCharArray()) p.keyTyped(c); break;
+          case "touch":   // with Hello.touch(true): fingers are pointers, as on a phone
+              if ("down".equals(e.phase)) p.touchDown((int) e.x, (int) e.y, e.id, Input.Buttons.LEFT);
+              else if ("up".equals(e.phase)) p.touchUp((int) e.x, (int) e.y, e.id, Input.Buttons.LEFT);
+              else p.touchDragged((int) e.x, (int) e.y, e.id);
+              break;
       }
   }
   ```

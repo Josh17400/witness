@@ -119,6 +119,32 @@ public final class SelfTest {
         eq(null, Witness.Event.fromJson((Map<String, Object>) Witness.Json.parse("{\"frame\":1,\"type\":\"mouse\",\"x\":5,\"y\":6}")).down, "mouse move has no down");
         eq("a", Witness.Event.fromJson((Map<String, Object>) Witness.Json.parse("{\"frame\":1,\"type\":\"pad\",\"button\":\"a\",\"down\":true}")).padButton, "pad button");
 
+        // Touch events
+        Witness.Event t = Witness.Event.fromJson((Map<String, Object>) Witness.Json.parse("{\"frame\":5,\"type\":\"touch\",\"id\":1,\"x\":10.5,\"y\":20,\"phase\":\"down\",\"pressure\":0.5}"));
+        eq(1, t.id, "touch id");
+        eq("down", t.phase, "touch phase");
+        eq(true, t.isDown(), "touch down flag");
+        eq(0.5, t.pressure, "touch pressure");
+        eq("{\"type\":\"touch\",\"id\":1,\"x\":10.5,\"y\":20,\"phase\":\"down\",\"pressure\":0.5}", Witness.Json.write(t.toJson(false)), "touch replay shape");
+        Witness.Event tm = Witness.Event.fromJson((Map<String, Object>) Witness.Json.parse("{\"frame\":1,\"type\":\"touch\",\"x\":1,\"y\":2}"));
+        eq(0, tm.id, "touch id defaults to 0");
+        eq("move", tm.phase, "touch phase defaults to move");
+        eq(null, tm.down, "touch move has no down");
+        eq(1.0, tm.pressure, "touch pressure defaults to 1");
+        eq("{\"type\":\"touch\",\"id\":0,\"x\":1,\"y\":2,\"phase\":\"move\"}", Witness.Json.write(tm.toJson(false)), "touch move shape: no pressure, no down");
+        eq("{\"type\":\"touch\",\"id\":2,\"x\":3,\"y\":4,\"phase\":\"up\"}", Witness.Json.write(Witness.Event.touch(2, 3, 4, "up").toJson(false)), "Event.touch factory");
+        eq(true, new Witness.Hello("t").touch(true).touch, "Hello.touch opt-out");
+        // mouse fallback: finger 0 is also queued as the mouse (fromTouch), right after each touch; other fingers aren't
+        Witness.queueInput((List<Object>) Witness.Json.parse("[{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":7,\"y\":8,\"phase\":\"down\"},"
+            + "{\"frame\":0,\"type\":\"touch\",\"id\":1,\"x\":1,\"y\":1,\"phase\":\"down\"},"
+            + "{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":9,\"y\":8,\"phase\":\"move\"},"
+            + "{\"frame\":0,\"type\":\"touch\",\"id\":0,\"x\":9,\"y\":8,\"phase\":\"up\"}]"));
+        StringBuilder seq = new StringBuilder();
+        for (Witness.Event d : Witness.beginFrame())
+            seq.append("touch".equals(d.type) ? "t" + d.id + d.phase : "m" + (int) d.x + "/" + d.down + "/" + d.button + (d.fromTouch ? "T" : "")).append(' ');
+        eq("t0down m7/true/0T t1down t0move m9/null/0T t0up m9/false/0T ", seq.toString(), "touch mouse fallback");
+        eq("{\"type\":\"mouse\",\"x\":9,\"y\":8,\"button\":0,\"down\":false}", Witness.Json.write(Witness.frameEvents().get(6).toJson(false)), "fallback mouse shape");
+
         // Images
         Witness.Image img = Witness.Image.rgba(2, 2, new byte[] { 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4 }, true);
         eq((byte) 3, img.rgba[0], "bottom-up flip");
@@ -136,6 +162,11 @@ public final class SelfTest {
             for (int f = 0; f < 45; f++) {
                 List<Witness.Event> evs = f == 0 ? Collections.singletonList(Witness.Event.key("right", true))
                     : f == 30 ? Collections.singletonList(Witness.Event.key("right", false)) : new ArrayList<>();
+                if (f == 40) {   // a second-finger tap (no mouse fallback, the coins game ignores it) + a synthesized mouse to skip
+                    Witness.Event synth = Witness.Event.mouse(5, 6, 0, true);
+                    synth.fromTouch = true;
+                    evs = Arrays.asList(Witness.Event.touch(1, 5, 6, "down"), synth, Witness.Event.touch(1, 5, 6, "up"));
+                }
                 if (f == 20) Witness.mark("F8");
                 Witness.recordFrame(1.0 / 60, evs);
             }
@@ -147,6 +178,7 @@ public final class SelfTest {
             eq((long) Witness.seed(), head.get("seed"), "replay seed");
             eq("F8", ((Map<String, Object>) Witness.Json.parse(lines.get(21))).get("mark"), "mark on frame 20");
             eq("{\"f\":0,\"dt\":0.016666666666666666,\"in\":[{\"type\":\"key\",\"key\":\"right\",\"down\":true}]}", lines.get(1), "frame line shape");
+            eq("{\"f\":40,\"dt\":0.016666666666666666,\"in\":[{\"type\":\"touch\",\"id\":1,\"x\":5,\"y\":6,\"phase\":\"down\"},{\"type\":\"touch\",\"id\":1,\"x\":5,\"y\":6,\"phase\":\"up\"}]}", lines.get(41), "touch recorded, synthesized mouse skipped");
         } else {
             eq(false, Witness.recording(), "not recording without WITNESS_RECORD");
         }

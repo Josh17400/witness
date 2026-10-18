@@ -6,12 +6,17 @@ export type WitnessMode = "witness" | "record" | "off";
 /** Protocol input events (docs/PROTOCOL.md section 4). `frame` is absolute since the last reset. */
 export type WitnessEvent =
   | { frame: number; type: "key"; key: string; down: boolean }
-  | { frame: number; type: "mouse"; x: number; y: number; button?: 0 | 1 | 2; down?: boolean }
+  /** `fromTouch`: the mouse fallback of finger 0 (delivered right after its touch event; never recorded). */
+  | { frame: number; type: "mouse"; x: number; y: number; button?: 0 | 1 | 2; down?: boolean; fromTouch?: boolean }
   | { frame: number; type: "wheel"; dx?: number; dy: number }
   | { frame: number; type: "text"; text: string }
   | { frame: number; type: "action"; action: string; down: boolean }
   | { frame: number; type: "pad"; button: string; down: boolean }
-  | { frame: number; type: "axis"; axis: string; value: number };
+  | { frame: number; type: "axis"; axis: string; value: number }
+  /** A finger: id 0 = first finger down (stable until up), x/y in game pixels like the mouse, pressure 0..1 (1 when not given). */
+  | { frame: number; type: "touch"; id: number; x: number; y: number; phase: WitnessTouchPhase; pressure?: number };
+
+export type WitnessTouchPhase = "down" | "move" | "up";
 
 /** The same events without `frame`, as written into replay lines. */
 export type WitnessRecordedEvent = WitnessEvent extends infer E ? (E extends { frame: number } ? Omit<E, "frame"> : never) : never;
@@ -69,6 +74,10 @@ export interface StartOptions {
   input?(event: WitnessEvent): boolean | void;
   /** Receive `action` events (input-mapping layers). Without it, an action is pressed as a key of that name. */
   action?(name: string, down: boolean): void;
+  /** The game handles touch itself: finger 0 is NOT also delivered as mouse events (default false: it is).
+   *  Sent in the hello as "touch": true. Browsers also skip the fallback when the page calls preventDefault()
+   *  on the touch's pointerdown/touchstart (or on a touchmove, for that move). */
+  touch?: boolean;
   calls?: Record<string, WitnessCallFn | WitnessCall>;
   /** Variables visible to `eval` expressions (a function is called for every eval). */
   scope?: Record<string, unknown> | (() => Record<string, unknown>);
@@ -107,6 +116,8 @@ export interface WitnessMixer {
 export interface WitnessInputState {
   keys: Set<string>;
   mouse: { x: number; y: number; buttons: number };
+  /** Fingers that are down: finger id -> position (game pixels) and pressure. */
+  touches: Map<number, { x: number; y: number; pressure: number }>;
   pad: { buttons: number[]; axes: number[] };
   actions: Set<string>;
 }
@@ -160,7 +171,10 @@ export interface WitnessApi {
   mark(label?: string): void;
   /** Normal play with recording on (Node / custom loops): append one frame; returns the dt to simulate. */
   recordFrame(dt: number, events?: WitnessRecordedEvent[]): number;
+  /** Queue an input event for the current frame line (mouse events with fromTouch are skipped). */
   recordInput(event: WitnessRecordedEvent): void;
+  /** Record a finger: id 0 = first finger down (reuse ids after up), game pixels, phase default "move". */
+  recordTouch(id: number, x: number, y: number, phase?: WitnessTouchPhase, pressure?: number): void;
   /** Browser recording: download (F9 mode) or flush to the endpoint. Returns the file name / URL. */
   saveRecording(): string | null;
   /** Events applied at the current frame (for games that pull input). */

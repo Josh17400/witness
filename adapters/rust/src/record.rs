@@ -1,6 +1,6 @@
 //! Replay recording for normal play (docs/PROTOCOL.md §5).
 
-use crate::{active, normalize_key, obj, seed, Input, Value};
+use crate::{active, normalize_key, obj, seed, Input, TouchPhase, Value};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
@@ -74,8 +74,13 @@ impl Recorder {
         &self.path
     }
 
-    /// Queue an input for the current frame. A key press of F8 becomes a mark instead.
+    /// Queue an input for the current frame. A key press of F8 becomes a mark instead, and a
+    /// mouse event made from finger 0 ([`Input::is_from_touch`]) is skipped: the replay's mouse
+    /// fallback recreates it from the touch.
     pub fn input(&mut self, input: &Input) {
+        if input.is_from_touch() {
+            return;
+        }
         if let Input::Key { key, down } = input {
             if key == "f8" {
                 if *down {
@@ -99,6 +104,19 @@ impl Recorder {
             pos: Some((x, y)),
             button,
             down: button.map(|_| down),
+            from_touch: false,
+        });
+    }
+    /// Queue a finger event: `id` 0 = the first finger down (keep it until `Up`), `x`/`y` in
+    /// logical pixels (convert from the engine's normalized 0..1 coordinates). Don't also record
+    /// the mouse events the platform synthesizes from touch: replay recreates them.
+    pub fn touch(&mut self, id: u32, x: f64, y: f64, phase: TouchPhase) {
+        self.input(&Input::Touch {
+            id,
+            x,
+            y,
+            phase,
+            pressure: 1.0,
         });
     }
     /// Flag this frame (shown by `witness replay` / `trace`).

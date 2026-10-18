@@ -3,6 +3,9 @@ package witness
 import (
 	"encoding/base64"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +51,106 @@ func TestEventRoundTrip(t *testing.T) {
 	}
 	if _, ok := m.JSON()["down"]; ok {
 		t.Error("a mouse move must not get a 'down' field")
+	}
+}
+
+func TestTouchEvents(t *testing.T) {
+	e := eventFromJSON(map[string]any{"frame": 2.0, "type": "touch", "id": 1.0, "x": 10.5, "y": 20.0, "phase": "down", "pressure": 0.5})
+	if e.Frame != 2 || e.ID != 1 || e.X != 10.5 || e.Y != 20 || e.Phase != TouchDown || e.Pressure != 0.5 || !e.Down || !e.HasDown {
+		t.Fatalf("bad touch event %+v", e)
+	}
+	b, _ := marshal(e.JSON())
+	if want := `{"id":1,"phase":"down","pressure":0.5,"type":"touch","x":10.5,"y":20}`; string(b) != want {
+		t.Errorf("got %s\nwant %s", b, want)
+	}
+	// defaults: id 0, a missing phase is a move, pressure 1 (not written), never a "down" field
+	bare := eventFromJSON(map[string]any{"type": "touch", "x": 1.0, "y": 2.0})
+	b, _ = marshal(bare.JSON())
+	if want := `{"id":0,"phase":"move","type":"touch","x":1,"y":2}`; string(b) != want || bare.Pressure != 1 {
+		t.Errorf("defaults: got %s (pressure %v)\nwant %s", b, bare.Pressure, want)
+	}
+	if TouchUp.String() != "up" || touchPhase("up") != TouchUp || touchPhase("cancel") != TouchMove {
+		t.Error("touch phase names")
+	}
+}
+
+type touchGame struct{ got []Event }
+
+func (g *touchGame) Reset(int64, string, map[string]any) error { return nil }
+
+func (g *touchGame) Step(*Step) {}
+
+func (g *touchGame) Snapshot() any { return nil }
+
+func (g *touchGame) Input(e Event) { g.got = append(g.got, e) }
+
+func TestTouchMouseFallback(t *testing.T) {
+	g := &touchGame{}
+	c := &Conn{game: g, fps: 60, held: map[string]bool{}, touches: map[int][2]float64{}}
+	events := []any{
+		map[string]any{"frame": 0.0, "type": "touch", "id": 0.0, "x": 5.0, "y": 6.0, "phase": "down"},
+		map[string]any{"frame": 0.0, "type": "touch", "id": 1.0, "x": 7.0, "y": 8.0, "phase": "down"},
+		map[string]any{"frame": 1.0, "type": "touch", "id": 0.0, "x": 9.0, "y": 6.0, "phase": "move"},
+	}
+	if _, err := c.dispatch(map[string]any{"cmd": "input", "events": events}); err != nil {
+		t.Fatal(err)
+	}
+	c.stepOnce(1.0 / 60)
+	// finger 0 down, then its mouse button 0 down, then finger 1 (other fingers make no mouse events)
+	if len(g.got) != 3 || g.got[1].Type != "mouse" || !g.got[1].FromTouch || g.got[1].Button != 0 || !g.got[1].Down || g.got[2].ID != 1 {
+		t.Fatalf("frame 0 events %+v", g.got)
+	}
+	s := &Step{c: c}
+	if x, y, b := s.Mouse(); x != 5 || y != 6 || b != 1 {
+		t.Errorf("mouse after finger 0 down: %v %v %v", x, y, b)
+	}
+	if x, _, down := s.Touch(1); !down || x != 7 {
+		t.Error("finger 1 is not tracked")
+	}
+	c.stepOnce(1.0 / 60)
+	if len(g.got) != 5 || g.got[4].Type != "mouse" || g.got[4].HasDown || g.got[4].X != 9 {
+		t.Fatalf("frame 1 events %+v", g.got)
+	}
+	if _, ok := g.got[4].JSON()["down"]; ok {
+		t.Error("a finger move must become a plain mouse move")
+	}
+	// opted out (Hello.Touch): only the touch event arrives
+	c.touchNative, g.got = true, nil
+	up := []any{map[string]any{"frame": 2.0, "type": "touch", "id": 0.0, "x": 9.0, "y": 6.0, "phase": "up"}}
+	if _, err := c.dispatch(map[string]any{"cmd": "input", "events": up}); err != nil {
+		t.Fatal(err)
+	}
+	c.stepOnce(1.0 / 60)
+	if len(g.got) != 1 || g.got[0].Type != "touch" || g.got[0].Phase != TouchUp {
+		t.Fatalf("opted out: want only the touch, got %+v", g.got)
+	}
+	if _, _, down := s.Touch(0); down {
+		t.Error("finger 0 is still down after its up")
+	}
+}
+
+func TestRecordTouch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "touch.jsonl")
+	r, err := Record(path, "touch", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Touch(0, 10, 20, TouchDown)
+	if m, ok := mouseFromTouch(Event{Type: "touch", X: 10, Y: 20, Phase: TouchDown}); ok {
+		r.Input(m) // a fallback mouse event is never recorded
+	}
+	r.Frame(0.5)
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	want := `{"dt":0.5,"f":0,"in":[{"id":0,"phase":"down","type":"touch","x":10,"y":20}]}`
+	if len(lines) != 2 || lines[1] != want {
+		t.Errorf("got %q\nwant %s", lines, want)
 	}
 }
 

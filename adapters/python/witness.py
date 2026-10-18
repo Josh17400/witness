@@ -38,13 +38,14 @@ from array import array
 
 __all__ = [
     "PROTOCOL", "DEFAULT_ADDR", "active", "recording", "address", "run", "seed", "frame", "time",
-    "log", "info", "warn", "error", "input_events", "is_down", "record_frame", "mark",
-    "start_recording", "AudioCapture", "json_safe", "WitnessError",
+    "log", "info", "warn", "error", "input_events", "is_down", "record_frame", "record_event",
+    "record_touch", "mark", "start_recording", "AudioCapture", "json_safe", "WitnessError",
 ]
 
 PROTOCOL = 1
 DEFAULT_ADDR = "127.0.0.1:7357"
 _LEVELS = ("info", "warn", "error")
+_PHASES = ("down", "move", "up")
 _BIG_ENDIAN = sys.byteorder == "big"
 
 
@@ -286,6 +287,46 @@ def _game_traceback(exc):
     return "%s: %s%s" % (type(exc).__name__, exc, ("\n" + where) if where else "")
 
 
+def _num(v, default):
+    try:
+        return float(v) if v is not None and not isinstance(v, bool) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _touch(e):
+    """A protocol touch event with its fields defaulted: id 0, x/y floats, phase "move", pressure 1."""
+    e = dict(e)
+    e["id"] = int(_num(e.get("id"), 0))
+    e["x"] = _num(e.get("x"), 0.0)
+    e["y"] = _num(e.get("y"), 0.0)
+    if e.get("phase") not in _PHASES:
+        e["phase"] = "move"
+    e["pressure"] = _num(e.get("pressure"), 1.0)
+    return e
+
+
+def _mouse_from_touch(t):
+    """The mouse fallback for finger 0: down -> button 0 down, move -> a move, up -> button 0 up."""
+    m = {"frame": t.get("frame", 0), "type": "mouse", "x": t["x"], "y": t["y"], "from_touch": True}
+    if t["phase"] != "move":
+        m["button"] = 0
+        m["down"] = t["phase"] == "down"
+    return m
+
+
+def _replay_event(e):
+    """An event in replay shape (no "frame"); touch gets exactly id/x/y/phase (+ pressure if not 1)."""
+    if e.get("type") != "touch":
+        return {k: v for k, v in e.items() if k != "frame"}
+    out = {"type": "touch", "id": int(_num(e.get("id"), 0)), "x": e.get("x", 0), "y": e.get("y", 0),
+           "phase": e.get("phase") if e.get("phase") in _PHASES else "move"}
+    p = _num(e.get("pressure"), 1.0)
+    if 0 < p != 1:
+        out["pressure"] = p
+    return out
+
+
 class _Adapter:
     def __init__(self):
         self.seed = None
@@ -298,6 +339,8 @@ class _Adapter:
         self.connected = False
         self.perf = {"update_ms": 0.0, "render_ms": 0.0, "frame_ms": 0.0}
         self.recorder = None
+        self.rec_pending = []    # record_event()/record_touch() events for the next record_frame()
+        self.size = None         # the hello's logical size (touch helpers normalize by it)
 
     # -------------------------------------------------------------- logging
     def log(self, level, message):
@@ -402,6 +445,21 @@ class _Adapter:
         return {"width": width, "height": height, "format": "rgba8",
                 "data": base64.b64encode(pixels).decode("ascii")}
 
+    def do_input(self, h, msg):
+        # finger 0 is also queued as the matching mouse event ("from_touch": True) right after
+        # each touch, unless the game handles touch itself (run(touch=True))
+        for e in msg.get("events") or []:
+            if not isinstance(e, dict):
+                continue
+            if e.get("type") == "touch":
+                e = _touch(e)
+                self.queue.append(e)
+                if e["id"] == 0 and not h.get("touch"):
+                    self.queue.append(_mouse_from_touch(e))
+            else:
+                self.queue.append(e)
+        return {}
+
     def do_audio(self, h, msg):
         audio = h["audio"]
         return audio.take() if hasattr(audio, "take") else audio()
@@ -445,7 +503,7 @@ class _Adapter:
             "reset": self.do_reset, "step": self.do_step,
             "snapshot": lambda h, m: {"frame": self.frame, "time": self.time,
                                       "state": json_safe(_call_flex(h["snapshot"], m.get("paths")))},
-            "input": lambda h, m: self.queue.extend(m.get("events") or []) or {},
+            "input": self.do_input,
             "screenshot": self.do_screenshot, "audio": self.do_audio, "call": self.do_call,
             "eval": self.do_eval, "logs": self.do_logs, "perf": self.do_perf,
         }
@@ -510,12 +568,16 @@ class _LogBridge:
 
 def run(name="game", fps=60, size=None, *, reset=None, on_input=None, update=None, snapshot=None,
         screenshot=None, audio=None, calls=None, namespace=None, perf=None, keys=None,
-        engine="python", language="python", capture_logging=True):
+        engine="python", language="python", capture_logging=True, touch=False):
     """Connect to the Witness CLI and serve commands until it says quit (or disconnects).
 
     Handlers (all optional except `update` and `snapshot`):
       reset(seed[, scene[, params]])  return the game to its deterministic initial state
-      on_input(event)                 apply one protocol input event (called at the start of its frame)
+      on_input(event)                 apply one protocol input event (called at the start of its frame).
+                                      Touch events ({"type": "touch", "id", "x", "y", "phase",
+                                      "pressure"}) for finger 0 are followed by the matching mouse
+                                      event with "from_touch": True, unless touch=True (the game
+                                      handles touch itself; the hello then says "touch": true)
       update(dt)                      advance exactly one frame
       snapshot([paths])               JSON-able dict (expose state["entities"] = [{id, type, pos}])
       screenshot([scale])             (width, height, rgba bytes) or a protocol dict
@@ -541,9 +603,12 @@ def run(name="game", fps=60, size=None, *, reset=None, on_input=None, update=Non
         hello["size"] = list(size)
     if keys:
         hello["keys"] = list(keys)
+    if touch:
+        hello["touch"] = True
+    _A.size = tuple(size) if size else None
     h = {"fps": fps, "reset": reset, "on_input": on_input, "update": update, "snapshot": snapshot,
          "screenshot": screenshot, "audio": audio, "calls": calls, "namespace": namespace,
-         "perf": perf, "capabilities": caps}
+         "perf": perf, "capabilities": caps, "touch": bool(touch)}
     bridge = None
     if capture_logging:
         import logging
@@ -622,8 +687,11 @@ class _Recorder:
 
     def frame(self, dt, events):
         line = {"f": self.f, "dt": float(dt)}  # full precision: replays must be exact
+        # mouse events synthesized from a finger are dropped: replay recreates them from the touch
+        events = [_replay_event(e) for e in events or ()
+                  if e and not (e.get("type") == "mouse" and e.get("from_touch"))]
         if events:
-            line["in"] = [{k: v for k, v in e.items() if k != "frame"} for e in events]
+            line["in"] = events
         if self.mark:
             line["mark"], self.mark = self.mark, None
         self.file.write(_dumps(line) + "\n")
@@ -659,13 +727,36 @@ def record_frame(dt, events=None):
     """Append one replay line for a frame of normal play (the dt it ran with and its input events).
 
     Call it once per frame, after the frame, with the events in protocol shape
-    ({"type": "key", "key": "d", "down": True} ...). Does nothing unless recording().
+    ({"type": "key", "key": "d", "down": True} ...). Events queued with record_event() /
+    record_touch() since the last call come first. Mouse events marked "from_touch" are skipped
+    (replay recreates them from the touch). Does nothing unless recording().
     """
     if _A.recorder is None:
         if not recording():
             return
         start_recording()
-    _A.recorder.frame(dt, events)
+    pending, _A.rec_pending = _A.rec_pending, []
+    _A.recorder.frame(dt, pending + list(events or ()))
+
+
+def record_event(event):
+    """Queue one protocol-shape input event for the current frame's replay line (written by the
+    next record_frame). Does nothing unless recording()."""
+    if event and recording():
+        _A.rec_pending.append(dict(event))
+
+
+def record_touch(id, x, y, phase, pressure=None):  # noqa: A002 - "id" is the protocol's name
+    """Queue a finger for the current frame's replay line: id 0 = first finger down (keep it
+    stable until "up"), x/y in logical pixels (convert normalized 0..1 touch coordinates), phase
+    "down" | "move" | "up". Don't also record the mouse events the platform synthesizes from the
+    touch (pygame: event.touch); replay recreates them. Does nothing unless recording()."""
+    if not recording():
+        return
+    e = {"type": "touch", "id": int(id), "x": x, "y": y, "phase": phase if phase in _PHASES else "move"}
+    if pressure is not None:
+        e["pressure"] = pressure
+    _A.rec_pending.append(e)
 
 
 def mark(label="F8"):
