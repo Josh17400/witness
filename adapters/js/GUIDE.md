@@ -107,17 +107,29 @@ real DOM events through the game's normal input path:
 | `key` | `keydown` (+ `keypress` for printable keys) / `keyup` with correct `key`, `code`, `location`, legacy `keyCode`/`which` (Phaser reads `keyCode`) and modifier flags. Target: `keyTarget` option, else a canvas with `tabindex`, else the focused element, else `body`. It bubbles to `document` and `window`. |
 | `mouse` | `pointermove`/`pointerdown`/`pointerup` + the compat `mousemove`/`mousedown`/`mouseup` (skipped after a cancelled `pointerdown`, per spec), then `click` / `auxclick` / `contextmenu`, with `buttons`, `movementX/Y`. Coordinates are mapped from logical game pixels (`size`) to client pixels through the canvas's `getBoundingClientRect()`, so CSS scaling works. The target is the element under the point (DOM UI buttons get clicked too), or the pressed element while a button is held. |
 | `wheel` | `WheelEvent` (`deltaY` in pixels) at the last mouse position. |
+| `touch` | `pointerdown`/`pointermove`/`pointerup` with `pointerType: "touch"` (`pointerId` 100 + finger id, `isPrimary` for finger 0, `pressure`, plus `pointerover`/`enter` before the down and `pointerout`/`leave` after the up), then real `TouchEvent`s `touchstart`/`touchmove`/`touchend` with `touches`/`targetTouches`/`changedTouches` across all fingers (`identifier` = finger id) where the browser has the `Touch` constructor (Chromium/Edge do). Every event of a finger goes to the element it went down on. Same coordinate mapping as the mouse. Finger 0 is then also the mouse (below). |
 | `text` | per character: `keydown`, `keypress`, `keyup`. Focused `<input>`/`<textarea>` elements also get the text and an `input` event. |
 | `pad`, `axis` | a virtual standard-mapping gamepad: `navigator.getGamepads()[0]` reflects them (buttons `a b x y lb rb lt rt back start ls rs up down left right home`, axes `leftx lefty rightx righty`, triggers `lefttrigger`/`righttrigger`) and `gamepadconnected` fires once. |
 | `action` | your `action(name, down)` handler. Without one, it is pressed as a key of that name. |
 
-Before `reset` runs, every held key and button is released (with real `keyup`/`pointerup`), so
+Before `reset` runs, every held key, button and finger is released (with real `keyup`/`pointerup`/`touchend`), so
 input never leaks from one run into the next.
 
+* **Touch mouse fallback.** Right after each touch event of finger 0 the adapter delivers a mouse
+  event `{type: "mouse", x, y, fromTouch: true}` (down → button 0 down, move → move, up → button 0
+  up), so touch tests (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games. In
+  browsers it arrives as compatibility `mousemove`/`mousedown`/`mouseup` + `click` only (no second
+  set of pointer events, like a phone), immediately per phase. It is skipped when the page calls
+  `preventDefault()` on the touch's `pointerdown` or `touchstart` (for the whole touch) or on a
+  `touchmove` (for that move), exactly as browsers drop compat mouse events. Games with their own
+  touch handling pass `touch: true` to `start()` (sent as `"touch": true` in the hello): they then
+  get only the touch events. Other fingers never make mouse events.
 * To handle an event yourself, pass `input(ev)`: return `true` to skip the DOM injection
-  (Node games always handle input this way). `witness.input` holds the current
-  keys/mouse/pad/actions, and `witness.inputEvents()` lists this frame's events, for games that
-  poll.
+  (Node games always handle input this way; a touch is `{type: "touch", id, x, y, phase, pressure}`,
+  followed for finger 0 by its `fromTouch` mouse event unless `touch: true`). `witness.input` holds
+  the current keys/mouse/touches (finger id → `{x, y, pressure}` while down)/pad/actions, and
+  `witness.inputEvents()` lists this frame's events (fallback mouse events included), for games
+  that poll.
 * Pointer lock (`requestPointerLock`) does nothing in headless Chromium. FPS games should read
   `movementX/Y`, which the injected events carry.
 
@@ -222,11 +234,20 @@ scene with a 2D UI canvas on top) at its backing resolution × `scale`, as exact
   key, pointer and wheel events are recorded (capture phase, before the game sees them), and
   `start()` performs `reset(seed)`, so frame 0 of the file matches `witness replay`'s reset. A
   replay re-feeds the exact recorded dts and events, and lands on the same state.
+* **Touch (phones/tablets):** touch pointers (`pointerType: "touch"`, `pointercancel` counts as up)
+  are recorded as `touch` events in game pixels with small finger ids (0 = first finger down, reused
+  after it lifts), one position per finger per frame. The compatibility mouse events the browser
+  fires after a touch are never recorded: the replay's mouse fallback recreates them, so recording
+  both would deliver them twice. Touch games should give the canvas `touch-action: none` (CSS):
+  otherwise the browser takes drags over for scrolling and cancels the touch (recorded as an up
+  where the finger last was).
 * **Node / custom loops:** set `WITNESS_RECORD=replays/run.jsonl` (and optionally
   `WITNESS_SEED`). `start()` calls `reset(seed)`, then each frame call
   `dt = witness.recordFrame(dt, events)` and **simulate with the returned dt** (quantized so the
   replay feeds back exactly the same value). Call `witness.mark("F8")` for markers. With
-  `takeover()` on, frames are recorded automatically: don't call `recordFrame` then.
+  `takeover()` on, frames are recorded automatically: don't call `recordFrame` then. Input goes
+  in with `witness.recordInput(ev)`, fingers with `witness.recordTouch(id, x, y, "down" | "move" |
+  "up")` (game pixels); mouse events flagged `fromTouch` are dropped.
 * Play it back with `witness replay <file> --watch "state.score"`.
 
 ## 10. witness.json
@@ -392,6 +413,7 @@ witness.seed(); witness.random()
 witness.log("message"); witness.log("warn" | "error", ...)    // errors fail tests
 witness.mark("label")        // replay marker
 witness.recordFrame(dt, events) -> dt                          // Node record mode
+witness.recordInput(ev); witness.recordTouch(id, x, y, phase)   // record input for the next frame line
 witness.saveRecording()      // browser record mode: download / flush
 witness.input, witness.inputEvents(), witness.frame, witness.time
 witness.createMixer({ sampleRate, channels }).play(samples, { delay, volume })

@@ -64,17 +64,32 @@ namespace WitnessKit
         public List<string> Keys;
         /// <summary>Leave null to derive it from the handlers that are set.</summary>
         public List<string> Capabilities;
+        /// <summary>
+        /// True when the game handles "touch" events itself: finger 0 is then NOT also delivered as mouse
+        /// events (the default mouse fallback), and the hello says "touch": true.
+        /// </summary>
+        public bool Touch;
+    }
+
+    /// <summary>The phase of a "touch" event (protocol section 4).</summary>
+    public enum WitnessTouchPhase
+    {
+        Down,
+        Move,
+        Up,
     }
 
     /// <summary>One input event (protocol section 4). Unused fields keep their defaults.</summary>
     public sealed class WitnessEvent
     {
         public int Frame;
-        /// <summary>key | mouse | wheel | text | action | pad | axis (or anything the game understands).</summary>
+        /// <summary>key | mouse | wheel | text | action | pad | axis | touch (or anything the game understands).</summary>
         public string Type = "";
         public string Key;
-        /// <summary>null for events without a down/up meaning (mouse moves, wheel, text, axis).</summary>
+        /// <summary>null for events without a down/up meaning (mouse moves, wheel, text, axis, touch moves).
+        /// Touch: true on down, false on up.</summary>
         public bool? Down;
+        /// <summary>Mouse and touch: logical pixels, top-left origin.</summary>
         public double X;
         public double Y;
         /// <summary>Mouse: 0 left, 1 middle, 2 right. Pads use <see cref="PadButton"/>.</summary>
@@ -86,6 +101,17 @@ namespace WitnessKit
         public string Action;
         public string Axis;
         public double Value;
+        /// <summary>Touch: the finger, 0 = the first finger down (the same from down to up).</summary>
+        public int Id;
+        /// <summary>Touch: down, move or up (a missing or unknown phase reads as Move).</summary>
+        public WitnessTouchPhase Phase = WitnessTouchPhase.Move;
+        /// <summary>Touch: 0..1, 1 when not given.</summary>
+        public double Pressure = 1;
+        /// <summary>
+        /// Mouse: synthesized from finger 0 by the mouse fallback (like SDL's SDL_TOUCH_MOUSEID). Skip it if the
+        /// game also handles the touch event. Never recorded.
+        /// </summary>
+        public bool FromTouch;
         /// <summary>The event exactly as received, including fields this class doesn't model.</summary>
         public Dictionary<string, object> Raw;
 
@@ -94,6 +120,16 @@ namespace WitnessKit
 
         /// <summary>A key event, e.g. for Witness.RecordFrame in normal play.</summary>
         public static WitnessEvent KeyEvent(string key, bool down) { return new WitnessEvent { Type = "key", Key = key, Down = down }; }
+
+        /// <summary>A touch event in logical pixels (id 0 = first finger down), e.g. for Witness.RecordFrame in normal play.</summary>
+        public static WitnessEvent TouchEvent(int id, double x, double y, WitnessTouchPhase phase, double pressure = 1)
+        {
+            return new WitnessEvent
+            {
+                Type = "touch", Id = id, X = x, Y = y, Phase = phase, Pressure = pressure,
+                Down = phase == WitnessTouchPhase.Down ? true : phase == WitnessTouchPhase.Up ? false : (bool?)null,
+            };
+        }
 
         public static WitnessEvent FromJson(Dictionary<string, object> o)
         {
@@ -114,6 +150,14 @@ namespace WitnessKit
             e.Action = WitnessJson.Str(WitnessJson.Get(o, "action"));
             e.Axis = WitnessJson.Str(WitnessJson.Get(o, "axis"));
             e.Value = WitnessJson.Double(WitnessJson.Get(o, "value"), 0);
+            if (e.Type == "touch")
+            {
+                e.Id = (int)WitnessJson.Long(WitnessJson.Get(o, "id"), 0);
+                string phase = WitnessJson.Str(WitnessJson.Get(o, "phase"));
+                e.Phase = phase == "down" ? WitnessTouchPhase.Down : phase == "up" ? WitnessTouchPhase.Up : WitnessTouchPhase.Move;
+                e.Pressure = WitnessJson.Double(WitnessJson.Get(o, "pressure"), 1);
+                e.Down = e.Phase == WitnessTouchPhase.Down ? true : e.Phase == WitnessTouchPhase.Up ? false : (bool?)null;
+            }
             return e;
         }
 
@@ -132,6 +176,11 @@ namespace WitnessKit
                 case "action": o["action"] = Action; break;
                 case "pad": o["button"] = PadButton; break;
                 case "axis": o["axis"] = Axis; o["value"] = Value; break;
+                case "touch":
+                    o["id"] = Id; o["x"] = X; o["y"] = Y;
+                    o["phase"] = Phase == WitnessTouchPhase.Down ? "down" : Phase == WitnessTouchPhase.Up ? "up" : "move";
+                    if (Pressure > 0 && Pressure != 1) o["pressure"] = Pressure;
+                    return o;   // a touch's down/up is its phase
                 default:
                     if (Raw != null) foreach (var kv in Raw) if (kv.Key != "frame") o[kv.Key] = kv.Value;
                     break;
@@ -381,6 +430,7 @@ namespace WitnessKit
         private static TextWriter _rec;
         private static int _recFrame;
         private static string _recMark;
+        private static readonly List<WitnessEvent> RecQueue = new List<WitnessEvent>();
 
         /// <summary>The simulated frame number (frames stepped since the last reset).</summary>
         public static int Frame { get; private set; }
@@ -637,16 +687,25 @@ namespace WitnessKit
             if (Pcm != null) Pcm.Clear();
         }
 
-        /// <summary>Queues protocol events (the "events" array of an input command).</summary>
+        /// <summary>
+        /// Queues protocol events (the "events" array of an input command). Mouse fallback: unless the hello
+        /// set Touch, each touch of finger 0 is followed by the matching mouse event (down: button 0 down at
+        /// x,y; move: a move; up: button 0 up), flagged FromTouch. Other fingers never make mouse events.
+        /// </summary>
         public static void QueueInput(List<object> events)
         {
             if (events == null) return;
+            bool fallback = _hello == null || !_hello.Touch;
             lock (Pending)
             {
                 foreach (var o in events)
                 {
                     var d = o as Dictionary<string, object>;
-                    if (d != null) Pending.Add(WitnessEvent.FromJson(d));
+                    if (d == null) continue;
+                    var e = WitnessEvent.FromJson(d);
+                    Pending.Add(e);
+                    if (fallback && e.Type == "touch" && e.Id == 0)
+                        Pending.Add(new WitnessEvent { Frame = e.Frame, Type = "mouse", X = e.X, Y = e.Y, Button = 0, Down = e.Down, FromTouch = true });
                 }
             }
         }
@@ -751,7 +810,11 @@ namespace WitnessKit
             return true;
         }
 
-        /// <summary>Normal play: append one replay line for the frame just simulated. No-op unless recording.</summary>
+        /// <summary>
+        /// Normal play: append one replay line for the frame just simulated, with the events queued by
+        /// RecordEvent/RecordTouch followed by <paramref name="events"/>. Mouse events synthesized from touch
+        /// (FromTouch) are skipped: on replay the mouse fallback recreates them. No-op unless recording.
+        /// </summary>
         public static void RecordFrame(double dt, IList<WitnessEvent> events = null)
         {
             var rec = _rec;
@@ -759,10 +822,17 @@ namespace WitnessKit
             var sb = new StringBuilder(48);
             sb.Append("{\"f\":").Append(_recFrame.ToString(CultureInfo.InvariantCulture)).Append(",\"dt\":");
             WitnessJson.WriteValue(sb, dt, 0);
-            if (events != null && events.Count > 0)
+            var list = new List<object>();
+            lock (RecQueue)
             {
-                var list = new List<object>(events.Count);
-                foreach (var e in events) list.Add(e.ToJson(false));
+                foreach (var e in RecQueue) list.Add(e.ToJson(false));
+                RecQueue.Clear();
+            }
+            if (events != null)
+                foreach (var e in events)
+                    if (e != null && !(e.Type == "mouse" && e.FromTouch)) list.Add(e.ToJson(false));
+            if (list.Count > 0)
+            {
                 sb.Append(",\"in\":");
                 WitnessJson.WriteValue(sb, list, 0);
             }
@@ -779,6 +849,27 @@ namespace WitnessKit
             }
             _recMark = null;
             _recFrame++;
+        }
+
+        /// <summary>
+        /// Normal play: queues an event for the next RecordFrame line (for event pumps that see input one event
+        /// at a time). FromTouch mouse events are ignored. No-op unless recording.
+        /// </summary>
+        public static void RecordEvent(WitnessEvent e)
+        {
+            if (_rec == null || e == null || (e.Type == "mouse" && e.FromTouch)) return;
+            lock (RecQueue) RecQueue.Add(e);
+        }
+
+        /// <summary>
+        /// Normal play: queues a finger for the next RecordFrame line. id 0 = the first finger down; x/y in the
+        /// same logical pixels Witness injects (convert from the engine's screen or normalized coordinates).
+        /// Don't also record the mouse events the platform synthesizes from touch. No-op unless recording.
+        /// </summary>
+        public static void RecordTouch(int id, double x, double y, WitnessTouchPhase phase, double pressure = 1)
+        {
+            if (_rec == null) return;
+            RecordEvent(WitnessEvent.TouchEvent(id, x, y, phase, pressure));
         }
 
         /// <summary>Flags the current frame in the replay (the game calls this on F8).</summary>
@@ -906,6 +997,7 @@ namespace WitnessKit
             };
             if (hello.Width > 0 && hello.Height > 0) o["size"] = new[] { hello.Width, hello.Height };
             if (hello.Keys != null) o["keys"] = hello.Keys;
+            if (hello.Touch) o["touch"] = true;
             return WitnessJson.Write(new Dictionary<string, object> { { "hello", o } });
         }
 

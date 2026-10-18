@@ -98,10 +98,20 @@ Witness events become real `InputEvent`s pushed through `Input.parse_input_event
 | `action` jump (down) | `InputEventAction` (warns if the InputMap has no such action) |
 | `pad` a/b/x/y/start/dpup… | `InputEventJoypadButton`, device 0 |
 | `axis` leftx/lefty/… value | `InputEventJoypadMotion` |
+| `touch` id, x, y, phase down/up | `InputEventScreenTouch` (`index` = id, `pressed`) |
+| `touch` phase move (+ pressure) | `InputEventScreenDrag` (`index`, `position`, `relative` from that finger's last position, `pressure`) |
 
 Coordinates: with `display/window/stretch/mode = "viewport"`, window pixels equal logical pixels.
 With other stretch modes, inject window coordinates (the Viewport transforms them).
 `Witness.input_events()` returns the events applied this frame.
+
+**Touch** (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`, `touch2:` for a second finger) arrives
+as `InputEventScreenTouch`/`InputEventScreenDrag`, like on a phone. The protocol's mouse
+fallback is Godot's own `input_devices/pointing/emulate_mouse_from_touch` (on by default): Godot
+then also sends the first finger down (normally id 0) as `InputEventMouseButton`/`MouseMotion`
+with `device == -1` (`InputEvent.DEVICE_ID_EMULATION`), so mouse-driven UI and gameplay work with
+touch tests. A game that handles touch itself turns that setting off; the hello then says
+`"touch": true` and only the touch events arrive. Fingers still down at `reset` are lifted.
 
 ## 4. RNG seeding
 
@@ -187,8 +197,11 @@ everything captured since the last call as interleaved stereo f32 at
 ## 9. Replay recording
 
 With `WITNESS_RECORD=<file.jsonl>` set (and no CLI), the autoload records normal play: one line
-per physics frame with full-precision dt, every key, mouse and wheel event from
+per physics frame with full-precision dt, every key, mouse, wheel and touch event from
 `Window.window_input` (so events the game marks as handled still count), and F8 as a marker.
+Touches are recorded as `touch` events (`ScreenTouch` → down/up, `ScreenDrag` → move, with
+`pressure` when the device reports one other than 1); mouse events Godot emulated from touch
+(`device == -1`) are skipped, because on replay the emulation recreates them from the touches.
 It seeds the global RNG with `WITNESS_SEED` (or a clock-based seed) in `_enter_tree`, before
 the main scene loads; read it from `Witness.seed`. `godot --path . -- --demo` in the example is
 a scripted session that CI records and replays exactly.

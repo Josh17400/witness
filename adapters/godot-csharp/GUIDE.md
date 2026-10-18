@@ -83,6 +83,16 @@ flushed at the start of the frame, before any `_PhysicsProcess`, so `Input.IsAct
 keys work too. Mouse coordinates are viewport pixels (equal to window pixels under `--headless`).
 Held keys are released on reset.
 
+**Touch** (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`): a down/up becomes
+`InputEventScreenTouch` (`Index` = Witness finger id, `Position`, `Pressed`), a move becomes
+`InputEventScreenDrag` (`Index`, `Position`, `Relative` from that finger's last position, `Velocity`,
+`Pressure`), in the same coordinates as the mouse. The mouse fallback is Godot's own: with Project
+Settings > Input Devices > Pointing > **Emulate Mouse From Touch** on (the default), Godot turns the
+first finger into `InputEventMouseButton` / `InputEventMouseMotion` (with `Device == -1`,
+`InputEvent.DeviceIdEmulation`), exactly as on a phone, so touch tests drive mouse-driven UI and
+gameplay. A game that handles touch itself turns that setting off; the hello then says
+`"touch": true` and only the touch events arrive. Fingers still down are lifted on reset.
+
 ## 5. Reset and RNG seeding
 
 Default reset: `GD.Seed(seed)`, `ReloadCurrentScene()` (or `ChangeSceneToFile("res://<scene>.tscn")`
@@ -136,8 +146,11 @@ image is the current frame.
 ## 9. Replay recording
 
 Run the game normally with `WITNESS_RECORD=run.jsonl`: the node records each frame's delta and key /
-mouse-button events (F8 adds a mark) and flushes on exit. Seed with `Witness.Seed`. Physics in normal
-play may tick 0 or 2 times per frame; record with `--fixed-fps 60` for replays that match exactly.
+mouse-button / touch events (`InputEventScreenTouch` → touch down/up, `InputEventScreenDrag` → move;
+F8 adds a mark) and flushes on exit. Emulated events (`Device == -1`: the mouse Godot makes from
+touch, or touch made from the mouse) are skipped, because the replay makes Godot emulate them again.
+Seed with `Witness.Seed`. Physics in normal play may tick 0 or 2 times per frame; record with
+`--fixed-fps 60` for replays that match exactly.
 
 ## 10. Determinism pitfalls (Godot)
 

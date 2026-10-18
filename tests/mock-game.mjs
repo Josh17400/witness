@@ -1,9 +1,12 @@
 // A tiny protocol-complete game used to test the Witness CLI itself (not an adapter template).
 // Player moves with arrows/WASD at 120 px/s, collects coins (+1 score, a "ding" sound).
+// Pointer: dragging with the left button (or finger 0: touch id 0 is treated like the mouse) drags the
+// player by the pointer's movement; state.pointer and state.touches (fingers down) make input observable.
 import net from "node:net";
 
 const FPS = 60, W = 320, H = 180, SR = 22050;
 let rngState = 1, frame = 0, time = 0, queue = [], keys = new Set(), logs = [], audioBuf = [];
+let pointer = { x: 0, y: 0, down: false }, fingers = new Map();
 let player, coins, score;
 // MOCK_LEAK=1: a "particle clock" that reset() forgets, so screenshots depend on earlier runs while the snapshot
 // stays identical (the classic leak only screenshot/audio comparison catches)
@@ -12,6 +15,7 @@ const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; ret
 
 function reset(seed = 1) {
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
+  pointer = { x: 0, y: 0, down: false }; fingers = new Map();
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
   coins = Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)] }));
 }
@@ -20,6 +24,15 @@ function stepOnce(dt) {
   for (const e of queue.filter((e) => e.frame <= frame)) {
     if (e.type === "key") e.down ? keys.add(e.key) : keys.delete(e.key);
     if (e.type === "action" && e.action === "dash") player.pos[0] += 30;
+    if (e.type === "touch") e.phase === "up" ? fingers.delete(e.id) : fingers.set(e.id, [e.x, e.y]);
+    // finger 0 drives the same pointer as the mouse (down -> button 0 down, move -> move, up -> button up)
+    const p = e.type === "mouse" && (e.button ?? 0) === 0 ? { x: e.x, y: e.y, down: e.down }
+      : e.type === "touch" && e.id === 0 ? { x: e.x, y: e.y, down: e.phase === "down" ? true : e.phase === "up" ? false : undefined } : null;
+    if (p) {
+      if (p.x != null && pointer.down) { player.pos[0] += p.x - pointer.x; player.pos[1] += p.y - pointer.y; }
+      if (p.x != null) { pointer.x = p.x; pointer.y = p.y; }
+      if (p.down !== undefined) pointer.down = p.down;
+    }
   }
   queue = queue.filter((e) => e.frame > frame);
   const dx = (keys.has("right") || keys.has("d") ? 1 : 0) - (keys.has("left") || keys.has("a") ? 1 : 0);
@@ -82,7 +95,7 @@ sock.on("data", (d) => {
       case "reset": reset(m.seed); audioSent = 0; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
-      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, entities: [player, ...coins] } }); break;
+      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins] } }); break;
       case "screenshot": reply(screenshot()); break;
       case "audio": reply(audio()); break;
       case "call":

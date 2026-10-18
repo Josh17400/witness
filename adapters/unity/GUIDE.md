@@ -85,6 +85,21 @@ Keys map by name (`right` → `KeyCode.RightArrow` / `Key.RightArrow`, `1` → `
 Mouse coordinates are converted from Witness's top-left logical pixels (the hello size) to Unity's
 bottom-left screen pixels.
 
+**Touch** (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`; same coordinates as the mouse, converted
+the same way):
+
+* New Input System: on the first touch event the bridge adds a virtual `Touchscreen` (none before,
+  so games that show on-screen controls when `Touchscreen.current != null` behave as on desktop until
+  a test touches) and queues a `TouchState` per finger change (`touchId` = Witness finger id + 1,
+  `Began` / `Moved` / `Ended`). `Touchscreen.current.touches`, touch `InputAction`s and EnhancedTouch
+  all see it.
+* Old Input Manager: `WitnessInput.touchCount`, `GetTouch(i)`, `touches`, `touchSupported`
+  (`fingerId` = Witness finger id; phases `Began`, `Moved`, `Stationary`, `Ended` per frame).
+* Mouse fallback: finger 0 also arrives as the mouse (button 0 down / move / up), like Unity's
+  `Input.simulateMouseWithTouches`, so touch tests drive mouse-only games. A game that reads touches
+  itself sets `WitnessBridge.Hello.Touch = true` (in a `[RuntimeInitializeOnLoadMethod]` or `Awake`):
+  it then gets only touches, and the hello says `"touch": true`.
+
 ## 5. Reset and RNG seeding
 
 Default reset: `UnityEngine.Random.InitState(seed)`, release held input, raise
@@ -148,9 +163,12 @@ resolution you want: `WitnessBridge.Hello.Width = 1280; Hello.Height = 720;`.
 ## 9. Replay recording
 
 Run the player normally with `WITNESS_RECORD=run.jsonl` (and optionally `WITNESS_SEED`): the bridge
-records each frame's unscaled delta and key presses/releases (Input System keyboard, or the old
-Input Manager), F8 adds a mark, and the file is flushed on quit. Seed with `Witness.Seed`.
-`witness replay run.jsonl` replays it with the recorded per-frame dts.
+records each frame's unscaled delta, key presses/releases and touches (Input System keyboard and
+`Touchscreen.current`, or the old Input Manager's `Input.touches`), F8 adds a mark, and the file is
+flushed on quit. Seed with `Witness.Seed`. `witness replay run.jsonl` replays it with the recorded
+per-frame dts. Touches are written in the hello's logical pixels (top-left origin) with small finger
+ids (0 = first finger down). The mouse Unity simulates from touches is not recorded: on replay the
+mouse fallback recreates it.
 
 ## 10. Determinism pitfalls (Unity)
 

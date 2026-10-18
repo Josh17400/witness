@@ -53,7 +53,8 @@ What `setup` does in witness mode (it does **nothing** in normal play, unless re
 * It replaces `love.run` with a loop that runs `love.load` once, then serves commands. Each
   `step` frame: apply that frame's injected input, `love.update(dt)` with the fixed dt, then the
   next frame. `love.draw` runs only for screenshots.
-* It patches `love.keyboard.isDown` / `isScancodeDown`, `love.mouse.getPosition/getX/getY/isDown`
+* It patches `love.keyboard.isDown` / `isScancodeDown`, `love.mouse.getPosition/getX/getY/isDown`,
+  `love.touch.getTouches/getPosition/getPressure`
   and `love.timer.getDelta/getTime/getFPS/step/sleep` to report injected state and simulated time.
 * It minimizes the window and discards real OS input events.
 * It replaces LÖVE's blue error screen (which waits for a click) with: print the traceback to
@@ -132,6 +133,19 @@ the game's input mapper (baton, tactile …). Gamepad callbacks need a Joystick 
 Witness can't fabricate. Mouse coordinates are logical pixels: if the game scales the screen,
 `love.mouse.getPosition` returns injected logical coordinates.
 
+**Touch** (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5` in tests). `wl` fires
+`love.touchpressed(id, x, y, dx, dy, pressure)`, `love.touchmoved` and `love.touchreleased` with
+integer ids (0 = first finger down; LÖVE ids are opaque, so treat them as table keys), logical
+pixels like the mouse, and `love.touch.getTouches/getPosition/getPressure` report the injected
+fingers. Like LÖVE on a phone, finger 0 also fires `love.mousepressed(x, y, 1, true, 1)`,
+`mousemoved(..., true)` and `mousereleased(x, y, 1, true, 1)` right after (the 4th/5th argument
+`istouch` is true), so mouse-only games work with touch tests. A game that handles touch itself
+passes `setup{ touch = true }`: finger 0 then makes no mouse callbacks (the hello says
+`"touch": true`). Plain Lua: `input` gets `{type = "touch", id, x, y, phase = "down"|"move"|"up",
+pressure}` followed, for finger 0, by `{type = "mouse", ..., from_touch = true}` (skip those if you
+handle the touch; `run{ touch = true }` turns them off). Polling: `witness.touch(id)` → x, y,
+pressure while the finger is down, `witness.mouse()` → x, y, `witness.mouse_down(0)`.
+
 ## 6. RNG seeding and reset
 
 Before calling your `reset`, `wl` calls `love.math.setRandomSeed(seed)` and
@@ -200,6 +214,15 @@ replay seed (`WITNESS_SEED`, else from the clock). Seed game RNGs from `witness.
 folders are created. If the file can't be written, the game prints a warning and plays on
 without recording. `examples/lua` has `love . --demo`, a scripted session that CI records and
 replays to 4 decimals.
+
+Touches are recorded as `touch` events with LÖVE's touch ids mapped to small finger numbers
+(0 = first finger down, reused after release). Mouse callbacks with `istouch = true` are left
+out: on replay the finger-0 mouse fallback recreates them, so recording both would click twice.
+Plain Lua / other engines: queue events with `witness.record_key(key, down)`,
+`witness.record_mouse(x, y, button, down)` (button nil = a move),
+`witness.record_touch(id, x, y, phase, pressure)` or `witness.record_event(ev)` during the frame
+(an f8 key marks instead), then call `witness.record_frame(dt)`; mouse events with `from_touch`
+or `istouch` set are skipped, and touch pressure is written only when it isn't 1.
 
 ## 11. Determinism pitfalls (Lua / LÖVE)
 

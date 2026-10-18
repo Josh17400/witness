@@ -12,6 +12,8 @@ screenshots, audio and logs. See docs/PROTOCOL.md in the Witness repo.
         name = "My Game", fps = 60, size = {640, 360},
         reset = function(seed, scene, params) ... end,  -- deterministic initial state
         input = function(ev) ... end,                    -- one protocol event, at the start of its frame
+        touch = false,                                   -- true: the game handles "touch" events itself
+                                                         -- (no mouse events made from finger 0)
         update = function(dt) ... end,                   -- exactly one fixed frame
         snapshot = function() return {...} end,          -- JSON-able table
         screenshot = function(scale) return w, h, rgba end,
@@ -354,6 +356,7 @@ end
 
 local A = {
   seed = nil, frame = 0, time = 0, queue = {}, due = {}, down = {}, logs = {},
+  mouse = { x = 0, y = 0, buttons = {} }, touches = {}, rec_pending = {},
   connected = false, perf = { frame_ms = 0, update_ms = 0, render_ms = 0 }, recorder = nil,
 }
 
@@ -391,6 +394,49 @@ function witness.time() return A.time end
 function witness.input_events() return A.due end
 --- Whether a Witness key name ("right", "space", ...) is held, from injected key events.
 function witness.is_down(key) return A.down[key] == true end
+--- The injected mouse position (logical pixels; finger 0 moves it too, see "touch" below).
+function witness.mouse() return A.mouse.x, A.mouse.y end
+--- Whether an injected mouse button (0 left, 1 middle, 2 right; default 0) is held.
+function witness.mouse_down(button) return A.mouse.buttons[button or 0] == true end
+--- x, y, pressure of finger `id` (0 = first finger) while it is down, else nil.
+function witness.touch(id)
+  local t = A.touches[id or 0]
+  if t then return t.x, t.y, t.pressure end
+  return nil
+end
+
+-------------------------------------------------------------------------------- touch
+
+local TOUCH_PHASES = { down = true, move = true, up = true }
+
+-- Normalize a protocol touch event in place: integer id (default 0), phase "down" | "move" | "up"
+-- (missing/unknown = "move"), numeric x/y, pressure (default 1).
+local function normalize_touch(e)
+  e.id = floor(tonumber(e.id) or 0)
+  if not TOUCH_PHASES[e.phase] then e.phase = "move" end
+  e.x, e.y = tonumber(e.x) or 0, tonumber(e.y) or 0
+  e.pressure = tonumber(e.pressure) or 1
+  return e
+end
+
+--- Events as the adapter queues them: touch events normalized and, unless `native_touch`, each
+--- finger-0 touch followed by its mouse fallback (down -> button 0 down at x,y; move -> move;
+--- up -> button 0 up), flagged from_touch = true. Other fingers never make mouse events.
+function witness.expand_input(events, native_touch)
+  local out = {}
+  for _, e in ipairs(events or {}) do
+    out[#out + 1] = e
+    if type(e) == "table" and e.type == "touch" then
+      normalize_touch(e)
+      if e.id == 0 and not native_touch then
+        local m = { frame = e.frame, type = "mouse", x = e.x, y = e.y, from_touch = true }
+        if e.phase ~= "move" then m.button, m.down = 0, e.phase == "down" end
+        out[#out + 1] = m
+      end
+    end
+  end
+  return out
+end
 
 -------------------------------------------------------------------------------- transport
 
@@ -452,7 +498,14 @@ local function step_once(h, dt)
   A.queue, A.due = keep, due
   for i = 1, #due do
     local e = due[i]
-    if e.type == "key" and e.key then A.down[e.key] = e.down and true or nil end
+    if e.type == "key" and e.key then A.down[e.key] = e.down and true or nil
+    elseif e.type == "mouse" then
+      if e.x ~= nil then A.mouse.x, A.mouse.y = tonumber(e.x) or 0, tonumber(e.y) or 0 end
+      if e.down ~= nil then A.mouse.buttons[floor(tonumber(e.button) or 0)] = e.down and true or nil end
+    elseif e.type == "touch" then
+      if e.phase == "up" then A.touches[e.id] = nil
+      else A.touches[e.id] = { x = e.x, y = e.y, pressure = e.pressure } end
+    end
     if h.input then h.input(e) end
   end
   if h.update then h.update(dt) end
@@ -470,6 +523,7 @@ local commands = {}
 function commands.reset(h, m)
   A.seed = floor(tonumber(m.seed) or 1)
   A.frame, A.time, A.queue, A.due, A.down, A.logs = 0, 0, {}, {}, {}, {}
+  A.mouse, A.touches = { x = 0, y = 0, buttons = {} }, {}
   if h.audio and h.audio.reset then h.audio:reset() end
   if h.reset then h.reset(A.seed, m.scene, m.params or {}) end
   return {}
@@ -477,7 +531,7 @@ end
 
 function commands.input(h, m)
   local q = A.queue
-  for _, e in ipairs(m.events or {}) do q[#q + 1] = e end
+  for _, e in ipairs(witness.expand_input(m.events, h.touch)) do q[#q + 1] = e end
   return {}
 end
 
@@ -603,7 +657,7 @@ function witness.run(h)
   for _, c in ipairs(caps) do available[c] = true end
   connect({ protocol = witness.PROTOCOL, name = h.name or "game", engine = h.engine or _VERSION,
             language = "lua", fps = h.fps, size = h.size, capabilities = caps,
-            calls = witness.array(calls), keys = h.keys })
+            calls = witness.array(calls), keys = h.keys, touch = h.touch and true or nil })
 
   while true do
     local line, err = A.sock:receive("*l")
@@ -672,8 +726,46 @@ function witness.start_recording(name, fps, seed)
   return { seed = A.recorder.seed, path = A.recorder.path }
 end
 
+-- The replay shape of one event, or nil to leave it out: mouse events synthesized from touch
+-- (from_touch, or LÖVE's istouch) are skipped, because replay recreates them from the touch;
+-- touch events are written as {type, id, x, y, phase} plus pressure only when it isn't 1.
+local function replay_shape(e)
+  if type(e) ~= "table" then return nil end
+  if e.type == "mouse" and (e.from_touch or e.istouch) then return nil end
+  if e.type ~= "touch" then return e end
+  local out = { type = "touch", id = floor(tonumber(e.id) or 0), x = tonumber(e.x) or 0,
+                y = tonumber(e.y) or 0, phase = TOUCH_PHASES[e.phase] and e.phase or "move" }
+  local p = tonumber(e.pressure)
+  if p and p > 0 and p ~= 1 then out.pressure = p end
+  return out
+end
+
+--- Queue one input event (protocol shape, without `frame`) for the current frame's replay line.
+--- A "key" event for f8 marks the moment instead. Does nothing unless recording().
+function witness.record_event(e)
+  if not A.recorder and (A.record_failed or not witness.recording()) then return end
+  if type(e) == "table" and e.type == "key" and e.key == "f8" then
+    if e.down then witness.mark("F8") end
+    return
+  end
+  local shaped = replay_shape(e)
+  if shaped then A.rec_pending[#A.rec_pending + 1] = shaped end
+end
+--- Shorthands for record_event (Witness key names; mouse button 0 left, nil = a move).
+function witness.record_key(key, down) witness.record_event({ type = "key", key = key, down = down and true or false }) end
+function witness.record_mouse(x, y, button, down)
+  if button == nil or button < 0 then witness.record_event({ type = "mouse", x = x, y = y })
+  else witness.record_event({ type = "mouse", x = x, y = y, button = button, down = down and true or false }) end
+end
+--- A finger: id 0 = first finger down (map engine ids to small slots), phase "down" | "move" | "up",
+--- logical pixels. Don't also record the mouse events the platform synthesizes from touch.
+function witness.record_touch(id, x, y, phase, pressure)
+  witness.record_event({ type = "touch", id = id, x = x, y = y, phase = phase, pressure = pressure })
+end
+
 --- Append one replay line for a frame of normal play: its dt and its input events (protocol
---- shapes, without `frame`). Call once per frame. Does nothing unless recording().
+--- shapes, without `frame`; queued record_* events come first). Call once per frame. Does
+--- nothing unless recording().
 function witness.record_frame(dt, events)
   local r = A.recorder
   if not r then
@@ -683,7 +775,13 @@ function witness.record_frame(dt, events)
     if not r then return end
   end
   local line = { f = r.f, dt = dt } -- full precision: replays must be exact
-  if events and #events > 0 then line["in"] = witness.array(events) end
+  local all = A.rec_pending
+  A.rec_pending = {}
+  for _, e in ipairs(events or {}) do
+    local shaped = replay_shape(e)
+    if shaped then all[#all + 1] = shaped end
+  end
+  if #all > 0 then line["in"] = witness.array(all) end
   if r.mark then line.mark, r.mark = r.mark, nil end
   r.file:write(witness.encode(line), "\n")
   r.f = r.f + 1
@@ -699,5 +797,7 @@ end
 function witness.stop_recording()
   if A.recorder then A.recorder.file:close(); A.recorder = nil end
 end
+
+witness._commands = commands -- for tests/test_witness.lua only (not API)
 
 return witness

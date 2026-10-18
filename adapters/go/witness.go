@@ -104,6 +104,9 @@ type Hello struct {
 	// AudioSampleRate > 0 enables the "audio" capability: write samples in Step via Step.WriteAudio.
 	AudioSampleRate int
 	AudioChannels   int // default 1
+	// Touch: the game handles touch events itself, so finger 0 is not also delivered as mouse
+	// events (the default mouse fallback). Sends "touch": true in the hello.
+	Touch bool
 }
 
 // ---------------------------------------------------------------- game interfaces
@@ -160,12 +163,12 @@ func FromRGBA(img *image.RGBA) Image {
 // Event is one input event (docs/PROTOCOL.md section 4).
 type Event struct {
 	Frame   int64          // frame at whose start it applies
-	Type    string         // "key", "mouse", "wheel", "text", "action", "pad", "axis", or anything else
+	Type    string         // "key", "mouse", "wheel", "text", "action", "pad", "axis", "touch", or anything else
 	Key     string         // key: lowercase Witness name ("a", "space", "left", "f1" ...)
-	Down    bool           // key/mouse/action/pad: pressed
-	HasDown bool           // false for mouse moves, axis, text
-	X, Y    float64        // mouse: logical pixels, top-left origin
-	HasPos  bool           // mouse: X/Y are set
+	Down    bool           // key/mouse/action/pad: pressed; touch: true on TouchDown
+	HasDown bool           // false for mouse moves, axis, text, touch moves
+	X, Y    float64        // mouse, touch: logical pixels, top-left origin
+	HasPos  bool           // mouse: X/Y are set (always true for touch)
 	Button  int            // mouse: 0 left, 1 middle, 2 right; -1 when not a button event
 	Pad     string         // pad: button name
 	DX, DY  float64        // wheel
@@ -174,6 +177,59 @@ type Event struct {
 	Axis    string         // axis
 	Value   float64        // axis value
 	Raw     map[string]any // the event as received
+
+	// Touch fields (Type "touch"); FromTouch marks mouse events made by the mouse fallback.
+	ID        int        // touch: finger, 0 = the first finger down (stable from down to up)
+	Phase     TouchPhase // touch: TouchDown, TouchMove or TouchUp
+	Pressure  float64    // touch: 0..1, 1 when not given (when recording, 0 also means not given)
+	FromTouch bool       // mouse: synthesized from finger 0 (like SDL_TOUCH_MOUSEID); never recorded
+}
+
+// TouchPhase is the phase of a touch event.
+type TouchPhase int
+
+// Touch phases: the protocol's "down", "move" and "up".
+const (
+	TouchDown TouchPhase = iota
+	TouchMove
+	TouchUp
+)
+
+// String returns the protocol name: "down", "move" or "up".
+func (p TouchPhase) String() string {
+	switch p {
+	case TouchDown:
+		return "down"
+	case TouchUp:
+		return "up"
+	default:
+		return "move"
+	}
+}
+
+// touchPhase parses a protocol phase; anything but "down" / "up" (or a missing one) is a move.
+func touchPhase(s string) TouchPhase {
+	switch s {
+	case "down":
+		return TouchDown
+	case "up":
+		return TouchUp
+	}
+	return TouchMove
+}
+
+// mouseFromTouch is the mouse event finger 0 also produces (the mouse fallback):
+// down -> button 0 down, move -> move, up -> button 0 up. ok is false for anything else.
+func mouseFromTouch(e Event) (m Event, ok bool) {
+	if e.Type != "touch" || e.ID != 0 {
+		return Event{}, false
+	}
+	m = Event{Frame: e.Frame, Type: "mouse", X: e.X, Y: e.Y, HasPos: true, Button: -1, FromTouch: true}
+	if e.Phase != TouchMove {
+		m.Button, m.Down, m.HasDown = 0, e.Phase == TouchDown, true
+	}
+	m.Raw = m.JSON()
+	return m, true
 }
 
 func eventFromJSON(m map[string]any) Event {
@@ -207,6 +263,13 @@ func eventFromJSON(m map[string]any) Event {
 		e.Pad = str("button")
 	case "axis":
 		e.Axis, e.Value = str("axis"), num(m["value"], 0)
+	case "touch":
+		e.ID = int(num(m["id"], 0))
+		e.HasPos = true
+		e.X, e.Y = num(m["x"], 0), num(m["y"], 0)
+		e.Phase = touchPhase(str("phase"))
+		e.Down, e.HasDown = e.Phase == TouchDown, e.Phase != TouchMove
+		e.Pressure = num(m["pressure"], 1)
 	}
 	return e
 }
@@ -234,6 +297,12 @@ func (e Event) JSON() map[string]any {
 		o["button"] = e.Pad
 	case "axis":
 		o["axis"], o["value"] = e.Axis, e.Value
+	case "touch":
+		o["id"], o["x"], o["y"], o["phase"] = e.ID, e.X, e.Y, e.Phase.String()
+		if e.Pressure > 0 && e.Pressure != 1 {
+			o["pressure"] = e.Pressure
+		}
+		return o // the phase says it all: no "down"
 	default:
 		for k, v := range e.Raw {
 			if k != "frame" {
@@ -355,6 +424,12 @@ func (s *Step) KeyDown(key string) bool { return s.c.held[NormalizeKey(key)] }
 // Mouse returns the mouse position and button bitmask (bit 0 left, 1 middle, 2 right).
 func (s *Step) Mouse() (x, y float64, buttons int) { return s.c.mx, s.c.my, s.c.mb }
 
+// Touch returns the position of finger id (0 = the first finger) and whether it is down.
+func (s *Step) Touch(id int) (x, y float64, down bool) {
+	p, ok := s.c.touches[id]
+	return p[0], p[1], ok
+}
+
 // AudioFrames is how many sample frames to render this step so audio tracks simulated time
 // exactly (never drifts). 0 when audio is not enabled.
 func (s *Step) AudioFrames() int {
@@ -398,6 +473,10 @@ type Conn struct {
 	audio    []float32
 	emitted  int64
 	quit     bool
+
+	// fingers down (id -> x, y); touchNative is Hello.Touch (no mouse fallback for finger 0)
+	touches     map[int][2]float64
+	touchNative bool
 }
 
 // Run connects and serves commands until "quit" or the CLI disconnects.
@@ -444,7 +523,8 @@ func Connect(hello Hello, game Game) (*Conn, error) {
 		hello.AudioChannels = 1
 	}
 	c := &Conn{nc: nc, r: bufio.NewReaderSize(nc, 1<<16), game: game, fps: hello.FPS, held: map[string]bool{},
-		rate: max(hello.AudioSampleRate, 0), channels: hello.AudioChannels}
+		rate: max(hello.AudioSampleRate, 0), channels: hello.AudioChannels,
+		touches: map[int][2]float64{}, touchNative: hello.Touch}
 	connected.Store(true)
 	curFrame.Store(0)
 	if err := c.send(map[string]any{"hello": helloJSON(hello, game)}); err != nil {
@@ -490,6 +570,9 @@ func helloJSON(h Hello, g Game) map[string]any {
 	}
 	if len(h.Keys) > 0 {
 		m["keys"] = h.Keys
+	}
+	if h.Touch {
+		m["touch"] = true
 	}
 	return m
 }
@@ -584,6 +667,7 @@ func (c *Conn) dispatch(m map[string]any) (map[string]any, error) {
 		params, _ := m["params"].(map[string]any)
 		c.frame, c.time, c.queue, c.held = 0, 0, nil, map[string]bool{}
 		c.mx, c.my, c.mb = 0, 0, 0
+		c.touches = map[int][2]float64{}
 		c.audio, c.emitted = c.audio[:0], 0
 		curFrame.Store(0)
 		if err := c.game.Reset(seed, scene, params); err != nil {
@@ -594,7 +678,12 @@ func (c *Conn) dispatch(m map[string]any) (map[string]any, error) {
 		evs, _ := m["events"].([]any)
 		for _, e := range evs {
 			if em, ok := e.(map[string]any); ok {
-				c.queue = append(c.queue, eventFromJSON(em))
+				ev := eventFromJSON(em)
+				c.queue = append(c.queue, ev)
+				// the mouse fallback: finger 0 is also the mouse unless the game handles touch
+				if mouse, isFinger0 := mouseFromTouch(ev); isFinger0 && !c.touchNative {
+					c.queue = append(c.queue, mouse)
+				}
 			}
 		}
 		return map[string]any{}, nil
@@ -733,6 +822,15 @@ func (c *Conn) track(e Event) {
 			} else {
 				c.mb &^= 1 << e.Button
 			}
+		}
+	case "touch":
+		if c.touches == nil {
+			c.touches = map[int][2]float64{}
+		}
+		if e.Phase == TouchUp {
+			delete(c.touches, e.ID)
+		} else {
+			c.touches[e.ID] = [2]float64{e.X, e.Y}
 		}
 	}
 }

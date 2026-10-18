@@ -131,7 +131,7 @@ h.step = [&](double dt) {
 
 ## 4. Input through the engine's normal path
 
-Witness sends protocol events (`key`, `mouse`, `wheel`, `text`, `action`, `pad`, `axis`). The
+Witness sends protocol events (`key`, `mouse`, `wheel`, `text`, `action`, `pad`, `axis`, `touch`). The
 adapter delivers each event at the start of its frame, before `step`. Feed it into the **same
 function your OS event pump feeds**, so gameplay code can't tell the difference:
 
@@ -146,10 +146,22 @@ h.input = [&](const witness_event& e) {
     case WITNESS_EV_ACTION:input.on_action(e.name, e.down == 1); break;    // input-mapping layer
     case WITNESS_EV_PAD:   input.on_pad_button(e.name, e.down == 1); break;
     case WITNESS_EV_AXIS:  input.on_pad_axis(e.name, (float)e.value); break;
+    case WITNESS_EV_TOUCH: input.on_finger(e.id, (float)e.x, (float)e.y, e.phase, (float)e.pressure); break;
     default: break;
     }
 };
 ```
+
+**Touch.** `WITNESS_EV_TOUCH` carries `id` (finger, 0 = first finger down), `x`/`y` (logical pixels,
+like the mouse), `phase` (`WITNESS_TOUCH_DOWN` / `_MOVE` / `_UP`; `down` is also 1 / -1 / 0) and
+`pressure` (1 when not given). By default the adapter also delivers finger 0 as a mouse event right
+after each touch event (down → button 0 down, move → move, up → button 0 up), flagged
+`from_touch = 1` like SDL's `SDL_TOUCH_MOUSEID`, so touch tests (`touch:160,90@1`,
+`swipe:40,90->200,90@1-1.5`) drive mouse-only games too. A game with real touch handling (on-screen
+sticks, multi-finger gestures) sets `hello.touch = 1`: it then gets only the touch events, like on a
+phone with SDL's touch-mouse events ignored. If the game's touch code wants SDL's normalized
+coordinates, divide by the logical size. Polling games can use `witness_touch(id, &x, &y)` (1 while
+the finger is down).
 
 * Key names are lowercase Witness names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`,
   `backspace`, `shift`, `ctrl`, `alt`, `left`/`right`/`up`/`down`, `f1`–`f12`. Mouse
@@ -386,7 +398,16 @@ case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
     char k[32];
     if (!ev.key.repeat) witness_record_key(witness_from_sdl(ev.key.key, k, sizeof k), ev.type == SDL_EVENT_KEY_DOWN);
     break; }
-case SDL_EVENT_MOUSE_MOTION: witness_record_mouse(ev.motion.x, ev.motion.y, -1, 0); break;
+case SDL_EVENT_MOUSE_MOTION:
+    if (ev.motion.which != SDL_TOUCH_MOUSEID) witness_record_mouse(ev.motion.x, ev.motion.y, -1, 0);
+    break;
+// touch (phones/tablets): record fingers in logical pixels; small ids (0 = first finger down)
+case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_CANCELED: {
+    int id = finger_slot(ev.tfinger.fingerID, ev.type == SDL_EVENT_FINGER_DOWN);   // your SDL_FingerID -> 0..9 map
+    int phase = ev.type == SDL_EVENT_FINGER_DOWN ? WITNESS_TOUCH_DOWN : ev.type == SDL_EVENT_FINGER_MOTION ? WITNESS_TOUCH_MOVE : WITNESS_TOUCH_UP;
+    if (id >= 0) witness_record_touch(id, ev.tfinger.x * logical_w, ev.tfinger.y * logical_h, phase);
+    if (phase == WITNESS_TOUCH_UP) finger_slot_free(ev.tfinger.fingerID);
+    break; }
 
 // fixed-step loop: one replay line per SIM tick
 while (acc >= FIXED_DT) { sim.update(FIXED_DT, input); witness_record_frame(FIXED_DT); acc -= FIXED_DT; }
@@ -405,6 +426,11 @@ witness_record_stop();
   `witness_record_begin("Embervale", 60, world_seed, "{\"background\":3}")`. The header then holds the seed the world
   really used plus params that your `reset` handler applies to rebuild the same start.
 * Mouse coordinates must be the same logical pixels Witness injects.
+* Touch: record the fingers, never the mouse events SDL synthesizes from them
+  (`which == SDL_TOUCH_MOUSEID`, for buttons and motion): on replay the adapter's mouse fallback
+  recreates those, so recording both would deliver them twice. SDL finger ids are large arbitrary
+  numbers; map them to small slots (0 = first finger down, reuse a slot after its finger lifts).
+  `witness_record_event` can also record a filled `witness_event` (e.g. with `pressure`).
 * Lines are flushed every frame, so a crash still leaves a usable replay.
 
 ## 11. Determinism checklist
@@ -451,10 +477,11 @@ witness listen --time 3   # audio report + spectrogram
 | `witness_run()` / `witness_poll(timeout_ms)` | serve commands (blocking / pumped) |
 | `witness_shutdown()` | close, free |
 | `witness_frame()`, `witness_time()`, `witness_seed()` | simulation clock and seed |
-| `witness_key_down(name)`, `witness_mouse(&x, &y, &buttons)`, `witness_frame_events(&n)` | polled input |
+| `witness_key_down(name)`, `witness_mouse(&x, &y, &buttons)`, `witness_touch(id, &x, &y)`, `witness_frame_events(&n)` | polled input |
+| `hello.touch = 1` | the game handles `WITNESS_EV_TOUCH` itself: no mouse events from finger 0 |
 | `witness_log(level, fmt, ...)` | logs (errors fail tests) |
 | `witness_audio_frames_for_step(dt)`, `witness_audio_write(f32, frames)`, `witness_audio_write_s16` | audio capture |
-| `witness_record_start/begin/key/mouse/event/frame/stop`, `witness_mark(label)` | replays |
+| `witness_record_start/begin/key/mouse/touch/event/frame/stop`, `witness_mark(label)` | replays |
 | `witness_json_*`, `witness::Json` | snapshot / result writer |
 | `witness_get/at/number/int/string/bool`, `witness::Value` | read command arguments |
 | `witness_key_normalize(name, out, n)` | any key name → Witness name |

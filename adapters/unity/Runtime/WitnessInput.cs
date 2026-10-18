@@ -3,11 +3,15 @@
 // New Input System (com.unity.inputsystem): nothing to change in game code. In witness mode events are
 // queued as real device state (InputSystem.QueueStateEvent) on virtual Keyboard/Mouse/Gamepad devices and
 // processed with a manual InputSystem.Update() at the start of each frame, so actions, PlayerInput and
-// Keyboard.current all see them.
+// Keyboard.current all see them. Touch events go to a virtual Touchscreen (added on the first touch event,
+// so games that check Touchscreen.current see no touchscreen until a test touches).
 //
 // Old Input Manager: UnityEngine.Input can't be fed from code, so call WitnessInput instead of Input
-// (same names: GetKey, GetKeyDown, GetAxisRaw, GetButton, mousePosition, ...). Outside witness mode every
-// call forwards to UnityEngine.Input, so the swap is free.
+// (same names: GetKey, GetKeyDown, GetAxisRaw, GetButton, mousePosition, touchCount, GetTouch, ...).
+// Outside witness mode every call forwards to UnityEngine.Input, so the swap is free.
+//
+// Touch mouse fallback: unless WitnessBridge.Hello.Touch is set, finger 0 also arrives as mouse events
+// (Witness.cs synthesizes them, flagged FromTouch), like Unity's Input.simulateMouseWithTouches.
 using System.Collections.Generic;
 using UnityEngine;
 #if WITNESS_INPUT_SYSTEM && ENABLE_INPUT_SYSTEM
@@ -26,6 +30,18 @@ namespace WitnessKit
         private static Vector2 _mouse;
         private static Vector2 _scroll;
         private static string _text = "";
+
+        // Fingers down (or lifted this frame), in the order they went down: what touchCount/GetTouch report.
+        private sealed class Finger
+        {
+            public int Id;
+            public Vector2 Position;
+            public Vector2 Delta;
+            public float Pressure;
+            public UnityEngine.TouchPhase Phase;
+        }
+
+        private static readonly List<Finger> Fingers = new List<Finger>();
 
         /// <summary>True while Witness drives the game (input comes from the CLI, not devices).</summary>
         public static bool Driving { get { return WitnessBridge.Driving; } }
@@ -172,6 +188,81 @@ namespace WitnessKit
 #endif
         }
 
+        /// <summary>Fingers on the screen this frame (like Input.touchCount).</summary>
+        public static int touchCount
+        {
+            get
+            {
+                if (Driving) return Fingers.Count;
+#if ENABLE_LEGACY_INPUT_MANAGER
+                return Input.touchCount;
+#else
+                return 0;
+#endif
+            }
+        }
+
+        /// <summary>
+        /// Like Input.GetTouch: fingerId = the Witness finger id, position in screen pixels (bottom-left origin),
+        /// phase Began / Moved / Stationary / Ended for this frame.
+        /// </summary>
+        public static UnityEngine.Touch GetTouch(int index)
+        {
+            if (Driving)
+            {
+                var f = Fingers[index];
+                var t = new UnityEngine.Touch();
+                t.fingerId = f.Id;
+                t.position = f.Position;
+                t.rawPosition = f.Position;
+                t.deltaPosition = f.Delta;
+                t.deltaTime = Time.deltaTime;
+                t.phase = f.Phase;
+                t.pressure = f.Pressure;
+                t.maximumPossiblePressure = 1f;
+                t.tapCount = 1;
+                t.type = UnityEngine.TouchType.Direct;
+                return t;
+            }
+#if ENABLE_LEGACY_INPUT_MANAGER
+            return Input.GetTouch(index);
+#else
+            throw new System.ArgumentOutOfRangeException("index", "no touches without the legacy Input Manager");
+#endif
+        }
+
+        /// <summary>All fingers this frame (like Input.touches).</summary>
+        public static UnityEngine.Touch[] touches
+        {
+            get
+            {
+                if (!Driving)
+                {
+#if ENABLE_LEGACY_INPUT_MANAGER
+                    return Input.touches;
+#else
+                    return new UnityEngine.Touch[0];
+#endif
+                }
+                var o = new UnityEngine.Touch[Fingers.Count];
+                for (int i = 0; i < o.Length; i++) o[i] = GetTouch(i);
+                return o;
+            }
+        }
+
+        public static bool touchSupported
+        {
+            get
+            {
+                if (Driving) return true;
+#if ENABLE_LEGACY_INPUT_MANAGER
+                return Input.touchSupported;
+#else
+                return false;
+#endif
+            }
+        }
+
         /// <summary>The default Input Manager buttons: Jump, Fire1-3, Submit, Cancel.</summary>
         public static bool GetButton(string button) { return Driving ? AnyOf(Held, button) : LegacyButton(button, 0); }
         public static bool GetButtonDown(string button) { return Driving ? AnyOf(Pressed, button) : LegacyButton(button, 1); }
@@ -185,6 +276,12 @@ namespace WitnessKit
             Released.Clear();
             _scroll = Vector2.zero;
             _text = "";
+            Fingers.RemoveAll(x => x.Phase == UnityEngine.TouchPhase.Ended || x.Phase == UnityEngine.TouchPhase.Canceled);
+            foreach (var f in Fingers)
+            {
+                f.Phase = UnityEngine.TouchPhase.Stationary;
+                f.Delta = Vector2.zero;
+            }
         }
 
         internal static void ReleaseAll()
@@ -192,15 +289,17 @@ namespace WitnessKit
             foreach (var k in Held) Released.Add(k);
             Held.Clear();
             Axes.Clear();
+            Fingers.Clear();
 #if WITNESS_INPUT_SYSTEM && ENABLE_INPUT_SYSTEM
             DeviceInput.ReleaseAll();
 #endif
         }
 
-        /// <summary>Applies one Witness event (screen size is used to flip mouse y to Unity's bottom-left origin).</summary>
+        /// <summary>Applies one Witness event (screen size is used to flip mouse/touch y to Unity's bottom-left origin).</summary>
         internal static void Apply(WitnessEvent e, float logicalWidth, float logicalHeight)
         {
             float sx = logicalWidth > 0 ? Screen.width / logicalWidth : 1f, sy = logicalHeight > 0 ? Screen.height / logicalHeight : 1f;
+            Vector2 touchPos = Vector2.zero;
             switch (e.Type)
             {
                 case "key":
@@ -229,10 +328,35 @@ namespace WitnessKit
                     if (PadToKeyCode.TryGetValue(e.PadButton ?? "", out button)) SetKey(button, e.IsDown);
                     break;
                 }
+                case "touch":
+                    touchPos = new Vector2((float)e.X * sx, Screen.height - (float)e.Y * sy);
+                    ApplyFinger(e, touchPos);
+                    break;
             }
 #if WITNESS_INPUT_SYSTEM && ENABLE_INPUT_SYSTEM
-            DeviceInput.Apply(e, _mouse);
+            DeviceInput.Apply(e, _mouse, touchPos);
 #endif
+        }
+
+        // Legacy-style touch state: Began on the frame a finger goes down, Moved when it moves, Ended on lift.
+        private static void ApplyFinger(WitnessEvent e, Vector2 pos)
+        {
+            Finger f = Fingers.Find(x => x.Id == e.Id && x.Phase != UnityEngine.TouchPhase.Ended);
+            if (e.Phase == WitnessTouchPhase.Down)
+            {
+                if (f == null) { f = new Finger { Id = e.Id }; Fingers.Add(f); }
+                f.Position = pos;
+                f.Delta = Vector2.zero;
+                f.Pressure = (float)e.Pressure;
+                f.Phase = UnityEngine.TouchPhase.Began;
+                return;
+            }
+            if (f == null) return;   // a move or lift without a down
+            f.Delta += pos - f.Position;
+            f.Position = pos;
+            f.Pressure = (float)e.Pressure;
+            if (e.Phase == WitnessTouchPhase.Up) f.Phase = UnityEngine.TouchPhase.Ended;
+            else if (f.Phase != UnityEngine.TouchPhase.Began) f.Phase = UnityEngine.TouchPhase.Moved;
         }
 
         /// <summary>Called after a frame's events: pushes the device state to the Input System.</summary>
@@ -308,6 +432,8 @@ namespace WitnessKit
             private static MouseState _mouseState;
             private static GamepadState _padState;
             private static bool _keysDirty, _mouseDirty, _padDirty;
+            private static Touchscreen _touchscreen;
+            private static readonly Dictionary<int, Vector2> TouchPositions = new Dictionary<int, Vector2>();   // Witness finger id -> last position
 
             public static void Setup()
             {
@@ -318,10 +444,32 @@ namespace WitnessKit
                 _gamepad = Gamepad.current ?? InputSystem.AddDevice<Gamepad>();
             }
 
-            public static void Apply(WitnessEvent e, Vector2 mouse)
+            public static void Apply(WitnessEvent e, Vector2 mouse, Vector2 touchPos)
             {
                 switch (e.Type)
                 {
+                    case "touch":
+                    {
+                        // One TouchState event per finger change; the Touchscreen assigns it a touch control.
+                        // touchId 0 means "no touch" to the Input System, so Witness finger n is touchId n + 1.
+                        Vector2 last;
+                        bool known = TouchPositions.TryGetValue(e.Id, out last);
+                        if (e.Phase != WitnessTouchPhase.Down && !known) return;   // a move or lift without a down
+                        if (_touchscreen == null) _touchscreen = Touchscreen.current ?? InputSystem.AddDevice<Touchscreen>();
+                        var phase = e.Phase == WitnessTouchPhase.Down ? UnityEngine.InputSystem.TouchPhase.Began
+                            : e.Phase == WitnessTouchPhase.Up ? UnityEngine.InputSystem.TouchPhase.Ended : UnityEngine.InputSystem.TouchPhase.Moved;
+                        InputSystem.QueueStateEvent(_touchscreen, new TouchState
+                        {
+                            touchId = e.Id + 1,
+                            phase = phase,
+                            position = touchPos,
+                            delta = known && e.Phase != WitnessTouchPhase.Down ? touchPos - last : Vector2.zero,
+                            pressure = (float)e.Pressure,
+                        });
+                        if (e.Phase == WitnessTouchPhase.Up) TouchPositions.Remove(e.Id);
+                        else TouchPositions[e.Id] = touchPos;
+                        break;
+                    }
                     case "key":
                     {
                         Key key;
@@ -387,6 +535,12 @@ namespace WitnessKit
 
             public static void ReleaseAll()
             {
+                if (_touchscreen != null)
+                {
+                    foreach (var kv in TouchPositions)
+                        InputSystem.QueueStateEvent(_touchscreen, new TouchState { touchId = kv.Key + 1, phase = UnityEngine.InputSystem.TouchPhase.Ended, position = kv.Value });
+                }
+                TouchPositions.Clear();
                 Keys.Clear();
                 _mouseState = new MouseState { position = _mouseState.position };
                 _padState = new GamepadState();

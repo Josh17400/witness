@@ -106,11 +106,23 @@ func (g *WitnessGame) Input(e witness.Event) {
 		g.input.Type(e.Text)
 	case "action":
 		g.input.SetAction(e.Action, e.Down)
+	case "touch":
+		g.input.Finger(e.ID, e.X, e.Y, e.Phase, e.Pressure) // witness.TouchDown / TouchMove / TouchUp
 	}
 }
 ```
 
-Polling games can use `s.KeyDown("space")`, `s.Mouse()` and `s.Events` inside `Step`.
+**Touch.** A `"touch"` event is one finger: `e.ID` 0 is the first finger down (it keeps its id until
+`TouchUp`), `e.X`/`e.Y` are logical pixels like the mouse, `e.Phase` is `witness.TouchDown` /
+`TouchMove` / `TouchUp` (`e.Down`/`e.HasDown` mirror it), `e.Pressure` is 0..1 (1 when not given).
+By default finger 0 is **also** delivered as a `"mouse"` event right after each touch event (down →
+button 0 down, move → move, up → button 0 up) with `e.FromTouch` set, so touch tests
+(`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games too. A game with real touch
+handling (on-screen sticks, gestures) sets `Hello{Touch: true}`: it then gets only the touch events
+(the hello says `"touch": true`). Ebitengine reports touches in screen pixels
+(`ebiten.TouchPosition`); convert to and from the logical size the same way as the cursor.
+
+Polling games can use `s.KeyDown("space")`, `s.Mouse()`, `s.Touch(id)` and `s.Events` inside `Step`.
 `witness.NormalizeKey` maps engine names to Witness names (`"ArrowLeft"` → `left`,
 `"KeyA"`/`"A"` → `a`, `"ShiftLeft"` → `shift`, `"Enter"` → `enter`).
 
@@ -187,11 +199,18 @@ rec := witness.RecordFromEnv("My Game", 60) // nil unless WITNESS_RECORD is set;
 defer rec.Close()
 world := NewWorld(rec.Seed()) // the recorded seed (WITNESS_SEED or the clock)
 // input pump: rec.Key(name, down) / rec.Mouse(x, y, button, down). F8 becomes a mark.
+// touch: rec.Touch(id, x, y, witness.TouchDown / TouchMove / TouchUp), logical pixels
 // after each SIM tick: rec.Frame(dt)
 ```
 
 Write one `Frame(dt)` per simulation step, with the dt that step used. Lines are flushed every
 frame. Play it back with `witness replay last`.
+
+Touch: give fingers small ids (0 = first finger down; map Ebitengine's `ebiten.TouchID` or SDL
+finger ids to slots and reuse a slot after its finger lifts, e.g. with
+`inpututil.AppendJustPressedTouchIDs` / `IsTouchJustReleased`). Don't also record the mouse events
+the platform synthesizes from touch: on replay the mouse fallback recreates them, so recording both
+would deliver them twice. `rec.Input(e)` skips events with `e.FromTouch` for you.
 
 ## 10. Determinism checklist (Go-specific items first)
 
@@ -309,8 +328,10 @@ witness shot --at 1       # look at the PNG
 | `witness.Active()` | `WITNESS_ADDR` set or `--witness` |
 | `witness.Run(Hello, Game)` / `Connect(Hello, Game)` + `(*Conn).Poll(timeout)` | serve commands |
 | `Game{Reset, Step, Snapshot}` + optional `InputHandler`, `Screenshotter`, `Caller`, `Evaluator`, `PerfReporter` | hooks |
-| `Step{DT, Frame, Time, Events}`, `KeyDown`, `Mouse`, `AudioFrames`, `WriteAudio` | per-step context |
+| `Step{DT, Frame, Time, Events}`, `KeyDown`, `Mouse`, `Touch`, `AudioFrames`, `WriteAudio` | per-step context |
+| `Event{Type, ...}`; touch: `ID`, `X`, `Y`, `Phase` (`TouchDown`/`TouchMove`/`TouchUp`), `Pressure`; mouse: `FromTouch` | input events |
+| `Hello{..., Touch: true}` | the game handles touch itself: no mouse events from finger 0 |
 | `witness.Image`, `witness.FromRGBA(*image.RGBA)` | screenshots |
 | `witness.Info/Warn/Error/Log` | logs (errors fail tests) |
-| `RecordFromEnv`, `Record`, `(*Recorder).Seed/Key/Mouse/Input/Mark/Frame/Close` | replays |
+| `RecordFromEnv`, `Record`, `(*Recorder).Seed/Key/Mouse/Touch/Input/Mark/Frame/Close` | replays |
 | `witness.Seed()`, `witness.NormalizeKey()` | helpers |

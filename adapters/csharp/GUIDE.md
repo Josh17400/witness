@@ -121,6 +121,19 @@ enum by name: MonoGame/FNA `Keys`, `ConsoleKey`, WinForms `Keys`, SDL wrappers. 
 `WitnessKeys.Normalize(engineKey.ToString())`, is for recording. Pull-style games can read
 `Witness.FrameEvents` inside `Step` instead of setting `Input`.
 
+**Touch.** A `Type == "touch"` event has `Id` (finger, 0 = the first finger down), `X`/`Y` (logical
+pixels, like the mouse), `Phase` (`WitnessTouchPhase.Down` / `Move` / `Up`; `Down` is also
+true / null / false) and `Pressure` (1 when not given). By default the adapter also delivers finger 0
+as a `"mouse"` event right after each touch (down → button 0 down, move → move, up → button 0 up),
+flagged `FromTouch`, so touch tests (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only
+games too. A game with real touch handling (virtual sticks, gestures) sets
+`new WitnessHello { ..., Touch = true }`: it then gets only the touch events (the hello says
+`"touch": true`). A game that handles both can also just ignore mouse events with `FromTouch` set.
+
+```csharp
+case "touch": touchInput.Finger(e.Id, (float)e.X, (float)e.Y, e.Phase, (float)e.Pressure); break;
+```
+
 ## 5. Reset and RNG seeding
 
 `Reset(seed, scene, params)` must rebuild the initial state completely: entities, score, timers,
@@ -176,6 +189,15 @@ frame `Witness.RecordFrame(dt, eventsThisFrame)` (the same `WitnessEvent`s you'd
 `Witness.Mark("F8")` when the player presses F8. Call `Witness.StopRecording()` on exit (it also
 runs on `ProcessExit`). Seed the game with `Witness.Seed`. `witness replay run.jsonl` plays it back
 through reset + input + per-frame dts.
+
+Event pumps that see input one event at a time can queue it instead: `Witness.RecordEvent(e)` and
+`Witness.RecordTouch(id, x, y, WitnessTouchPhase.Down, pressure)` go into the next `RecordFrame` line.
+Touch: record fingers in the same logical pixels Witness injects (convert from window pixels, or from
+normalized 0–1 coordinates like SDL's), with small ids (0 = first finger down; map the platform's
+finger ids to slots and reuse a slot after its finger lifts). Don't record the mouse events the
+platform synthesizes from touch (SDL `which == SDL_TOUCH_MOUSEID`, MonoGame's `TouchPanel` mouse
+emulation): replay recreates them through the mouse fallback, so recording both would click twice.
+`FromTouch` mouse events are never written.
 
 ## 10. Determinism pitfalls (.NET)
 

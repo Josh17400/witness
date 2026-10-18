@@ -35,7 +35,10 @@ namespace WitnessKit
             Screen,
         }
 
-        /// <summary>Edit in a [RuntimeInitializeOnLoadMethod] or an Awake: the hello is sent at the end of the first frame.</summary>
+        /// <summary>
+        /// Edit in a [RuntimeInitializeOnLoadMethod] or an Awake: the hello is sent at the end of the first frame.
+        /// Hello.Touch = true: the game reads touches itself, so finger 0 is not also delivered as the mouse.
+        /// </summary>
         public static readonly WitnessHello Hello = new WitnessHello { Language = "c#" };
 
         /// <summary>Optional: replaces the default snapshot ([WitnessEntity], [WitnessState], IWitnessState).</summary>
@@ -602,6 +605,20 @@ namespace WitnessKit
                     _recordEvents.Add(WitnessEvent.KeyEvent(WitnessKeys.Normalize(key.keyCode.ToString()), down));
                 }
             }
+            var ts = UnityEngine.InputSystem.Touchscreen.current;
+            if (ts != null || _recFingers.Count > 0)
+            {
+                _recSeen.Clear();
+                if (ts != null)
+                {
+                    foreach (var t in ts.touches)
+                    {
+                        if (!t.press.isPressed) continue;
+                        RecordFinger(t.touchId.ReadValue(), t.position.ReadValue(), t.pressure.ReadValue());
+                    }
+                }
+                RecordLifts();
+            }
 #elif ENABLE_LEGACY_INPUT_MANAGER
             if (Input.anyKeyDown || _legacyHeld.Count > 0)
             {
@@ -619,8 +636,76 @@ namespace WitnessKit
                     }
                 }
             }
+            if (Input.touchCount > 0 || _recFingers.Count > 0)
+            {
+                _recSeen.Clear();
+                for (int i = 0; i < Input.touchCount; i++)
+                {
+                    var t = Input.GetTouch(i);
+                    if (t.phase == UnityEngine.TouchPhase.Ended || t.phase == UnityEngine.TouchPhase.Canceled) continue;
+                    RecordFinger(t.fingerId, t.position, t.pressure);
+                }
+                RecordLifts();
+            }
 #endif
             Witness.RecordFrame(Time.unscaledDeltaTime, _recordEvents);
+        }
+
+        // Touch recording (normal play). Platform touch ids become Witness finger ids (0 = the first finger
+        // down, reused after a lift); screen pixels (bottom-left origin) become the hello's logical pixels.
+        // Mouse events Unity simulates from touches are never recorded (the bridge records no mouse), so a
+        // replay gets them back from the adapter's mouse fallback.
+        private sealed class RecFinger
+        {
+            public int Slot;
+            public Vector2 Pos;
+        }
+
+        private readonly Dictionary<int, RecFinger> _recFingers = new Dictionary<int, RecFinger>();
+        private readonly HashSet<int> _recSeen = new HashSet<int>();
+        private readonly List<int> _recGone = new List<int>();
+
+        private void RecordFinger(int platformId, Vector2 screenPos, float pressure)
+        {
+            _recSeen.Add(platformId);
+            RecFinger f;
+            bool known = _recFingers.TryGetValue(platformId, out f);
+            if (known && f.Pos == screenPos) return;   // stationary
+            if (!known)
+            {
+                int slot = 0;
+                while (SlotTaken(slot)) slot++;   // the lowest free finger id
+                f = new RecFinger { Slot = slot };
+                _recFingers[platformId] = f;
+            }
+            f.Pos = screenPos;
+            _recordEvents.Add(TouchEventAt(f.Slot, screenPos, known ? WitnessTouchPhase.Move : WitnessTouchPhase.Down, pressure));
+        }
+
+        private bool SlotTaken(int slot)
+        {
+            foreach (var other in _recFingers.Values) if (other.Slot == slot) return true;
+            return false;
+        }
+
+        private void RecordLifts()
+        {
+            _recGone.Clear();
+            foreach (var kv in _recFingers) if (!_recSeen.Contains(kv.Key)) _recGone.Add(kv.Key);
+            _recGone.Sort();
+            foreach (int id in _recGone)
+            {
+                var f = _recFingers[id];
+                _recordEvents.Add(TouchEventAt(f.Slot, f.Pos, WitnessTouchPhase.Up, 1f));
+                _recFingers.Remove(id);
+            }
+        }
+
+        private static WitnessEvent TouchEventAt(int slot, Vector2 screenPos, WitnessTouchPhase phase, float pressure)
+        {
+            float sx = Hello.Width > 0 && Screen.width > 0 ? (float)Hello.Width / Screen.width : 1f;
+            float sy = Hello.Height > 0 && Screen.height > 0 ? (float)Hello.Height / Screen.height : 1f;
+            return WitnessEvent.TouchEvent(slot, screenPos.x * sx, (Screen.height - screenPos.y) * sy, phase, pressure > 0f ? pressure : 1f);
         }
 
 #if !(WITNESS_INPUT_SYSTEM && ENABLE_INPUT_SYSTEM) && ENABLE_LEGACY_INPUT_MANAGER

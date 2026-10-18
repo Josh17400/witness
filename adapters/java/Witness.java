@@ -80,6 +80,11 @@ public final class Witness {
         public List<String> keys;
         /** Leave null to derive it from the handlers that are set. */
         public List<String> capabilities;
+        /**
+         * True when the game handles "touch" events itself: finger 0 is then NOT also delivered as
+         * mouse events (the default mouse fallback), and the hello says "touch": true.
+         */
+        public boolean touch;
 
         public Hello() {}
         public Hello(String name) { this.name = name; }
@@ -90,21 +95,37 @@ public final class Witness {
         public Hello call(String name, String args, String help) { calls.add(new Call(name, args, help)); return this; }
         public Hello keys(String... names) { keys = Arrays.asList(names); return this; }
         public Hello capabilities(String... caps) { capabilities = Arrays.asList(caps); return this; }
+        public Hello touch(boolean v) { touch = v; return this; }
     }
 
     /** One input event (protocol section 4). Unused fields keep their defaults. */
     public static final class Event {
         public int frame;
-        /** key | mouse | wheel | text | action | pad | axis (or anything the game understands). */
+        /** key | mouse | wheel | text | action | pad | axis | touch (or anything the game understands). */
         public String type = "";
         public String key, text, action, axis;
         /** Pad button name ("a", "start", ...). Mouse buttons use {@link #button}. */
         public String padButton;
-        /** null for events without a down/up meaning (mouse moves, wheel, text, axis). */
+        /**
+         * null for events without a down/up meaning (mouse moves, wheel, text, axis).
+         * Touch: true on "down", false on "up", null on "move".
+         */
         public Boolean down;
+        /** Mouse / touch: logical pixels, top-left origin. */
         public double x, y, dx, dy, value;
         /** Mouse: 0 left, 1 middle, 2 right. */
         public int button;
+        /** Touch: the finger, 0 = first finger down (stable from down to up). */
+        public int id;
+        /** Touch: "down" | "move" | "up". */
+        public String phase;
+        /** Touch: 0..1, 1 when not given (when recording, 0 also means not given). */
+        public double pressure = 1;
+        /**
+         * Mouse: synthesized from finger 0 by the mouse fallback (like SDL's SDL_TOUCH_MOUSEID). Skip it
+         * if the game also handles the touch event. Never recorded.
+         */
+        public boolean fromTouch;
         /** The event exactly as received, including fields this class doesn't model. */
         public Map<String, Object> raw;
 
@@ -116,6 +137,32 @@ public final class Witness {
             e.type = "key";
             e.key = key;
             e.down = down;
+            return e;
+        }
+
+        /** A mouse event for recording: down null = a move, else button 0/1/2 pressed or released. */
+        public static Event mouse(double x, double y, int button, Boolean down) {
+            Event e = new Event();
+            e.type = "mouse";
+            e.x = x;
+            e.y = y;
+            e.button = button;
+            e.down = down;
+            return e;
+        }
+
+        /**
+         * A finger for recording (or injecting): id 0 = first finger, phase "down" | "move" | "up",
+         * logical pixels. Don't also record mouse events the platform synthesizes from touch.
+         */
+        public static Event touch(int id, double x, double y, String phase) {
+            Event e = new Event();
+            e.type = "touch";
+            e.id = id;
+            e.x = x;
+            e.y = y;
+            e.phase = "down".equals(phase) || "up".equals(phase) ? phase : "move";
+            e.down = "down".equals(e.phase) ? Boolean.TRUE : "up".equals(e.phase) ? Boolean.FALSE : null;
             return e;
         }
 
@@ -138,6 +185,13 @@ public final class Witness {
             e.action = Json.str(o.get("action"), null);
             e.axis = Json.str(o.get("axis"), null);
             e.value = Json.toDouble(o.get("value"), 0);
+            if ("touch".equals(e.type)) {
+                String p = Json.str(o.get("phase"), "move");
+                e.id = (int) Json.toLong(o.get("id"), 0);
+                e.phase = "down".equals(p) || "up".equals(p) ? p : "move";
+                e.down = "down".equals(e.phase) ? Boolean.TRUE : "up".equals(e.phase) ? Boolean.FALSE : null;
+                e.pressure = Json.toDouble(o.get("pressure"), 1);
+            }
             return e;
         }
 
@@ -154,6 +208,13 @@ public final class Witness {
                 case "action": o.put("action", action); break;
                 case "pad": o.put("button", padButton); break;
                 case "axis": o.put("axis", axis); o.put("value", value); break;
+                case "touch":
+                    o.put("id", id);
+                    o.put("x", x);
+                    o.put("y", y);
+                    o.put("phase", "down".equals(phase) || "up".equals(phase) ? phase : "move");
+                    if (pressure > 0 && pressure != 1) o.put("pressure", pressure);
+                    return o;   // no "down": the phase says it
                 default:
                     if (raw != null) for (Map.Entry<String, Object> kv : raw.entrySet()) if (!kv.getKey().equals("frame")) o.put(kv.getKey(), kv.getValue());
             }
@@ -619,13 +680,31 @@ public final class Witness {
         if (p != null) p.clear();
     }
 
-    /** Queues protocol events (the "events" array of an input command). */
+    /**
+     * Queues protocol events (the "events" array of an input command). Finger 0 of a touch is also
+     * queued as the matching mouse event right after it (fromTouch = true) unless Hello.touch is set.
+     */
     @SuppressWarnings("unchecked")
     public static void queueInput(List<Object> events) {
         if (events == null) return;
+        Hello h = hello;
+        boolean fallback = h == null || !h.touch;
         synchronized (PENDING) {
-            for (Object o : events) if (o instanceof Map) PENDING.add(Event.fromJson((Map<String, Object>) o));
+            for (Object o : events) {
+                if (!(o instanceof Map)) continue;
+                Event e = Event.fromJson((Map<String, Object>) o);
+                PENDING.add(e);
+                if (fallback && e.id == 0 && "touch".equals(e.type)) PENDING.add(mouseFromTouch(e));
+            }
         }
+    }
+
+    /** The mouse fallback for finger 0: down = button 0 down, move = a move, up = button 0 up. */
+    private static Event mouseFromTouch(Event t) {
+        Event m = Event.mouse(t.x, t.y, 0, t.down);
+        m.frame = t.frame;
+        m.fromTouch = true;
+        return m;
     }
 
     /** Starts a frame: removes and returns the queued events due now (frame &lt;= frame()), in arrival order. */
@@ -731,14 +810,17 @@ public final class Witness {
         return true;
     }
 
-    /** Normal play: append one replay line for the frame just simulated. No-op unless recording. */
+    /**
+     * Normal play: append one replay line for the frame just simulated. No-op unless recording.
+     * Touch goes in as Event.touch(...); mouse events with fromTouch set are skipped (replay recreates them).
+     */
     public static synchronized void recordFrame(double dt, List<Event> events) {
         if (rec == null) return;
         StringBuilder sb = new StringBuilder(48).append("{\"f\":").append(recFrame).append(",\"dt\":");
         Json.writeValue(sb, dt, 0);
-        if (events != null && !events.isEmpty()) {
-            List<Object> list = new ArrayList<>(events.size());
-            for (Event e : events) list.add(e.toJson(false));
+        List<Object> list = new ArrayList<>(events != null ? events.size() : 0);
+        if (events != null) for (Event e : events) if (e != null && !(e.fromTouch && "mouse".equals(e.type))) list.add(e.toJson(false));
+        if (!list.isEmpty()) {
             sb.append(",\"in\":");
             Json.writeValue(sb, list, 0);
         }
@@ -850,6 +932,7 @@ public final class Witness {
         o.put("capabilities", caps);
         o.put("calls", calls);
         if (h.keys != null) o.put("keys", h.keys);
+        if (h.touch) o.put("touch", true);
         return Json.write(Collections.singletonMap("hello", o));
     }
 

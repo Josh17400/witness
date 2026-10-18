@@ -77,6 +77,9 @@ them like `logs`.
 {"frame": 50, "type": "action", "action": "jump", "down": true}
 {"frame": 60, "type": "pad",    "button": "a", "down": true}
 {"frame": 60, "type": "axis",   "axis": "leftx", "value": 0.8}
+{"frame": 70, "type": "touch",  "id": 0, "x": 160, "y": 90, "phase": "down"}
+{"frame": 71, "type": "touch",  "id": 0, "x": 170, "y": 92, "phase": "move", "pressure": 0.6}
+{"frame": 72, "type": "touch",  "id": 0, "x": 170, "y": 92, "phase": "up"}
 ```
 
 * **Key names** are lowercase: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`,
@@ -88,6 +91,37 @@ them like `logs`.
   straight to it.
 * Adapters inject events through the game's normal input path, so gameplay code can't tell
   the difference.
+
+### Touch
+
+* `id` is the finger: an integer, 0 for the first finger down, 1 for the second, and so on.
+  One finger keeps its id from `down` through its `move`s to `up`, and an id may be reused
+  after `up`. Several fingers can be down at once.
+* `x`/`y` are in the same logical pixel space as mouse events (top-left origin), never
+  normalized 0–1: adapters convert from/to engine-normalized coordinates (SDL, pygame).
+* `phase` is `"down"`, `"move"` or `"up"`. `pressure` is optional (0–1; adapters use 1 when
+  it is missing).
+* **Mouse fallback.** Adapters deliver touch events as touch (the engine's touch path, or a
+  touch event in the adapter's event API). For finger `id` 0 they also deliver the matching
+  mouse event right after it, unless the game opts out: `down` → button 0 down at x,y,
+  `move` → mouse move to x,y, `up` → button 0 up at x,y. So touch-only tests still drive
+  mouse-driven games, the way phones and browsers emulate a mouse from the first finger.
+  Where the engine has a marker for "mouse from touch", the synthesized event carries it
+  (SDL's `SDL_TOUCH_MOUSEID`, pygame's `touch`, LÖVE's `istouch`); other fingers never make
+  mouse events. Engine-integrated adapters may use the engine's own emulation instead (Godot's
+  `emulate_mouse_from_touch`).
+* **Opting out.** A game that handles touch itself turns the fallback off with its adapter's
+  `touch` option and then receives only the touch events. Such games may add `"touch": true`
+  to the hello to say so (informational; the CLI ignores unknown hello fields).
+* **Recording.** Touch events are recorded in replay frames (`in`, section 5) like any other
+  event, in the shape above without `frame`. Record the real touches and skip the mouse
+  events the platform synthesizes from them (SDL `which == SDL_TOUCH_MOUSEID`, pygame
+  `event.touch`, LÖVE `istouch`, browser compatibility mouse events): on replay the fallback
+  recreates those, so recording both would deliver them twice.
+* Scripted input (`--input` and test `input`): `touch:x,y@t` taps with finger 0 (down at t,
+  up one frame later), `touch:x,y@a-b` holds, `touch2:x,y@…` uses finger 1 (`touchN` is
+  finger N−1), and `swipe:x1,y1->x2,y2@a-b` puts finger 0 down at a, moves it every frame
+  (linearly interpolated) and lifts it at b (`swipeN` for other fingers).
 
 ## 5. Recording (replays)
 

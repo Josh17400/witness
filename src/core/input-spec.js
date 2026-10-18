@@ -8,9 +8,13 @@
 //   drag:x1,y1->x2,y2@a-b   hold the left button and move linearly from a to b
 //   wheel:+3@t         mouse wheel (+ = zoom out / scroll down)
 //   click:world:x,y@t  coordinates in the 2D world instead of UI pixels (also mouse:/drag:)
+//   touch:x,y@t        tap with finger 0 (down at t, up one frame later); touch:x,y@a-b holds it
+//   touch2:x,y@t       the same with finger 1 (touchN = finger N-1, so touch1 == touch)
+//   swipe:x1,y1->x2,y2@a-b  finger 0 down at a, one interpolated move per frame, up at b (swipeN too)
 //
 // Items are separated by "," or ";". Anything not understood throws an Error naming the item.
 // Events: {t, key, down} | {t, mouse:[x,y], down?, button, world?} | {t, wheel}
+// (touch:/swipe:, like action:/pad:/text:, are frame-exact and handled by parseWitnessInput.)
 
 const NUM = "-?\\d+(?:\\.\\d+)?";
 const TIME = `@(${NUM})(?:-(${NUM}))?`;
@@ -20,7 +24,9 @@ const RE = {
   drag: new RegExp(`^drag:(world:)?(${NUM}),(${NUM})->(${NUM}),(${NUM})${TIME}$`, "i"),
   wheel: new RegExp(`^wheel:([+-]?\\d+(?:\\.\\d+)?)@(${NUM})$`, "i"),
 };
-const EXAMPLES = "examples: right@0-2 (hold), space@1 (tap), click:640,360@1.5, mouse:100,200@2, drag:600,300->800,300@1-2, wheel:+3@1";
+const EXAMPLES = "examples: right@0-2 (hold), space@1 (tap), click:640,360@1.5, mouse:100,200@2, drag:600,300->800,300@1-2, wheel:+3@1, touch:160,90@1, swipe:40,90->200,90@1-1.5";
+const TOUCH_RE = new RegExp(`^touch(\\d*):(${NUM}),(${NUM})${TIME}$`, "i");
+const SWIPE_RE = new RegExp(`^swipe(\\d*):(${NUM}),(${NUM})->(${NUM}),(${NUM})${TIME}$`, "i");
 
 /** Split on separators without breaking "click:640,360@1" apart. */
 export function splitItems(spec) {
@@ -75,7 +81,7 @@ export function parseInputSpec(spec) {
       ev.push({ t: +m[2], wheel: +m[1] });
     } else if ((m = RE.key.exec(item))) {
       const [, name, a, b] = m;
-      if (/^(click|rclick|mouse|drag|wheel)$/i.test(name)) throw new Error(`'${item}': ${name} needs a position — ${EXAMPLES}`);
+      if (/^(click|rclick|mouse|drag|wheel|touch\d*|swipe\d*)$/i.test(name)) throw new Error(`'${item}': ${name} needs a position — ${EXAMPLES}`);
       const t0 = +a, t1 = b !== undefined ? +b : t0 + 0.1;
       if (t1 <= t0) throw new Error(`'${item}': hold must end after it starts`);
       ev.push({ t: t0, key: name.toLowerCase(), down: true });
@@ -106,12 +112,51 @@ export function toProtocolEvents(events, fps) {
   });
 }
 
-/** Extended spec items: action:jump@1-2 (input-mapping actions), pad:a@1, text:hello@2 */
+/** Finger id from the digits after touch/swipe: "" or "1" -> 0, "2" -> 1, ... */
+function fingerId(digits, item) {
+  if (!digits) return 0;
+  const n = +digits;
+  if (!Number.isInteger(n) || n < 1) throw new Error(`'${item}': fingers are numbered from 1 (touch = touch1 = finger id 0, touch2 = id 1)`);
+  return n - 1;
+}
+
+/** touch:/touchN:/swipe:/swipeN: items as protocol touch events (frame-exact, so they need fps). */
+function parseTouch(item, fps) {
+  const F = (t) => Math.max(0, Math.round(t * fps));
+  const ev = (frame, id, x, y, phase) => ({ frame, type: "touch", id, x, y, phase });
+  let m;
+  if ((m = TOUCH_RE.exec(item))) {
+    const [, digits, x, y, a, b] = m;
+    const id = fingerId(digits, item);
+    if (b !== undefined && +b <= +a) throw new Error(`'${item}': hold must end after it starts`);
+    const f0 = F(+a), f1 = b !== undefined ? Math.max(F(+b), f0 + 1) : f0 + 1;   // a tap lifts one frame later
+    return [ev(f0, id, +x, +y, "down"), ev(f1, id, +x, +y, "up")];
+  }
+  if ((m = SWIPE_RE.exec(item))) {
+    const [, digits, x1, y1, x2, y2, a, b] = m;
+    const id = fingerId(digits, item);
+    if (b === undefined) throw new Error(`'${item}': swipe needs a time range, e.g. swipe:40,90->200,90@1-1.5`);
+    if (+b <= +a) throw new Error(`'${item}': swipe must end after it starts`);
+    const f0 = F(+a), f1 = Math.max(F(+b), f0 + 1), out = [ev(f0, id, +x1, +y1, "down")];
+    // one move per frame after the down; the last one lands exactly on the end point, then the finger lifts there
+    for (let f = f0 + 1; f <= f1; f++) {
+      const k = (f - f0) / (f1 - f0);
+      out.push(ev(f, id, +x1 + (x2 - x1) * k, +y1 + (y2 - y1) * k, "move"));
+    }
+    out.push(ev(f1, id, +x2, +y2, "up"));
+    return out;
+  }
+  return null;
+}
+
+/** Extended spec items: action:jump@1-2 (input-mapping actions), pad:a@1, text:hello@2, touch:x,y@t, swipe:... */
 export function parseWitnessInput(spec, fps) {
   if (spec == null || spec === true || spec === "") return [];
   if (Array.isArray(spec)) return toProtocolEvents(spec, fps);
   const rest = [], extra = [];
   for (const item of splitItems(String(spec))) {
+    const touch = parseTouch(item.trim(), fps);
+    if (touch) { extra.push(...touch); continue; }
     const m = /^(action|pad|text):([^@]+)@(-?\d+(?:\.\d+)?)(?:-(-?\d+(?:\.\d+)?))?$/.exec(item.trim());
     if (!m) { rest.push(item); continue; }
     const [, kind, name, a, b] = m;
