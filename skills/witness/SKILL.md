@@ -1,6 +1,6 @@
 ---
 name: witness
-description: Witness lets you see, hear and prove a game headlessly — in any language or engine (C/C++, Rust, Go, C#, Unity, Godot, Java/LibGDX, Python/pygame, Lua/LÖVE, JS/TS web, Lumen). Use it whenever you are building, debugging, testing or polishing a GAME (or any real-time interactive app): to wire the Witness adapter into the project, then verify gameplay with scripted-input tests, query game state at any moment, chart values over time, take and diff screenshots, analyze the game's audio, and replay a human's recorded play session.
+description: Witness lets you see, hear and prove a game headlessly — in any language or engine (C/C++, Rust, Go, C#, Unity, Godot, Java/LibGDX, Python/pygame, Lua/LÖVE, JS/TS web). Use it whenever you are building, debugging, testing or polishing a GAME (or any real-time interactive app): to wire the Witness adapter into the project, then verify gameplay with scripted-input tests, query game state at any moment, chart values over time, take and diff screenshots, analyze the game's audio, and replay a human's recorded play session.
 when_to_use: User asks to test/verify/debug a game, "make sure it works", check a mechanic, reproduce a bug they hit while playing, look at what the game renders, check sound/music, add automated gameplay tests or CI for a game, or set up Witness. Also when you have changed game code and should prove it still works.
 ---
 

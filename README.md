@@ -49,7 +49,6 @@ cd /path/to/your/game && witness init
 | `java` | Java / Kotlin (LibGDX, LWJGL, jMonkeyEngine, Swing/Java2D, custom engines) | ✅ local + CI |
 | `js` | JavaScript / TypeScript (browser canvas, Phaser, three.js, PixiJS, Babylon.js, Node, Electron, Tauri; one ES module) | ✅ local + CI |
 | `lua` | Lua (LÖVE 11 via witness_love.lua, plain Lua 5.1-5.4 / LuaJIT with LuaSocket) | ✅ local + CI |
-| `lumen` | Lumen (.lum games): a bridge onto Lumen's built-in test API through its Electron shell | ✅ local + CI |
 | `python` | Python (plain Python, pygame / pygame-ce, Arcade, Pyglet; single file witness.py, stdlib only) | ✅ local + CI |
 | `rust` | Rust (custom engines, winit/wgpu, macroquad, Bevy via guide; crate `witness`, std only) | ✅ local + CI |
 | `unity` | Unity (2021.3+, built players in -batchmode or the Editor) | ⚠️ compile-checked in CI; never run inside Unity (needs a license) |
