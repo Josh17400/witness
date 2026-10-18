@@ -653,6 +653,7 @@ export class Autopilot {
     this.t = w.t; this.frame = w.frame;
     const p = w.player;
     if (w.newScene) {   // a new level or scene: the old map knowledge and what we remembered no longer apply
+      this.visitedBefore = (this.visitedBefore || 0) + this.grid.visited.size;   // coverage adds up across levels
       this.grid.reset(); this.windupSeen.clear(); this.prevP = null;
       if (this.platform) this.platform.reset();
       this.emit("scene", `new scene/level (${w.sceneKey}): map knowledge reset`);

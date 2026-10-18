@@ -222,7 +222,7 @@ export async function runDaemon(dir) {
     let seenOpen = 0;
     if (open) for (const k of grid.seen) if (grid.mapSolid.get(k) === false) seenOpen++;
     const b = (() => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const k of grid.visited) { const [x, y] = k.split(",").map(Number); x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); } return Number.isFinite(x0) ? { x0, y0, x1, y1 } : null; })();
-    return { cells: grid.visited.size, seen: open ? seenOpen : grid.seen.size, openCells: open || null, percent: open ? Math.round((100 * seenOpen) / open) : null, bounds: b };
+    return { cells: grid.visited.size + (ap.visitedBefore || 0), scenes: ap.visitedBefore ? "all levels (map % is the current one)" : undefined, seen: open ? seenOpen : grid.seen.size, openCells: open || null, percent: open ? Math.round((100 * seenOpen) / open) : null, bounds: b };
   }
 
   function state(extra = {}) {
