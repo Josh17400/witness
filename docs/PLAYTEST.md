@@ -71,7 +71,7 @@ of a second. `--config DIR` (or `--cmd "<launch>"`) works as in every Witness co
 | `play end` | `-s t1` `--fun 1-5` `--difficulty 1-5` `--feedback "…"` `--all` | Writes report.md/report.json/coverage.png and the final replay, stops the game and the daemon. |
 | `play stop` | `-s t1` or `--all` | Same as `end`, without feedback (reason "stopped by the main agent"). Kills the daemon and game if they don't exit within 15 s. |
 | `play status` | `-s t1` | Game time, frame, orders and notes of a live session; state and summary of an ended one. |
-| `play list` | `--clean` | All sessions in the registry (● live, ○ ended). `--clean` kills unresponsive sessions (daemon and game), marks dead ones ended, and drops entries older than 7 days. |
+| `play list` | `--clean` | All sessions in the registry (● live, ○ ended). `--clean` kills unresponsive sessions (daemon and game), marks dead ones ended, and drops entries older than 7 days or whose folder was deleted. |
 | `play report` | `[name\|dir]` `--json` | Prints report.md (or report.json). report.json is also updated after every order while a session runs. |
 | `play brief` | `--goal` `--persona` (newbie) `--minutes` (4) `--name` (t1) `--seed` `--scene` `--params` `--model` `--extra "…"` | Prints the tester prompt. `--extra` (or `play.brief` in witness.json) adds a "notes from the developer" paragraph. |
 | `play suggest` | `--seed` `--scene` `--params` `--write` | Probes the game (holds each key for 0.35 s from a fresh reset) and proposes a `"play"` config, plus which snapshot conventions the game follows. `--write` merges it into witness.json. It runs one game process. |
@@ -409,7 +409,7 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 * **Process cap.** `start` refuses when `WITNESS_PLAY_MAX` sessions (default 2) are already live machine-wide, unless
   `--force`. Each session is one game plus one light daemon. `play suggest` runs a game too but isn't counted.
 * **Cleanup.** `witness play list` shows what's alive. `witness play stop --all` ends every live session.
-  `witness play list --clean` kills unresponsive ones and forgets entries older than a week.
+  `witness play list --clean` kills unresponsive ones and forgets entries older than a week or whose folder was deleted.
 * `witness init` adds `playtests/` to `witness/.gitignore`.
 
 ## The report

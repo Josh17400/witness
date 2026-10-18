@@ -187,7 +187,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       if (opt.clean) {
         for (const e of all) {
           if (e.live) { try { await request(e, "ping", {}, 3000); } catch { kill(e.pid); const info = sessionInfo(e); if (info && info.gamePid) kill(info.gamePid); updateEntry(e.name, { state: "ended" }); console.log(`killed unresponsive session ${e.name}`); } }
-          else if (Date.now() - Date.parse(e.started || 0) > 7 * 864e5) removeEntry(e.name);
+          else if (Date.now() - Date.parse(e.started || 0) > 7 * 864e5 || (e.dir && !fs.existsSync(e.dir))) removeEntry(e.name);   // old, or its folder was deleted
           else if (e.state !== "ended" && e.state !== "failed") updateEntry(e.name, { state: "ended" });
         }
       }
