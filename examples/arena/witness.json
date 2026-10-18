@@ -1,0 +1,21 @@
+{
+  "name": "arena",
+  "launch": { "command": "node", "args": ["game.mjs"] },
+  "tests": "witness",
+  "seed": 1,
+  "play": {
+    "profile": "topdown",
+    "controls": {
+      "move": "wasd",
+      "attack": "j",
+      "block": "k",
+      "dodge": "l",
+      "interact": "e",
+      "heal": "q",
+      "confirm": "enter",
+      "cancel": "escape",
+      "choose": "numbers"
+    },
+    "reach": { "attack": 1.3, "interact": 1.2, "pickup": 0.5 }
+  }
+}

@@ -1,0 +1,106 @@
+[
+  { "name": "map: everything is reachable with the gate open, the exit is not with it closed, and the straight line is walled",
+    "params": { "wolves": false },
+    "steps": [
+      { "at": 0, "expect": [
+        "(() => { const g = state.map.rows, seen = new Set(), todo = [[2, 7]]; while (todo.length) { const [x, y] = todo.pop(), k = x + ',' + y; if (seen.has(k) || '#G'.includes(g[y][x])) continue; seen.add(k); todo.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]); } return seen.has('26,14'); })() == false",
+        "(() => { const g = state.map.rows, a = state.player.pos, b = first('Exit').pos; for (let i = 0; i <= 400; i++) { const x = a[0] + (b[0] - a[0]) * i / 400, y = a[1] + (b[1] - a[1]) * i / 400; if ('#G'.includes(g[Math.floor(y / 16)][Math.floor(x / 16)])) return true; } return false; })()",
+        "state.map.rows[8][26] == 'G'", "state.map.rows[14][26] == 'X'", "state.map.solid == '#G'" ] },
+      { "at": 0.1, "call": ["open"], "expect": [
+        "(() => { const g = state.map.rows, seen = new Set(), todo = [[2, 7]]; while (todo.length) { const [x, y] = todo.pop(), k = x + ',' + y; if (seen.has(k) || '#G'.includes(g[y][x])) continue; seen.add(k); todo.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]); } return seen.has('26,14') && seen.size == g.join('').split('').filter((c) => c != '#').length; })()",
+        "state.map.rows[8][26] == '.'", "byId(9).locked == false" ] }
+    ] },
+
+  { "name": "walking straight east from the start stops at the maze wall",
+    "params": { "wolves": false }, "input": "right@0-2.6",
+    "steps": [
+      { "at": 1, "expect": ["state.player.pos[0] > 100", "state.player.facing == 'E'"] },
+      { "at": 2.2, "expect": ["approx(state.player.pos[0], 187, 0.001)", "state.player.pos[1] == 120"] },
+      { "at": 2.5, "expect": ["state.player.pos[0] == prev.player.pos[0]", "state.player.pos[1] == 120"] }
+    ] },
+
+  { "name": "moving diagonally into a wall slides along it",
+    "params": { "wolves": false }, "input": "up@0-1, left@0-1",
+    "steps": [
+      { "at": 0.3, "expect": ["state.player.pos[0] > 22", "state.player.pos[1] < 110"] },
+      { "at": 0.6, "expect": ["approx(state.player.pos[0], 21, 0.001)", "state.player.pos[1] < prev.player.pos[1] - 10"] }
+    ] },
+
+  { "name": "a wolf in reach winds up first, and the bite lands at the end of the windup",
+    "params": { "start": "courtyard" },
+    "steps": [
+      { "at": 0, "call": ["kill", 5, 8], "expect": ["count('Wolf') == 1", "byId(3).state == 'idle'"] },
+      { "at": 0.4, "expect": ["byId(3).state == 'chase'", "byId(3).telegraph == 0", "state.player.hp == 10"] },
+      { "at": 0.75, "expect": ["byId(3).state == 'windup'", "byId(3).telegraph > 0", "state.player.hp == 10"] },
+      { "at": 0.99, "expect": ["byId(3).state == 'windup'", "state.player.hp == 10"] },
+      { "at": 1.1, "expect": ["state.player.hp == 8", "byId(3).state == 'recover'", "byId(3).telegraph == 0"] }
+    ] },
+
+  { "name": "blocking while facing the wolf negates the bite and staggers it",
+    "params": { "start": "courtyard" }, "input": "right@0-0.1, k@0.15-1.3",
+    "steps": [
+      { "at": 0, "call": ["kill", 5, 8] },
+      { "at": 0.6, "expect": ["byId(3).state == 'windup'", "state.player.blocking", "state.player.facing == 'E'"] },
+      { "at": 1.2, "expect": ["state.player.hp == 10", "byId(3).state == 'stagger'", "byId(3).hp == 3"] }
+    ] },
+
+  { "name": "attacking a staggered wolf deals 2",
+    "params": { "start": "courtyard" }, "input": "right@0-0.1, k@0.15-1.3, j@1.35, j@1.8",
+    "steps": [
+      { "at": 0, "call": ["kill", 5, 8] },
+      { "at": 1.3, "expect": ["byId(3).state == 'stagger'", "byId(3).hp == 3"] },
+      { "at": 1.45, "expect": ["byId(3).hp == 1", "state.player.hp == 10"] },
+      { "at": 1.9, "expect": ["byId(3) == null", "count('Wolf') == 0", "state.player.hp == 10"] }
+    ] },
+
+  { "name": "talking to the guard opens a 2-option dialogue; option 1 gives a potion and sets the quest",
+    "params": { "wolves": false }, "input": "up@0-0.5, right@0-0.5, e@0.6, left@0.7-0.85, 1@0.9, 1@1.2",
+    "steps": [
+      { "at": 0, "expect": ["state.goal.text == 'Talk to the Old Guard'", "state.quest == null", "state.dialogue == null"] },
+      { "at": 0.55, "expect": ["dist(state.player.pos, first('Guard').pos) < 20", "first('Guard').talk"] },
+      { "at": 0.7, "expect": ["state.dialogue.speaker == 'Old Guard'", "len(state.dialogue.options) == 2",
+        "state.dialogue.options[0] == \"I'll get it back.\"", "state.dialogue.options[1] == 'Not my problem.'", "state.player.potions == 0"] },
+      { "at": 1, "expect": ["state.player.potions == 1", "state.quest == 'Get the key from the Alpha Wolf'",
+        "state.goal.text == 'Get the key from the Alpha Wolf'", "len(state.dialogue.options) == 1",
+        "dist(state.player.pos, prev.player.pos) == 0"] },
+      { "at": 1.3, "expect": ["state.dialogue == null", "state.player.potions == 1"] }
+    ] },
+
+  { "name": "a potion heals 4, capped at max hp",
+    "params": { "wolves": false }, "input": "q@0.1, q@0.5",
+    "steps": [
+      { "at": 0, "call": [["sethp", 3], ["give", "potion", 2]], "expect": ["state.player.hp == 3", "state.player.potions == 2"] },
+      { "at": 0.2, "expect": ["state.player.hp == 7", "state.player.potions == 1"] },
+      { "at": 0.3, "call": ["sethp", 9] },
+      { "at": 0.6, "expect": ["state.player.hp == 10", "state.player.potions == 0"] }
+    ] },
+
+  { "name": "the gate is locked without the key and blocks the way",
+    "params": { "start": "gate", "wolves": false }, "input": "e@0.1, down@0.3-1",
+    "steps": [
+      { "at": 0.2, "expect": ["state.notice == 'The gate is locked. The Alpha Wolf has the key.'", "byId(9).locked", "state.map.rows[8][26] == 'G'"] },
+      { "at": 1.1, "expect": ["approx(state.player.pos[1], 123, 0.001)", "state.won == false"] },
+      { "at": 3.3, "expect": ["state.notice == null"] }
+    ] },
+
+  { "name": "the Alpha drops the key; the key opens the gate and the exit wins",
+    "params": { "start": "alpha" }, "input": "e@0.4, down@0.6-2",
+    "steps": [
+      { "at": 0, "call": [["kill", "Wolf"], ["kill", "AlphaWolf"]],
+        "expect": ["count('AlphaWolf') == 0", "count('Key') == 1", "dist(first('Key').pos, [328, 232]) < 0.001", "first('Key').item"] },
+      { "at": 0.1, "call": ["teleport", 328, 226] },
+      { "at": 0.2, "expect": ["state.player.hasKey", "count('Key') == 0", "state.goal.text == 'Open the gate (east) and reach the exit'"] },
+      { "at": 0.3, "call": ["teleport", 424, 118] },
+      { "at": 0.5, "expect": ["byId(9).locked == false", "state.map.rows[8][26] == '.'"] },
+      { "at": 2.2, "expect": ["state.won", "state.notice == 'You escaped the arena!'", "state.goal.text == 'You escaped!'"] }
+    ] },
+
+  { "name": "dying, then ENTER respawns at the start with full hp",
+    "params": { "start": "courtyard" }, "input": "enter@1.5",
+    "steps": [
+      { "at": 0, "call": [["sethp", 2], ["kill", 5, 8]] },
+      { "at": 1.1, "expect": ["state.dead", "state.player.hp == 0", "state.deaths == 1", "state.notice == 'You died. Press ENTER to respawn.'"] },
+      { "at": 1.6, "expect": ["state.dead == false", "state.player.hp == 10", "state.deaths == 1",
+        "dist(state.player.pos, [40, 120]) < 0.001", "state.notice == null", "byId(3).hp == 3"] }
+    ] }
+]
