@@ -74,6 +74,19 @@ reproduces the session exactly. Embervale wolves wind up for only 0.3 s: at the 
 (0.25 s) the roll lands just in time, and at the newbie persona's 0.35 s it lands too late. That's useful feedback on
 how readable the telegraph is.
 
+**A Haiku 5.5 playtest** (persona newbie, `--scene village` with 3 wolves, 140 s of game time, 37 orders) beat the
+opening pack with the guards' help. It then talked to the villagers, took a den quest from an NPC, and killed two of
+the three den wolves before dying and respawning. What it reported about the game:
+* **wolf windups are hard to read:** 24 windups, 18 of them hit (the telegraph is shorter than a human reaction);
+* accepting a quest silently replaced the tracked "A Blade of Your Own" quest in the HUD and the goal line;
+* hens and roosters are typed `Villager` in the snapshot, so "talk to the nearest villager" walked to a chicken;
+* the den pack did 17–19 damage per bite (89 → 0 hp in about 10 s at level 1).
+
+The harness fixes that came out of this run: a fight leash, falling back to the roll when "block" was asked for,
+dead corpses, and stale remembered NPCs. Without a `state.map`, walking through the village still bumps into buildings
+and sometimes through doors (20 short stuck incidents, all resolved). A walkability map in the snapshot would fix
+that.
+
 ## Record a session (normal play)
 
 ```bat
