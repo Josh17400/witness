@@ -100,7 +100,10 @@ witness replay witness/playtests/t1/replay.jsonl --at 12.4 --shot         # see 
 ```
 
 [examples/arena](examples/arena) is a small top-down game built for it (a maze, wolves that telegraph their bites,
-an NPC dialogue, a locked gate). Reference: [docs/PLAYTEST.md](docs/PLAYTEST.md).
+an NPC dialogue, a locked gate). Three profiles cover top-down games, side-view platformers (jump planning, stomps,
+landing prediction) and first-person shooters (auto-calibrated mouse aim). Haiku testers have won the arena, beaten
+level 1-1 of a Mario-style platformer, and won a 4v4 FPS match 40–17, and each report fed back real bugs and design
+feedback. `witness play suggest` proposes the config for a new game. Reference: [docs/PLAYTEST.md](docs/PLAYTEST.md).
 
 ## License
 

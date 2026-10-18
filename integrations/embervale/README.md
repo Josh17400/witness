@@ -51,6 +51,29 @@ witness call goto town --at 0.5
   `EMB_HUD`/`EMB_SAFE` say), read back from the hidden window's renderer after every bake and paint has finished.
 * **audio:** the synth mix at 48 kHz mono, rendered per step instead of to a device (`witness listen` analyses it).
 
+## Agent playtests (`witness play`)
+
+[`play.json`](play.json) is a tested `"play"` config for Embervale: merge its `play` object into Embervale's
+`witness.json`. Embervale's snapshot already follows the playtest conventions (player hp, entities with `hostile`,
+`state: "windup"` telegraphs, `dialogue` with options, `notice`, quests). The config adds the following:
+* `cell: 1`: positions are tiles, and tile numbers are large, so this has to be set;
+* the controls: WASD, `j` attack, `shift` roll as the dodge, `e` talk, `q` potion; dialogue options are picked with
+  up/down + enter (`choose: "arrows"`; the harness presses enter twice when the text is still typing);
+* `dead` from `mode`, the tracked quest as the goal line, gold/level/stamina/region as stats;
+* people as NPCs (`kind == 'person'`).
+
+There's no `state.map`, so walls are learned by bumping into them.
+
+```
+witness play start --scene village --params "{\"fight\":\"wolf\",\"count\":3}" --goal "survive the wolves"
+witness play do "fight wolves" -s <name>          # 2 wolves defeated in 5 s, no damage (the guards help)
+```
+
+Checked on a build of `eb4668d` (2026-10-18): sessions start in about 1 s, `fight wolves` wins, and the replay
+reproduces the session exactly. Embervale wolves wind up for only 0.3 s: at the default human reaction delay
+(0.25 s) the roll lands just in time, and at the newbie persona's 0.35 s it lands too late. That's useful feedback on
+how readable the telegraph is.
+
 ## Record a session (normal play)
 
 ```bat

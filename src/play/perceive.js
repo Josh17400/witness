@@ -142,7 +142,7 @@ export class Perceiver {
       if (typeof e.telegraph === "number" && e.telegraph > 0 && tele == null) tele = e.telegraph;
       const id = e.id ?? `${type}@${i}`;
       things.push({
-        raw: e, id, type, name: e.name && String(e.name) !== type ? String(e.name) : null, key: `${type}#${id}`,
+        raw: e, id, type, name: e.name && String(e.name).toLowerCase() !== type.toLowerCase() ? String(e.name) : null, key: `${type}#${id}`,
         pos, p2: this.planeOf(pos), rel, hp, maxHp: num(e.maxHp ?? e.hpMax ?? e.max_hp ?? e.maxHealth), dead,
         state: typeof e.state === "string" ? e.state : null, telegraph, tele,
         los: e.los ?? e.visible ?? e.inSight ?? e.in_sight ?? null, team: e.team ?? null,

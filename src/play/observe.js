@@ -17,7 +17,7 @@ function thingDetails(th, w, cfg) {
   if (th.rel === "item") bits.push("item");
   else if (th.rel === "npc") bits.push("npc");
   else if (th.rel === "friend") bits.push("teammate");
-  else if (th.rel === "hostile" && !bits.length) bits.push("enemy");
+  else if (th.rel === "hostile") bits.push("enemy");
   if (th.locked === true) bits.push("locked");
   if (th.locked === false) bits.push("open");
   if (cfg.profile === "fps" && th.rel === "hostile") bits.push(th.los === false ? "no line of sight" : th.los === true ? "in sight" : "");

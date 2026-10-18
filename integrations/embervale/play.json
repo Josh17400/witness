@@ -1,0 +1,37 @@
+{
+  "play": {
+    "profile": "topdown",
+    "cell": 1,
+    "controls": {
+      "move": "wasd",
+      "attack": "j",
+      "dodge": "shift",
+      "interact": "e",
+      "heal": "q",
+      "confirm": "enter",
+      "cancel": "escape",
+      "choose": "arrows",
+      "bow": "k",
+      "spell": "l",
+      "menu": "tab",
+      "map": "m"
+    },
+    "dead": "state.mode == 'dead'",
+    "menu": "state.mode == 'menu' || state.mode == 'shop' || state.mode == 'paused' ? state.mode : null",
+    "goal": "(() => { const qs = state.quests || []; const q = qs.find((x) => x.tracked) || qs.find((x) => x.state === 'active'); return q ? q.title + (q.need ? ' (' + q.have + '/' + q.need + ')' : '') : null; })()",
+    "stats": [
+      "state.player.gold",
+      "state.player.level",
+      "state.player.stamina",
+      "state.location.region"
+    ],
+    "reach": {
+      "attack": 1.3,
+      "interact": 1.4,
+      "pickup": 0.6
+    },
+    "alert": 8,
+    "brief": "Embervale: an open-world pixel RPG (think Skyrim in pixels). Distances are in tiles. Hostile creatures and bandits fight back; wolves wind up before they bite (the autopilot rolls away from telegraphed attacks). People can be talked to; dialogue options are picked with choose N. Quests appear in the goal line.",
+    "npc": "e.kind == 'person' && !e.hostile"
+  }
+}

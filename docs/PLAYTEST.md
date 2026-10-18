@@ -17,9 +17,16 @@ The design reasoning is in [PLAYTEST_PLAN.md](PLAYTEST_PLAN.md). Where the two d
   pathing, stuck recovery, attack timing and reacting to telegraphs happen inside Witness, with a human-like reaction
   delay so difficulty feedback stays meaningful.
 
-The harness was proven this way: a Haiku 5.5 tester, on its first try at [examples/arena](../examples/arena), won in
-38.8 s of game time with 26 tool calls in about a minute of wall time. Its report flagged real harness bugs and real
-game feedback (difficulty too low, gold has no use).
+The harness was proven with real Claude testers on three games, and every round of reports fed fixes back into the
+reflex layer:
+
+| game | tester | result |
+|---|---|---|
+| [examples/arena](../examples/arena) (top-down, maze, telegraphed wolves, NPC, gate) | Haiku 5.5, newbie | won in 38.8 s of game time, no damage taken, 26 tool calls, about a minute of wall time; its report found real harness bugs (fixed) |
+| examples/arena | Haiku 5.5, explorer | won in 44.9 s, 100% map coverage, 9 of 9 windups avoided; feedback on the game (too small for an explorer, combat too easy once you block) |
+| a Mario-style platformer (pygame) | Haiku 5.5, newbie | beat level 1-1 twice: 10,400 points and 5 deaths before the platformer fixes, 21,700 points and 1 death after |
+| a 4v4 first-person shooter (OpenGL) | Haiku 5.5, fighter | its team won 40–17; the tester had 28 kills and 6 deaths; feedback: the line-of-sight flag doesn't match who can shoot you (bullets penetrate walls), shotgun one-shots, cheap deaths |
+| the same shooter | Sonnet 5.5 (low effort), fighter | a short run that found two harness gaps (`fight` chased away from the team, `respawn` gave up early), both fixed |
 
 ## Quick start (for the main agent)
 
