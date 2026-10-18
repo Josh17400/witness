@@ -285,6 +285,7 @@ function runRafs() {
 function runFrame(dt) {
   const target = clock.ticks + clock.dtTicks(dt);
   audioClock.t += dt;
+  audioClock.since += dt;   // summed from 0 at every reset: the same run gives the same float sums
   if (sched.timers) runTasks(target);
   clock.ticks = target;
   if (H.step) {
@@ -358,8 +359,14 @@ function startRealPump(hook) {
 const sources = [];   // {rate, born (clock ticks), sample(i0, i1) -> Float32Array, prepare?(), render?(ceil)}
 // Audio follows simulated time exactly (the sum of the stepped dts), not the quantized clock:
 // one step of dt yields dt x sampleRate frames, as the protocol asks.
-const audioClock = { t: 0 };
+const audioClock = { t: 0, since: 0 };   // since: simulated seconds since the last reset
 let audioMark = 0;
+// Sample positions are counted from the last reset (the epoch), never from process start: with 367.5 samples per
+// frame (22050 Hz, 60 fps) an absolute count rounds differently depending on how many frames ran before, so the
+// same sound would land a sample earlier or later in a later run.
+let audioEpoch = 0, audioReadSince = 0;
+// (a WebAudio tap anchors its epoch on a 128-frame render quantum instead: see tap.realign)
+const epochIndex = (src) => (src.anchor != null ? src.anchor : Math.round((audioEpoch - src.born) * src.rate));
 
 /** A PCM capture buffer that follows simulated time: for games that synthesize their own audio. */
 class Mixer {
@@ -370,13 +377,16 @@ class Mixer {
     this.buf = new Float32Array(0);
     this.base = 0;              // absolute sample index of buf[0]
     this.born = audioClock.t;
-    if (this.enabled) sources.push({ rate: sampleRate, born: this.born, sample: (a, b) => this._take(a, b), drop: (a) => this._drop(a) });
+    this.src = { rate: sampleRate, born: this.born, read: 0, sample: (a, b) => this._take(a, b), drop: (a) => this._drop(a), clear: (a) => this._clear(a) };
+    this.src.read = Math.round(audioReadSince * sampleRate);   // created mid-run: start reading where the capture is
+    this.base = epochIndex(this.src) + this.src.read;
+    if (this.enabled) sources.push(this.src);
   }
   /** Mix samples in at the current simulated time (+delay seconds). Stereo input is interleaved. */
   play(samples, { delay = 0, volume = 1 } = {}) {
     if (!this.enabled || !samples) return;
     const mono = this.channels === 2 ? Float32Array.from({ length: samples.length >> 1 }, (_, i) => (samples[2 * i] + samples[2 * i + 1]) / 2) : samples;
-    const start = Math.round((audioClock.t - this.born + delay) * this.sampleRate);
+    const start = epochIndex(this.src) + Math.round((audioClock.since + delay) * this.sampleRate);
     const end = start + mono.length;
     if (end - this.base > this.buf.length) {
       const grown = new Float32Array(Math.max(end - this.base, this.buf.length * 2));
@@ -389,6 +399,11 @@ class Mixer {
     const out = new Float32Array(Math.max(0, b - a));
     for (let i = Math.max(a, this.base); i < b; i++) { const j = i - this.base; if (j < this.buf.length) out[i - a] = this.buf[j]; }
     return out;
+  }
+  /** reset: forget everything, including sounds already mixed into the future (they belong to the previous run). */
+  _clear(a) {
+    this.buf = new Float32Array(0);
+    this.base = a;
   }
   _drop(a) {
     const n = Math.min(Math.max(0, a - this.base), this.buf.length);
@@ -431,6 +446,7 @@ function installWebAudioTap() {
       setSinkId: { value: () => Promise.resolve() },
     });
     const tap = { rate, born: audioClock.t, chunks: [], base: 0, received: 0, rendered: 0, started: false, dead: false, ready: null };
+    tap.read = Math.round(audioReadSince * rate);   // created mid-run: start reading where the capture is
     tap.prepare = () => {
       if (!tap.ready) {
         tap.ready = (async () => {
@@ -444,12 +460,25 @@ function installWebAudioTap() {
       }
       return tap.ready;
     };
+    // WebAudio renders in 128-frame quanta and ctx.currentTime moves in those steps. A sound a game starts "now"
+    // lands on the last quantum boundary, so where the boundaries fall relative to a reset must not depend on how
+    // long the process ran before it: every reset anchors the capture on a boundary (tap.anchor), and from there
+    // simulated time maps to anchor + since x rate.
+    tap.anchor = null;
     tap.render = async (ceil) => {
+      if (tap.dead) return;
+      const pos = (tap.anchor != null ? tap.anchor + audioClock.since * rate : (audioClock.t - tap.born) * rate) / 128;
+      await tap.renderTo((ceil ? Math.ceil(pos) : Math.floor(pos)) * 128);
+    };
+    tap.realign = async () => {
+      if (tap.dead) return;
+      await tap.renderTo(Math.ceil(((audioClock.t - tap.born) * rate) / 128) * 128);
+      tap.anchor = tap.rendered;
+    };
+    tap.renderTo = async (target) => {
       if (tap.dead) return;
       try {
         await tap.prepare();
-        const pos = ((audioClock.t - tap.born) * rate) / 128;
-        const target = (ceil ? Math.ceil(pos) : Math.floor(pos)) * 128;
         if (target <= tap.rendered) return;
         if (target >= ctx.length) { tap.dead = true; warnOnce("audio-full", `audio capture is full (${seconds}s per AudioContext; set WITNESS_CONFIG.audioSeconds)`); return; }
         const reached = nSuspend.call(ctx, target / rate);
@@ -493,18 +522,21 @@ async function readAudio() {
   await renderAudio(true);
   for (const s of sources) if (s.settle) await s.settle();
   const rate = sources.length ? sources[0].rate : 22050;
-  const t0 = audioMark, t1 = audioClock.t;
-  const n = Math.max(0, Math.round((t1 - t0) * rate));
+  const t1 = audioClock.t;
+  // every read covers [what was read before, all of the time since the epoch): consecutive replies tile exactly
+  const total = (r) => Math.max(0, Math.round(audioClock.since * r));
+  const n = Math.max(0, total(rate) - (sources.length ? sources[0].read || 0 : 0));
   const out = new Float32Array(n);
   for (const s of sources) {
-    const at = (t) => Math.round((t - s.born) * s.rate);
-    const a = at(t0), b = at(t1);
+    const a = epochIndex(s) + (s.read || 0), b = epochIndex(s) + total(s.rate);
+    s.read = total(s.rate);
     const pcm = s.sample(a, b);
     if (pcm.length === n) for (let i = 0; i < n; i++) out[i] += pcm[i];
     else for (let i = 0; i < n && pcm.length; i++) out[i] += pcm[Math.min(pcm.length - 1, Math.floor((i * pcm.length) / n))];
     s.drop(b);
   }
   audioMark = t1;
+  audioReadSince = audioClock.since;
   return { sampleRate: rate, channels: 1, format: "f32", data: b64(new Uint8Array(out.buffer)) };
 }
 
@@ -841,6 +873,9 @@ function patchCanvasContexts() {
   const proto = G.HTMLCanvasElement.prototype, orig = proto.getContext;
   proto.getContext = function (type, attrs) {
     if (/^(webgl2?|experimental-webgl)$/.test(type)) attrs = Object.assign({}, attrs, { preserveDrawingBuffer: true });
+    // 2D: rasterize on the CPU from the first frame. Browsers move a canvas from GPU to CPU raster after a few
+    // readbacks (screenshots), and the two anti-alias edges differently, so later shots would differ by a few px.
+    if (type === "2d") attrs = Object.assign({}, attrs, { willReadFrequently: true });
     const ctx = orig.call(this, type, attrs);
     if (ctx && !contextKind.has(this)) contextKind.set(this, type);
     return ctx;
@@ -1133,12 +1168,22 @@ async function doReset(m) {
   releaseAllInput();
   reseed(m.seed ?? 1);
   clock.align();
+  // the audio epoch first, so sounds the game's reset starts (music...) belong to the new run
+  audioMark = audioEpoch = audioClock.t;
+  audioClock.since = 0;
+  audioReadSince = 0;
+  // a reset starts silent: tails still ringing from the previous run must not leak into this one
+  // (WebAudio nodes the game scheduled are its own: its reset should stop them)
+  for (const s of sources) {
+    s.read = 0;
+    if (s.realign) await s.realign();
+    const a = epochIndex(s);
+    if (s.clear) s.clear(a); else s.drop(a);
+  }
   await H.reset({ seed: currentSeed, scene: m.scene, params: m.params || {} });
   sim.frame = 0;
   sim.time = 0;
   frameEvents = [];
-  audioMark = audioClock.t;
-  for (const s of sources) s.drop(Math.round((audioMark - s.born) * s.rate));
   return {};
 }
 
