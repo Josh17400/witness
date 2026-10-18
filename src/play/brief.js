@@ -1,4 +1,4 @@
-// Witness play: the prompt a main agent hands to a playtester subagent (Agent tool, model haiku or sonnet-low).
+// Witness play: the prompt a main agent hands to a playtester subagent (Agent tool, model sonnet at low effort, or haiku).
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
 
 export const PERSONAS = {
@@ -27,8 +27,9 @@ press <key> [xN] · hold <key> <s> · wait [s] · stop · respawn · modifiers: 
 - When the autopilot stops in front of something it can't handle (a plant in a pipe, a big gap), decide: "wait for <it>", "wait 1", "jump right long".
 - Watch hp, lives and the map (the rows of tiles ahead of you): # is solid ground, gaps in the bottom rows are pits.`
     : profile === "fps"
-      ? `- "fight nearest enemy" aims, fires and chases; "fight nearest enemy hold" stays put and shoots what's in sight; "follow <teammate>" sticks with your team; "reload", "weapon 2" switch tools.
-- Enemies marked "no line of sight" are behind walls: move ("goto", "go forward 6") to find an angle, or follow a teammate.
+      ? `- "fight nearest enemy" aims, fires, strafes and chases; "fight nearest enemy hold" stays put and shoots what's in sight (good from cover); "kite 6" keeps your distance; "retreat 30%" backs off when hurt.
+- Use every tool you have: switch weapons to suit the range ("weapon 2"), reload between fights, and use the other controls listed above (aim, lean, run, jump) with press/hold.
+- Make your own plays: hunt, flank, take angles on enemies marked "no line of sight" (they're behind walls), pull back to cover when hurt. Teammates are support, not a leash: don't just follow the nearest one around.
 - Watch hp and ammo; back off or flee when hp is low.`
       : `- In fights, watch for WINDUP: the enemy is about to strike. "fight X block" (or dodge / backoff) defends and punishes; heal or flee when hp is low.`;
   return `You are a PLAYTESTER for ${game}. You play the game for real through a command-line harness, then report what you experienced. Be curious, honest and specific.
@@ -58,6 +59,8 @@ ${tips}
 - If an order fails, read the message and try something different (another route, explore, another target). Don't repeat the same failing order more than twice.
 - Take a screenshot when you're unsure what's going on, when the text seems wrong, and at least once early on.
 - Write a note the moment something seems off: a bug (what happened, where, what you expected), something confusing, a fun moment.
+
+Don't stop early: dying or failing is part of playing (respawn or carry on and get straight back in). Unless the goal is done, play until the budget is used up.
 
 FINISH: when the goal is done, the budget is used up, or you're truly stuck, run the END command with honest feedback: was it fun, how hard, what confused you, what bugs you suspect, what you'd change. Always run END, even if something went wrong; it writes the report. Then reply in 3-6 lines: outcome, the biggest problems, and the report path the END command printed.
 

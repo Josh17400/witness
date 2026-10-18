@@ -1,6 +1,6 @@
 # Agent playtests: `witness play`
 
-A cheap Claude model (Haiku, or Sonnet at low effort) runs as a subagent and **plays** the game through short Bash
+A cheap Claude model (Sonnet at low effort, or Haiku) runs as a subagent and **plays** the game through short Bash
 commands. It gives plain-word orders ("fight wolves block", "talk guard", "goto Exit"). A deterministic **reflex
 layer** inside Witness carries them out frame by frame: it walks around walls, faces and attacks, blocks when an enemy
 winds up, picks dialogue options. Witness records a frame-exact replay and writes a report for the main agent.
@@ -47,8 +47,10 @@ reflex layer:
    ```
    It's a complete prompt: role, goal, persona, budget, the exact commands with the absolute CLI path, the order card,
    the game's controls, how to read observations, how to finish.
-4. **Spawn the tester** with the Agent tool: `model: "haiku"` with the brief as the prompt, or `model: "sonnet"` with
-   low effort for harder games. Run at most 2 testers at once.
+4. **Spawn the tester** with the Agent tool: `model: "sonnet"` and `effort: "low"`, with the brief as the prompt.
+   That's the default: in a side-by-side on the 4v4 shooter it played the smartest at nearly Haiku's speed. Haiku is
+   cheaper and fast, but it plays shallowly (it trailed the nearest teammate and ignored its weapons), and Haiku at
+   medium effort wasn't better. Use Haiku for simple games or quick smoke runs. Run at most 2 testers at once.
 5. **Read `witness/playtests/t1/report.md`** when it returns: the tester's feedback and bug notes first, then fights,
    stuck incidents, deaths, coverage. Open the key screenshots and `coverage.png`.
 6. **Reproduce** anything marked: `witness replay witness/playtests/t1/replay.jsonl --at 12.40 --shot` (report.md

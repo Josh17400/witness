@@ -15,7 +15,7 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
 
   witness play start [--name t1] [--goal "…"] [--persona newbie|explorer|speedrunner|breaker|fighter]
                      [--seed N] [--scene S] [--params JSON] [--minutes 20] [--idle 300] [--allow-calls] [--no-map]
-                     [--model haiku] [--out DIR] [--force] [--json] [--cmd "<launch>"]
+                     [--model sonnet] [--out DIR] [--force] [--json] [--cmd "<launch>"]
                      → launches the game + a background session daemon, prints the first observation
   witness play do "<orders>" [-s t1] [--for S]  run orders ("fight wolf block; then talk guard") until done/interrupted
   witness play look [-s t1] [--shot] [--json]    the observation now (no game time passes)

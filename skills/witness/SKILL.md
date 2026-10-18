@@ -127,8 +127,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    -s check`, `witness play end -s check`. Fix the config until orders work and things are classified right.
 3. **Brief:** `witness play brief --goal "<what to achieve>" --persona newbie --minutes 4 --name t1` prints the
    complete tester prompt (commands with the absolute CLI path, the order card, the rules).
-4. **Spawn the tester** with the Agent tool: `model: "haiku"` and the brief as the prompt, or `model: "sonnet"` with
-   low effort for harder games. The tester runs the commands itself; don't play for it.
+4. **Spawn the tester** with the Agent tool: `model: "sonnet"`, `effort: "low"` and the brief as the prompt (the
+   best play at nearly Haiku's speed; `model: "haiku"` is cheaper but plays shallowly, so keep it for simple games).
+   The tester runs the commands itself; don't play for it.
 5. **Read `witness/playtests/t1/report.md`**: tester feedback and bug notes first, then fights (windups avoided vs
    hit), stuck incidents, deaths, coverage. Open the key shots and `coverage.png`.
 6. **Reproduce** what it flagged: report.md lists `witness replay witness/playtests/t1/replay.jsonl --at <t> --shot`

@@ -85,7 +85,7 @@ Test files are JSON (or JS modules):
 
 ## Agent playtests
 
-`witness play` lets a cheap Claude model (Haiku, or Sonnet at low effort) **play** the game as a subagent. It gives
+`witness play` lets a cheap Claude model (Sonnet at low effort, or Haiku) **play** the game as a subagent. It gives
 plain-word orders through short commands; a deterministic reflex layer inside Witness carries them out frame by
 frame (pathing around walls, attack timing, blocking telegraphed attacks, dialogue choices). The game only steps on
 command, so the model's thinking costs no game time, and every playtest is recorded as a frame-exact replay with a
