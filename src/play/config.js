@@ -1,0 +1,134 @@
+// Witness play: resolve the "play" section of witness.json into a complete config, filling everything the game
+// doesn't specify from conventions (docs/PLAYTEST.md). Pure: no game access; `hello` and a first snapshot refine it.
+
+const has = (keys, k) => keys.includes(k);
+const firstIn = (keys, cands) => cands.find((c) => keys.includes(c)) || null;
+
+/** A control reference → {type, ...}. "j" | "key:j" | "action:attack" | "pad:x" | "mouse:left" | "axis:leftx". */
+export function parseControl(spec) {
+  if (spec == null || spec === false || spec === "") return null;
+  if (typeof spec === "object") return spec.type ? spec : null;
+  const s = String(spec).trim();
+  const m = /^(key|action|pad|mouse|axis):(.+)$/i.exec(s);
+  if (!m) return { type: "key", key: s.toLowerCase() };
+  const kind = m[1].toLowerCase(), v = m[2].trim();
+  if (kind === "key") return { type: "key", key: v.toLowerCase() };
+  if (kind === "action") return { type: "action", action: v };
+  if (kind === "pad") return { type: "pad", button: v.toLowerCase() };
+  if (kind === "axis") return { type: "axis", axis: v.toLowerCase() };
+  const b = { left: 0, l: 0, "0": 0, middle: 1, m: 1, "1": 1, right: 2, r: 2, "2": 2 }[v.toLowerCase()];
+  return { type: "mouse", button: b ?? 0 };
+}
+export const controlLabel = (c) => !c ? "?" : c.type === "key" ? c.key : c.type === "action" ? `action:${c.action}` : c.type === "pad" ? `pad:${c.button}` : c.type === "mouse" ? `mouse:${["left", "middle", "right"][c.button] || c.button}` : `axis:${c.axis}`;
+
+function parseMove(spec, keys, profile) {
+  if (spec && typeof spec === "object" && Array.isArray(spec.axis)) return { axis: spec.axis.map(String) };
+  if (spec && typeof spec === "object") {
+    const o = {};
+    for (const d of ["up", "down", "left", "right", "forward", "back"]) if (spec[d]) o[d] = parseControl(spec[d]);
+    if (o.forward && !o.up) o.up = o.forward;
+    if (o.back && !o.down) o.down = o.back;
+    return o;
+  }
+  const mk = (u, d, l, r) => ({ up: parseControl(u), down: parseControl(d), left: parseControl(l), right: parseControl(r) });
+  if (spec === "wasd") return mk("w", "s", "a", "d");
+  if (spec === "arrows") return mk("up", "down", "left", "right");
+  if (spec === "zqsd") return mk("z", "s", "q", "d");
+  // auto: platformers walk with the arrows (W/up is often jump); fps with WASD; top-down with WASD if the game has it
+  const wasd = ["w", "a", "s", "d"].every((k) => has(keys, k));
+  const arrows = ["up", "down", "left", "right"].every((k) => has(keys, k));
+  if (profile === "platformer") return arrows || !wasd ? mk(null, "down", "left", "right") : mk(null, "s", "a", "d");
+  if (profile === "fps") return mk("w", "s", "a", "d");
+  return wasd || !arrows ? mk("w", "s", "a", "d") : mk("up", "down", "left", "right");
+}
+
+const PROFILES = ["topdown", "platformer", "fps"];
+
+/**
+ * Resolve the play config. `raw` = witness.json "play" (may be undefined), `hello` = the adapter hello.
+ * Every field the harness reads is present in the result.
+ */
+export function resolvePlayConfig(raw = {}, hello = {}) {
+  raw = raw || {};
+  const keys = (hello.keys || []).map((k) => String(k).toLowerCase());
+  const profile = PROFILES.includes(raw.profile) ? raw.profile : "topdown";
+  const c = raw.controls || {};
+  const pick = (name, cands) => (name in c ? parseControl(c[name]) : cands ? parseControl(firstIn(keys, cands)) : null);
+  const controls = {
+    move: parseMove(c.move, keys, profile),
+    attack: pick("attack", profile === "fps" ? null : profile === "platformer" ? null : ["j", "x", "f"]),
+    attackMode: c.attackMode === "hold" ? "hold" : profile === "fps" ? "hold" : "tap",
+    attackEvery: +(c.attackEvery ?? 0.35),
+    block: pick("block"),
+    dodge: pick("dodge"),
+    interact: pick("interact", ["e", "f"]),
+    heal: pick("heal"),
+    confirm: pick("confirm", ["enter", "space"]),
+    cancel: pick("cancel", ["escape"]),
+    jump: pick("jump", profile === "platformer" ? ["z", "space", "k", "up", "w"] : profile === "fps" ? ["space"] : null),
+    run: pick("run", profile === "platformer" ? ["x", "shift"] : profile === "fps" ? ["shift"] : null),
+    crouch: pick("crouch"),
+    reload: pick("reload", profile === "fps" ? ["r"] : null),
+    aim: pick("aim"),                 // fps: aim down sights (held)
+    weapons: Array.isArray(c.weapons) ? c.weapons.map(parseControl) : profile === "fps" ? ["1", "2", "3", "4"].filter((k) => has(keys, k)).map(parseControl) : [],
+    choose: c.choose === "arrows" ? { mode: "arrows" } : Array.isArray(c.choose) ? { mode: "list", keys: c.choose.map(parseControl) }
+      : c.choose === "numbers" || has(keys, "1") || !keys.length ? { mode: "numbers" } : { mode: "arrows" },
+    tapFrames: Math.max(1, Math.round(+(c.tapFrames ?? 2))),
+  };
+  if (profile === "fps" && !("attack" in c)) controls.attack = parseControl("mouse:left");
+  // free-form named controls usable in orders: "use <name>" / "press <name>"
+  const named = {};
+  for (const [k, v] of Object.entries(c)) if (!["move", "attackMode", "attackEvery", "choose", "weapons", "tapFrames"].includes(k) && v != null) {
+    const pc = parseControl(v); if (pc) named[k.toLowerCase()] = pc;
+  }
+  for (const [k, v] of Object.entries(controls)) if (v && v.type && !named[k]) named[k] = v;
+
+  const fpsDefaults = profile === "fps";
+  const cfg = {
+    profile,
+    controls,
+    named,
+    // where things live (expressions over the snapshot; `state`, `snap` and the expr.js helpers are in scope)
+    player: raw.player || null,             // null: state.player, else the first entity typed Player/Hero
+    entities: raw.entities || "state.entities",
+    pos: raw.pos || null,                    // per-thing position expression with `e`; null: e.pos / e.position / [e.x, e.y(, e.z)]
+    hostile: raw.hostile || null, item: raw.item || null, npc: raw.npc || null, friend: raw.friend || null,
+    telegraph: raw.telegraph || null, ignore: raw.ignore || null,
+    dialogue: raw.dialogue || null, menu: raw.menu || null, goal: raw.goal || null, notice: raw.notice || null,
+    scene: raw.scene || null, won: raw.won || null, dead: raw.dead || null, map: raw.map === false ? false : raw.map || null,
+    stats: Array.isArray(raw.stats) ? raw.stats : null,
+    ammo: raw.ammo || null,
+    // geometry
+    plane: Array.isArray(raw.plane) ? raw.plane : fpsDefaults ? [0, 2] : [0, 1],
+    north: raw.north || (fpsDefaults ? "-z" : profile === "platformer" ? "-y" : "-y"),
+    cell: raw.cell != null ? +raw.cell : null,           // world units per nav cell (null: from the map, else measured)
+    speed: raw.speed != null ? +raw.speed : null,         // world units per second when walking (null: measured)
+    reach: { attack: 1.2, interact: 1.2, pickup: 0.5, ...(raw.reach || {}) },   // in cells
+    alert: +(raw.alert ?? 6),                // cells: a hostile this close wakes the tester
+    sight: +(raw.sight ?? 3),                // cells around the path counted as "seen" when exploring without a map
+    reaction: +(raw.reaction ?? 0.25),       // seconds before the reflex layer reacts to a telegraph
+    tick: Math.max(1, Math.round(+(raw.tick ?? 3))),
+    combatTick: Math.max(1, Math.round(+(raw.combatTick ?? 1))),
+    guard: raw.guard !== false,
+    retreat: +(raw.retreat ?? 0),
+    heal: +(raw.heal ?? 0),
+    combos: raw.combos || {},
+    allowCalls: !!raw.allowCalls,
+    logs: raw.logs === false ? false : raw.logs || true,   // true | false | "regex" for which info logs count as game events
+    maxShots: +(raw.maxShots ?? 24),
+    platformer: { jumpFrames: 18, runJumpFrames: 22, stomp: true, ...(raw.platformer || {}) },
+    fps: { sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2, ...(raw.fps || {}) },
+    module: raw.module || null,
+  };
+  cfg.northSign = /^\+/.test(String(cfg.north)) ? 1 : -1;
+  return cfg;
+}
+
+/** Short description of the controls for the brief / first observation. */
+export function describeControls(cfg) {
+  const c = cfg.controls, out = [];
+  const mv = c.move.axis ? `stick ${c.move.axis.join("/")}` : ["up", "left", "down", "right"].map((d) => c.move[d] ? c.move[d].key || controlLabel(c.move[d]) : null).filter(Boolean).join("");
+  if (mv) out.push(`move ${mv}`);
+  for (const k of ["attack", "block", "dodge", "interact", "heal", "jump", "run", "reload", "aim"]) if (c[k]) out.push(`${k} ${controlLabel(c[k])}`);
+  return out.join(" · ");
+}

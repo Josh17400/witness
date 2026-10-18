@@ -157,6 +157,16 @@ r = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "doctor"]
 ok("config control character refused", r.status !== 0 && /control character/.test(r.stdout + r.stderr) && /tools\\\\build\.bat/.test(r.stdout + r.stderr), r.stdout + r.stderr);
 fs.rmSync(tmp, { recursive: true, force: true });
 
+// agent playtest harness (separate runners: unit tests without processes, then end-to-end CLI/daemon runs)
+for (const suite of ["unit", "e2e"]) {
+  const f = path.join(here, "play", `${suite}.mjs`);
+  if (!fs.existsSync(f)) continue;
+  const m = spawnSync(process.execPath, [f], { encoding: "utf8", timeout: 600000 });
+  ok(`play ${suite} suite`, m.status === 0, (m.stdout + m.stderr).slice(-2500));
+  const counts = /(\d+) passed, (\d+) failed/.exec(m.stdout || "");
+  if (counts) console.log(`  play ${suite}: ${counts[0]}`);
+}
+
 // media suites (separate runner)
 if (fs.existsSync(path.join(here, "media", "run.mjs"))) {
   const m = spawnSync(process.execPath, [path.join(here, "media", "run.mjs")], { encoding: "utf8", timeout: 300000 });

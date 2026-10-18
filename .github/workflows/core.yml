@@ -13,3 +13,8 @@ jobs:
       - run: node tests/run.mjs
       - run: node tests/media/run.mjs
         if: hashFiles('tests/media/run.mjs') != ''
+      - name: arena example (doctor + tests, deterministic)
+        working-directory: examples/arena
+        run: |
+          node ../../bin/witness.js doctor
+          node ../../bin/witness.js test --repeat 2

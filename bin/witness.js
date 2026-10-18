@@ -26,6 +26,7 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness call <name> [args] --at 1   run a game-specific command, then show the state
   witness raw '<json command>'        send one raw protocol command (for adapter authors)
   witness adapters                    list the bundled adapters
+  witness play start|do|look|end ...  agent playtests: a cheap model PLAYS the game, Witness reports (help play)
 
 Common options:
   --input "right@0-2, space@1, click:640,360@1.5, action:jump@2"   scripted input (times in s)
@@ -86,8 +87,9 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a.startsWith("--")) {
       const k = a.slice(2), nxt = argv[i + 1];
-      if (nxt !== undefined && !nxt.startsWith("--")) { opt[k] = nxt; i++; } else opt[k] = true;
+      if (nxt !== undefined && !nxt.startsWith("--") && !/^-[a-z]/i.test(nxt)) { opt[k] = nxt; i++; } else opt[k] = true;
     } else if (a === "-o") opt.out = argv[++i];
+    else if (a === "-s") opt.s = argv[++i];
     else pos.push(a);
   }
   return { pos, opt };
@@ -593,7 +595,15 @@ const commands = {
     for (const a of listAdapters(ROOT)) console.log(`  ${a.id.padEnd(14)} ${a.title}${a.verified ? "" : "  (unverified)"}`);
   },
 
-  help(pos) { console.log(pos[0] && CMD_HELP[pos[0]] ? CMD_HELP[pos[0]] : HELP); },
+  async play(pos, opt) {
+    const { playCommand } = await import("../src/play/client.js");
+    await playCommand(pos[0], pos.slice(1), opt, { loadConfig, ROOT });
+  },
+
+  async help(pos) {
+    if (pos[0] === "play") { const { PLAY_HELP } = await import("../src/play/client.js"); console.log(PLAY_HELP); return; }
+    console.log(pos[0] && CMD_HELP[pos[0]] ? CMD_HELP[pos[0]] : HELP);
+  },
   version() { console.log(VERSION); },
 };
 
@@ -640,7 +650,7 @@ JSON_MODE = !!opt.json;
 try {
   if (!cmd || cmd === "-h" || cmd === "--help") commands.help([]);
   else if (cmd === "-v" || cmd === "--version") commands.version();
-  else if (commands[cmd] && (opt.help || pos[0] === "--help")) commands.help([cmd]);
+  else if (commands[cmd] && (opt.help || pos[0] === "--help")) await commands.help([cmd]);
   else if (commands[cmd]) await commands[cmd](pos, opt);
   else die(`unknown command '${cmd}'\n\n${HELP}`);
 } catch (e) {

@@ -9,10 +9,20 @@ import { WitnessError } from "./session.js";
 
 const MAX_CHUNK = 600; // frames per step request (keeps requests short and responsive)
 
+/** Run replay `calls` that are due at the current frame (written by `witness play`; docs/PROTOCOL.md section 5). */
+async function runDueCalls(session, state) {
+  while (state.calls && state.callIdx < state.calls.length && state.calls[state.callIdx].frame <= state.frame) {
+    const c = state.calls[state.callIdx++];
+    await session.call(c.name, c.args);
+  }
+}
+
 /** Step the session forward to frame `target` (absolute). Uses replay dts when given. */
 export async function stepTo(session, state, target, dts = null) {
+  await runDueCalls(session, state);
   while (state.frame < target) {
-    const n = Math.min(MAX_CHUNK, target - state.frame);
+    let n = Math.min(MAX_CHUNK, target - state.frame);
+    if (state.calls && state.callIdx < state.calls.length) n = Math.min(n, Math.max(1, state.calls[state.callIdx].frame - state.frame));
     let r;
     if (dts) {
       const slice = dts.slice(state.frame, state.frame + n);
@@ -21,6 +31,7 @@ export async function stepTo(session, state, target, dts = null) {
     } else r = await session.step(n);
     state.frame = r.frame ?? state.frame + n;
     state.time = r.time ?? state.frame / session.fps;
+    await runDueCalls(session, state);
   }
 }
 
@@ -31,7 +42,8 @@ export async function begin(session, { seed = 1, scene, params, input, events, r
     // a replay restarts exactly as recorded: its seed, and its scene/params when the header has them
     await session.reset(replay ? replay.seed : seed, replay && replay.scene != null ? replay.scene : scene, replay && replay.params != null ? replay.params : params);
   }
-  const state = { frame: 0, time: 0, dts: replay ? replay.dts : null };
+  const state = { frame: 0, time: 0, dts: replay ? replay.dts : null, calls: replay && replay.calls && replay.calls.length ? replay.calls : null, callIdx: 0 };
+  if (state.calls && !session.has("call")) throw new WitnessError("this replay contains game calls (recorded by witness play --allow-calls) but the adapter has no 'call'");
   const evs = [...(events || []), ...parseWitnessInput(input, fps), ...(replay ? replay.events : [])];
   if (evs.length) {
     if (!session.has("input")) throw new WitnessError("this game's adapter doesn't support 'input' (see its hello.capabilities)");
@@ -45,19 +57,20 @@ export function loadReplay(file) {
   const lines = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
   const head = lines.find((l) => l.replay) || {};
   const frames = lines.filter((l) => l.f != null).sort((a, b) => a.f - b.f);
-  const dts = [], events = [], markFrames = [];
+  const dts = [], events = [], markFrames = [], calls = [];
   const fixed = 1 / (head.fps || 60);
   for (const fr of frames) {
     dts[fr.f] = fr.dt || fixed;
     for (const e of fr.in || []) events.push({ ...e, frame: fr.f });
     if (fr.mark) markFrames.push({ frame: fr.f, label: fr.mark });
+    for (const c of fr.calls || []) if (Array.isArray(c) && c.length) calls.push({ frame: fr.f, name: String(c[0]), args: c.slice(1) });
   }
   // frames missing from the file (sparse recordings) ran at the fixed dt
   for (let i = 0; i < dts.length; i++) if (dts[i] == null) dts[i] = fixed;
   const startOf = [0];
   for (let i = 0; i < dts.length; i++) startOf[i + 1] = startOf[i] + dts[i];
   const marks = markFrames.map((m) => ({ ...m, t: startOf[m.frame] }));
-  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, dts, events, marks, duration: startOf[dts.length], frames: dts.length };
+  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length };
 }
 
 /** Frame index for time t, honoring replay dts. */
