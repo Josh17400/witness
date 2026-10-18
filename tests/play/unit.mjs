@@ -52,6 +52,9 @@ o = P("explore north for 8s")[0]; ok("order explore for", o.verb === "explore" &
 o = P("please attack")[0]; ok("order filler + bare verb", o.verb === "fight" && !o.target);
 o = P("fireball")[0]; ok("order bare combo name", o.verb === "combo" && o.name === "fireball");
 o = P("open the gate")[0]; ok("order open → interact", o.verb === "interact" && o.target.words[0] === "gate");
+o = P("fight nearest enemy hold")[0]; ok("order fight hold (fps: no chasing)", o.verb === "fight" && o.mode === "hold" && o.target.category === "hostile");
+o = P("press block")[0]; ok("order press keeps control names that look like modifiers", o.verb === "press" && o.control === "block");
+o = P("respawn")[0]; ok("order respawn", o.verb === "respawn");
 
 // ---- target resolution
 const th = (id, type, rel, dist, extra = {}) => ({ id, type, rel, dist, key: `${type}#${id}`, name: null, p2: [dist, 0], dead: false, ...extra });
@@ -64,6 +67,9 @@ ok("resolve id", R("#3")[0].id === 3 && R("Wolf#3")[0].id === 3);
 ok("resolve category", R("nearest enemy")[0].id === 5);
 ok("resolve typo", R("wlof")[0].type === "Wolf");
 ok("resolve remembered", R("gate")[0].id === 9);
+const teamWorld = { things: [th(1, "Soldier", "friend", 3, { name: "Blue 1" }), th(4, "Soldier", "hostile", 5, { name: "Red 1" })], remembered: [] };
+ok("resolve a name ending in a number (Red 1 is a name, not id 1)", resolveTarget(P("fight Red 1")[0].target, teamWorld, { prefer: "hostile" }).things[0].id === 4);
+ok("resolve type + id still works", resolveTarget(P("fight Soldier 4")[0].target, teamWorld).things[0].id === 4);
 ok("resolve missing lists what's in view", (() => { try { R("dragon"); return false; } catch (e) { return /in view: .*Wolf#5/.test(e.message); } })());
 
 // ---- nav grid

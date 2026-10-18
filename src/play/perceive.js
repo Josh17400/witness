@@ -73,6 +73,7 @@ export class Perceiver {
   /** Decide the nav cell size once (stable units for the whole session). */
   decideCell(player, things, map) {
     if (this.geo.cell) return;
+    if (!map && !(player && player.p2)) return;   // a title screen or intro: decide once there's something to measure
     if (map && map.cell) { this.geo.cell = +map.cell; this.geo.origin = (map.origin || [0, 0]).slice(0, 2).map(Number); this.geo.fromMap = true; return; }
     const sz = player && (Array.isArray(player.size) ? player.size : null);
     if (sz && sz.length && Math.max(...sz) > 0) { this.geo.cell = Math.max(...sz.slice(0, 2)) * 1.25; return; }

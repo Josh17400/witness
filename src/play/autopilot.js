@@ -499,6 +499,12 @@ class Choose extends Behaviour {
     }
     const now = w.dialogue ? JSON.stringify(w.dialogue) : null;
     if (now !== this.text0) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}"${w.dialogue ? ` → ${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 100)}"` : " → dialogue closed"}`);
+    // many games swallow the first confirm while the text is still typing out: press it once more
+    if (ch.mode === "arrows" && !this.again && ap.t - this.waitT > 0.35 + (this.waitFrames || 0) / ap.fps) {
+      this.again = true;
+      want.taps.push({ label: "confirm", c: c.confirm || parseControl("enter"), frames: c.tapFrames });
+      return this.run();
+    }
     if (ap.t - this.waitT > 1.0 + (this.waitFrames || 0) / ap.fps) return this.fail(`chose ${this.idx} but the dialogue didn't change (is play.controls.choose right?)`);
     return this.run();
   }
@@ -652,6 +658,10 @@ export class Autopilot {
       this.emit("scene", `new scene/level (${w.sceneKey}): map knowledge reset`);
     }
     if (!p || !p.p2) return;
+    if (this.grid.cell !== w.cell || this.grid.origin[0] !== w.origin[0] || this.grid.origin[1] !== w.origin[1]) {
+      // the cell size was only decided now (the session started on a title screen): start the grid in the right units
+      this.grid.cell = w.cell; this.grid.origin = w.origin.slice(); this.grid.reset();
+    }
     if (w.map) this.grid.setMap(w.map);
     this.grid.visit(p.p2, this.cfg.sight);
     if (this.prevP && this.prevT != null && this.t > this.prevT) {
@@ -765,6 +775,8 @@ export class Autopilot {
 
   /** Build the behaviour for an order (may throw OrderError when its target doesn't exist). */
   make(o, w) {
+    if ((!w.player || !w.player.p2) && !/^(press|hold|wait|stop|set|call|choose|use|respawn|combo)$/.test(o.verb))
+      throw new OrderError("there's no player in the game right now (an intro, a cutscene or a menu?)", "wait, or press the key the screen asks for (press enter)");
     try { return this.make1(o, w); }
     catch (e) {
       // "Potion#14" that we already picked up / "Wolf#3" we already killed: say so instead of "not here"
@@ -918,6 +930,17 @@ export class Autopilot {
       if (w.dead && !(b instanceof Tap || b instanceof Wait || b instanceof Instant || b instanceof Choose || b instanceof Hold || b instanceof CallOrder)) return this.finish(b, { status: "fail", msg: "you died" }, want);
       if (w.dialogue && (b instanceof GoTo || b instanceof Explore || b instanceof Fight || b instanceof Pickup || b instanceof Follow || b instanceof Flee) && !(b instanceof Talk))
         return this.finish(b, { status: "fail", msg: `a dialogue is open (${w.dialogue.speaker || "someone"}: "${clip(w.dialogue.text, 60)}") — choose an option or press cancel first` }, want);
+      // no player in the snapshot (a cutscene, an intro, a title screen): only orders that don't move can run
+      if (!w.player || !w.player.p2) {
+        if (!(b instanceof Tap || b instanceof Wait || b instanceof Hold || b instanceof Instant || b instanceof Choose || b instanceof CallOrder))
+          return this.finish(b, { status: "fail", msg: "there's no player in the game right now (an intro, a cutscene or a menu?) — wait, or press the key the screen asks for" }, want);
+        const res0 = b.tick(w, want);
+        if (res0.status === "call") { this.wantedMove = false; return { want, k: 1, status: "call", name: res0.name, args: res0.args }; }
+        if (res0.status === "run") { this.wantedMove = false; return { want, k: this.cfg.tick, status: "run" }; }
+        const out0 = this.finish(b, res0, want);
+        if (out0.status === "fail" || !this.queue.length) return out0;
+        continue;
+      }
       const pct = hpPct(w);
       if (this.policy.heal && pct != null && pct < this.policy.heal && this.cfg.controls.heal && this.t - this.lastHealT > 1.2) {
         want.taps.push({ label: "heal", c: this.cfg.controls.heal, frames: this.cfg.controls.tapFrames }); this.lastHealT = this.t;

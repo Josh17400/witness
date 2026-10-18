@@ -21,6 +21,7 @@ export class EventTracker {
     this.logRe = typeof cfg.logs === "string" ? new RegExp(cfg.logs, "i") : null;
     this.seenTypes = new Set();
     this.firstSight = [];       // {t, type, key} first time each hostile type is seen (for key-moment shots)
+    this.recentLogs = [];       // game log lines of the last 1.5 s (death causes)
   }
 
   /** prev may be null (the first snapshot). `ctx` = {lastAttackT, logs: [{frame, level, message}], fps}. Returns events. */
@@ -65,10 +66,15 @@ export class EventTracker {
         if (P.maxHp && (100 * P.hp) / P.maxHp >= LOW_HP + 10) this.lowWarned = false;
       }
     }
+    for (const l of ctx.logs || []) this.recentLogs.push({ t, text: String(l.message) });
+    this.recentLogs = this.recentLogs.filter((l) => t - l.t < 1.5);
     if (cur.dead && !prev.dead) {
       const cell = P && P.p2 ? cellOf(cur, P.p2) : null;
-      this.deaths.push({ t, cell, cause: this.lastHurtBy || "unknown" });
-      push("death", `YOU DIED${this.lastHurtBy ? ` (last hit by ${this.lastHurtBy})` : ""}`);
+      // the game's own words beat our guess ("fell into a pit", "hit by Piranha#27")
+      const said = this.recentLogs.slice().reverse().find((l) => /(died|death|killed|fell|pit|lava|drown|slain|you lose|game over)/i.test(l.text));
+      const cause = said ? clip(oneLine(said.text), 120) : this.lastHurtBy ? `last hit by ${this.lastHurtBy}` : "unknown";
+      this.deaths.push({ t, cell, cause });
+      push("death", `YOU DIED (${cause})`);
     }
     if (!cur.dead && prev.dead) { push("respawn", "respawned"); this.lowWarned = false; }
     if (cur.won && !prev.won) push("goal", "GOAL REACHED");

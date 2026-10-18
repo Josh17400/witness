@@ -52,7 +52,7 @@ export const ORDER_CARD = [
   "modifiers: for 8s · careful (wake on anything) · kite 4 (keep distance)",
 ].join("\n");
 export const ORDER_CARD_PLATFORMER = "run <left|right> [to x] · jump [left|right] [short|long|high] · stomp <thing> · wait for <thing>";
-export const ORDER_CARD_FPS = "look <dir|thing> · reload · weapon <n|name> · go forward|back|left|right [m]";
+export const ORDER_CARD_FPS = "fight [thing] [hold] · look <dir|thing> · reload · weapon <n|name> · go forward|back|left|right [cells]";
 
 function tokenize(s) {
   const out = []; const re = /"([^"]*)"|'([^']*)'|(\S+)/g; let m;
@@ -114,7 +114,7 @@ export function parseTarget(words) {
     if (/^(nearest|closest|next|nearby|close)$/.test(lw)) { spec.nearest = true; continue; }
     const idm = /^([a-z_][\w-]*)?#(\w+)$/i.exec(w);
     if (idm) { if (idm[1]) spec.words.push(idm[1]); spec.id = idm[2]; continue; }
-    if (/^\d+$/.test(w) && spec.words.length) { spec.id = w; continue; }
+    if (/^\d+$/.test(w) && spec.words.length) { spec.id = w; spec.idFromWord = true; continue; }   // "wolf 5" (or a name like "Red 1": retried below)
     if (CATEGORY[lw] && !spec.words.length) { spec.category = CATEGORY[lw]; if (/s$/.test(lw) && lw !== "boss") spec.plural = true; continue; }
     if (CATEGORY[lw]) { spec.category = spec.category || CATEGORY[lw]; continue; }
     spec.words.push(w);
@@ -313,8 +313,16 @@ const relOk = (th, cat) => !cat || cat === "any" || th.rel === cat || (cat === "
  * Resolve a target spec to things. Returns {things: [...] (nearest first), remembered: bool} or throws OrderError.
  * `prefer` biases to a relation ("hostile" for fight, "npc" for talk, "item" for pickup) when several match.
  */
-export function resolveTarget(spec, world, { prefer = null, allowRemembered = true, includeDead = false } = {}) {
+export function resolveTarget(spec, world, opts = {}) {
   if (!spec) throw new OrderError("no target");
+  try { return resolveTarget1(spec, world, opts); }
+  catch (e) {
+    // "Red 1" is a name, not "Red" with id 1: retry with the number as part of the name
+    if (spec.idFromWord) return resolveTarget1({ ...spec, words: [...spec.words, String(spec.id)], id: null, idFromWord: false }, world, opts);
+    throw e;
+  }
+}
+function resolveTarget1(spec, world, { prefer = null, allowRemembered = true, includeDead = false } = {}) {
   const pools = [world.things.filter((t) => includeDead || !t.dead), allowRemembered ? world.remembered || [] : []];
   for (let pi = 0; pi < pools.length; pi++) {
     const pool = pools[pi];

@@ -111,7 +111,7 @@ export function observeText(w, ctx) {
     if (d.player.pitch != null) where.push(`pitch ${d.player.pitch}°`);
     if (cfg.profile === "platformer" && d.player.onGround != null) where.push(d.player.onGround ? "on ground" : "in the air");
     L.push(`${head.join(" · ")} · ${where.join(" ")}`);
-  } else L.push(`${head.join(" ")} (no player found in the snapshot: check play.player in witness.json)`);
+  } else L.push(`${head.join(" ")} · no player right now${w.scene ? ` (scene: ${w.scene})` : ""}: a title screen, intro or menu? (if this lasts into gameplay, check play.player in witness.json)`);
   if (ctx.first && ctx.session && ctx.session.goal) L.push(`your goal: ${ctx.session.goal}`);
   if (d.goal) L.push(`goal: ${clip(oneLine(d.goal), 140)}`);
   if (d.result) L.push(d.result.line);

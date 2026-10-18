@@ -119,8 +119,10 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 items appearing, notices, pickups, kills), `using <x>`.
 
 **Fight modes.** `block`: hold block facing the attacker through the strike, then keep attacking. `dodge`: dash away
-and sideways just before the strike lands. `backoff`: step out of reach. `aggressive`: ignore windups. Default:
-`block` if a block control exists, else `dodge`, else `backoff` (`aggressive` after `set guard off`).
+and sideways just before the strike lands. `backoff`: step out of reach. `aggressive`: ignore windups. `hold` (fps;
+also `stay`, `in place`): never chase, shoot whatever is in sight, switch to another visible enemy, done after 2.5 s
+with nothing in sight. Default: `play.guardMode` if set, else `block` if a block control exists, else `dodge`, else
+`backoff` (`aggressive` after `set guard off`). Fighting or stomping something already dead counts as done.
 
 **Naming things.** As the observation lists them: a type (`Wolf`; a plural `wolves` means all of them), `Type#id`
 (`Wolf#5`), `#5`, `wolf 5`, a name (`"Old Guard"`, `guard`), or a category with `nearest`: `nearest enemy`, `item`,
@@ -251,11 +253,15 @@ speed.
 | profile | movement | needs from the snapshot | needs from the controls |
 |---|---|---|---|
 | `topdown` | 8-way keys (or a stick) toward the next path cell. Facing: taps a move key toward the target when the player's `facing` says it's turned away (unknown facing is assumed right). | `player.pos`; `facing` helps attacks land; `hp` for heal/retreat/low-hp | `move`, plus attack / block / dodge / interact / heal as the game has them |
-| `platformer` | left/right with `run` held for distance. Jumps planned from the tile map: a wall at body height (held longer for taller walls), a gap or hazard (running jump), an enemy ahead (jump onto it if stompable, else over it). An enemy marked `stompable: false` close ahead stops the run and fails the order with a suggestion ("wait for X", "jump right long"), unless its `state` says it's harmless right now (`hidden`, `retracted`, `sleeping`, `inactive`…); `wait for X` ends when it goes harmless. Stuck: high jump, then back up for a run-up. | `player.pos`, `onGround` (or `grounded`), `vel`, `size`; `state.map` rows with `#` solid, `=` one-way, `^`/`~` hazards (rows below the map count as a pit) | `move` (left/right/down), `jump`, `run`; `attack` only for `fight X ranged` / `using` |
-| `fps` | WASD relative to the look direction; turning and aiming with mouse deltas. Mouse sensitivity and sign are auto-calibrated on first use (or `play.fps.sens`). `fight` aims at centre mass, fires while the aim error is under the target's angular size, strafes on a rhythm, reloads at 0 ammo. | `player.pos` (3D), `look` [x,y,z] or `yaw`/`pitch` (`play.fps.degrees`, `yawSign`), `ammo`; entity `los` / `visible` | `move` (wasd by default), attack (default `mouse:left`, held), `reload` (`r`), `weapons` (`1`–`4`) |
+| `platformer` | left/right with `run` held for distance. Jumps planned from the tile map: a wall at body height (held longer for taller walls), a gap or hazard (running jump), an enemy ahead (jump onto it if stompable, else over it), using time-to-contact from both speeds so fast things (a kicked shell coming back) are jumped in time. **Packs**: with another enemy just behind the first, it stops, lets the first walk in and stomps it from a standstill (timed by the measured air time), so the bounce doesn't land in the second one. **In the air** a landing planner tries each input (toward, none, away), simulates the fall with the measured gravity and every enemy's measured speed, and picks the safest: landing on a head is good, a side hit, a pit or sliding into an enemy after touchdown is not. While an order stands still (wait, press, look), an enemy about to touch you gets jumped on (or away from). Star power (`star`/`invincible` on the player) ignores all this. An enemy marked `stompable: false` close ahead stops the run and fails the order with a suggestion ("wait for X until it hides"), unless its `state` says it's harmless right now (`hidden`, `retracted`, `sleeping`, `inactive`…); `wait for X` ends when it goes harmless. Stuck: high jump, then back up for a run-up. Speeds, gravity and friction are measured from positions, so the game's units don't matter. | `player.pos`, `onGround` (or `grounded`), `size` (and entity `size`, which makes the landing planner exact); `state.map` rows with `#` solid, `=` one-way, `^`/`~` hazards (rows below the map count as a pit) | `move` (left/right/down), `jump`, `run`; `attack` only for `fight X ranged` / `using` |
+| `fps` | WASD relative to the look direction; turning and aiming with mouse deltas. Mouse sensitivity and sign are auto-calibrated on first use (or `play.fps.sens`). `fight` aims at centre mass, fires while the aim error is under the target's angular size, strafes on a rhythm, reloads at 0 ammo, and chases to `fps.range` cells (`fight X hold` never chases). In team games (`team` on the player) damage and kills are only credited to you while you were firing, since teammates shoot too. `respawn` waits up to 8 s for games that respawn on a timer. | `player.pos` (3D), `look` [x,y,z] or `yaw`/`pitch` (`play.fps.degrees`, `yawSign`), `ammo`, `team`; entity `los` / `visible`, `team`, `dead` | `move` (wasd by default), attack (default `mouse:left`, held), `reload` (`r`), `weapons` (`1`–`4`) |
 
 The plane is `[0,1]` (x/y) by default and `[0,2]` (x/z) for fps. North is screen up: `-y` by default, `-z` for fps;
-set `play.north: "+y"` for y-up worlds. The platformer profile has no guard reflex.
+set `play.north: "+y"` for y-up worlds. The platformer's guard reflex is jumping (above), not blocking.
+
+**Levels and scenes.** When the snapshot's `scene`, `level`, `stage`, `area`, `world`, `chapter` or `map.id` changes,
+the harness forgets the old map knowledge and remembered things (a new level is a new place). Every thing also gets a
+measured velocity (world units per frame) from consecutive snapshots, used for time-to-contact and landing plans.
 
 ## The `"play"` config
 
@@ -326,12 +332,16 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `reaction` | 0.25 (or the persona's) | seconds before the guard reacts to a windup |
 | `tick`, `combatTick` | 3, 1 | frames per decision normally / near hostiles |
 | `guard` | `true` | the telegraph reflex |
+| `guardMode` | none: block if a block control exists, else dodge, else back off | force `block`, `dodge` or `backoff` for the guard and default fights |
+| `radius` | the player's `size`, else 0.35 | the player's collision radius in cells (path look-ahead keeps this much clearance from walls) |
 | `retreat`, `heal` | 0, 0 | standing hp % policies (0 = off) |
 | `combos` | `{}` | name → Witness input spec (`"down@0-0.05, right@0.05-0.12, p@0.1"`) |
+| `mirrorCombos` | `true` | swap left/right in combos when the nearest enemy is on your left (fighting games) |
+| `brief` | none | developer notes added to `witness play brief` (same as `--extra`) |
 | `allowCalls` | `false` | allow `call` orders (same as `--allow-calls`) |
 | `logs` | `true` | which game info logs become events: `true`, `false`, or a regex |
 | `maxShots` | 24 | cap on automatic key-moment screenshots |
-| `platformer` | `{jumpFrames: 18, runJumpFrames: 22, stomp: true}` | also `run` (false: never hold run), `stuckLimit` (7 s) |
+| `platformer` | `{jumpFrames: 18, runJumpFrames: 22, stomp: true}` | also `run` (false: never hold run), `stuckLimit` (7 s), `airAccel` (air control per frame, default 0.005 cells) |
 | `fps` | `{sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2}` | also `range` (12 cells), `degrees`, `yawSign`, `maxTurn` (0.5 rad per tick) |
 | `module` | none | see below |
 | `brief` | none | default `--extra` text for `play brief` |

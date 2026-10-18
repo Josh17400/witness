@@ -313,6 +313,8 @@ export class PlatformRunner {
 
   stompTick(w, want, th) {
     const cell = w.cell, b = this.body(w);
+    // far away (pipes, gaps, other enemies in between): approach with the full runner first
+    if (Math.abs(th.p2[0] - b.x) > cell * 2.5) { this.tick(w, want, { targetX: th.p2[0], reachX: cell * 2.2 }); return null; }
     this.holdJump(w, want);
     const dx = th.p2[0] - b.x, dir = Math.sign(dx) || 1;
     if (dir > 0 && this.c.move.right) want.held.set("move:right", this.c.move.right); else if (dir < 0 && this.c.move.left) want.held.set("move:left", this.c.move.left);

@@ -17,7 +17,7 @@ export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie
   const start = [`${W} start --name ${name}`, `--config ${q(configDir)}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
   const card = profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
     : profile === "fps" ? `goto <thing|x,y> · go forward|back|left|right [cells] · go <n|s|e|w…> [cells] · explore [dir] · follow <thing>
-fight [thing] [retreat 30%] [kite N] · flee · look <dir|thing> · reload · weapon <n>
+fight [thing] [retreat 30%] [kite N] [hold] · flee · look <dir|thing> · reload · weapon <n>
 press <key> [xN] · hold <key> <s> · wait [s] · stop · respawn · modifiers: for 8s · careful`
       : ORDER_CARD;
   const does = profile === "platformer" ? "running, jumping gaps and walls, stomping enemies that can be stomped"
@@ -27,7 +27,7 @@ press <key> [xN] · hold <key> <s> · wait [s] · stop · respawn · modifiers: 
 - When the autopilot stops in front of something it can't handle (a plant in a pipe, a big gap), decide: "wait for <it>", "wait 1", "jump right long".
 - Watch hp, lives and the map (the rows of tiles ahead of you): # is solid ground, gaps in the bottom rows are pits.`
     : profile === "fps"
-      ? `- "fight nearest enemy" aims and fires; "follow <teammate>" sticks with your team; "reload", "weapon 2" switch tools.
+      ? `- "fight nearest enemy" aims, fires and chases; "fight nearest enemy hold" stays put and shoots what's in sight; "follow <teammate>" sticks with your team; "reload", "weapon 2" switch tools.
 - Enemies marked "no line of sight" are behind walls: move ("goto", "go forward 6") to find an angle, or follow a teammate.
 - Watch hp and ammo; back off or flee when hp is low.`
       : `- In fights, watch for WINDUP: the enemy is about to strike. "fight X block" (or dodge / backoff) defends and punishes; heal or flee when hp is low.`;
