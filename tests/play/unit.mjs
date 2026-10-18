@@ -239,5 +239,106 @@ S1 = simWorld({ wolf: true }); S1.useMap = true;
 r = drive(S1, { controls: { move: "wasd", attack: "j", block: "k" }, reaction: 0.6 }, "wait 4");
 ok("a slow reaction (0.6s > 0.5s windup) gets bitten", S1.hp < 10, `hp ${S1.hp}`);
 
+// ---- platformer profile in a simulated side-view world: a gap, a 2-high wall, a stompable enemy
+const PLAT = [
+  "................................................",
+  "................................................",
+  "................................................",
+  "................................................",
+  "..........................##....................",
+  "..........................##....................",
+  "##########...#####################...###########",
+  "##########...#####################...###########",
+];
+function platWorld() {
+  const T = 16, S = { frame: 0, x: 40, y: 6 * T - 8, vx: 0, vy: 0, keys: new Set(), onGround: true, dead: false, queue: [], jumpHeld: 0, prevJump: false,
+    enemy: { x: 20 * T, y: 6 * T - 8, alive: true, vx: -0.4 } };
+  const solid = (px, py) => { const c = Math.floor(px / T), r = Math.floor(py / T); if (r < 0) return false; if (r >= PLAT.length) return false; return (PLAT[r][c] || ".") === "#"; };
+  S.step = () => {
+    for (const e of S.queue.filter((e) => e.frame <= S.frame)) if (e.type === "key") e.down ? S.keys.add(e.key) : S.keys.delete(e.key);
+    S.queue = S.queue.filter((e) => e.frame > S.frame);
+    if (S.dead) { S.frame++; return; }
+    const run = S.keys.has("x"), max = run ? 2.4 : 1.4, dir = (S.keys.has("right") ? 1 : 0) - (S.keys.has("left") ? 1 : 0);
+    S.vx += dir * 0.12; if (!dir) S.vx *= 0.85; S.vx = Math.max(-max, Math.min(max, S.vx));
+    const jump = S.keys.has("z");
+    if (jump && !S.prevJump && S.onGround) { S.vy = -4.6; S.onGround = false; }
+    S.prevJump = jump;
+    S.vy += jump && S.vy < 0 ? 0.2 : 0.5; S.vy = Math.min(S.vy, 5);
+    const nx = S.x + S.vx;
+    if (!solid(nx + 6 * Math.sign(S.vx || 1), S.y) && !solid(nx + 6 * Math.sign(S.vx || 1), S.y - 6)) S.x = nx; else S.vx = 0;
+    const ny = S.y + S.vy;
+    if (S.vy > 0 && (solid(S.x - 5, ny + 8) || solid(S.x + 5, ny + 8))) { S.y = Math.floor((ny + 8) / T) * T - 8; S.vy = 0; S.onGround = true; }
+    else { S.y = ny; S.onGround = false; }
+    if (S.y > PLAT.length * T + 32) S.dead = true;
+    const E = S.enemy;
+    if (E.alive) {
+      E.x += E.vx;
+      if (Math.abs(E.x - S.x) < 12 && Math.abs(E.y - S.y) < 14) { if (S.vy > 0 && S.y < E.y - 4) { E.alive = false; S.vy = -3; } else S.dead = true; }
+    }
+    S.frame++;
+  };
+  S.snap = () => ({ frame: S.frame, state: { dead: S.dead,
+    player: { id: 1, type: "Player", pos: [S.x, S.y], size: [12, 16], vel: [S.vx, S.vy], onGround: S.onGround },
+    entities: S.enemy.alive ? [{ id: 2, type: "Goomba", pos: [S.enemy.x, S.enemy.y], size: [12, 14], hostile: true, stompable: true }] : [],
+    map: { cell: 16, origin: [0, 0], rows: PLAT, solid: "#" } } });
+  return S;
+}
+{
+  const S2 = platWorld();
+  const cfg = resolvePlayConfig({ profile: "platformer", controls: { move: { left: "left", right: "right" }, jump: "z", run: "x" } }, { keys: ["left", "right", "z", "x"] });
+  const per5 = new Perceiver(cfg, { fps: 60 });
+  let w = per5.perceive(S2.snap(), 0);
+  const ap = new Autopilot(cfg, { fps: 60, grid: new NavGrid({ cell: 16 }), perceiver: per5 });
+  ap.observe(w);
+  ap.setOrders(parseOrders("run right to 44"));
+  let st = "run", msg = "";
+  while (S2.frame < 60 * 30 && !S2.dead) {
+    const d = ap.decide(w);
+    S2.queue.push(...ap.ctrl.emit(d.want, S2.frame));
+    if (d.status !== "run") { st = d.status; msg = d.message; break; }
+    for (let i = 0; i < Math.max(1, d.k); i++) S2.step();
+    w = per5.perceive(S2.snap(), S2.frame); ap.observe(w);
+  }
+  ok("platformer: runs right over a gap, a wall and an enemy without dying", st === "done" && !S2.dead && Math.floor(S2.x / 16) >= 43, `${st} ${msg} x=${(S2.x / 16).toFixed(1)} dead=${S2.dead} enemy=${S2.enemy.alive}`);
+  ok("platformer: the stompable enemy got stomped (or jumped)", !S2.dead && (!S2.enemy.alive || S2.x > S2.enemy.x));
+}
+
+// ---- fps profile: mouse sensitivity calibration, aiming at a target, firing when on target
+{
+  const F = { frame: 0, pos: [0, 0, 0], yaw: 0, pitch: 0, mouse: [160, 90], queue: [], firing: false, shots: 0, target: { pos: [6, 0, -6], hp: 100 } };
+  const sens = 0.0011;
+  F.step = () => {
+    for (const e of F.queue.filter((e) => e.frame <= F.frame)) {
+      if (e.type === "mouse") { if (e.button === 0 && e.down !== undefined) F.firing = e.down; F.yaw += (e.x - F.mouse[0]) * sens; F.pitch = Math.max(-1.5, Math.min(1.5, F.pitch - (e.y - F.mouse[1]) * sens)); F.mouse = [e.x, e.y]; }
+    }
+    F.queue = F.queue.filter((e) => e.frame > F.frame);
+    if (F.firing) {
+      F.shots++;
+      const dx = F.target.pos[0] - F.pos[0], dz = F.target.pos[2] - F.pos[2];
+      const want = Math.atan2(dx, -dz);
+      if (Math.abs(((want - F.yaw + Math.PI) % (2 * Math.PI)) - Math.PI) < 0.08) F.target.hp -= 2;
+    }
+    F.frame++;
+  };
+  F.snap = () => ({ frame: F.frame, state: { player: { id: 0, type: "Player", team: "blue", pos: [...F.pos], yaw: F.yaw, pitch: F.pitch, hp: 100, maxHp: 100, ammo: 30 },
+    entities: F.target.hp > 0 ? [{ id: 5, type: "Soldier", name: "Red 1", team: "red", pos: F.target.pos, hp: F.target.hp, los: true }] : [{ id: 5, type: "Soldier", name: "Red 1", team: "red", pos: F.target.pos, hp: 0, dead: true }] } });
+  const cfg = resolvePlayConfig({ profile: "fps", cell: 1, fps: { eye: 1.6, aimHeight: 1.6, strafe: false } }, { keys: ["w", "a", "s", "d"] });
+  const per6 = new Perceiver(cfg, { fps: 60 });
+  let w = per6.perceive(F.snap(), 0);
+  const ap = new Autopilot(cfg, { fps: 60, grid: new NavGrid({ cell: 1 }), perceiver: per6, size: [320, 180] });
+  ap.observe(w);
+  ap.setOrders(parseOrders("fight Red"));
+  let st = "run";
+  while (F.frame < 60 * 10) {
+    const d = ap.decide(w);
+    F.queue.push(...ap.ctrl.emit(d.want, F.frame));
+    if (d.status !== "run") { st = d.status; break; }
+    for (let i = 0; i < Math.max(1, d.k); i++) F.step();
+    w = per6.perceive(F.snap(), F.frame); ap.observe(w);
+  }
+  ok("fps: calibrates the mouse, aims at the enemy and kills it", st === "done" && F.target.hp <= 0, `${st} hp=${F.target.hp} yaw=${F.yaw.toFixed(3)} shots=${F.shots} sens=${JSON.stringify(ap.profile.sens)}`);
+  ok("fps: calibrated yaw sensitivity ≈ the game's", ap.profile.sens && Math.abs(ap.profile.sens.x - 0.0011) < 0.0002, JSON.stringify(ap.profile.sens));
+}
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -33,11 +33,12 @@ function thingDetails(th, w, cfg) {
 function letterTable(things) {
   const used = new Set(["#", ".", "?", "@", "^", "="]), table = new Map();
   for (const th of things) {
-    if (table.has(th.type)) continue;
+    const key = `${th.type}|${th.rel === "hostile"}`;
+    if (table.has(key)) continue;
     const up = th.rel === "hostile";
     const cands = [...th.type.replace(/[^A-Za-z]/g, ""), ..."abcdefghijklmnopqrstuvwxyz"].map((ch) => (up ? ch.toUpperCase() : ch.toLowerCase()));
     const ch = cands.find((c) => !used.has(c)) || "*";
-    used.add(ch); table.set(th.type, ch);
+    used.add(ch); table.set(key, ch);
   }
   return table;
 }
@@ -64,13 +65,14 @@ export function observeData(w, ctx) {
   // map window
   if (P && P.p2 && grid && (w.map || grid.learned.size || cfg.profile !== "fps")) {
     const marks = new Map(), letters = letterTable(w.things.filter((th) => !th.dead));
-    const letterFor = (th) => letters.get(th.type) || "*";
+    const letterFor = (th) => letters.get(`${th.type}|${th.rel === "hostile"}`) || "*";
     for (const th of w.things) { if (th.dead) continue; const c = cellOf(w, th.p2); const k = `${c[0]},${c[1]}`; if (!marks.has(k) || th.rel === "hostile") marks.set(k, letterFor(th)); }
     let rows, x0, y0;
     if (cfg.profile === "platformer" && w.map) ({ rows, x0, y0 } = platformWindow(w, marks));
     else ({ rows, x0, y0 } = grid.render(cellOf(w, P.p2), cfg.profile === "fps" ? 17 : 19, cfg.profile === "fps" ? 11 : 9, marks, w.t));
-    const inWin = new Set(); for (const th of w.things) { if (th.dead) continue; const c = cellOf(w, th.p2); if (c[0] >= x0 && c[1] >= y0 && c[0] < x0 + (rows[0] || "").length && c[1] < y0 + rows.length) inWin.add(th.type); }
-    const legend = [...inWin].map((ty) => `${letters.get(ty)}=${ty}`).slice(0, 10);
+    const inWin = new Map(); for (const th of w.things) { if (th.dead) continue; const c = cellOf(w, th.p2); if (c[0] >= x0 && c[1] >= y0 && c[0] < x0 + (rows[0] || "").length && c[1] < y0 + rows.length) inWin.set(`${th.type}|${th.rel === "hostile"}`, th); }
+    const twoSides = (ty) => [...letters.keys()].filter((k) => k.startsWith(`${ty}|`)).length > 1;
+    const legend = [...inWin.entries()].map(([k, th]) => `${letters.get(k)}=${th.type}${twoSides(th.type) ? (th.rel === "hostile" ? " (enemy)" : " (ally)") : ""}`).slice(0, 10);
     // only worth showing when walls are known (the game's map, or walls learned by bumping into them)
     if (w.map || /[#^]/.test(rows.join(""))) data.map = { rows, x0, y0, legend };
   }

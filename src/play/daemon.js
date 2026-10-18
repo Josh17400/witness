@@ -126,7 +126,9 @@ export async function runDaemon(dir) {
       if (["death", "goal", "error", "scene", "lowhp"].includes(e.kind)) return e.text;
       if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return e.text;
       if (!combat && e.kind === "hurt" && b?.verb !== "flee") return e.text;
-      if (!combat && e.kind === "alert" && b?.verb !== "flee" && !(b?.target != null && e.data && String(e.data.id) === String(b.target))) return e.text;
+      // platformer runs jump or stomp enemies on their own: an approaching enemy isn't worth a wake there
+      const runner = cfg.profile === "platformer" && /^(run|goto|go|explore|pickup|jump)$/.test(b?.verb || "");
+      if (!combat && !runner && e.kind === "alert" && b?.verb !== "flee" && !(b?.target != null && e.data && String(e.data.id) === String(b.target))) return e.text;
       if (careful && ["appear", "notice", "pickup", "kill"].includes(e.kind)) return e.text;
     }
     return null;

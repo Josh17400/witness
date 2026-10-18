@@ -5,7 +5,7 @@
 import { norm, len, sub, add, scale, dist2, dot, perp, compass, dirVector, r1, fmtT, clip } from "./util.js";
 import { controlLabel, parseControl } from "./config.js";
 import { makeProfile, moveControls, lookOf } from "./profiles.js";
-import { PlatformRunner } from "./platformer.js";
+import { PlatformRunner, SAFE_STATES } from "./platformer.js";
 import { OrderError, resolveTarget } from "./orders.js";
 import { thingLabel } from "./perceive.js";
 import { parseWitnessInput } from "../core/input-spec.js";
@@ -369,7 +369,7 @@ class Fight extends Behaviour {
     const aim = ap.profile.aim(w, th, want);
     const size = Math.atan2(0.45, Math.max(0.5, d));
     const onTarget = Math.abs(aim.yawErr) < size * cfg.fps.aimTolerance + 0.01 && Math.abs(aim.pitchErr) < size * 1.6 + 0.02;
-    if (onTarget && th.los !== false) want.held.set("attack", c.attack);
+    if (onTarget && th.los !== false) { want.held.set("attack", c.attack); ap.lastAttackT = ap.t; }
     const prefer = (this.kite ?? cfg.fps.range ?? 12) * w.cell;
     let mv = null;
     if (th.los === false || d > prefer * 1.4) {
@@ -551,6 +551,7 @@ class WaitFor extends Behaviour {
     if (!th) return this.done(`${this.thing.key} is gone`);
     const side = Math.sign(th.p2[0] - w.player.p2[0]);
     if (this.ap.platform && side !== this.side0 && side !== 0) return this.done(`${th.key} passed`);
+    if (th.state && SAFE_STATES.test(th.state) && this.age > 0.05) return this.done(`${th.key} is ${th.state} now — go`);
     if (th.dist > Math.max(this.d0 + 3, this.ap.cfg.alert)) return this.done(`${th.key} moved away (${r1(th.dist)} cells)`);
     if (this.age > this.maxT) return this.done(`waited ${r1(this.age)}s for ${th.key}`);
     return this.run();
@@ -701,7 +702,7 @@ export class Autopilot {
   attack(want) {
     const c = this.cfg.controls;
     if (!c.attack) return;
-    if (c.attackMode === "hold") { want.held.set("attack", c.attack); return; }
+    if (c.attackMode === "hold") { want.held.set("attack", c.attack); this.lastAttackT = this.t; return; }
     if (this.t - this.lastAttackT >= c.attackEvery - 1e-9) { want.taps.push({ label: "attack", c: c.attack, frames: c.tapFrames }); this.lastAttackT = this.t; }
   }
 

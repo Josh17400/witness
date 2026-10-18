@@ -78,12 +78,14 @@ export class EventTracker {
     const prevById = new Map(prev.things.map((th) => [th.id, th])), curById = new Map(cur.things.map((th) => [th.id, th]));
     const attackedRecently = ctx.lastAttackT != null && t - ctx.lastAttackT <= 0.6;
     let dealtNow = 0;
+    const killedNow = [];
     for (const [id, th] of prevById) {
       if (curById.has(id)) continue;
       const near = th.dist <= 3.5, far = th.dist > Math.max(cur.maxListed, prev.maxListed) * 0.6 && th.dist > 8;
       if (th.rel === "hostile") {
         if ((th.hp != null && th.hp <= 2 && th.dist <= 6) || near || (!far && th.hp != null && th.maxHp && th.hp < th.maxHp)) {
           this.kills.push({ t, key: th.key, type: th.type });
+          killedNow.push(th);
           if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; if (th.hp != null) dealtNow += th.hp; }
           pushInf("kill", `${th.key} died`, { id }, th.key);
           this.perceiver.forget(id);
@@ -95,6 +97,16 @@ export class EventTracker {
     }
     for (const [id, th] of curById) {
       const was = prevById.get(id);
+      // games that keep the dead in the list (dead: true / hp 0) instead of removing them
+      if (was && !was.dead && th.dead && th.rel === "hostile") {
+        this.kills.push({ t, key: th.key, type: th.type });
+        killedNow.push(was);
+        if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; }
+        if (was.hp != null && th.hp != null && was.hp > th.hp) dealtNow += was.hp - th.hp;
+        pushInf("kill", `${th.key}${th.name ? ` "${th.name}"` : ""} died`, { id }, th.key);
+        continue;
+      }
+      if (th.dead) continue;
       if (!was) {
         if (th.rel === "hostile" && !this.seenTypes.has(th.type)) { this.seenTypes.add(th.type); this.firstSight.push({ t, type: th.type, key: th.key }); }
         if (!this.perceiver.memory.has(id) || this.perceiver.memory.get(id).lastSeen >= t) {
@@ -151,15 +163,15 @@ export class EventTracker {
     const changes = cur.stats.filter((s) => ps.has(s.label) && JSON.stringify(ps.get(s.label)) !== JSON.stringify(s.value) && !/^(time|timer|clock|frame|t)$/i.test(s.label));
     if (changes.length && changes.length <= 3) push("stat", changes.map((s) => `${s.label} ${fmtV(ps.get(s.label))}→${fmtV(s.value)}`).join(", "));
 
-    this.trackFight(prev, cur, ev, dealtNow, attackedRecently);
+    this.trackFight(prev, cur, ev, dealtNow, attackedRecently, killedNow);
     return ev;
   }
 
-  trackFight(prev, cur, ev, dealtNow, attackedRecently) {
+  trackFight(prev, cur, ev, dealtNow, attackedRecently, killedNow = []) {
     const t = cur.t, reach = this.cfg.reach.attack, P = cur.player;
     if (!P || !P.p2) return;
     const hurt = ev.some((e) => e.kind === "hurt"), hit = ev.some((e) => e.kind === "hit" || e.kind === "kill");
-    const close = cur.things.filter((th) => th.rel === "hostile" && !th.dead && th.dist <= Math.max(reach * 2.5, 2.5));
+    const close = cur.things.filter((th) => th.rel === "hostile" && !th.dead && th.dist <= Math.max(reach * 2.5, 2.5, this.cfg.profile === "fps" ? (this.cfg.fps.range ?? 12) * 1.5 : 0));
     if (!this.active) {
       if ((hurt || hit) && (close.length || hit)) {
         this.active = { n: ++this.fightN, t0: t, participants: new Map(), dealt: 0, taken: ev.filter((e) => e.kind === "hurt").reduce((a, e) => a + (e.data?.amount || 0), 0), kills: 0, windups: 0, avoided: 0, hits: 0, lastExchange: t };
@@ -167,10 +179,12 @@ export class EventTracker {
     }
     const f = this.active;
     for (const th of close) if (!f.participants.has(th.id)) f.participants.set(th.id, { key: th.key, type: th.type, dead: false });
+    // a one-hit kill (a stomp, a headshot) ends the fight in the same frame it starts: count the victim
+    for (const th of killedNow) if (!f.participants.has(th.id)) { f.participants.set(th.id, { key: th.key, type: th.type, dead: true }); f.kills++; if (th.hp != null) f.dealt += th.hp; }
     f.dealt += dealtNow;
     if (hurt || hit) f.lastExchange = t;
-    const alive = [...f.participants.entries()].filter(([id, p]) => !p.dead && cur.things.some((th) => th.id === id));
-    for (const [id, p] of f.participants) if (!p.dead && !cur.things.some((th) => th.id === id)) p.dead = true;
+    const alive = [...f.participants.entries()].filter(([id, p]) => !p.dead && cur.things.some((th) => th.id === id && !th.dead));
+    for (const [id, p] of f.participants) if (!p.dead && !cur.things.some((th) => th.id === id && !th.dead)) p.dead = true;
     let result = null;
     if (cur.dead) result = "lost";
     else if (!alive.length && f.participants.size) result = "won";

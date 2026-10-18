@@ -5,6 +5,8 @@ import { r1, clip } from "./util.js";
 import { OrderError, resolveTarget } from "./orders.js";
 import { parseControl } from "./config.js";
 
+export const SAFE_STATES = /^(hidden|retracted|retract|down|wait|waiting|sleep|sleeping|inactive|dormant|off|in)$/i;
+
 export class PlatformRunner {
   constructor(ap) {
     this.ap = ap;
@@ -123,6 +125,13 @@ export class PlatformRunner {
     if (t < this.backoffUntil) return {};
     const s = this.scan(w, b, dir);
     if (s.wallDist < cell * 3 || s.gapDist < cell * 3 || s.enemy) ap.fastUntil = t + 0.3;
+    // an enemy you can't stomp (a plant in a pipe, spikes, fire) close ahead: that's a judgement call, not a reflex
+    const danger = w.things.find((th) => th.rel === "hostile" && !th.dead && th.stompable === false && !SAFE_STATES.test(th.state || "")
+      && (th.p2[0] - b.x) * dir > -cell * 0.3 && (th.p2[0] - b.x) * dir < cell * 2.6 + Math.abs(b.vx) * 6 && Math.abs(th.p2[1] - b.y) < cell * 4);
+    if (danger && b.onGround && !this.jumping && !this.ignoreDanger?.has(danger.id)) {
+      want.held.delete("move:right"); want.held.delete("move:left"); want.held.delete("run");
+      return { danger, fail: `stopped: ${danger.key}${danger.state ? ` (${danger.state})` : ""} is in the way ${((danger.p2[0] - b.x) * dir / cell).toFixed(1)} cells ahead and can't be stomped — "wait for ${danger.key}", "wait 1", or "jump right long" to go past it` };
+    }
     if (b.onGround && !this.jumping) {
       const speedPx = Math.abs(b.vx);
       if (s.enemy && s.enemy.dx < cell * 1.6 + speedPx * 6) {

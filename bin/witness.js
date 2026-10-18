@@ -105,7 +105,7 @@ function loadConfig(opt) {
   }
   const found = findConfig(opt.config ? path.resolve(opt.config) : process.cwd());
   if (!found) die(`no ${CONFIG_NAME} found here or in any parent folder — run 'witness init' (or pass --cmd "<how to start the game>")`);
-  return { cfg: found.config, root: found.root };
+  return { cfg: found.config, root: found.root, file: found.file };
 }
 function splitCmd(s) { return (s.match(/"[^"]*"|\S+/g) || []).map((x) => x.replace(/^"|"$/g, "")); }
 

@@ -44,7 +44,7 @@ function normFacing(f) {
   return null;
 }
 
-const STAT_SKIP = /^(id|type|kind|name|pos|position|x|y|z|vx|vy|vz|vel|velocity|size|w|h|width|height|hp|health|maxhp|hpmax|max_hp|maxhealth|healthmax|facing|dir|direction|yaw|pitch|look|forward|state|ongroud|onground|grounded|on_ground|frame|time|t|digest|seed|team|hostile|item|talk|npc|dead|won|attacking|blocking|dodging|invulnerable|star|cooldown|telegraph)$/i;
+const STAT_SKIP = /^(id|type|kind|name|pos|position|x|y|z|vx|vy|vz|vel|velocity|size|w|h|width|height|hp|health|maxhp|hpmax|max_hp|maxhealth|healthmax|facing|dir|direction|yaw|pitch|look|forward|state|ongroud|onground|grounded|on_ground|frame|time|t|digest|seed|team|hostile|item|talk|npc|dead|won|attacking|blocking|dodging|invulnerable|star|cooldown|telegraph|lean|magsize|mag_size|maxammo|ads|reloading|sprinting|crouching|god|paused)$/i;
 
 export class Perceiver {
   constructor(cfg, { fps = 60 } = {}) {

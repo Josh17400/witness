@@ -61,7 +61,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     attackEvery: +(c.attackEvery ?? 0.35),
     block: pick("block"),
     dodge: pick("dodge"),
-    interact: pick("interact", ["e", "f"]),
+    interact: pick("interact", profile === "fps" ? null : ["e", "f"]),
     heal: pick("heal"),
     confirm: pick("confirm", ["enter", "space"]),
     cancel: pick("cancel", ["escape"]),
@@ -127,7 +127,8 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
 /** Short description of the controls for the brief / first observation. */
 export function describeControls(cfg) {
   const c = cfg.controls, out = [];
-  const mv = c.move.axis ? `stick ${c.move.axis.join("/")}` : ["up", "left", "down", "right"].map((d) => c.move[d] ? c.move[d].key || controlLabel(c.move[d]) : null).filter(Boolean).join("");
+  const parts = c.move.axis ? null : ["up", "left", "down", "right"].map((d) => c.move[d] ? c.move[d].key || controlLabel(c.move[d]) : null).filter(Boolean);
+  const mv = c.move.axis ? `stick ${c.move.axis.join("/")}` : parts.every((k) => k.length === 1) ? parts.join("") : parts.join("/");
   if (mv) out.push(`move ${mv}`);
   for (const k of ["attack", "block", "dodge", "interact", "heal", "jump", "run", "reload", "aim"]) if (c[k]) out.push(`${k} ${controlLabel(c[k])}`);
   return out.join(" · ");

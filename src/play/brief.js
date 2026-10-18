@@ -15,14 +15,26 @@ export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie
   const P = PERSONAS[persona] ? persona : "newbie";
   const W = `${cli} play`;
   const start = [`${W} start --name ${name}`, `--config ${q(configDir)}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
-  const card = ORDER_CARD + (profile === "platformer" ? `\n${ORDER_CARD_PLATFORMER}` : profile === "fps" ? `\n${ORDER_CARD_FPS}` : "");
+  const card = profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
+    : ORDER_CARD + (profile === "fps" ? `\n${ORDER_CARD_FPS}` : "");
+  const does = profile === "platformer" ? "running, jumping gaps and walls, stomping enemies that can be stomped"
+    : profile === "fps" ? "moving, turning, aiming and firing, strafing, reloading" : "walking around walls, aiming, attack timing, blocking when an enemy winds up";
+  const tips = profile === "platformer"
+    ? `- "run right" / "goto <thing>" moves you through the level; jumps over gaps, walls and stompable enemies are automatic.
+- When the autopilot stops in front of something it can't handle (a plant in a pipe, a big gap), decide: "wait for <it>", "wait 1", "jump right long".
+- Watch hp, lives and the map (the rows of tiles ahead of you): # is solid ground, gaps in the bottom rows are pits.`
+    : profile === "fps"
+      ? `- "fight nearest enemy" aims and fires; "follow <teammate>" sticks with your team; "reload", "weapon 2" switch tools.
+- Enemies marked "no line of sight" are behind walls: move ("goto", "go forward 6") to find an angle, or follow a teammate.
+- Watch hp and ammo; back off or flee when hp is low.`
+      : `- In fights, watch for WINDUP: the enemy is about to strike. "fight X block" (or dodge / backoff) defends and punishes; heal or flee when hp is low.`;
   return `You are a PLAYTESTER for ${game}. You play the game for real through a command-line harness, then report what you experienced. Be curious, honest and specific.
 
 GOAL: ${goal || "play the game and see how far you get"}
 PERSONA: ${PERSONAS[P].text}.
 BUDGET: about ${minutes} minutes of GAME time (the session shows it as [t …s]). Game time only passes inside \`do\` orders; the game is paused while you think, so take your time.
 
-HOW IT WORKS: you give plain-word orders; an autopilot carries them out frame by frame (walking around walls, aiming, attack timing, blocking when an enemy winds up). You decide WHAT to do and WHY. After every order you get a short text observation: your hp and stats, why the order stopped, what is near (distance in map cells and compass direction, north = up), a small map, dialogue, recent events.
+HOW IT WORKS: you give plain-word orders; an autopilot carries them out frame by frame (${does}). You decide WHAT to do and WHY. After every order you get a short text observation: your hp and stats, why the order stopped, what is near (distance in map cells and compass direction, north = up), a small map, dialogue, recent events.
 
 COMMANDS (run with your Bash tool, one at a time, exactly like this; each returns in a few seconds):
   start:  ${start}
@@ -34,12 +46,12 @@ COMMANDS (run with your Bash tool, one at a time, exactly like this; each return
 
 ORDERS (chain several with ";"):
 ${card.split("\n").map((l) => `  ${l}`).join("\n")}
-Name things exactly as the observation lists them: Wolf, Wolf#5, Guard, Potion, "nearest enemy", "item".${controls ? `\nThe game's controls (for press/hold): ${controls}.` : ""}
+Name things exactly as the observation lists them (a type like Wolf, an exact one like Wolf#5, a name, or "nearest enemy", "item").${controls ? `\nThe game's controls (for press/hold): ${controls}.` : ""}
 
 PLAY WELL:
 - Read each observation fully: the result line (✔ done / ✖ failed / ⚠ interrupted / ⏱ time) tells you what happened and why.
-- Follow the game's own goal and hints ("goal:" and "game says:" lines) and talk to characters.
-- In fights, watch for WINDUP: the enemy is about to strike. "fight X block" (or dodge / backoff) defends and punishes; heal or flee when hp is low.
+- Follow the game's own goal and hints ("goal:" and "game says:" lines)${profile === "topdown" ? " and talk to characters" : ""}.
+${tips}
 - If an order fails, read the message and try something different (another route, explore, another target). Don't repeat the same failing order more than twice.
 - Take a screenshot when you're unsure what's going on, when the text seems wrong, and at least once early on.
 - Write a note the moment something seems off: a bug (what happened, where, what you expected), something confusing, a fun moment.
