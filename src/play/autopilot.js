@@ -294,6 +294,15 @@ class Fight extends Behaviour {
     this.plural = !!(o.target && o.target.plural) || !o.target;
     this.nav = new Navigator(ap);
     this.kills = 0; this.blockUntil = -1; this.maxT = o.forS ?? 60;
+    this.start = w.player && w.player.p2 ? w.player.p2.slice() : null;   // the leash: a fight doesn't chase across the map
+    // asked for a defence the game has no control for: use the best one it has, and say so
+    const cc = ap.cfg.controls;
+    if ((this.mode === "block" && !cc.block) || (this.mode === "dodge" && !cc.dodge)) {
+      const alt = cc.block ? "block" : cc.dodge ? "dodge" : "backoff";
+      ap.note(`no ${this.mode} control in this game: defending with ${alt} instead`);
+      this.label = `${o.text} (${alt})`;
+      this.mode = alt;
+    }
     this.pick(w, true);
   }
   defaultMode() {
@@ -351,6 +360,9 @@ class Fight extends Behaviour {
       return this.run();
     }
     if (d > reach * 0.85) {
+      // the leash: don't chase a target across the map (out of the village, into another region)
+      if (this.start && cfg.leash > 0 && dist2(p, this.start) > cfg.leash * w.cell && d > reach * 2)
+        return this.done(`stopped chasing ${th.key}: it led you ${r1(dist2(p, this.start) / w.cell)} cells from where the fight started (fight it again to keep going)`);
       const r = this.nav.tick(w, th.p2, reach * 0.8, { stuckLimit: 4 });
       if (r.fail) return this.fail(`can't reach ${th.key}: ${r.fail}`);
       if (r.dir) ap.moveTo(w, r.dir, want);

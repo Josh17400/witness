@@ -133,7 +133,7 @@ export class Perceiver {
       const isItem = this.fx.item ? !!this.fx.item(scope) : itemField ? !!(e.item ?? e.pickup ?? e.collectible) : ITEM_NAMES.test(type);
       const isNpc = this.fx.npc ? !!this.fx.npc(scope) : npcField ? !!(e.talk ?? e.npc ?? e.talkable) : NPC_NAMES.test(type);
       if (isHostile) rel = "hostile"; else if (isFriend) rel = "friend"; else if (isItem) rel = "item"; else if (isNpc) rel = "npc";
-      const hp = num(e.hp ?? e.health), dead = !!(e.dead || (hp != null && hp <= 0 && rel === "hostile"));
+      const hp = num(e.hp ?? e.health), dead = !!(e.dead || (hp != null && hp <= 0 && rel === "hostile") || (typeof e.state === "string" && /^(dead|dying|corpse|killed)$/i.test(e.state)));
       let telegraph = false, tele = null;
       if (this.fx.telegraph) { const v = this.fx.telegraph(scope); telegraph = !!v; if (typeof v === "number") tele = v; }
       else if (typeof e.telegraph === "number") { telegraph = e.telegraph > 0; tele = e.telegraph > 0 ? e.telegraph : null; }
@@ -208,6 +208,8 @@ export class Perceiver {
     for (const [id, m] of this.memory) {
       if (visible.has(id) || m.gone) continue;
       if (player && player.p2) { const d = sub(m.thing.p2, player.p2); m.thing.dist = dist2(m.thing.p2, player.p2) / cell; m.thing.dir = compass(d, cfg.northSign); }
+      // last seen right around here but not listed now: it moved on (walked indoors, left), so don't keep a ghost
+      if (things.length && m.thing.dist < Math.min(8, maxListed * 0.5) && t - m.lastSeen > 0.5) { m.gone = true; continue; }
       remembered.push({ ...m.thing, lastSeen: m.lastSeen, remembered: true });
     }
 

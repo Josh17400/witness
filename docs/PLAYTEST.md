@@ -335,6 +335,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `speed` | measured | walking speed in world units/s |
 | `reach` | `{attack: 1.2, interact: 1.2, pickup: 0.5}` | in cells |
 | `alert` | 6 | cells: a hostile this close wakes the tester |
+| `leash` | 14 | cells: a melee fight stops chasing a target this far from where the fight started (0 = never stop) |
 | `sight` | 3 | cells around the path counted as seen when exploring |
 | `reaction` | 0.25 (or the persona's) | seconds before the guard reacts to a windup |
 | `tick`, `combatTick` | 3, 1 | frames per decision normally / near hostiles |

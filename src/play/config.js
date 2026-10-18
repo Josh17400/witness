@@ -105,6 +105,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     speed: raw.speed != null ? +raw.speed : null,         // world units per second when walking (null: measured)
     reach: { attack: 1.2, interact: 1.2, pickup: 0.5, ...(raw.reach || {}) },   // in cells
     alert: +(raw.alert ?? 6),                // cells: a hostile this close wakes the tester
+    leash: +(raw.leash ?? 14),               // cells: a fight stops chasing a target this far from where it started
     sight: +(raw.sight ?? 3),                // cells around the path counted as "seen" when exploring without a map
     reaction: +(raw.reaction ?? 0.25),       // seconds before the reflex layer reacts to a telegraph
     tick: Math.max(1, Math.round(+(raw.tick ?? 3))),
