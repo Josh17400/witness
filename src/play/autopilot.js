@@ -83,7 +83,11 @@ export class Navigator {
     if (d <= reach) { this.closeIncident(w, true, "arrived"); return { dir: null, arrived: true }; }
     if (d < this.best - 0.4 * cell) { this.best = d; this.bestT = t; }
     if (t - this.bestT > stuckLimit) {
-      const msg = `stuck at cell ${fmtCell(grid.toCell(p))} heading ${compass(sub(goal, p), w.northSign)} for ${r1(t - this.bestT)}s (no progress toward the target)`;
+      let msg = `stuck at cell ${fmtCell(grid.toCell(p))} heading ${compass(sub(goal, p), w.northSign)} for ${r1(t - this.bestT)}s (no progress toward the target)`;
+      if (this.partial) {   // the planner found no open way at all: say so, and point at a locked door/gate if there is one
+        const locked = w.things.filter((th) => th.locked && !th.dead).sort((a, b) => dist2(p, a.p2) - dist2(p, b.p2))[0];
+        msg += locked ? ` — the map shows no open way there; ${locked.key} is locked (${r1(dist2(p, locked.p2) / cell)} cells ${compass(sub(locked.p2, p), w.northSign)}): try "goto ${locked.key}; interact ${locked.key}"` : " — the map shows no open way there from here";
+      }
       this.closeIncident(w, false, "gave up");
       return { dir: null, fail: msg };
     }
@@ -100,7 +104,9 @@ export class Navigator {
       const offPath = this.path && !this.path.some((c) => Math.abs(c[0] - pc[0]) <= 1 && Math.abs(c[1] - pc[1]) <= 1);
       if (!this.path || this.planVersion !== grid.version || !this.goalCell || this.goalCell[0] !== gc[0] || this.goalCell[1] !== gc[1] || offPath || t - this.planT > 1.5) {
         const reachCells = reach / cell;
-        this.path = grid.astar(pc, gc, { t, goalOk: (x, y) => dist2(grid.center([x, y]), goal) <= Math.max(reach, cell * 0.5) && !(x === pc[0] && y === pc[1]) || (Math.hypot(x - gc[0], y - gc[1]) <= Math.max(0, reachCells - 0.5)) }) || grid.lastPartial || null;
+        const full = grid.astar(pc, gc, { t, goalOk: (x, y) => dist2(grid.center([x, y]), goal) <= Math.max(reach, cell * 0.5) && !(x === pc[0] && y === pc[1]) || (Math.hypot(x - gc[0], y - gc[1]) <= Math.max(0, reachCells - 0.5)) });
+        this.path = full || grid.lastPartial || null;
+        this.partial = !full;
         this.planVersion = grid.version; this.goalCell = gc; this.planT = t;
         if (!this.path) this.noPath = (this.noPath || 0) + 1;
         this.bestRem = Infinity;   // a new plan: progress is measured along it from here
@@ -109,7 +115,8 @@ export class Navigator {
         let i = this.path.findIndex((c) => c[0] === pc[0] && c[1] === pc[1]);
         if (i < 0) { let bd = Infinity; this.path.forEach((c, j) => { const dd = Math.hypot(c[0] - pc[0], c[1] - pc[1]); if (dd < bd) { bd = dd; i = j; } }); }
         const rem = this.path.length - 1 - i;
-        if (rem < this.bestRem - 0.5) { if (this.bestRem !== Infinity) this.bestT = t; this.bestRem = rem; }
+        // (a partial path ends short of the target: only real closing-in counts, or backing off and re-walking it loops forever)
+        if (rem < this.bestRem - 0.5) { if (this.bestRem !== Infinity && !this.partial) this.bestT = t; this.bestRem = rem; }
         // look ahead along the path as far as the body fits through in a straight line (no clipping wall corners)
         let j = Math.min(i + 1, this.path.length - 1);
         for (let k = j + 1; k < Math.min(this.path.length, i + 6); k++) { if (grid.clearLine(p, grid.center(this.path[k]), rb, t)) j = k; else break; }
