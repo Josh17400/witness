@@ -148,7 +148,8 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    interact, heal, choose…), plus `profile` (`topdown` | `platformer` | `fps`) if it isn't top-down.
    `witness play suggest` probes the game and proposes one (`--write` saves it). The harness works much better when
    the snapshot follows the playtest conventions (entity `hostile`/`item`/`talk`, enemy `state: "windup"` or
-   `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`): see PLAYTEST.md "Snapshot conventions".
+   `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`): `witness play check` lists which ones the snapshot has,
+   what each missing one unlocks, and PLAYTEST.md "Playtest-ready snapshots" has a minimal example per profile.
 2. **Sanity-check it yourself:** `witness play start --name check --goal "smoke"`, `witness play do "explore for 3s"
    -s check`, `witness play end -s check`. Fix the config until orders work and things are classified right.
 3. **Brief:** `witness play brief --goal "<what to achieve>" --persona newbie --minutes 4 --name t1` prints the
@@ -160,7 +161,10 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    ~1.3 s lag shows (23 kills / 14 deaths in the same shooter). One visible game at a time.
 4. **Spawn the tester** with the Agent tool: `model: "sonnet"`, `effort: "low"` and the brief as the prompt (the
    best play at nearly Haiku's speed; `model: "haiku"` is cheaper but plays shallowly, so keep it for simple games).
-   The tester runs the commands itself; don't play for it.
+   The tester runs the commands itself; don't play for it. **No Agent tool** (a workflow subagent): `witness play
+   batch --goals goals.txt --minutes 3` launches the testers itself as headless `claude -p` processes (Sonnet, low
+   effort, Bash limited to the witness commands, the user's login), at most 2 at once, and prints one summary (also
+   `witness/playtests/batch-<time>.md`). Use `--parallel 1` when the machine is busy.
 5. **Read `witness/playtests/t1/report.md`**: tester feedback and bug notes first, then fights (windups avoided vs
    hit), stuck incidents, deaths, coverage. Open the key shots and `coverage.png`.
 6. **Reproduce** what it flagged: report.md lists `witness replay witness/playtests/t1/replay.jsonl --at <t> --shot`
