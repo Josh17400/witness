@@ -12,7 +12,10 @@
     ]
   },
   "priority": 10,
-  "install": [{ "from": "witness.h", "to": "witness/witness.h" }],
+  "install": [
+    { "from": "witness.h", "to": "witness/witness.h" },
+    { "from": "witness_emscripten.js", "to": "witness/witness_emscripten.js" }
+  ],
   "launch": { "command": "./build/game", "args": [] },
   "guide": "GUIDE.md",
   "verified": "local"

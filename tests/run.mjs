@@ -775,6 +775,15 @@ for (const suite of ["unit", "e2e"]) {
   if (counts) console.log(`  play ${suite}: ${counts[0]}`);
 }
 
+// web / WASM: device profiles, audio unlock, the Emscripten bridge (browser parts skip without Playwright, the native
+// bridge build without a C compiler)
+{
+  const m = spawnSync(process.execPath, [path.join(here, "web", "run.mjs")], { encoding: "utf8", timeout: 1200000 });
+  ok("web suite", m.status === 0, (m.stdout + m.stderr).slice(-2500));
+  const counts = /(\d+) passed, (\d+) failed/.exec(m.stdout || "");
+  if (counts) console.log(`  web: ${counts[0]}${/skipped/.test(m.stdout) ? ` (${(m.stdout.match(/^ {2}.*skipped.*$/gm) || []).map((l) => l.trim()).join("; ")})` : ""}`);
+}
+
 // Python adapter (standard library only): skipped when no Python is installed
 {
   const f = path.join(here, "python", "test_idle.py");

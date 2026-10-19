@@ -11,7 +11,7 @@
 //   diff      diffImages                                     (witness shot --diff)
 //   tracking  components, trackObjects, trackReport, estimateShift, cameraPath, mosaicPlate  (measure motion v2)
 //   sheets    cropImage, zoomImage, contactSheet, frameDiffScore, pickKeyFrames  (witness shot --sheet/--crop/--zoom)
-//   measure   blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo,
+//   measure   blockScale, detectScale, pixelRuns, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo,
 //             maskStats, ringMask, contrast, motion           (witness measure)
 
 export { encodePNG, decodePNG, isPNG } from "./png.js";
@@ -29,7 +29,7 @@ export {
 export { timelinePNG, soundSheetPNG } from "./spectrogram.js";
 export { diffImages } from "./diff.js";
 export {
-  blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
+  blockScale, detectScale, pixelRuns, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
   ringMask, contrast, motion, motionStream, medianPlate, medianSampleIndices, pathJitter, AUTO_MEDIAN_FRAMES,
 } from "./measure.js";
 export {

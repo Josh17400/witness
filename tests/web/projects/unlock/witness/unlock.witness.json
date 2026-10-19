@@ -1,0 +1,10 @@
+[
+  { "name": "witness tap: silent and suspended until a tap, then running",
+    "input": "touch:80,45@0.5",
+    "steps": [ { "at": 0.3, "expect": ["!state.started", "web.audio.state == 'suspended'", "state.ui.length == 1"] },
+               { "at": 0.6, "expect": ["state.started", "web.audio.state == 'running'", "web.audio.blocked == 0"] } ] },
+  { "name": "real tap: the same with a trusted browser tap",
+    "input": "dom:tap:80,45@0.5",
+    "steps": [ { "at": 0.3, "expect": ["!state.started", "web.audio.state == 'suspended'"] },
+               { "at": 0.6, "expect": ["state.started", "web.audio.state == 'running'"] } ] }
+]

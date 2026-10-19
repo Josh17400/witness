@@ -17,12 +17,36 @@ async function runDueCalls(session, state) {
   }
 }
 
+/** Real browser input (dom:tap / dom:click / dom:key) that is due at the current frame. */
+async function runDueDom(session, state) {
+  while (state.dom && state.domIdx < state.dom.length && state.dom[state.domIdx].frame <= state.frame) {
+    const e = state.dom[state.domIdx++];
+    await session.web.dom(e, session.hello && session.hello.size);
+  }
+}
+
+/** Queue protocol events with the adapter; dom: events (real browser input) wait in state.dom for their frame. */
+export async function queueInput(session, state, evs) {
+  const dom = evs.filter((e) => e.type === "dom"), rest = evs.filter((e) => e.type !== "dom");
+  if (dom.length) {
+    if (!session.web) throw new WitnessError("dom: input is real browser input: it needs a browser launch (launch.url)");
+    state.dom = [...(state.dom || []).slice(state.domIdx || 0), ...dom].sort((a, b) => a.frame - b.frame);
+    state.domIdx = 0;
+  }
+  if (rest.length) {
+    if (!session.has("input")) throw new WitnessError("this game's adapter doesn't support 'input' (see its hello.capabilities)");
+    await session.input(rest.sort((a, b) => a.frame - b.frame));
+  }
+}
+
 /** Step the session forward to frame `target` (absolute). Uses replay dts when given. */
 export async function stepTo(session, state, target, dts = null) {
   await runDueCalls(session, state);
+  await runDueDom(session, state);
   while (state.frame < target) {
     let n = Math.min(MAX_CHUNK, target - state.frame);
     if (state.calls && state.callIdx < state.calls.length) n = Math.min(n, Math.max(1, state.calls[state.callIdx].frame - state.frame));
+    if (state.dom && state.domIdx < state.dom.length) n = Math.min(n, Math.max(1, state.dom[state.domIdx].frame - state.frame));
     let r;
     if (dts) {
       const slice = dts.slice(state.frame, state.frame + n);
@@ -32,6 +56,7 @@ export async function stepTo(session, state, target, dts = null) {
     state.frame = r.frame ?? state.frame + n;
     state.time = r.time ?? state.frame / session.fps;
     await runDueCalls(session, state);
+    await runDueDom(session, state);
   }
 }
 
@@ -45,10 +70,7 @@ export async function begin(session, { seed = 1, scene, params, input, events, r
   const state = { frame: 0, time: 0, dts: replay ? replay.dts : null, calls: replay && replay.calls && replay.calls.length ? replay.calls : null, callIdx: 0 };
   if (state.calls && !session.has("call")) throw new WitnessError("this replay contains game calls (recorded by witness play --allow-calls) but the adapter has no 'call'");
   const evs = [...(events || []), ...parseWitnessInput(input, fps), ...(replay ? replay.events : [])];
-  if (evs.length) {
-    if (!session.has("input")) throw new WitnessError("this game's adapter doesn't support 'input' (see its hello.capabilities)");
-    await session.input(evs.sort((a, b) => a.frame - b.frame));
-  }
+  if (evs.length) await queueInput(session, state, evs);
   return state;
 }
 
@@ -168,6 +190,15 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
   const useShot = matching && matchMedia.shot && session.has("screenshot");
   // when a point step reads prev (or rose/changed...), every step keeps its snapshot so prev is the previous step
   const pointUsesPrev = steps.some((st) => [].concat(st.expect || [], st.probe || []).some(usesPrev));
+  // expressions that read web.* (browser launches: web.audio.state, web.dpr, ...) get the page's facts with each snapshot
+  const exprs = [...steps.flatMap((st) => [].concat(st.expect || [], st.probe || [])), ...ranges.flatMap((r) => r.asserts.map((a) => a.expr))];
+  const usesWeb = exprs.some((e) => /(^|[^\w$.])web\./.test(String(e)));
+  if (usesWeb && !session.web) res.failures.push({ kind: "warn", message: "an expression reads web.*, which only browser launches have (launch.url): it is null here" });
+  if (usesWeb && session.web && session.web.policy === "gesture") {
+    const a = await session.web.audio().catch(() => null);
+    if (a && a.contexts.some((c) => c.unlockedBy)) res.failures.push({ kind: "warn", message: "audio was already unlocked when this test began (an unlock lasts for the page's life, as in a browser): run audio-unlock tests on their own (--name)" });
+  }
+  const snapshot = async () => { const s = await session.snapshot(); if (usesWeb && session.web) s.web = await session.web.state(); return s; };
   if (useAudio) await session.audio();   // drop anything mixed before this test's reset: audio is compared per test
   let lastSnap = null;      // the snapshot of the previous point step (exposed as `prev` there)
   let frameSnap = null, frameSnapF = -1;   // the previous frame's snapshot inside range windows
@@ -200,7 +231,7 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
   const runPoint = async (st, rangeSnap) => {
     let snap = rangeSnap || null;
     const prev = lastSnap;
-    const getSnap = async () => { if (!snap) snap = await session.snapshot(); return snap; };
+    const getSnap = async () => { if (!snap) snap = await snapshot(); return snap; };
     const where = `at ${st.at ?? 0}s`;
     try {
       const calls = st.call ? (Array.isArray(st.call[0]) ? st.call : [st.call]) : [];
@@ -212,7 +243,8 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
       }
       if (st.input) {
         const evs = parseWitnessInput(st.input, fps).map((e) => ({ ...e, frame: e.frame + state.frame }));
-        await session.input(evs);
+        await queueInput(session, state, evs);
+        await runDueDom(session, state);
       }
       for (const ex of [].concat(st.expect || [])) {
         const s = await getSnap();
@@ -256,7 +288,7 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
           }
         }
       }
-      if (!snap && pointUsesPrev) snap = await session.snapshot();
+      if (!snap && pointUsesPrev) snap = await snapshot();
     } catch (e) {
       res.failures.push({ kind: "error", at: st.at, message: `${where}: ${e.message}` });
     }
@@ -270,7 +302,7 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
       const f = state.frame;
       let rangeSnap = null;
       if (inWindow(f)) {
-        rangeSnap = await session.snapshot();
+        rangeSnap = await snapshot();
         checkRanges(f, rangeSnap, frameSnapF === f - 1 ? frameSnap : null);
         frameSnap = rangeSnap; frameSnapF = f;
       }

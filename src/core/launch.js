@@ -64,6 +64,23 @@ export function runBuild(cfg, root, { quiet = false } = {}) {
 }
 
 /**
+ * Browser launches: session.web (device, engine, audio policy, page facts), the auto-unlock gesture at connect, and
+ * screenshots from the screen (capture "element" / "screen") instead of the adapter's canvas readback.
+ */
+async function attachWeb(session, web) {
+  session.web = web;
+  if (web.policy === "auto") { try { web.autoUnlocked = await web.unlock(); } catch { web.autoUnlocked = 0; } }
+  if (web.captureMode !== "canvas") {
+    const caps = session.hello.capabilities || (session.hello.capabilities = []);
+    if (!caps.includes("screenshot")) caps.push("screenshot");
+    session.screenshot = async () => {
+      const c = await web.capture(web.captureMode);
+      return { width: c.width, height: c.height, format: "png", data: c.png.toString("base64") };
+    };
+  }
+}
+
+/**
  * Start (or attach to) the game and return {session, stop(), proc, output()}.
  * opts: {attach, port, timeout, env, quiet}
  */
@@ -72,7 +89,7 @@ export async function openGame(cfg, root, opts = {}) {
   const attach = opts.attach || launch.attach;
   const srv = await listen({ port: attach ? (opts.port || launch.port || DEFAULT_ATTACH_PORT) : 0 });
   const addr = `127.0.0.1:${srv.port}`;
-  let proc = null, browser = null, server = null;
+  let proc = null, browser = null, server = null, web = null;
   const out = [];
   const keep = (d) => { out.push(d.toString()); if (out.length > 400) out.splice(0, out.length - 400); };
 
@@ -82,7 +99,7 @@ export async function openGame(cfg, root, opts = {}) {
     } else if (launch.url) {
       // Browser games: optional dev server + headless browser (see src/core/browser.js).
       const { openBrowserGame } = await import("./browser.js");
-      ({ browser, server } = await openBrowserGame(launch, root, addr, keep));
+      ({ browser, server, web } = await openBrowserGame(launch, root, addr, keep));
     } else if (launch.command) {
       const env = { ...process.env, ...(launch.env || {}), ...(opts.env || {}), WITNESS_ADDR: addr, WITNESS: "1" };
       proc = spawn(launch.command, launch.args || [], {
@@ -102,6 +119,7 @@ export async function openGame(cfg, root, opts = {}) {
       exited.then((code) => { throw new WitnessError(`the game exited (code ${code}) before connecting to Witness.\n--- game output ---\n${out.join("").slice(-3000)}`); }),
     ]);
     if (cfg.fps) session.hello.fps = cfg.fps;
+    if (web) await attachWeb(session, web);
     const stop = async () => {
       await session.quit();
       session.close();

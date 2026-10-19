@@ -104,6 +104,11 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
   (✔/✖/⚠ double), pitch movement, length, loudness vs music, and the Problems list.
 * **Sound names**: games can announce sounds (`witness.sound("jump")` in the adapters), so `listen` names them
   and ties them to their cause. Without it, `listen` still matches sounds by onset.
+* **Web builds on phones** (JS, or C/C++ via Emscripten + `witness_emscripten.js`, see the cpp GUIDE §13): add
+  `--device iphone-15` (also `iphone-se`, `ipad`, `-landscape`) and `--engine webkit` to any command. `doctor` then
+  says how the canvas lands on the screen (exact ×k, fractional = uneven pixels, smoothing = blur); `shot --capture
+  element` + `measure scale` checks it from device pixels. `doctor --no-auto-unlock` tests the iPhone "no sound until
+  a tap" bug; tests assert `web.audio.state == 'running'` after `touch:x,y@t` (or a real `dom:tap:x,y@t`).
 
 ## 3. Test files: prove gameplay, keep it proven
 

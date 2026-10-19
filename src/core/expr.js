@@ -142,6 +142,7 @@ export function helpers(snap, prev = null, ctx = null, targs = []) {
   };
   return {
     state, snap, prev: prev ? prev.state : null, frame: snap ? snap.frame : 0, time: snap ? snap.time : 0,
+    web: snap && snap.web != null ? snap.web : null,   // browser launches: device, dpr, audio policy/state (filled when an expression reads web.)
     entities,
     all: (t) => match(t),
     count: (t) => match(t).length,

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bridge mock</title>
+  <style>
+    html, body { margin: 0; background: #000; }
+    canvas { display: block; width: 100vw; aspect-ratio: 16 / 9; image-rendering: pixelated; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" width="64" height="36"></canvas>
+  <!-- as with emcc --pre-js: the shim first, then the "compiled" module -->
+  <script src="/witness/witness_emscripten.js"></script>
+  <script src="bridge-module.js"></script>
+</body>
+</html>

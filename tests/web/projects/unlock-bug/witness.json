@@ -1,0 +1,7 @@
+{
+  "name": "tap-to-start-bug",
+  "launch": { "url": "http://127.0.0.1:5318/unlock.html?bug=1", "server": { "command": "node ../../serve.mjs 5318" }, "device": "iphone-15" },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 40
+}

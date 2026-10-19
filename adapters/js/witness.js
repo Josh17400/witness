@@ -46,6 +46,7 @@ function readConfig() {
     if (c.addr == null && q.has("witness")) c.addr = q.get("witness") || DEFAULT_ADDR;
     if (c.record == null && q.has("witness_record")) c.record = q.get("witness_record") || "1";
     if (c.seed == null && q.has("witness_seed")) c.seed = +q.get("witness_seed");
+    if (c.audioUnlock == null && q.has("witness_audio_unlock")) c.audioUnlock = q.get("witness_audio_unlock") !== "0";
     for (const k of ["takeover", "raf", "timers", "webaudio", "console"]) {
       if (c[k] == null && q.has(`witness_${k}`)) c[k] = q.get(`witness_${k}`) !== "0";
     }
@@ -417,12 +418,37 @@ const TAP_WORKLET = `registerProcessor("witness-tap", class extends AudioWorklet
   process(inputs) { const i = inputs[0] && inputs[0][0]; const c = new Float32Array(i ? i.length : 128); if (i) c.set(i);
     this.port.postMessage(c, [c.buffer]); return true; } });`;
 
+// Audio autoplay policy (the CLI's page init script keeps it in globalThis.__witnessWeb; standalone pages use
+// WITNESS_CONFIG.audioUnlock / ?witness_audio_unlock=0). "auto": contexts run from the start. "gesture" (like iPhone
+// Safari): a context starts suspended and resume() only works while a user gesture is handled: Witness input that is
+// one (key down, mouse button, finger lifted) or trusted browser input. While suspended a captured context is silent.
+let gestureDepth = 0;
+const webReg = () => G.__witnessWeb || null;
+const audioGesturePolicy = () => { const w = webReg(); return w ? w.policy === "gesture" : CFG.audioUnlock === false; };
+const inGesture = () => { const w = webReg(); return w ? w.inGesture() : gestureDepth > 0; };
+const allowResume = () => !audioGesturePolicy() || inGesture();
+/** Input that browsers count as a user gesture (HTML "activation-triggering" events; a finger counts when it lifts). */
+const activates = (ev) => (ev.type === "key" && ev.down && normKey(ev.key) !== "escape") || (ev.type === "mouse" && typeof ev.down === "boolean")
+  || (ev.type === "touch" && ev.phase === "up") || ev.type === "text" || (ev.type === "action" && ev.down);
+
+// currentTime half a sample after the rendered frame N. A sound started at exactly "now" has to be turned back into a
+// frame by the engine, and N / rate × rate lands a hair above or below N depending on N (Chrome clamps a start in the
+// past to the render quantum's own start time, which has the same problem), so it began on N or N + 1 depending on how
+// long the page ran before the reset: the same run gave different audio after some histories (3 in 40 preludes in
+// examples/js-browser). Half a sample later, "now" is always a future time half a frame from any rounding edge.
+function frameTime(t, rate) {
+  const n = Math.round(t * rate);
+  if (!(t > 0) || Math.abs(t * rate - n) > 1e-6) return t;
+  return (n + 0.5) / rate;
+}
+
 /** In witness mode every AudioContext the game creates is an OfflineAudioContext rendered in step with simulated time. */
 function installWebAudioTap() {
   const Native = G.OfflineAudioContext;
   if (!Native || !G.AudioWorkletNode) return;
   const nSuspend = Native.prototype.suspend, nResume = Native.prototype.resume;
   const destGet = Object.getOwnPropertyDescriptor(G.BaseAudioContext ? G.BaseAudioContext.prototype : Native.prototype, "destination").get;
+  const timeGet = Object.getOwnPropertyDescriptor(G.BaseAudioContext ? G.BaseAudioContext.prototype : Native.prototype, "currentTime").get;
   const seconds = +CFG.audioSeconds || 300;
   function WitnessAudioContext(opts = {}) {
     const rate = (opts && opts.sampleRate) || +CFG.audioRate || 24000;
@@ -431,12 +457,44 @@ function installWebAudioTap() {
     const bus = ctx.createGain();
     Object.defineProperty(bus, "maxChannelCount", { value: 2 });
     const silent = () => ctx.createGain();
+    // the autoplay policy: while the context isn't running its capture is silent. Muted spans are kept in rendered
+    // sample positions and zeroed when read (changing a gain's value mid-render would move later sounds by a sample)
+    const muted = [];   // [[from, to (Infinity while muted)]] in samples since the context started rendering
+    const held = !allowResume();   // created outside a gesture under the "gesture" policy: suspended, as in Safari
+    const entry = { kind: "captured", resumes: 0, blocked: 0, st: held ? "suspended" : "running", policySuspended: held, waiting: [], sampleRate: rate };
+    if (!held && audioGesturePolicy()) entry.unlockedBy = "created in a gesture";
+    if (held) muted.push([0, Infinity]);
+    const setState = (st) => {
+      if (entry.st === st) return;
+      const was = entry.st;
+      entry.st = st;
+      const at = tap.rendered;
+      if (was === "running") muted.push([at, Infinity]);
+      else if (st === "running" && muted.length) muted[muted.length - 1][1] = at;
+      try { ctx.dispatchEvent(new Event("statechange")); } catch { /* no events here */ }
+    };
+    entry.state = () => entry.st;
+    entry.unlock = (by) => {
+      if (entry.st === "closed") return;
+      entry.policySuspended = false;
+      if (!entry.unlockedBy && entry.st !== "running") entry.unlockedBy = by;
+      setState("running");
+      for (const r of entry.waiting.splice(0)) r();
+    };
+    if (webReg()) webReg().track(entry);
     Object.defineProperties(ctx, {
       destination: { get: () => bus },
-      state: { get: () => "running" },
-      resume: { value: () => Promise.resolve() },
-      suspend: { value: () => Promise.resolve() },
-      close: { value: () => Promise.resolve() },
+      currentTime: { get: () => frameTime(timeGet.call(ctx), rate) },
+      state: { get: () => entry.st },
+      resume: { value: () => {
+        entry.resumes++;
+        if (entry.st === "closed") return Promise.reject(new DOMException("the AudioContext is closed", "InvalidStateError"));
+        if (allowResume()) { entry.unlock(inGesture() ? "gesture" : "auto policy"); return Promise.resolve(); }
+        entry.blocked++;
+        return new Promise((res) => entry.waiting.push(res));   // pending until a gesture unlocks it, as in browsers
+      } },
+      suspend: { value: () => { if (entry.st !== "closed") { entry.policySuspended = false; setState("suspended"); } return Promise.resolve(); } },
+      close: { value: () => { setState("closed"); return Promise.resolve(); } },
       baseLatency: { value: 0 },
       outputLatency: { value: 0 },
       getOutputTimestamp: { value: () => ({ contextTime: ctx.currentTime, performanceTime: clock.now() }) },
@@ -499,9 +557,10 @@ function installWebAudioTap() {
         off += c.length;
         if (off >= b) break;
       }
+      for (const [m0, m1] of muted) for (let i = Math.max(a, m0); i < Math.min(b, m1); i++) out[i - a] = 0;
       return out;
     };
-    tap.drop = (a) => { while (tap.chunks.length && tap.base + tap.chunks[0].length <= a) tap.base += tap.chunks.shift().length; };
+    tap.drop = (a) => { while (muted.length > 1 && muted[0][1] <= a) muted.shift(); while (tap.chunks.length && tap.base + tap.chunks[0].length <= a) tap.base += tap.chunks.shift().length; };
     tap.settle = async () => {   // worklet messages arrive asynchronously: wait until they caught up
       const end = real.now() + 2000;
       while (!tap.dead && tap.received < tap.rendered && real.now() < end) await new Promise((r) => real.setTimeout(r, 2));
@@ -617,6 +676,14 @@ function applyInputs(frame) {
 /** One event: the game's input(ev) handler first, else (browsers) real DOM events. Returns false
  *  only for a touch the page cancelled, so no compatibility mouse event follows it. */
 function deliver(ev) {
+  const g = activates(ev);   // a user gesture while it is delivered: what lets the game's handler resume audio
+  if (!g) return deliverNow(ev);
+  gestureDepth++;
+  const w = webReg();
+  if (w) w.begin();
+  try { return deliverNow(ev); } finally { gestureDepth--; if (w) w.end(); }
+}
+function deliverNow(ev) {
   frameEvents.push(ev);
   track(ev);
   let handled = false;

@@ -185,9 +185,11 @@ would break them). Keep absolute times out of the state.
 **WebAudio (automatic, browser):** in witness mode `new AudioContext()` returns an
 `OfflineAudioContext` (mono, 24 kHz unless the game asks for a rate, 300 s per context) that is
 rendered in step with simulated time. An AudioWorklet tap behind `ctx.destination` collects the
-samples. `ctx.currentTime` advances with the steps, so sounds scheduled with
-`ctx.currentTime` land at the right simulated moment. `state` reports `"running"`, and
-`resume()`/`suspend()`/`close()` are harmless no-ops, so autoplay-unlock code passes. This works
+samples. `ctx.currentTime` advances with the steps (it reads half a sample after the rendered frame, so a sound
+started "now" lands on the same sample whatever ran before the reset), so sounds scheduled with
+`ctx.currentTime` land at the right simulated moment. The autoplay policy is emulated (see
+"Audio unlock" below): by default contexts are `"running"` from the start; `suspend()` makes the capture silent
+until `resume()`; `close()` silences it for good. This works
 for Phaser's WebAudio sound manager, Howler.js (WebAudio mode), three.js `AudioListener`, Tone.js
 and hand-written graphs. Limits:
 * `<audio>`/`HTMLAudioElement` playback and `createMediaElementSource` are **not** captured (a
@@ -195,6 +197,27 @@ and hand-written graphs. Limits:
   `html5: false`.
 * Capacity: `WITNESS_CONFIG.audioSeconds` (default 300) of simulated time per context.
   `WITNESS_CONFIG.webaudio = false` keeps the real AudioContext (and turns capture off).
+
+**Audio unlock (iPhone "no sound until a tap").** Browsers start an `AudioContext` suspended until the player
+touches the page, and iPhone Safari only accepts `resume()` while a touchend / click / keydown handler is running.
+Witness emulates that policy the same way in every engine:
+* default (`auto`): Witness counts as the player's first gesture; contexts run from the start.
+* `--no-auto-unlock` (or witness.json `launch.audioUnlock: false`): like iPhone Safari. A context created outside a
+  gesture starts `"suspended"` and its capture is **silent**; `resume()` works only while Witness delivers input that
+  is a gesture (a key down other than Escape, a mouse button, a finger lifting: `touch:x,y@t` lifts one frame after it
+  lands; text) or a real browser tap (`dom:tap:x,y@t`); called from the game loop or a timer it stays pending
+  (counted as `blocked`). An unlock lasts for the page's life, as in a browser.
+* `witness doctor --no-auto-unlock` taps the centre of the canvas, clicks it, presses space and enter, and says which
+  one resumed audio, or warns that it stayed suspended. Tests read `web.audio.state` (`"running"`, `"suspended"`,
+  `"none"`), `web.audio.blocked` and `web.audio.contexts` (each with `unlockedBy`):
+  ```json
+  { "name": "tap to start", "input": "touch:80,45@0.5",
+    "steps": [ { "at": 0.3, "expect": ["!state.started", "web.audio.state == 'suspended'"] },
+               { "at": 0.6, "expect": ["state.started", "web.audio.state == 'running'"] } ] }
+  ```
+  Run audio-unlock tests one per process (`witness test --name ...`): a later test starts already unlocked.
+* Fix for games that fail it: call `ctx.resume()` (or create the context) inside the touchend/click/keydown
+  handler itself, not in the update loop.
 
 **Mixer (games that synthesize PCM, and Node):**
 ```js
@@ -274,9 +297,41 @@ scene with a 2D UI canvas on top) at its backing resolution × `scale`, as exact
 ```
 
 `server` may also be `{"command", "cwd", "wait": "<url to poll>", "timeout": 60}`. The browser
-needs Playwright in the project (`npm i -D playwright && npx playwright install chromium`), and
-always runs headless. If the dev server prints a different port than the one you configured, fix
-`url`.
+needs Playwright in the project (`npm i -D playwright && npx playwright install chromium`; or point
+`WITNESS_PLAYWRIGHT` at a folder that has it), and always runs headless. If the dev server prints a different port
+than the one you configured, fix `url`.
+
+### Phones and tablets: device profiles, engines, device pixels
+
+```jsonc
+{ "launch": { "url": "...", "server": "...",
+    "device": "iphone-15",        // or iphone-15-safari, iphone-15-pro-max, iphone-se, ipad (+ "-landscape"),
+                                  // or {"width": 393, "height": 852, "dpr": 3, "touch": true, "mobile": true,
+                                  //     "userAgent": "...", "standalone": true}
+    "engine": "webkit",           // chromium (default) | webkit (iPhone/iPad Safari's engine) | firefox
+    "audioUnlock": false,         // emulate iPhone Safari's audio unlock (see Audio unlock)
+    "capture": "element" } }      // screenshots: canvas (default) | element | screen, see below
+```
+Every command takes the same as flags: `--device iphone-15`, `--engine webkit`, `--no-auto-unlock`, `--capture
+element`. A profile sets the CSS viewport, `devicePixelRatio`, touch, the mobile viewport (meta viewport honoured),
+the user agent, and for Home Screen web apps `navigator.standalone` and `display-mode: standalone`. The iPhone
+profiles are full screen (a web app added to the Home Screen); `iphone-15-safari` is a Safari tab (393×659).
+`ipad` reports a Mac user agent, as iPadOS Safari does.
+
+* `witness doctor` with a browser prints the page (viewport, DPR, touch), how the main canvas lands on the screen,
+  from the layout (`canvas 320×180 shown at 361×203.06 CSS px = 1083×609.19 device px: ×3.3844, not a whole number:
+  pixels drawn unevenly`) and from a capture at device pixels (`≈×3.40, one game pixel is 3 or 4 device px`). A
+  canvas whose backing store is its CSS size on a DPR-3 phone is reported as upscaled with smoothing: blurry.
+* `capture`: `canvas` reads the game's own buffer (game pixels; what `align`, `--follow` and `annotate` expect);
+  `element` is the canvas as the screen shows it, at device pixels; `screen` is the whole viewport (HTML HUD too).
+  `witness shot --device iphone-15 --capture element` then `witness measure scale shot.png` measures fractional
+  scaling and blur.
+* `dom:tap:x,y@t`, `dom:click:x,y@t`, `dom:key:space@t` in `--input` / tests: real (trusted) browser input at that
+  frame, through Playwright instead of the adapter (game pixels, mapped onto the canvas). `dom:tap` needs a touch
+  device.
+* WebKit: install it once with `npx playwright install webkit` (no admin; ~60 MB download). Playwright's WebKit is
+  close to Safari, not Safari: on Windows it has **no Web Audio and no TouchEvent** (Witness puts in a silent
+  AudioContext so pages load, and doctor says so; touches arrive as pointer events). Check audio with Chromium.
 
 ## 11. Engine notes
 

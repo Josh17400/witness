@@ -27,6 +27,7 @@ witness shot --at 1,4 --diff witness/shots/before.png
 witness listen --time 8 --input "space@1"        # every sound tied to its cause, audio report + PNGs
 witness replay last --shot                       # what the human saw when they pressed F8
 witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
+witness doctor --device iphone-15 --no-auto-unlock   # web builds as an iPhone shows them: DPR, scaling, audio unlock
 witness measure ui --at 2                        # readability: HUD layout, text size/contrast; also colorblind, palette
 witness measure figure --of Player --params '[{"hour":12},{"hour":22}]'   # can you see the hero on every ground, day and night?
 witness measure anim --of "state.player.anim"    # frames per pose, loop length, doubled or dropped frames

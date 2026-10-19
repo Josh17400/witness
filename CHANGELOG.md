@@ -110,7 +110,51 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 - Media: `src/media/apng.js` (`encodeAPNG`, `decodeAPNG`), `src/media/anim.js` (`poseLabels`, `poseDistance`),
   `peakEnvelope` / `levelLane` in `spectrogram.js`, `scaleImage` in `sheet.js`; `src/core/perf.js`, `src/core/anim.js`.
 
+**Web / WASM builds on phones: device profiles, WebKit, device pixels, audio unlock, Emscripten**
+- Device profiles for browser launches: witness.json `launch.device` or `--device iphone-15 | iphone-15-safari |
+  iphone-15-pro-max | iphone-se | ipad` (`-landscape` too; or custom `{width, height, dpr, touch, mobile, userAgent,
+  standalone}`): CSS viewport, devicePixelRatio, touch, mobile viewport, user agent, and for Home Screen web apps
+  `navigator.standalone` / `display-mode: standalone`. `--engine webkit` (iPhone/iPad Safari's engine) or `firefox`;
+  when the engine's build isn't installed the error gives the install command (`npx playwright install webkit`, no
+  admin). Playwright's WebKit for Windows has no Web Audio and no TouchEvent: Witness puts in a silent AudioContext so
+  pages load, and doctor says so. `WITNESS_PLAYWRIGHT=<folder>` finds Playwright outside the game project.
+- `witness doctor` on a browser launch: engine, device, page (viewport, DPR, touch), and how the main canvas lands on
+  the screen from the layout ("canvas#game 320×180 shown at 361×203.06 CSS px = 1083×609.19 device px: ×3.3844, not a
+  whole number: pixels drawn unevenly (some 3 px, some 4 px wide)", or "×3 upscaled with smoothing: blurry") and from
+  a capture at device pixels ("≈×3.40, one game pixel is 3 or 4 device px"; an integer layout scale is checked cell
+  by cell). `summary.web` in `--json`.
+- `--capture canvas | element | screen` (witness.json `launch.capture`): screenshots from the game's buffer (default),
+  the canvas as the screen shows it, or the whole viewport, both at device pixels.
+- `measure scale` reads any scale from runs of one colour: ✖ FRACTIONAL (`≈×3.38`, a source pixel drawn 3 or 4 px,
+  with the share of each) and ✖ BLURRY (soft one-pixel ramps), where it used to say "no pixel grid larger than 1".
+  On synthetic nearest-neighbour scalings of ×2.5, ×3.384375, ×3.684 and ×4.2 it is within 1%; on the real iPhone 15
+  capture of examples/js-browser (×3.384375) it read ×3.36 to ×3.40 depending on the frame (within 1%; the
+  sample game has few one-pixel details). Media: `pixelRuns` in measure.js.
+- Audio unlock (the iPhone "no sound until a tap" bug): every browser launch emulates the autoplay policy in the
+  page, the same in every engine. Default `auto`: Witness counts as the first gesture. `--no-auto-unlock` (witness.json
+  `launch.audioUnlock: false`): like iPhone Safari, an AudioContext starts suspended (the JS adapter's capture is
+  silent), and `resume()` works only while a gesture is being handled: Witness input that is one (key down, mouse
+  button, finger lifted, text; adapters mark it) or real browser input. `doctor --no-auto-unlock` taps the canvas
+  centre, clicks, presses space and enter, and says which resumed audio (on a touch device a key alone is a ⚠), or
+  that it stayed suspended with the number of blocked `resume()` calls. Tests read `web.audio.state`,
+  `web.audio.blocked`, `web.dpr`, `web.device`.
+- `dom:tap:x,y@t`, `dom:click:x,y@t`, `dom:key:space@t` input items: real (trusted) browser input through Playwright
+  at that frame (game pixels mapped onto the canvas), for unlock paths that listen to the DOM (SDL3's).
+- C/C++ in the browser: compiled with emcc, `witness.h` uses no sockets; `adapters/cpp/witness_emscripten.js`
+  (`--pre-js`) holds the WebSocket and calls back into the module (`witness_emscripten_inbuf/recv/closed`, exported by
+  the header). `witness_run()` returns control to the browser and keeps the runtime alive; in witness mode the game
+  doesn't start `emscripten_set_main_loop`. The shim answers `screenshot` from the canvas when the game has no
+  handler and keeps WebGL drawing buffers. `witness.h` marks gesture input around the game's `input` handler.
+  adapters/cpp/GUIDE.md §13 "Web (Emscripten) builds". **Not verified with a real emcc build** (none here): the C side
+  is compiled natively against a stand-in `emscripten.h` (C and C++, warnings as errors) and driven through the real
+  shim and CLI (doctor, the shared coins test ×2, 23 of 23 gestures marked); the shim runs in Chromium and WebKit
+  pages against a JavaScript stand-in for the module on a growing `WebAssembly.Memory`.
+
 **Fixed**
+- JS adapter, WebAudio capture: a sound started at exactly `ctx.currentTime` began on the rendered frame or one
+  sample later depending on how long the page had run before the reset (the engine turns the time back into a frame
+  and rounds up), so the same run could give different audio after a different history: 3 of 40 histories in
+  examples/js-browser. `currentTime` now reads half a sample after the rendered frame: 0 of 120.
 - `measure motion` (and `measure anim`) took a lone sprite moving over a plain background for a scrolling camera
   (the picture shift matched the sprite); camera tracking now keeps the camera still when under 2% of the picture
   changed between frames in up to 4 blobs. A sparse scene that scrolls (a starfield: many small changes that one
@@ -151,6 +195,10 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
   witness.Volume(v), witness.At(x, y))`.
 
 **Behaviour changes**
+- `measure scale` on a fractionally scaled or smoothed picture is now `ok: false` (✖ FRACTIONAL / ✖ BLURRY; it said
+  "no pixel grid larger than 1", ok). Summary adds `fractional`, `scaleX`, `scaleY`, `softPercent`.
+- JS adapter: a captured AudioContext reports and honours `suspend()` (silent until `resume()`) and `close()`; its
+  `currentTime` is half a sample after the rendered frame.
 - `trace --json` `summary`: vector series are summarized per axis (`"state.player.pos.x": {start, end, min, ...}`)
   instead of `{"error": null}`. `trace` now accepts `--expect` (over the summary).
 
@@ -178,6 +226,14 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
    entity's state `box`/`rect` or the sprite at its position. Phone/web builds: `measure ui --safe iphone-landscape`
    (or `iphone-portrait`, `iphone-se`, `ipad`) on a screenshot of the phone-sized layout; list toasts in `state.ui`
    only while they show, so `measure ui --from/--to` can catch repeats.
+11. If a script gates on `measure scale`'s `ok`: fractional or smoothed pictures now fail; re-check them.
+12. *Optional, web games:* re-vendor `adapters/js/witness.js` (determinism fix for sounds started at `currentTime`,
+   gesture marking), run `witness doctor --device iphone-15` (and `--engine webkit` after
+   `npx playwright install webkit`), and `witness doctor --no-auto-unlock`: if audio stays suspended, call
+   `ctx.resume()` inside the touchend/click/keydown handler. Pin it with a test reading `web.audio.state`.
+13. *Optional, C/C++ web builds (Emscripten):* re-vendor `witness.h`, copy `witness_emscripten.js` next to it, link it
+   with `--pre-js`, and skip `emscripten_set_main_loop` in witness mode (adapters/cpp/GUIDE.md §13). Native builds
+   need nothing.
 
 ## 0.6.0 (2026-10-19)
 

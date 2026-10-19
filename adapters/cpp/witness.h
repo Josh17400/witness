@@ -299,6 +299,27 @@ WITNESS_API void witness_record_stop(void);
 #define WITNESS_BASE64_SIZE(n) ((((n) + 2) / 3) * 4 + 1)
 WITNESS_API size_t witness_base64_encode(const void *data, size_t n, char *out);
 
+/* ---------------------------------------------------------------- web (Emscripten) builds */
+
+/* Built with emcc, witness.h uses no sockets: it talks to the CLI through witness_emscripten.js (link it with
+ * --pre-js), which holds a WebSocket and calls the functions below. The game's code doesn't change, except that in
+ * witness mode it must not start its own main loop (see GUIDE.md "Web (Emscripten) builds"):
+ *   witness_active()  1 when the page URL has ?witness=host:port (the CLI adds it)
+ *   witness_connect() starts connecting and returns 1 at once (the hello waits until the socket is open)
+ *   witness_run()     returns to the browser and keeps the runtime alive (emscripten_exit_with_live_runtime):
+ *                     from then on every command runs inside witness_emscripten_recv, called by the shim
+ * Define WITNESS_EMSCRIPTEN_SOCKETS to keep the socket code instead (emcc -sPROXY_POSIX_SOCKETS builds). */
+#if defined(__EMSCRIPTEN__) && !defined(WITNESS_EMSCRIPTEN_SOCKETS) && !defined(WITNESS_WEB_BRIDGE)
+#define WITNESS_WEB_BRIDGE 1
+#endif
+#ifdef WITNESS_WEB_BRIDGE
+/* Called from witness_emscripten.js only. inbuf: room for size more input bytes; recv: they were written there
+ * (complete lines are handled now); closed: the WebSocket closed. */
+WITNESS_API char *witness_emscripten_inbuf(int size);
+WITNESS_API int witness_emscripten_recv(int len);
+WITNESS_API void witness_emscripten_closed(void);
+#endif
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
@@ -460,7 +481,26 @@ inline bool active(int argc = 0, char **argv = nullptr) { return witness_active(
 #include <time.h>
 #include <locale.h>
 
-#ifdef _WIN32
+#ifdef WITNESS_WEB_BRIDGE
+/* web builds: no sockets; protocol lines go through witness_emscripten.js (EM_JS functions below) */
+#include <emscripten.h>
+#ifdef _WIN32 /* only Witness's own native test build of the bridge (a stub emscripten.h) */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#endif
+typedef int witness__socket;
+#define WITNESS__NO_SOCKET (-1)
+#elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -544,6 +584,7 @@ static int witness__getenv(const char *name, char *out, size_t size) {
 #endif
 }
 
+#ifndef WITNESS_WEB_BRIDGE /* web builds never block or wait */
 static void witness__sleep_ms(int ms) {
 #ifdef _WIN32
     Sleep(WITNESS__CAST(DWORD, ms));
@@ -564,6 +605,7 @@ static double witness__now_ms(void) {
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 #endif
 }
+#endif
 
 /* Locale-proof strtod: JSON always uses '.', the C locale of a game may not. */
 static double witness__strtod(const char *s, size_t n, int *ok) {
@@ -1102,7 +1144,15 @@ typedef struct witness__state {
 
 static witness__state witness__g;
 
-#ifdef _WIN32
+#if defined(WITNESS_WEB_BRIDGE) && !defined(__EMSCRIPTEN_PTHREADS__)
+static void witness__lock(void) {}   /* a web build without threads: everything runs on the browser's main thread */
+static void witness__unlock(void) {}
+#elif defined(WITNESS_WEB_BRIDGE)
+#include <pthread.h>
+static pthread_mutex_t witness__lock_obj = PTHREAD_MUTEX_INITIALIZER;
+static void witness__lock(void) { pthread_mutex_lock(&witness__lock_obj); }
+static void witness__unlock(void) { pthread_mutex_unlock(&witness__lock_obj); }
+#elif defined(_WIN32)
 static SRWLOCK witness__lock_obj = SRWLOCK_INIT;
 static void witness__lock(void) { AcquireSRWLockExclusive(&witness__lock_obj); }
 static void witness__unlock(void) { ReleaseSRWLockExclusive(&witness__lock_obj); }
@@ -1136,12 +1186,47 @@ long long witness_seed(void) {
     return witness__g.seed;
 }
 
+#ifdef WITNESS_WEB_BRIDGE
+/* The browser side (witness_emscripten.js). EM_JS bodies are stringified onto one line: no // comments in them. */
+EM_JS(int, witness__js_active, (void), {
+    var W = globalThis.WitnessEmscripten;
+    return W && W.active() ? 1 : 0;
+});
+EM_JS(int, witness__js_open, (void), {
+    var W = globalThis.WitnessEmscripten;
+    if (!W) return 0;
+    return W.open({
+        heap: function () { return HEAPU8; },
+        inbuf: function (n) { return _witness_emscripten_inbuf(n); },
+        recv: function (n) { return _witness_emscripten_recv(n); },
+        closed: function () { _witness_emscripten_closed(); }
+    });
+});
+EM_JS(void, witness__js_send, (const char *data, int len), {
+    var W = globalThis.WitnessEmscripten;
+    if (W) W.send(HEAPU8, data, len);
+});
+EM_JS(void, witness__js_close, (void), {
+    var W = globalThis.WitnessEmscripten;
+    if (W) W.close();
+});
+EM_JS(void, witness__js_gesture, (int on), {
+    var W = globalThis.WitnessEmscripten;
+    if (W) W.gesture(on);
+});
+#endif
+
 int witness_active(int argc, char **argv) {
+#ifdef WITNESS_WEB_BRIDGE
+    (void)argc; (void)argv;
+    return witness__js_active();
+#else
     char buf[128];
     int i;
     if (witness__getenv("WITNESS_ADDR", buf, sizeof buf)) return 1;
     if (argv) for (i = 1; i < argc; i++) if (argv[i] && strcmp(argv[i], "--witness") == 0) return 1;
     return 0;
+#endif
 }
 
 /* ---------------------------------------------------------------- logs & audio */
@@ -1374,6 +1459,20 @@ static void witness__write_event(witness_json *w, const witness_event *e) {
 
 /* ---------------------------------------------------------------- socket */
 
+#ifdef WITNESS_WEB_BRIDGE
+/* web builds: the shim's WebSocket instead of a socket (it queues lines until the socket is open) */
+static int witness__send_all(const char *data, size_t n) {
+    if (!witness__g.sock_open) return 0;
+    witness__js_send(data, WITNESS__CAST(int, n));
+    return 1;
+}
+
+static void witness__disconnect(void) {
+    if (witness__g.sock_open) witness__js_close();
+    witness__g.sock_open = 0;
+    witness__g.connected = 0;
+}
+#else
 static int witness__send_all(const char *data, size_t n) {
     while (n > 0) {
         int chunk = n > 0x40000000u ? 0x40000000 : WITNESS__CAST(int, n);
@@ -1421,6 +1520,7 @@ static int witness__wait_readable(double timeout_ms) {
     return r < 0 ? -1 : r > 0;
 #endif
 }
+#endif /* WITNESS_WEB_BRIDGE */
 
 static int witness__send_out(void) {
     witness_json *w = &witness__g.out;
@@ -1430,6 +1530,7 @@ static int witness__send_out(void) {
     return 1;
 }
 
+#ifndef WITNESS_WEB_BRIDGE
 static witness__socket witness__dial(const char *host, const char *port) {
     struct addrinfo hints, *res = NULL, *ai;
     witness__socket s = WITNESS__NO_SOCKET;
@@ -1459,6 +1560,7 @@ static witness__socket witness__dial(const char *host, const char *port) {
     }
     return s;
 }
+#endif
 
 /* ---------------------------------------------------------------- sound events */
 
@@ -1694,7 +1796,21 @@ static void witness__dispatch(const witness_value *m) {
             witness__take_due();
             for (k = 0; k < g->cur_len; k++) {
                 witness__track(&g->cur[k]);
+#ifdef WITNESS_WEB_BRIDGE
+                if (g->h.input) {
+                    /* input browsers count as a user gesture (key down, mouse button, finger lifted): while the game's
+                     * handler runs, the page's audio policy lets it resume an AudioContext, as a real tap would */
+                    const witness_event *e = &g->cur[k];
+                    int gesture = (e->type == WITNESS_EV_KEY && e->down == 1 && strcmp(e->name, "escape") != 0) ||
+                                  (e->type == WITNESS_EV_MOUSE && e->down >= 0) || (e->type == WITNESS_EV_TOUCH && e->phase == WITNESS_TOUCH_UP) ||
+                                  e->type == WITNESS_EV_TEXT || (e->type == WITNESS_EV_ACTION && e->down == 1);
+                    if (gesture) witness__js_gesture(1);
+                    g->h.input(g->h.user, e);
+                    if (gesture) witness__js_gesture(0);
+                }
+#else
                 if (g->h.input) g->h.input(g->h.user, &g->cur[k]);
+#endif
             }
             g->h.step(g->h.user, fdt);
             g->cur_len = 0;
@@ -1842,6 +1958,45 @@ static int witness__drain_lines(void) {
     return handled;
 }
 
+#ifdef WITNESS_WEB_BRIDGE
+/* web builds: commands arrive through witness_emscripten_recv (the browser can't block), so polling only handles
+ * what is already buffered */
+EMSCRIPTEN_KEEPALIVE char *witness_emscripten_inbuf(int size) {
+    char *p;
+    if (size < 0) return NULL;
+    p = WITNESS__CAST(char *, witness__grow(witness__g.in, &witness__g.in_cap, witness__g.in_len + WITNESS__CAST(size_t, size) + 1, 1));
+    if (!p) return NULL;
+    witness__g.in = p;
+    return witness__g.in + witness__g.in_len;
+}
+
+EMSCRIPTEN_KEEPALIVE int witness_emscripten_recv(int len) {
+    if (!witness__g.connected || len <= 0 || witness__g.in_len + WITNESS__CAST(size_t, len) + 1 > witness__g.in_cap) return witness__g.connected;
+    witness__g.in_len += WITNESS__CAST(size_t, len);
+    witness__drain_lines();
+    if (witness__g.quit) witness__disconnect();
+    return witness__g.connected;
+}
+
+EMSCRIPTEN_KEEPALIVE void witness_emscripten_closed(void) {
+    witness__g.sock_open = 0;
+    witness__g.connected = 0;
+}
+
+int witness_poll(int timeout_ms) {
+    (void)timeout_ms;
+    if (!witness__g.connected) return 0;
+    witness__drain_lines();
+    if (witness__g.quit) witness__disconnect();
+    return witness__g.connected;
+}
+
+/* Hand control back to the browser and keep the runtime alive: the code after witness_run() in main() (usually
+ * witness_shutdown()) never runs, exactly like emscripten_set_main_loop(..., 1). */
+void witness_run(void) {
+    if (witness__g.connected) emscripten_exit_with_live_runtime();
+}
+#else
 int witness_poll(int timeout_ms) {
     double deadline = timeout_ms >= 0 ? witness__now_ms() + timeout_ms : 0;
     if (!witness__g.connected) return 0;
@@ -1879,6 +2034,7 @@ int witness_poll(int timeout_ms) {
 void witness_run(void) {
     while (witness_poll(-1)) {}
 }
+#endif /* WITNESS_WEB_BRIDGE */
 
 /* Witness runs games unattended: a crash, abort() or assert must print to stderr and exit
  * non-zero, never pop a dialog that waits for a human. Called only in witness mode. */
@@ -1900,9 +2056,11 @@ static void witness__quiet_crashes(void) {
 }
 
 int witness_connect(const witness_hello *hello, const witness_handlers *handlers) {
+#ifndef WITNESS_WEB_BRIDGE
     char addr[128], host[100], port[16];
     const char *colon;
     double give_up;
+#endif
     witness_json *w = &witness__g.out;
     if (witness__g.connected) return 1;
     witness__quiet_crashes();
@@ -1910,6 +2068,13 @@ int witness_connect(const witness_hello *hello, const witness_handlers *handlers
         fprintf(stderr, "[witness] witness_connect: the step and snapshot handlers are required\n");
         return 0;
     }
+#ifdef WITNESS_WEB_BRIDGE
+    /* the shim opens the WebSocket; the hello below waits in its queue until the socket is open */
+    if (!witness__js_open()) {
+        fprintf(stderr, "[witness] no witness_emscripten.js in the page (link it with --pre-js) or no ?witness= address\n");
+        return 0;
+    }
+#else
     if (!witness__getenv("WITNESS_ADDR", addr, sizeof addr)) witness__copy(addr, sizeof addr, "127.0.0.1:7357");
     colon = strrchr(addr, ':');
     if (!colon || colon == addr || WITNESS__CAST(size_t, colon - addr) >= sizeof host) {
@@ -1938,6 +2103,7 @@ int witness_connect(const witness_hello *hello, const witness_handlers *handlers
         }
         witness__sleep_ms(100);
     }
+#endif
     witness__g.sock_open = 1;
     witness__g.connected = 1;
     witness__g.quit = 0;
@@ -2196,7 +2362,7 @@ void witness_shutdown(void) {
     size_t i;
     witness__disconnect();
     witness_record_stop();
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(WITNESS_WEB_BRIDGE)
     if (witness__g.wsa_started) WSACleanup();
     witness__g.wsa_started = 0;
 #endif

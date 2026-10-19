@@ -49,8 +49,24 @@ async function pixelMeasure(what, files, opt) {
     const img = m.decodePNG(read(files[0]));
     const k = opt.k && opt.k !== true ? +opt.k : m.detectScale(img, { region, tolerance: +(opt.tolerance || 0) });
     const r = m.blockScale(img, k, { region, tolerance: +(opt.tolerance || 0) });
-    out(envelope("measure scale", { ok: !r.blurry, verdict: r.blurry ? "blurry or fractionally scaled" : r.k > 1 ? `exact ×${r.k} integer scaling` : "no pixel grid larger than 1", summary: { k: r.k, offset: r.offset, nonUniformPercent: r.nonUniformPercent, blurry: r.blurry }, data: r }), [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
-      `  ${r.cells} cells, ${r.nonUniform} not one colour (${r.nonUniformPercent}%) → ${r.blurry ? "✖ BLURRY or fractionally scaled" : r.k > 1 ? "✔ exact integer scaling" : "no pixel grid larger than 1"}`,
+    // any scale from runs of one colour: catches fractional scaling (uneven pixels) and smoothing, which the k×k
+    // cell test can only call "no grid" (a phone at DPR 3 showing a 320 px canvas 1083 device px wide is ×3.384)
+    const runs = m.pixelRuns(img, { region, tolerance: +(opt.tolerance || 0) });
+    // a sparse scene (mostly flat colour) passes the k×k test at many k: uneven runs or a clearly different run scale overrule it
+    const exact = r.k > 1 && !r.blurry && !runs.fractional && (runs.scale[0] == null || Math.abs(runs.scale[0] - r.k) / r.k < 0.05);
+    const fx = (v) => (v == null ? "?" : `×${v.toFixed(2)}`);
+    const sc = runs.scale[0] != null && runs.scale[1] != null && Math.abs(runs.scale[0] - runs.scale[1]) > 0.02 ? `${fx(runs.scale[0])} × ${runs.scale[1].toFixed(2)}` : fx(runs.scale[0]);
+    const unevenAxis = (a, name) => (a.uneven ? `${name}: one source pixel is ${a.single[0]} or ${a.single[1]} px (${Math.round(a.longShare * 100)}% are ${a.single[1]})` : null);
+    let verdict, status;
+    if (exact) { verdict = `exact ×${r.k} integer scaling`; status = "✔ exact integer scaling"; }
+    else if (r.blurry || runs.blurry) { verdict = "blurry or smoothed"; status = `✖ BLURRY: ${runs.softPercent}% of colour changes are soft one-pixel ramps (smoothing, or scaling with filtering)`; }
+    else if (runs.fractional) { verdict = `fractional scaling ≈${sc} (uneven pixels)`; status = `✖ FRACTIONAL scaling ≈${sc}: pixels are drawn unevenly`; }
+    else { verdict = "no pixel grid larger than 1"; status = "no pixel grid larger than 1"; }
+    const bad = !exact && (r.blurry || runs.blurry || runs.fractional);
+    out(envelope("measure scale", { ok: !bad, verdict, summary: { k: r.k, offset: r.offset, nonUniformPercent: r.nonUniformPercent, blurry: r.blurry || runs.blurry, fractional: !exact && runs.fractional, scaleX: runs.scale[0], scaleY: runs.scale[1], softPercent: runs.softPercent }, data: { ...r, runs } }), [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
+      `  ${r.cells} cells, ${r.nonUniform} not one colour (${r.nonUniformPercent}%) → ${status}`,
+      exact ? null : `  runs of one colour: scale ${sc} (x ${fx(runs.scale[0])}, y ${fx(runs.scale[1])}), soft ramps ${runs.softPercent}% of ${runs.changes} colour changes`,
+      ...(exact ? [] : [unevenAxis(runs.x, "  x"), unevenAxis(runs.y, "  y")]),
       ...r.worst.slice(0, 5).map((c) => `  worst cell ${box(c)}: ${c.colors} colours, spread ${c.spread}`)]);
   } else if (what === "box") {
     if (files.length < 2) die("usage: witness measure box <with.png> <without.png>");

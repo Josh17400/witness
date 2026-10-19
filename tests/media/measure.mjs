@@ -1,7 +1,7 @@
 // Pixel measurement tests: `node tests/media/measure.mjs`
 // Every image is synthesized so the right answer is known by construction.
 import {
-  blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
+  blockScale, detectScale, pixelRuns, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
   ringMask, contrast, motion, motionStream, medianPlate,
 } from "../../src/media/measure.js";
 import { encodePNG } from "../../src/media/png.js";
@@ -356,6 +356,53 @@ function framesOf(positions, { size = 8, y = 30, hud = false } = {}) {
   msg = "";
   try { motion([]); } catch (e) { msg = e.message; }
   ok("motion: empty frames, clear error", /non-empty array/.test(msg), msg);
+}
+
+// ---- pixelRuns: any scale from runs of one colour (fractional scaling, smoothing) ------------------------------------
+{
+  // busy pixel art (every pixel a palette colour from a hash), scaled by nearest neighbour or bilinear by a known factor
+  const src = image(80, 45);
+  for (let y = 0; y < 45; y++) for (let x = 0; x < 80; x++) put(src, x, y, PALETTE[hash(x, y, 9) % PALETTE.length]);
+  const nearest = (s) => {
+    const W = Math.floor(80 * s), H = Math.floor(45 * s), out = image(W, H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(out, x, y, get(src, Math.min(79, Math.floor(x / s)), Math.min(44, Math.floor(y / s))));
+    return out;
+  };
+  const bilinear = (s) => {
+    const W = Math.floor(80 * s), H = Math.floor(45 * s), out = image(W, H);
+    const g = (u, v) => get(src, Math.min(79, Math.max(0, u)), Math.min(44, Math.max(0, v)));
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const fx = (x + 0.5) / s - 0.5, fy = (y + 0.5) / s - 0.5, x0 = Math.floor(fx), y0 = Math.floor(fy), ax = fx - x0, ay = fy - y0;
+      const a = g(x0, y0), b = g(x0 + 1, y0), c = g(x0, y0 + 1), d = g(x0 + 1, y0 + 1);
+      put(out, x, y, [0, 1, 2].map((k) => Math.round(a[k] * (1 - ax) * (1 - ay) + b[k] * ax * (1 - ay) + c[k] * (1 - ax) * ay + d[k] * ax * ay)));
+    }
+    return out;
+  };
+  for (const s of [2, 3, 4]) {
+    const r = pixelRuns(nearest(s));
+    ok(`pixelRuns: exact ×${s} reads ${s}, even`, r.scale[0] === s && r.scale[1] === s && !r.fractional && !r.blurry && r.softPercent === 0, r);
+  }
+  // the phone case: a 320 px canvas 361 CSS px wide at DPR 3 = 1083 device px = ×3.384375
+  for (const s of [3.384375, 2.5, 3.684, 4.2]) {
+    const r = pixelRuns(nearest(s));
+    show(`pixelRuns ×${s}`, `scale ${r.scale.join(" × ")}, runs ${r.x.single.join("/")}, ${Math.round(r.x.longShare * 100)}% long`);
+    ok(`pixelRuns: ×${s} is fractional (uneven ${Math.floor(s)}/${Math.ceil(s)} px pixels)`, r.fractional && r.x.uneven && r.y.uneven && r.x.single[0] === Math.floor(s) && r.x.single[1] === Math.ceil(s), r);
+    ok(`pixelRuns: ×${s} estimated within 1%`, Math.abs(r.scale[0] - s) / s < 0.01 && Math.abs(r.scale[1] - s) / s < 0.01, r.scale);
+    // the share of long runs is the fractional part of the scale (68.4% of pixels are 4 px wide at ×3.684)
+    ok(`pixelRuns: ×${s} long-run share near ${(s % 1).toFixed(3)}`, Math.abs(r.x.longShare - (s % 1)) < 0.05, r.x.longShare);
+  }
+  const one = pixelRuns(src);
+  ok("pixelRuns: unscaled art is ×1 and not called fractional", one.scale[0] === 1 && !one.fractional && !one.blurry, one);
+  for (const s of [3, 3.384375]) {
+    const r = pixelRuns(bilinear(s));
+    ok(`pixelRuns: bilinear ×${s} is blurry (soft ramps), no scale claimed`, r.blurry && r.softPercent > 25 && r.scale[0] === null && !r.fractional, r);
+  }
+  // a frame around the picture (rounded corners, borders) adds 1-px runs: the anchor is the most common run, not the shortest
+  const framed = nearest(3.384375);
+  for (let x = 0; x < framed.width; x += 2) { put(framed, x, 0, [255, 255, 255]); put(framed, x, framed.height - 1, [255, 255, 255]); }
+  for (let y = 0; y < framed.height; y += 2) { put(framed, 0, y, [255, 255, 255]); put(framed, framed.width - 1, y, [255, 255, 255]); }
+  const fr = pixelRuns(framed);
+  ok("pixelRuns: a dotted frame doesn't pull the scale to 1", fr.fractional && Math.abs(fr.scale[0] - 3.384375) / 3.384375 < 0.01, fr.scale);
 }
 
 done("measure");

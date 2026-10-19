@@ -19,6 +19,7 @@ import { effectCommand } from "../src/cli/effect.js";
 import { listenCommand } from "../src/cli/listen.js";
 import { windowCommand } from "../src/cli/window.js";
 import { abCommand } from "../src/cli/ab.js";
+import { describeWeb, displayReport, unlockProbe, audioReport } from "../src/cli/web.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -53,6 +54,10 @@ Common options:
   --window 1920x1080  --dpi 2   (sent as reset params "window"/"dpi" for games that support them)
   --hold-camera   reset param "camera": "hold": games that support it keep the camera still (pixel measures)
   --attach (wait for an already-running game)  --cmd "<launch command>" (no witness.json needed)
+  Browser games (launch.url): --device iphone-15|iphone-15-safari|iphone-15-pro-max|iphone-se|ipad[-landscape]
+  (viewport, DPR, touch, mobile, user agent) · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio
+  policy: suspended until a tap) · --capture canvas|element|screen (element/screen: device pixels) · input
+  dom:tap:x,y@t / dom:click / dom:key:space (real browser input) · expressions web.audio.state, web.dpr
   --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
   --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
 Times are seconds, or frames with an "f": --at 90f, --every 1f, space@60f. "+2f" = 2 frames after the input's frame.
@@ -127,6 +132,8 @@ const CMD_HELP = {
   state.player.dead (rising edges), placed at the last position seen if the position is null while dead. The picture: the level, the heat (sqrt scale,
   seconds per cell), deaths as red X. --expect "deaths == 0", "unvisitedOpen < 20", "hottest.share < 0.5".`,
   shot: `witness shot [--at 1,4,90f] [--out shots/s.png] [--scale 0.5] [--json]
+  --capture element|screen     browser games: what the screen shows at device pixels (with --device iphone-15: the
+                               canvas after CSS scaling, or the whole viewport) instead of the game's own buffer
   --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)
   --zoom 3                     crisp nearest-neighbour enlargement (small sprites)
   --diff ref.png [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16] [--resize] [--no-align]
@@ -208,7 +215,10 @@ const CMD_HELP = {
       and its lowest row (the feet) moving in the world against the body (planted vs gliding: foot slide). The
       camera comes from state.camera when the game exposes it, else it's estimated and removed.
   scale <shot.png> [--k 3] [--region x,y,w,h] [--tolerance 0]
-      integer-scale test: is every k×k cell one colour? Finds k and the grid offset; reports blur/fractional scaling.
+      integer-scale test: is every k×k cell one colour? Finds k and the grid offset. Otherwise the scale from runs of
+      one colour (any factor, ≈2 decimals): ✖ FRACTIONAL (a source pixel drawn 3 or 4 px: uneven pixels, e.g. a
+      canvas stretched to a phone screen) or ✖ BLURRY (soft one-pixel ramps: smoothing). Take the picture at device
+      pixels: shot --device iphone-15 --capture element.
   box <with.png> <without.png> [--threshold 16]
       the pixels that differ between a shot with something and one without it: its exact box, height, centroid.
   contrast <shot.png> --a <mask> --b <mask>
@@ -282,10 +292,15 @@ const CMD_HELP = {
       background, one to measure), or reads PNG files.
       --background auto|first|median|<file.png>  (auto: median for 8+ frames; median needs movers to move their own
       size) · --camera auto|static|moving|state (state: the game's state.camera, exact) · --min-size 6 (smallest object, px) · --threshold 16`,
-  doctor: `witness doctor [--time 3]
+  doctor: `witness doctor [--time 3] [--device iphone-15] [--engine webkit] [--no-auto-unlock]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
-  For long game-specific scenarios (journeys, fights) use test steps with "match", or witness test --repeat 2.`,
+  For long game-specific scenarios (journeys, fights) use test steps with "match", or witness test --repeat 2.
+  Browser games also get: the engine and device; the page (CSS viewport, DPR, touch); how the main canvas lands on
+  the screen (backing size → CSS box → device px: an exact ×k, a fractional scale with uneven pixels, or smoothing
+  blur, from the layout and from a capture at device pixels); the AudioContexts and the audio policy. With
+  --no-auto-unlock it first checks the iPhone unlock: audio suspended at start, then a tap at the canvas centre, a
+  click, space and enter, and which one resumed it (or ⚠ it stayed suspended: silent on iPhone).`,
 };
 
 // ------------------------------------------------------------------ args & output
@@ -307,6 +322,8 @@ const commands = {
   async doctor(pos, opt) {
     const report = [];
     const ok = (m) => report.push(`✔ ${m}`), bad = (m) => report.push(`✖ ${m}`), warn = (m) => report.push(`⚠ ${m}`);
+    const mark = ([m, t]) => report.push(m ? `${m} ${t}` : `  ${t}`);
+    let webSummary = null;
     await withGame(opt, async (s) => {
       const h = s.hello;
       ok(`connected over ${s.conn.kind}: "${h.name}" (${h.engine || "?"}, ${h.language || "?"}), protocol ${h.protocol}, ${s.fps} fps${h.size ? `, ${h.size.join("×")}` : ""}`);
@@ -318,6 +335,13 @@ const commands = {
       for (const need of ["step", "snapshot"]) if (!caps.includes(need)) bad(`missing required capability '${need}'`);
       if (!caps.includes("reset")) warn("no 'reset': Witness restarts the game for every run (slower)");
       if (h.calls && h.calls.length) report.push(`  calls: ${h.calls.map((c) => `${c.name}${c.args ? ` ${c.args}` : ""}`).join(" · ")}`);
+      // browser launches: the engine and device; with --no-auto-unlock the audio unlock probe runs first (an unlock
+      // lasts for the page's life, as in a browser, so it must happen before the determinism runs compare audio)
+      if (s.web) {
+        report.push(`  ${describeWeb(s.web)}`);
+        webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy };
+        if (s.web.policy === "gesture") { const p = await unlockProbe(s); p.forEach(mark); webSummary.unlock = p[0] ? p[0][1] : null; webSummary.audioLocked = p.some(([, t]) => /stayed SUSPENDED/.test(t)); }
+      }
       // step + snapshot
       const st = await begin(s, { seed: 1 });
       await stepTo(s, st, 30);
@@ -375,11 +399,20 @@ const commands = {
           void want;
         } catch (e) { bad(`audio failed: ${e.message}`); }
       }
+      if (s.web) {
+        const m = await media();
+        const d = await displayReport(s.web, m);
+        d.lines.forEach(mark);
+        if (d.display) webSummary.display = { scale: d.display.scale, problem: d.display.problem, pixels: d.display.pixels };
+        if (s.web.policy === "auto") (await audioReport(s.web)).forEach(mark);
+        const au = await s.web.audio();
+        if (au) webSummary.audio = { state: au.state, contexts: au.contexts.length, blocked: au.blocked };
+      }
       const logs = await s.drainLogs();
       if (logs.some((l) => l.level === "error")) warn(`the game logged ${logs.filter((l) => l.level === "error").length} error(s) during the checks`);
     });
     const failed = report.some((l) => l.startsWith("✖"));
-    if (opt.json) printJSON(envelope("doctor", { ok: !failed, verdict: failed ? "doctor found problems" : "all good", summary: { problems: report.filter((l) => l.startsWith("✖")).length, warnings: report.filter((l) => l.startsWith("⚠")).length, deterministic: report.some((l) => /^✔ deterministic/.test(l)) ? true : report.some((l) => /NOT deterministic/.test(l)) ? false : null }, data: { lines: report } }));
+    if (opt.json) printJSON(envelope("doctor", { ok: !failed, verdict: failed ? "doctor found problems" : "all good", summary: { problems: report.filter((l) => l.startsWith("✖")).length, warnings: report.filter((l) => l.startsWith("⚠")).length, deterministic: report.some((l) => /^✔ deterministic/.test(l)) ? true : report.some((l) => /NOT deterministic/.test(l)) ? false : null, ...(webSummary ? { web: webSummary } : {}) }, data: { lines: report } }));
     else {
       console.log(report.join("\n"));
       console.log(failed ? "doctor found problems" : "all good — Witness can drive this game");

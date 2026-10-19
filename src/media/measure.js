@@ -9,6 +9,8 @@
 //     { k, offset: [ox, oy], region: { x, y, w, h }, cells, nonUniform, nonUniformPercent, blurry,
 //       worst: [{ x, y, w, h, colors, spread }] }                        up to 10, worst first
 //   detectScale(img, { tolerance = 0, region, maxK = 16, minUniform = 99.5 }) -> k   (1 if none)
+//   pixelRuns(img, { region, tolerance = 0 }) -> { x: {scale, uneven, single, longShare, runs, lengths}, y, scale: [sx, sy],
+//     fractional, softPercent, blurry, region }       any scale (also fractional) from runs of one colour
 //   maskDiff(a, b, { threshold = 16, region }) -> { mask, width, height, count, bbox, centroid }
 //   maskFromColor(img, color, tolerance = 0) -> mask
 //   maskFromRect(width, height, { x, y, w, h }) -> mask
@@ -296,6 +298,87 @@ export function detectScale(input, { tolerance = 0, region, maxK = 16, minUnifor
     }
   }
   return 1;
+}
+
+// ---------------------------------------------------------------------------
+// any scale, from run lengths (fractional scaling, soft edges)
+// ---------------------------------------------------------------------------
+
+/** Runs of one colour along one axis: lengths of runs that start and end inside the region, colour changes, and
+ *  "in-between" pixels (different from both neighbours and between them in every channel: a soft ramp). */
+function axisRuns(img, R, tol, vertical) {
+  const d = img.data, W = img.width;
+  const outer = vertical ? R.w : R.h, inner = vertical ? R.h : R.w;
+  const idx = (o, i) => (vertical ? (R.y + i) * W + (R.x + o) : (R.y + o) * W + (R.x + i));
+  const lengths = new Map();
+  let changes = 0, between = 0;
+  for (let o = 0; o < outer; o++) {
+    let start = 0;
+    for (let i = 1; i <= inner; i++) {
+      const edge = i === inner || delta(d, idx(o, i - 1), d, idx(o, i)) > tol;
+      if (!edge) continue;
+      if (i < inner) changes++;
+      if (start > 0 && i < inner) lengths.set(i - start, (lengths.get(i - start) || 0) + 1);   // whole runs only
+      if (i - start === 1 && start > 0 && i < inner) {
+        const a = idx(o, start - 1) * 4, b = idx(o, start) * 4, c = idx(o, i) * 4;
+        let inside = true;
+        for (let ch = 0; ch < 3 && inside; ch++) { const lo = Math.min(d[a + ch], d[c + ch]), hi = Math.max(d[a + ch], d[c + ch]); if (d[b + ch] < lo || d[b + ch] > hi) inside = false; }
+        if (inside) between++;
+      }
+      start = i;
+    }
+  }
+  return { lengths, changes, between };
+}
+
+/** Scale along one axis from its run lengths: the shortest common run is one source pixel (two lengths, L and L+1,
+ *  when the scale isn't a whole number), then every run is fitted as a whole number of source pixels. */
+function scaleFromRuns(lengths) {
+  const all = [...lengths.entries()].sort((a, b) => a[0] - b[0]);
+  const n = all.reduce((a, [, c]) => a + c, 0);
+  if (!n) return { scale: null, runs: 0, lengths: [], uneven: false, longShare: 0 };
+  const min = Math.max(2, 0.03 * n);
+  // the anchor is the most common short run (a frame, rounded corners or text can add some 1-px runs of their own);
+  // with a neighbour length that is also common, the pair (L, L+1) is one source pixel drawn unevenly
+  let mode = null;
+  for (const [d, c] of all) if (d <= 64 && c >= min && (!mode || c > mode[1])) mode = [d, c];
+  if (!mode) return { scale: null, runs: n, lengths: all.slice(0, 6), uneven: false, longShare: 0 };
+  const below = lengths.get(mode[0] - 1) || 0, above = lengths.get(mode[0] + 1) || 0;
+  const L = below >= min && below >= above ? mode[0] - 1 : mode[0];
+  const cL = lengths.get(L) || 0, cL1 = lengths.get(L + 1) || 0;
+  const pair = cL >= min && cL1 >= min;
+  let s = pair ? (L * cL + (L + 1) * cL1) / (cL + cL1) : L;
+  for (let it = 0; it < 3; it++) {
+    let sd = 0, sm = 0;
+    for (const [d, c] of all) { if (d < L) continue; if (d > 12 * s) break; const m = Math.max(1, Math.round(d / s)); sd += d * c; sm += m * c; }   // shorter runs aren't whole source pixels
+    if (sm) s = sd / sm;
+  }
+  const share = pair ? cL1 / (cL + cL1) : 0;
+  const top = all.filter(([d]) => d <= 3 * Math.max(1, s)).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  // L = 1 is ambiguous (unscaled art has 1- and 2-px runs of its own): uneven pixels are only claimed from 2 px up
+  return { scale: s, runs: n, lengths: top, uneven: pair && L >= 2 && share >= 0.1 && share <= 0.9, longShare: share, single: pair ? [L, L + 1] : [L] };
+}
+
+/**
+ * The scale a picture was drawn at, from its runs of one colour (works for any scale, unlike blockScale):
+ *   { x: {scale, uneven, single: [3, 4], longShare, runs, lengths}, y: {...}, scale: [sx, sy], fractional,
+ *     softPercent, blurry, region }
+ * fractional: one source pixel is drawn L px in some places and L+1 px in others (nearest-neighbour scaling by a
+ * non-whole factor: uneven pixels). softPercent: colour changes that are soft one-pixel ramps (smoothing / blur);
+ * blurry above 25%. Assumes the source has some one-pixel features (outlines, anti-aliased edges, single pixels).
+ */
+export function pixelRuns(input, { region, tolerance = 0 } = {}) {
+  const img = toImage(input, "pixelRuns");
+  const tol = clampThreshold(tolerance, "pixelRuns", "tolerance");
+  const R = clipRegion(region, img.width, img.height, "pixelRuns");
+  const hx = axisRuns(img, R, tol, false), hy = axisRuns(img, R, tol, true);
+  const x = scaleFromRuns(hx.lengths), y = scaleFromRuns(hy.lengths);
+  const changes = hx.changes + hy.changes, between = hx.between + hy.between;
+  const softPercent = changes ? r2((between / changes) * 100) : 0;
+  const clean = (a) => ({ scale: a.scale == null ? null : r4(a.scale), uneven: a.uneven, single: a.single || null, longShare: r4(a.longShare), runs: a.runs, lengths: a.lengths });
+  const blurry = changes > 0 && softPercent > 25;
+  const X = clean(blurry ? { ...x, scale: null } : x), Y = clean(blurry ? { ...y, scale: null } : y);
+  return { region: R, x: X, y: Y, scale: [X.scale, Y.scale], fractional: !blurry && (X.uneven || Y.uneven), softPercent, blurry, changes };
 }
 
 // ---------------------------------------------------------------------------

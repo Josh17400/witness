@@ -32,7 +32,28 @@ export function loadConfig(opt) {
   }
   const found = findConfig(opt.config ? path.resolve(opt.config) : process.cwd());
   if (!found) die(`no ${CONFIG_NAME} found here or in any parent folder — run 'witness init' (or pass --cmd "<how to start the game>")`);
-  return { cfg: found.config, root: found.root, file: found.file };
+  return { cfg: browserOverrides(found.config, opt), root: found.root, file: found.file };
+}
+
+/** --device / --engine / --no-auto-unlock / --capture: browser launch options from the command line (they win over
+ *  witness.json launch.device / engine / audioUnlock / capture). */
+export function browserOverrides(cfg, opt) {
+  const want = { device: opt.device, engine: opt.engine, capture: opt.capture };
+  const any = Object.values(want).some((v) => v !== undefined) || opt["no-auto-unlock"] || opt["auto-unlock"];
+  if (!any) return cfg;
+  for (const [k, v] of Object.entries(want)) if (v === true) die(`--${k} needs a value (e.g. --device iphone-15, --engine webkit, --capture element)`);
+  if (!cfg.launch || !cfg.launch.url) die(`--device, --engine, --capture and --no-auto-unlock are for browser games (${CONFIG_NAME} launch.url); this launch is ${cfg.launch && cfg.launch.attach ? "attach" : "a command"}`);
+  const launch = { ...cfg.launch };
+  if (want.device !== undefined) {
+    const d = String(want.device);
+    if (d.trim().startsWith("{")) { try { launch.device = JSON.parse(d); } catch (e) { die(`--device: bad JSON (${e.message})`); } }
+    else launch.device = d === "none" || d === "desktop" ? null : d;
+  }
+  if (want.engine !== undefined) launch.engine = String(want.engine);
+  if (want.capture !== undefined) launch.capture = String(want.capture);
+  if (opt["no-auto-unlock"]) launch.audioUnlock = false;
+  else if (opt["auto-unlock"]) launch.audioUnlock = true;
+  return { ...cfg, launch };
 }
 
 export async function withGame(opt, fn) {

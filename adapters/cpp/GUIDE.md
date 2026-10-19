@@ -480,6 +480,72 @@ witness listen --time 3   # audio report + spectrogram
 | `audio returned no samples` | `render_audio_for_step` not called from `step`, or `audio_sample_rate` not set in the hello |
 | `didn't answer 'step'` | the step handler blocks (waiting on vsync, a device, or a thread that never finishes) |
 
+## 13. Web (Emscripten) builds
+
+The same `witness.h` drives a WebAssembly build of the game in a headless browser (and with `--device iphone-15`,
+as an iPhone would show it). Compiled by `emcc`, `witness.h` uses **no sockets**: its protocol lines go through
+`witness_emscripten.js`, a small shim that keeps one WebSocket to the Witness CLI and calls back into C for every
+command. Nothing else in your Witness code changes: handlers, hello, input, snapshot and audio work as on desktop.
+
+**1. Link the shim** (copy `adapters/cpp/witness_emscripten.js` next to `witness.h`; `witness init` does):
+```
+emcc ... --pre-js witness/witness_emscripten.js
+```
+(or load it with a `<script>` before the Emscripten loader). It does nothing unless the page URL has
+`?witness=host:port`, which the CLI adds. `witness_emscripten_inbuf/recv/closed` are exported by `witness.h` itself
+(`EMSCRIPTEN_KEEPALIVE`); no `EXPORTED_FUNCTIONS` changes are needed.
+
+**2. Don't start the main loop in witness mode.** The browser can't block, so `witness_run()` returns control to
+the browser and keeps the runtime alive (`emscripten_exit_with_live_runtime()`; the lines after it in `main`, such
+as `witness_shutdown()`, never run). From then on the game advances only inside the `step` handler:
+```c
+int main(int argc, char **argv) {
+    init_game();                                  /* window/GL context, assets: as usual */
+    if (witness_active(argc, argv)) {             /* ?witness= in the page URL */
+        witness_connect(&hello, &handlers);       /* returns 1 at once: the hello waits until the socket opens */
+        witness_run();                            /* back to the browser; commands now drive the game */
+        return 0;                                 /* not reached */
+    }
+    emscripten_set_main_loop(frame, 0, 1);        /* normal play only */
+}
+```
+Never call `emscripten_set_main_loop` (or `requestAnimationFrame` loops) in witness mode: it would advance the game
+on the browser's clock between commands. If the loop is already running when you detect witness mode, call
+`emscripten_cancel_main_loop()` first. The `step` handler does one frame of simulation with the given dt (the same
+function your frame callback calls, minus reading the clock and polling SDL events).
+
+**3. Screenshots.** Either keep your desktop `screenshot` handler (render, then `glReadPixels` with
+`bottom_up = 1`; reading right after drawing in the same call is always valid), or leave `screenshot` out of the
+handlers: the shim then answers it from the canvas (`Module.canvas`, else the largest `<canvas>`). In witness mode
+the shim forces `preserveDrawingBuffer: true` on WebGL contexts created after it loads, so the canvas can be read
+at any time. `--capture element` reads what the screen shows instead (device pixels, CSS scaling included).
+
+**4. Audio.** Keep `witness_audio_write()` from your mixer in `step` (section 7): it follows simulated time exactly.
+SDL3's own Emscripten audio device pulls samples on the browser's real audio clock, so it is not what Witness
+captures. For the iPhone unlock path (no sound until a tap), see `witness doctor --no-auto-unlock` in the JS guide
+(adapters/js/GUIDE.md, "Audio unlock"): in web builds, `witness.h` marks each input event that browsers count as a
+user gesture (key down, mouse button, finger lifted) while your `input` handler runs, so resuming an
+`AudioContext` from that handler works, and the page's AudioContexts (SDL's too) are tracked and reported. SDL3
+resumes its context from its own DOM listeners, which Witness input does not go through: test that path with real
+browser taps, `dom:tap:x,y@t`, and expect `web.audio.state == 'running'`.
+
+**5. witness.json:**
+```json
+{ "launch": { "url": "http://127.0.0.1:8080/game.html", "server": "python -m http.server 8080 -d build-web",
+              "device": "iphone-15" } }
+```
+`witness doctor --device iphone-15` then also prints how the canvas lands on the phone's screen (DPR, fractional
+scaling, blur). Engines and profiles: adapters/js/GUIDE.md, "Phones and tablets".
+
+**Limits (honest):** Witness's tests have no `emcc`. The bridge's C side is compiled natively against a stand-in
+`emscripten.h` (C and C++, warnings as errors) and driven end to end through the real shim and CLI (doctor, the shared
+coins test, gesture marking); the shim also runs in Chromium and WebKit pages against a JavaScript stand-in for the
+compiled module on a growing `WebAssembly.Memory`. **Not run here: an actual emcc build** — the `EM_JS` bodies
+(`HEAPU8`, calling `_witness_emscripten_*`), the `--pre-js` placement and `emscripten_exit_with_live_runtime()` in a
+real wasm runtime. Recording replays (`WITNESS_RECORD`) is not wired for web builds (it would write to MEMFS).
+`WITNESS_EMSCRIPTEN_SOCKETS` keeps the socket code for builds that proxy POSIX sockets. Threads: without
+`-pthread` the adapter's lock is a no-op; with it, a mutex.
+
 ## API summary
 
 | C | purpose |
@@ -488,6 +554,7 @@ witness listen --time 3   # audio report + spectrogram
 | `witness_connect(&hello, &handlers)` / `witness::connect(hello, Handlers)` | connect + hello |
 | `witness_run()` / `witness_poll(timeout_ms)` | serve commands (blocking / pumped) |
 | `witness_shutdown()` | close, free |
+| `--pre-js witness_emscripten.js`, `witness_emscripten_inbuf/recv/closed` | web (Emscripten) builds: the shim and its entry points (section 13) |
 | `witness_frame()`, `witness_time()`, `witness_seed()` | simulation clock and seed |
 | `witness_key_down(name)`, `witness_mouse(&x, &y, &buttons)`, `witness_touch(id, &x, &y)`, `witness_frame_events(&n)` | polled input |
 | `hello.touch = 1` | the game handles `WITNESS_EV_TOUCH` itself: no mouse events from finger 0 |

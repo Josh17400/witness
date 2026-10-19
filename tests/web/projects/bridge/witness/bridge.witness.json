@@ -1,0 +1,9 @@
+[
+  { "name": "steps only on command, input moves the square", "seed": 1, "input": "right@0-1",
+    "steps": [ { "at": 0, "expect": ["state.player.pos[0] == 11", "frame == 0"] },
+               { "from": 0, "to": 1, "always": "state.player.pos[0] >= 11 && state.player.pos[0] <= 41" },
+               { "at": 1, "expect": ["approx(state.player.pos[0], 41, 1e-9)", "state.grows >= 1"], "shot": "bridge-1s.png" } ] },
+  { "name": "a lifted finger is a gesture: the native AudioContext resumes", "seed": 1, "input": "touch:32,18@0.5",
+    "steps": [ { "at": 0.4, "expect": ["state.taps == 0"] },
+               { "at": 0.6, "expect": ["state.taps == 1", "state.audio == 'running'", "web.audio.state == 'running'"] } ] }
+]

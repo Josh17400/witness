@@ -11,6 +11,8 @@
 //   touch:x,y@t        tap with finger 0 (down at t, up one frame later); touch:x,y@a-b holds it
 //   touch2:x,y@t       the same with finger 1 (touchN = finger N-1, so touch1 == touch)
 //   swipe:x1,y1->x2,y2@a-b  finger 0 down at a, one interpolated move per frame, up at b (swipeN too)
+//   dom:tap:x,y@t | dom:click:x,y@t | dom:key:space@t   browser launches only: real (trusted) input through the browser
+//                      at frame t, not through the adapter (what unlocks audio on a phone; x,y in game pixels)
 //
 // Times are seconds, or frames with an "f" suffix: space@60f, right@0-120f (mixing is fine: right@0.5-90f).
 //
@@ -29,6 +31,7 @@ const RE = {
 };
 const EXAMPLES = "examples: right@0-2 (hold), space@1 (tap), click:640,360@1.5, mouse:100,200@2, drag:600,300->800,300@1-2, wheel:+3@1, touch:160,90@1, swipe:40,90->200,90@1-1.5";
 const TOUCH_RE = new RegExp(`^touch(\\d*):(${NUM}),(${NUM})${TIME}$`, "i");
+const DOM_RE = new RegExp(`^dom:(tap|click):(${NUM}),(${NUM})@(${TNUM})$|^dom:key:([a-z0-9_]+)@(${TNUM})$`, "i");
 const SWIPE_RE = new RegExp(`^swipe(\\d*):(${NUM}),(${NUM})->(${NUM}),(${NUM})${TIME}$`, "i");
 
 /** Split on separators without breaking "click:640,360@1" apart. */
@@ -164,6 +167,13 @@ export function parseWitnessInput(spec, fps) {
   for (const item of splitItems(String(spec))) {
     const touch = parseTouch(item.trim(), fps);
     if (touch) { extra.push(...touch); continue; }
+    const d = DOM_RE.exec(item.trim());
+    if (d) {
+      extra.push(d[1] ? { frame: Math.max(0, Math.round(tsec(d[4], fps) * fps)), type: "dom", kind: d[1].toLowerCase(), x: +d[2], y: +d[3] }
+        : { frame: Math.max(0, Math.round(tsec(d[6], fps) * fps)), type: "dom", kind: "key", key: d[5].toLowerCase() });
+      continue;
+    }
+    if (/^dom:/i.test(item.trim())) throw new Error(`bad input item '${item}' — dom: takes tap:x,y@t, click:x,y@t or key:name@t`);
     const m = /^(action|pad|text):([^@]+)@(-?\d+(?:\.\d+)?f?)(?:-(-?\d+(?:\.\d+)?f?))?$/i.exec(item.trim());
     if (!m) { rest.push(item); continue; }
     const [, kind, name, a, b] = m;

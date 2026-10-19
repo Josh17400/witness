@@ -142,6 +142,9 @@ export interface WitnessConfig {
   audioSeconds?: number;
   /** Sample rate of captured AudioContexts that don't ask for one (default 24000). */
   audioRate?: number;
+  /** false: iPhone-Safari audio policy on pages without the CLI's init script (contexts start suspended; resume()
+   *  only during a gesture). Browser launches take it from --no-auto-unlock instead. ?witness_audio_unlock=0 */
+  audioUnlock?: boolean;
   /** What Date.now() says at import in witness/record mode (default 2026-01-01T00:00:00Z). */
   epoch?: string | number;
 }
