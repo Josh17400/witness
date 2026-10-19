@@ -180,7 +180,8 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    interact, heal, choose…), plus `profile` (`topdown` | `platformer` | `fps`) if it isn't top-down.
    `witness play suggest` probes the game and proposes one (`--write` saves it). The harness works much better when
    the snapshot follows the playtest conventions (entity `hostile`/`item`/`talk`, enemy `state: "windup"` or
-   `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`): `witness play check` lists which ones the snapshot has,
+   `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`, doors with `leadsTo` and, for an exit you push into,
+   `enter: "s"`): `witness play check` lists which ones the snapshot has,
    what each missing one unlocks, and PLAYTEST.md "Playtest-ready snapshots" has a minimal example per profile.
 2. **Sanity-check it yourself:** `witness play start --name check --goal "smoke"`, `witness play do "explore for 3s"
    -s check`, `witness play end -s check`. Fix the config until orders work and things are classified right.
@@ -215,7 +216,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 * Several testers give a broader picture: different `--persona`s (`newbie`, `explorer`, `speedrunner`, `breaker`,
   `fighter`) and different `--name`s. **Run at most 2 at once** (each is a game process; `WITNESS_PLAY_MAX`).
 * **Never leave sessions running.** `witness play list` shows them; `witness play stop --all` ends them. Sessions
-  also end themselves after 5 idle minutes or 20 wall-clock minutes (`--wall-minutes`).
+  also end themselves after 5 idle minutes, 20 wall-clock minutes (`--wall-minutes`; batch scales it to `--minutes`),
+  when the game exits or hangs (said with the exit code / time and its last lines), or when the hero stays dead while
+  presses change nothing for 20 game seconds (outcome `stuck dead`: check the respawn key, `play.controls.confirm`).
 * Judge the feedback: the reflex layer plays like a decent human, not a pro, and a stuck incident can be a harness
   limit (moving blockers, no `state.map`) rather than a game bug. Check with a replay before changing the game.
 

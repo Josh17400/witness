@@ -1,6 +1,7 @@
 // Witness play: the playtest report (report.json + report.md + coverage.png). What the main agent reads first:
 // the outcome, the tester's own feedback, then fights, stuck incidents, deaths, coverage, dialogues and errors,
 // with the exact `witness replay` command to see any marked moment again.
+import fs from "node:fs";
 import path from "node:path";
 import { r1, clip, oneLine } from "./util.js";
 
@@ -42,7 +43,7 @@ export function reportData(s) {
     orders: s.orders, timeline: s.timeline,
     fights, telegraphs: tele,
     stuck: s.incidents, stuckSpots: stuckSpots(s.incidents), until: s.until || null, deaths: tr.deaths, kills: tr.kills, pickups: tr.pickups, dialogues: tr.dialogues,
-    coverage: s.coverage, shots: s.shots, errors: s.errors, notes: s.notes, feedback: s.feedback || null,
+    coverage: s.coverage, shots: s.shots, errors: s.errors, notes: s.notes, feedback: s.feedback || null, stuckDead: s.stuckDead || null,
     replay: s.replay, profile: s.profile, pace: s.pace || null,
     stats: {
       orders: s.orders.length, ordersFailed: s.orders.filter((o) => o.status === "fail").length, parseErrors: s.parseErrors || 0,
@@ -64,7 +65,7 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
   // flags: the launch overrides the session started with (--device iphone-15-landscape --engine webkit): same viewport
   if (flags) replayCmd += flags;
   const L = [];
-  const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped", "until reached": "UNTIL REACHED" }[r.outcome] || r.outcome || "in progress";
+  const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped", "until reached": "UNTIL REACHED", "stuck dead": "STUCK DEAD", "not responding": "GAME NOT RESPONDING" }[r.outcome] || r.outcome || "in progress";
   L.push(`# Playtest ${r.session}: ${r.game?.name || "game"} — ${outcome}`);
   L.push("");
   L.push(`${r.model ? `Tester: **${r.model}** · ` : ""}${r.persona ? `persona: **${r.persona}** · ` : ""}goal: ${r.goal ? `"${r.goal}"` : "(none)"} · seed ${r.seed}${r.scene ? ` · scene ${r.scene}` : ""}${r.params ? ` · params \`${JSON.stringify(r.params)}\`` : ""}`);
@@ -91,6 +92,7 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     const fd = r.feedback;
     if (fd.fun != null || fd.difficulty != null) L.push(`fun **${fd.fun ?? "?"}/5** · difficulty **${fd.difficulty ?? "?"}/5**`);
     if (fd.text) L.push("", `> ${oneLine(fd.text)}`);
+    if (fd.late) L.push("", "_(given after the session had ended)_");
   } else L.push("_The tester didn't leave final feedback._");
   const byKind = (k) => r.notes.filter((n) => n.kind === k);
   for (const [k, title] of [["bug", "Bugs suspected"], ["confusing", "Confusing moments"], ["idea", "Ideas"], ["fun", "Fun moments"], ["note", "Notes"]]) {
@@ -134,6 +136,12 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     for (const d of r.deaths) L.push(`- [${r1(d.t)}s] at cell (${d.cell || "?"}), last hit by ${d.cause}`);
     L.push("");
   }
+  if (r.stuckDead) {
+    const sd = r.stuckDead;
+    L.push("## Stuck dead");
+    L.push(`Dead from ${r1(sd.since)}s to ${r1(sd.at)}s of game time: ${sd.attempts} respawn attempt${sd.attempts === 1 ? "" : "s"} and nothing in the state changed, so the session ended. Last inputs: ${sd.lastInputs.map((x) => `${x.input} at ${r1(x.t)}s`).join(", ") || "none"}.${sd.shot ? ` [shot](${link(sd.shot)})` : ""} Does the game respawn on its own, or with a key the play config doesn't name (play.controls.confirm)?`);
+    L.push("", "```json", JSON.stringify(sd.state, null, 1).slice(0, 2500), "```", "");
+  }
   if (r.dialogues.length) {
     L.push("## Dialogues");
     for (const d of r.dialogues.slice(0, 15)) L.push(`- [${r1(d.t)}s] ${d.speaker ? `**${d.speaker}**: ` : ""}"${clip(oneLine(d.text), 200)}"${d.options.length ? ` → ${d.options.map((o, i) => `${i + 1}) ${clip(o, 50)}`).join(" · ")}` : ""}`);
@@ -171,6 +179,32 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     L.push("```");
   }
   return L.join("\n") + "\n";
+}
+
+/** report.md's options from the session's own session.json (root, a non-default config file, launch flags). */
+function mdOptions(dir) {
+  let spec = {};
+  try { spec = JSON.parse(fs.readFileSync(path.join(dir, "session.json"), "utf8")); } catch { /* defaults */ }
+  const root = spec.root || dir;
+  const rel = (p) => path.relative(root, p).replace(/\\/g, "/");
+  return { rel, link: (p) => path.relative(dir, p).replace(/\\/g, "/"), replayCmd: "witness replay", config: spec.configFile ? rel(spec.configFile) : null, flags: spec.launchFlags || "" };
+}
+/** Write report.json and report.md into a session folder. */
+export function writeReports(dir, r) {
+  fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(r, null, 1));
+  fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, mdOptions(dir)));
+}
+/**
+ * END after the session had already ended (the wall cap, stuck dead, the game exiting): the tester's feedback still
+ * goes into report.json and report.md. Returns the updated report, or null when there's no finished report.
+ */
+export function addLateFeedback(dir, fb) {
+  let r;
+  try { r = JSON.parse(fs.readFileSync(path.join(dir, "report.json"), "utf8")); } catch { return null; }
+  if (!fb || (fb.text == null && fb.fun == null && fb.difficulty == null)) return r;
+  r.feedback = { fun: fb.fun ?? null, difficulty: fb.difficulty ?? null, text: fb.text ?? null, late: true };
+  writeReports(dir, r);
+  return r;
 }
 
 function fmtWall(s) { if (s == null) return "?"; const m = Math.floor(s / 60); return m ? `${m}m${String(Math.round(s % 60)).padStart(2, "0")}s` : `${Math.round(s)}s`; }

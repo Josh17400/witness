@@ -102,6 +102,74 @@ for (let i = 0; i < 40 && pidAlive(wmPid); i++) await new Promise((res) => setTi
 rep = report(dirOf(mock, "wm"));
 ok("wall-minutes: the session ends itself after ~5 s (outcome timeout)", !pidAlive(wmPid) && rep.outcome === "timeout" && rep.wallSeconds <= 12, JSON.stringify({ o: rep.outcome, w: rep.wallSeconds }));
 
+// ---- how a session ends while an order runs (Embervale's long batch on 0.7.1)
+const wE = (dir, args, extra) => witness(args, { cwd: dir, env: { ...env, ...extra } });
+const daemonGone = async (name, dir) => { const pid = JSON.parse(fs.readFileSync(path.join(dirOf(dir, name), "session.json"), "utf8")).pid; for (let i = 0; i < 30 && pidAlive(pid); i++) await new Promise((res) => setTimeout(res, 300)); return !pidAlive(pid); };
+{
+  // (a) the wall cap hits mid-order: the order stops cleanly and says why (it said "the game disconnected" while the
+  // game was fine); END afterwards is still taken and its feedback lands in report.md/json
+  const slow = { MOCK_STEP_MS: "25" };   // 1 game second takes 1.5 s
+  r = wE(mock, ["play", "start", "--name", "tl", "--wall-minutes", "0.06"], slow);
+  r = wE(mock, ["play", "do", "wait 600", "-s", "tl"], slow);
+  ok("time limit mid-order: the order says the session time limit was reached", /session time limit reached \(max 0\.06 min\)/.test(r.out) && !/disconnected|crashed/.test(r.out), r.out);
+  ok("time limit mid-order: the daemon exits", await daemonGone("tl", mock));
+  r = wE(mock, ["play", "end", "-s", "tl", "--fun", "4", "--feedback", "late words"], slow);
+  rep = report(dirOf(mock, "tl"));
+  ok("time limit: END after the session closed is accepted", r.code === 0 && /feedback (was )?added/.test(r.out), r.out);
+  ok("time limit: the feedback is in report.json and report.md, the outcome stays timeout", rep.outcome === "timeout" && rep.feedback && rep.feedback.text === "late words" && rep.feedback.fun === 4 && /late words/.test(fs.readFileSync(path.join(dirOf(mock, "tl"), "report.md"), "utf8")), JSON.stringify({ o: rep.outcome, f: rep.feedback, e: rep.endReason }));
+  ok("time limit: endReason names the cap", /session time limit reached \(max 0\.06 min\)/.test(rep.endReason || ""), rep.endReason);
+  r = wE(mock, ["replay", path.join(dirOf(mock, "tl"), "replay.jsonl")]);
+  ok("time limit: the replay ends in exactly the recorded state", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out.split("\n").slice(-4).join("\n"));
+
+  // live: the waiting order is told the same
+  r = wE(mock, ["play", "start", "--name", "tll", "--live", "--wall-minutes", "0.05"]);
+  r = wE(mock, ["play", "do", "wait 600", "--for", "60", "-s", "tll"]);
+  ok("time limit, live: the waiting order says the session time limit was reached", /session time limit reached \(max 0\.05 min\)/.test(r.out) && !/disconnected|crashed/.test(r.out), r.out);
+  ok("time limit, live: the daemon exits", await daemonGone("tll", mock));
+
+  // (b) the game really exits mid-order: said with its exit code, the time, and its last output
+  r = wE(mock, ["play", "start", "--name", "ex"], { MOCK_EXIT_AT: "30" });
+  r = wE(mock, ["play", "do", "wait 5", "-s", "ex"], { MOCK_EXIT_AT: "30" });
+  ok("game exit: 'game exited (code 3) at t=0.5s' with its last output", /game exited \(code 3\) at t=0\.5s/.test(r.out) && /out of cheese/.test(r.out), r.out);
+  ok("game exit: the daemon exits", await daemonGone("ex", mock));
+  rep = report(dirOf(mock, "ex"));
+  ok("game exit: outcome crashed, endReason with the code", rep.outcome === "crashed" && /game exited \(code 3\) at t=0\.5s/.test(rep.endReason || ""), JSON.stringify({ o: rep.outcome, e: rep.endReason }));
+
+  // (c) the game hangs: "not responding since t=…" instead of a TIMEOUT at the wall cap
+  const hang = { MOCK_HANG_AT: "30", WITNESS_PLAY_HANG: "2" };
+  r = wE(mock, ["play", "start", "--name", "hg"], hang);
+  r = wE(mock, ["play", "do", "wait 5", "-s", "hg"], hang);
+  ok("game hang: 'not responding since t=0.5s'", /not responding since t=0\.5s/.test(r.out), r.out);
+  ok("game hang: the daemon exits (and the game with it)", await daemonGone("hg", mock));
+  rep = report(dirOf(mock, "hg"));
+  ok("game hang: outcome 'not responding'", rep.outcome === "not responding" && /not responding since t=0\.5s/.test(rep.endReason || ""), JSON.stringify({ o: rep.outcome, e: rep.endReason }));
+
+  // (d) dead for good: respawn attempts and nothing changing for 20 game seconds ends the session as "stuck dead"
+  const stuck = { MOCK_HAZARD: "stuck" };
+  r = wE(mock, ["play", "start", "--name", "sd"], stuck);
+  r = wE(mock, ["play", "do", "hold d 1.5", "-s", "sd"], stuck);
+  ok("stuck dead: the player died", /YOU DIED|dead/.test(r.out), r.out);
+  r = wE(mock, ["play", "do", "respawn", "-s", "sd"], stuck);
+  ok("stuck dead: respawn fails after 8 s, pressing confirm", /still dead after 8s \(pressed confirm \d+×\)/.test(r.out), r.out);
+  wE(mock, ["play", "do", "respawn", "-s", "sd"], stuck);
+  r = wE(mock, ["play", "do", "wait 6", "-s", "sd"], stuck);
+  ok("stuck dead: the session ends as 'stuck dead' with the attempts", /stuck dead: dead for 20s/.test(r.out) && /respawn attempt/.test(r.out) && /enter/.test(r.out), r.out);
+  ok("stuck dead: the daemon exits", await daemonGone("sd", mock));
+  rep = report(dirOf(mock, "sd"));
+  ok("stuck dead: report outcome, inputs, state and a shot", rep.outcome === "stuck dead" && rep.stuckDead && rep.stuckDead.attempts >= 1 && rep.stuckDead.lastInputs.some((x) => /enter/.test(x.input)) && rep.stuckDead.state && rep.stuckDead.state.dead === true && rep.stuckDead.shot && fs.existsSync(rep.stuckDead.shot), JSON.stringify({ o: rep.outcome, s: rep.stuckDead }).slice(0, 1500));
+  ok("stuck dead: report.md says so", /STUCK DEAD/.test(fs.readFileSync(path.join(dirOf(mock, "sd"), "report.md"), "utf8")));
+}
+
+// ---- batch --minutes 240: each session gets a wall cap that fits (it was the daemon default, 20 min)
+fs.writeFileSync(path.join(mock, "long.txt"), "play for a long time\n");
+r = w(mock, ["play", "batch", "--goals", "long.txt", "--minutes", "240", "--dry-run"]);
+ok("batch --minutes 240: the session cap scales (960 wall min), the tester timeout 963", r.code === 0 && /about 240 game minutes \(hard stop after 960 wall min\), tester timeout 963 wall min/.test(r.out), r.out.slice(-600));
+r = w(mock, ["play", "brief", "--minutes", "240"]);
+ok("brief --minutes 240: the start line carries the same scaled cap", r.code === 0 && /--wall-minutes 960/.test(r.out), r.out.slice(0, 600));
+r = w(mock, ["play", "brief", "--minutes", "4"]);
+ok("brief --minutes 4: the daemon default (20 wall min) needs no flag", r.code === 0 && !/--wall-minutes/.test(r.out), r.out.slice(0, 600));
+fs.rmSync(path.join(mock, "long.txt"));
+
 // ---- play batch with a fake claude that runs the brief's commands through sh
 const hasSh = spawnSync("sh", ["-c", "echo ok"], { encoding: "utf8", windowsHide: true }).stdout?.trim() === "ok";
 if (!hasSh) console.log("  batch with a fake tester: skipped (no sh)");

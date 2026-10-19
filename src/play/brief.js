@@ -26,7 +26,7 @@ export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie
   const untilText = [gameHours != null ? `${fmtHours(gameHours)} of in-game time have passed (the game's own clock)` : null, until ? `this is true in the game: ${until}` : null].filter(Boolean).join(", or ");
   const budget = untilText ? `BUDGET: play until ${untilText}. The ⏲ line under the header shows the game clock and how much is left. When an order answers "★ UNTIL REACHED", the playtest is over: run END.`
     : `BUDGET: about ${minutes} minutes of GAME time (the session shows it as [t …s]): keep playing until the header shows [t ${Math.round(minutes * 60)}s] or more.`;
-  const hard = wallMinutes != null ? ` Hard limit: the session stops itself after ${wallMinutes} real (wall-clock) minutes, so END before that.` : "";
+  const hard = wallMinutes != null ? ` Hard limit: the session stops itself after ${wallMinutes} real (wall-clock) minutes, so END before that (if it stops first, still run END with your feedback).` : "";
   const card = profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
     : profile === "fps" ? `goto <thing|x,y> · go forward|back|left|right [cells] · go <n|s|e|w…> [cells] · explore [dir] · follow <thing>
 fight [thing] [retreat 30%] [kite N] [hold] · flee · look <dir|thing> · reload · weapon <n>

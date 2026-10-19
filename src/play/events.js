@@ -65,7 +65,12 @@ export class EventTracker {
           .sort((a, b) => (b.telegraph || /strike|attack|bite|hit/i.test(b.state || "") ? 1 : 0) - (a.telegraph || /strike|attack|bite|hit/i.test(a.state || "") ? 1 : 0) || a.dist - b.dist)[0];
         this.lastHurtBy = src ? src.key : null;
         this.hurtTimes.push(t);
-        ev.push({ t, frame, kind: "hurt", text: `you took ${r1(-d)} damage${src ? ` from ${src.key}` : ""} (hp ${r1(from)}→${r1(P.hp)})`, data: { amount: -d, by: src ? src.key : null, from, to: P.hp } });
+        // damage over time (poison, burning, hunger): a small loss with nobody near, and no enemy in view or another
+        // such tick just before. It goes in the timeline but doesn't wake the tester or stop an order (wake.js)
+        const small = -d <= Math.max(0.5, P.maxHp ? 0.08 * P.maxHp : 0);
+        const dot = !src && small && (!cur.things.some((th) => th.rel === "hostile" && !th.dead) || t - (this.lastDotT ?? -1e9) <= 2.5);
+        if (dot) this.lastDotT = t;
+        ev.push({ t, frame, kind: "hurt", text: `you took ${r1(-d)} damage${src ? ` from ${src.key}` : ""} (hp ${r1(from)}→${r1(P.hp)})`, data: { amount: -d, by: src ? src.key : null, from, to: P.hp, ...(dot ? { dot: true } : {}) } });
         const pct = P.maxHp ? (100 * P.hp) / P.maxHp : null;
         const lowAt = Math.max(LOW_HP, ctx.retreat || 0);
         if (pct != null && pct < lowAt && pct > 0 && !this.lowWarned) { this.lowWarned = true; push("lowhp", `hp low: ${r1(P.hp)}/${r1(P.maxHp)}`); }

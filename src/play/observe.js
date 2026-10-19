@@ -161,7 +161,7 @@ export function observeText(w, ctx) {
 /** The one-line summary of how a `do` ended. */
 export function resultLine(r) {
   if (!r) return null;
-  const icon = { done: "✔ done", fail: "✖ failed", interrupted: "⚠ interrupted", time: "⏱ time", idle: "· idle", error: "✖ error", goal: "★ GOAL REACHED", until: "★ UNTIL REACHED", running: "⏩ running", event: "⚠" }[r.status] || r.status;
+  const icon = { done: "✔ done", fail: "✖ failed", interrupted: "⚠ interrupted", time: "⏱ time", idle: "· idle", error: "✖ error", goal: "★ GOAL REACHED", until: "★ UNTIL REACHED", running: "⏩ running", event: "⚠", ended: "■ session ended" }[r.status] || r.status;
   return `${icon}: ${r.order ? `${clip(r.order, 60)} — ` : ""}${r.msg || ""}${r.seconds != null ? ` (${r1(r.seconds)}s)` : ""}`.replace(/ — $/, "");
 }
 export { thingLabel, len };

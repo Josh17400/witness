@@ -153,6 +153,9 @@ export class Perceiver {
         los: e.los ?? e.visible ?? e.inSight ?? e.in_sight ?? null, team: e.team ?? null,
         locked: e.locked ?? null, stompable: e.stompable ?? null, size: Array.isArray(e.size) ? e.size.map(Number) : null,
         avoid, leadsTo: e.leadsTo ?? e.leads_to ?? e.to ?? e.building ?? e.destination ?? null,
+        // the push that uses a door/exit: "s", "ne" … or a vector (state coords; 3D: projected onto the ground plane)
+        enter: typeof e.enter === "string" && /^(n|s|e|w|ne|nw|se|sw)$/i.test(e.enter.trim()) ? e.enter.trim().toUpperCase()
+          : Array.isArray(e.enter) && e.enter.length >= 2 && e.enter.every((x) => Number.isFinite(+x)) ? (e.enter.length > 2 ? this.planeOf(e.enter.map(Number)) : e.enter.slice(0, 2).map(Number)) : null,
       });
     }
 

@@ -66,7 +66,7 @@ fps:        look <dir|thing> · reload · weapon <n|name> · go forward|back|lef
 * Name things exactly as the observation lists them: `Wolf`, `Wolf#5`, `Guard`, `Potion`, `"nearest enemy"`,
   `item`. A plural (`wolves`) means all of them.
 * `for 6s` caps any order's game time (`explore for 6s`). `careful` makes an order stop on anything new.
-* After dying: `respawn` (or press the key the game names).
+* After dying: `respawn` (or press the key the game names). `set`, `wait` and `press` work while dead too.
 * An order that doesn't parse changes nothing in the game; the error suggests the right word.
 
 ## Reading an observation
@@ -120,7 +120,8 @@ can jump straight to that moment.
 
 When the goal is done, the budget is used up (or an order says `★ UNTIL REACHED`), or you're truly stuck, run `end` with honest feedback: was it fun, how
 hard was it, what confused you, which bugs you suspect, what you'd change. **Always run `end`**, even if something went
-wrong: it writes the report. Then reply in 3–6 lines: the outcome, the biggest problems, and the report path `end`
+wrong: it writes the report. If an order says `■ session ended` (the time limit, stuck dead) or the game exited,
+still run `end` with your feedback: it is added to the report. Then reply in 3–6 lines: the outcome, the biggest problems, and the report path `end`
 printed.
 
 ## Rules

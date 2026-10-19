@@ -301,16 +301,82 @@ class GoTo extends Behaviour {
     const head = `target ${th ? `${this.desc} at ${fmtCell(gc)}` : fmtCell(gc)} is inside a wall${kind === "learned" ? " (found by bumping into it)" : ""}`;
     if (doors.length) {
       const dc = doors[0].cell;
-      return { goal: grid.center(dc), reach: w.cell * 0.45, cell: dc, door: true, msg: `${head}: ${fmtCell(gc)} is in a building; entering by its door at ${fmtCell(dc)}` };
+      return { goal: grid.center(dc), reach: w.cell * 0.45, cell: dc, door: true, thing: doors[0].thing || null, msg: `${head}: ${fmtCell(gc)} is in a building; entering by its door at ${fmtCell(dc)}` };
     }
     const n = grid.nearestOpen(grid.toCell(w.player.p2), gc, { t });
     if (!n) return null;
     const d = +r1(n.d);
     return { goal: grid.center(n.cell), reach: w.cell * 0.45, cell: n.cell, door: false, msg: `${head}: nearest open cell ${fmtCell(n.cell)}, ${d} cell${d === 1 ? "" : "s"} from the target` };
   }
+  /**
+   * The door this goto goes through, if any: a door-like target (Door/Exit/Stairs…, or with leadsTo or enter), a map
+   * door cell as the goal, or the door a target in a wall is entered by. {cell, enter, key} or null.
+   */
+  doorTarget(w) {
+    const grid = this.ap.grid;
+    if (this.via) {
+      if (!this.via.door) return null;
+      const th = this.via.thing;
+      return { cell: this.via.cell, enter: (th && th.enter) || null, key: th ? th.key : `the door at ${fmtCell(this.via.cell)}` };
+    }
+    const th = this.thingId != null ? this.lastThing : null;
+    if (th) return th.p2 && !th.locked && (th.avoid || th.leadsTo != null || th.enter != null) ? { cell: grid.toCell(th.p2), enter: th.enter || null, key: th.key } : null;
+    if (!this.goal) return null;
+    const gc = grid.toCell(this.goal), d = grid.doorsNear(gc, 0)[0];
+    return d ? { cell: gc, enter: (d.thing && d.thing.enter) || null, key: d.thing ? d.thing.key : `the door at ${fmtCell(gc)}` } : null;
+  }
+  /**
+   * Which way to push on a door: its `enter` ("S", or a vector), else from its open side into its solid side (an
+   * Exit with the wall behind it), else on in the direction we came. {v, name} or null.
+   */
+  pushDir(w, door) {
+    const ns = w.northSign ?? -1;
+    if (typeof door.enter === "string") return { v: dirVector(door.enter, ns), name: door.enter };
+    if (Array.isArray(door.enter) && len(door.enter) > 1e-9) return { v: norm(door.enter), name: compass(door.enter, ns) };
+    const grid = this.ap.grid, t = this.ap.t, [cx, cy] = door.cell, came = this.ap.lastMoveDir;
+    const cands = [[0, 1], [0, -1], [1, 0], [-1, 0]].filter(([dx, dy]) => grid.isBlocked(cx + dx, cy + dy, t) && !grid.isBlocked(cx - dx, cy - dy, t));
+    if (cands.length) {
+      const v = cands.map((c) => ({ c, s: came ? dot(c, came) : 0 })).sort((a, b) => b.s - a.s)[0].c;
+      return { v, name: compass(v, ns) };
+    }
+    if (came && len(came) > 1e-9) { const v = Math.abs(came[0]) >= Math.abs(came[1]) ? [Math.sign(came[0]), 0] : [0, Math.sign(came[1])]; return { v, name: compass(v, ns) }; }
+    return null;
+  }
+  /**
+   * Arrived at a door and the scene didn't change: step onto its cell, push toward `enter` (or the inferred way) for
+   * up to 0.6 s, then press the interact key. The scene changing at any point finishes the goto (observe).
+   */
+  pushTick(w, want) {
+    const ap = this.ap, grid = ap.grid, t = ap.t, P = this.push, door = P.door;
+    const pc = grid.toCell(w.player.p2), on = pc[0] === door.cell[0] && pc[1] === door.cell[1];
+    for (let i = 0; i < 6; i++) {
+      if (P.phase === "step" || P.phase === "back") {
+        if (!on && t - P.t0 <= (P.phase === "step" ? 2 : 1.5)) { ap.moveTo(w, sub(grid.center(door.cell), w.player.p2), want); return this.run(); }
+        if (!on) P.tried.push(P.phase === "step" ? "couldn't step onto it" : "couldn't step back onto it");
+        if (P.phase === "back") { P.phase = "key"; P.t0 = t; continue; }
+        P.phase = "push"; P.t0 = t; P.dir = this.pushDir(w, door);
+        if (P.dir) P.tried.push(`pushed ${P.dir.name}`);
+        else { P.tried.push("no push direction (no enter field, no wall beside it)"); P.phase = "key"; }
+        continue;
+      }
+      if (P.phase === "push") {
+        if (!on) { P.tried[P.tried.length - 1] = `pushed ${P.dir.name} (that walked off it)`; P.phase = "back"; P.t0 = t; continue; }
+        if (t - P.t0 < 0.6 - 1e-9) { ap.moveTo(w, P.dir.v, want); return this.run(); }
+        P.tried[P.tried.length - 1] = `pushed ${P.dir.name} for 0.6s`;
+        P.phase = "key"; P.t0 = t;
+        continue;
+      }
+      const c = ap.cfg.controls.interact;
+      if (c && !P.pressed) { want.taps.push({ label: "interact", c, frames: ap.cfg.controls.tapFrames }); P.pressed = true; P.t0 = t; P.tried.push(`pressed ${controlLabel(c)}`); return this.run(); }
+      if (c && t - P.t0 < 0.5) return this.run();
+      return this.done(`arrived at ${this.desc} — standing on ${door.key} at ${fmtCell(door.cell)}: ${P.tried.join(", ")}: the scene didn't change`);
+    }
+    return this.run();
+  }
   tick(w, want) {
     // entering the target (a building, a door, an exit) changed the scene: that was the point of the order
     if (this.sceneDone) return this.done(this.sceneDone);
+    if (this.push) return this.pushTick(w, want);
     const goal = this.target(w);
     // forgotten (not just out of view): it was killed, picked up or removed near you, e.g. by an autofight on the way
     const mem = this.outOfView && this.ap.perceiver ? this.ap.perceiver.memory.get(this.thingId) : null;
@@ -336,14 +402,20 @@ class GoTo extends Behaviour {
     }
     const via = this.via;
     const r = this.nav.tick(w, via ? via.goal : goal, via ? via.reach : reach);
-    if (r.arrived && via) {
-      if (!via.door) return this.done(`${via.msg} — arrived there`);
-      // standing in the door: give the game a moment to change the scene (that finishes the goto through observe)
-      this.inDoorT ??= this.ap.t;
-      if (this.ap.t - this.inDoorT < 1) return this.run();
-      return this.done(`${via.msg} — standing in the door (the scene didn't change)`);
+    if (r.arrived && via && !via.door) return this.done(`${via.msg} — arrived there`);
+    if (r.arrived && this.outOfView && !via) return this.fail(`${this.outOfViewMsg()}: reached that spot, but it isn't in view here`);
+    // at a door, exit or stairs and the scene didn't change: some games want you on the tile pushing a way (an Exit
+    // you leave by pushing south into the wall behind it), or the interact key. Give the game a moment, then try those
+    if (r.arrived && this.o.verb === "goto") {
+      const door = this.doorTarget(w);
+      if (door) {
+        this.inDoorT ??= this.ap.t;
+        const pc = this.ap.grid.toCell(w.player.p2);
+        if (pc[0] === door.cell[0] && pc[1] === door.cell[1] && this.ap.t - this.inDoorT < 0.3) return this.run();
+        this.push = { door, phase: "step", t0: this.ap.t, tried: [], pressed: false };
+        return this.pushTick(w, want);
+      }
     }
-    if (r.arrived && this.outOfView) return this.fail(`${this.outOfViewMsg()}: reached that spot, but it isn't in view here`);
     if (r.arrived) return this.done(`arrived at ${this.desc}${this.note ? ` — ${this.note}` : ""}`);
     if (r.fail) return this.fail(`${via ? `${via.msg} — ` : ""}${this.ap.blockerHint(w, r.fail, { dir: this.nav.lastDir, goal: via ? via.goal : goal, targetId: this.thingId })}`);
     this.ap.moveTo(w, r.dir, want);
@@ -913,11 +985,10 @@ export class Autopilot {
     }
     this.prevP = p.p2; this.prevT = this.t;
     if (p.hp != null) {
-      if (this.lastHp != null && p.hp < this.lastHp) {
-        this.lastHurtT = this.t;
-        const src = w.things.filter((th) => th.rel === "hostile" && !th.dead).sort((a, b) => a.dist - b.dist)[0];
-        this.lastHurtBy = src ? src.id : null;
-      }
+      const src = this.lastHp != null && p.hp < this.lastHp ? w.things.filter((th) => th.rel === "hostile" && !th.dead).sort((a, b) => a.dist - b.dist)[0] : undefined;
+      // a small loss with no enemy near is damage over time (poison), not a hit: autofight doesn't go after a bystander
+      const dot = src !== undefined && this.lastHp - p.hp <= Math.max(0.5, p.maxHp ? 0.08 * p.maxHp : 0) && !(src && src.dist <= reachW(w, this.cfg.reach.attack) * 2.6);
+      if (src !== undefined && !dot) { this.lastHurtT = this.t; this.lastHurtBy = src ? src.id : null; }
       this.lastHp = p.hp;
     }
     for (const th of w.things) {
@@ -947,8 +1018,9 @@ export class Autopilot {
     const door = th && pw.things.find((x) => x.avoid && x.leadsTo != null && dist2(x.p2, p0) <= 2 * cell && words.some((wd) => String(x.leadsTo).toLowerCase().includes(wd)));
     if (inner || (!near && !door)) { if (!listed) return null; g.nav.reset(); return g.desc; }
     const changed = `(the scene changed${w.scene ? ` to ${w.scene}` : ""})`;
-    g.sceneDone = g.via && g.via.door ? `${g.via.msg} — entered ${changed}`
-      : `entered ${g.desc}${door && door.id !== g.thingId ? ` through ${door.key}` : ""} ${changed}`;
+    const how = g.push && g.push.tried.length ? ` (${g.push.tried.join(", ")})` : "";
+    g.sceneDone = g.via && g.via.door ? `${g.via.msg} — entered${how} ${changed}`
+      : `entered ${g.desc}${door && door.id !== g.thingId ? ` through ${door.key}` : ""}${how} ${changed}`;
     return g.desc;
   }
 
@@ -1190,14 +1262,15 @@ export class Autopilot {
       case "call": if (!cfg.allowCalls) throw new OrderError("calls are disabled in playtests (start with --allow-calls to enable them)"); return new CallOrder(o, this, w);
       case "combo": return new Combo(o, this, w);
       case "respawn": {
-        // press confirm once (and again after 3 s); many games respawn on their own timer, so wait up to 8 s
+        // press confirm now and every 1.5 s while dead (a "press Enter" prompt often shows a second or so after the
+        // death, and an earlier press is ignored); many games respawn on their own timer, so wait up to 8 s
         let t0 = null, pressed = 0;
         return new Instant(o, this, w, (w2, want) => {
           if (t0 == null) { t0 = this.t; if (!w2.dead) return { status: "done", msg: "not dead" }; }
-          if (!w2.dead) return { status: "done", msg: `respawned after ${r1(this.t - t0)}s` };
-          const due = pressed === 0 || (pressed === 1 && this.t - t0 >= 3);
+          if (!w2.dead) return { status: "done", msg: `respawned after ${r1(this.t - t0)}s${pressed ? ` (pressed confirm ${pressed}×)` : ""}` };
+          const due = this.t - t0 >= pressed * 1.5 - 1e-9;
           if (due && (c.confirm || cfg.profile !== "fps")) { want.taps.push({ label: "confirm", c: c.confirm || parseControl("enter"), frames: c.tapFrames }); pressed++; }
-          if (this.t - t0 > 8) return { status: "fail", msg: `still dead after 8s${pressed ? " (pressed confirm)" : ""} — the game may need a menu choice: look at a screenshot` };
+          if (this.t - t0 > 8) return { status: "fail", msg: `still dead after 8s${pressed ? ` (pressed confirm ${pressed}×)` : ""} — the game may need a menu choice: look at a screenshot` };
           return { status: "run" };
         });
       }
@@ -1281,7 +1354,9 @@ export class Autopilot {
         if (out0.status === "fail" || !this.queue.length) return out0;
         continue;
       }
-      const pct = hpPct(w);
+      // the reflexes (heal, retreat, guard, autofight) are for a living hero: over a body (0 hp, an enemy standing on
+      // it) a retreat would swap every order (respawn, wait, press, even `set retreat 0`) for a Flee that can't run
+      const pct = w.dead ? null : hpPct(w);
       if (this.policy.heal && pct != null && pct < this.policy.heal && this.cfg.controls.heal && this.t - this.lastHealT > 1.2) {
         want.taps.push({ label: "heal", c: this.cfg.controls.heal, frames: this.cfg.controls.tapFrames }); this.lastHealT = this.t;
         this.emit("reflex", `healing at ${Math.round(pct)}% hp`);
@@ -1291,7 +1366,7 @@ export class Autopilot {
         this.emit("reflex", `retreating at ${Math.round(pct)}% hp`);
         continue;
       }
-      if (b.guardable && this.policy.guard && !this.platform) {
+      if (b.guardable && this.policy.guard && !this.platform && !w.dead) {
         const threat = this.reactingThreat(w, reachW(w, this.cfg.reach.attack) * 1.9);
         const mode = this.cfg.guardMode || (this.cfg.controls.block ? "block" : this.cfg.controls.dodge ? "dodge" : "backoff");
         const pause = () => { for (const n of [b.nav, b.go && b.go.nav]) if (n) n.bestT = this.t; };
@@ -1299,12 +1374,12 @@ export class Autopilot {
         if (this.blockUntilT && this.t < this.blockUntilT && this.cfg.controls.block) { pause(); want.held.set("block", this.cfg.controls.block); this.k = this.cfg.combatTick; return { want, k: this.cfg.combatTick, status: "run" }; }
       }
       // platformers: while an order stands still (wait, press, look, wait for ...), jump onto or away from an enemy about to touch you
-      if (this.platform && this.policy.guard && (b instanceof Wait || b instanceof WaitFor || b instanceof Tap || b instanceof Look || b instanceof Hold) && this.platform.guard(w, want)) {
+      if (this.platform && this.policy.guard && !w.dead && (b instanceof Wait || b instanceof WaitFor || b instanceof Tap || b instanceof Look || b instanceof Hold) && this.platform.guard(w, want)) {
         this.k = this.cfg.combatTick; this.wantedMove = true;
         return { want, k: this.cfg.combatTick, status: "run" };
       }
       // ---- autofight: an enemy met during a move gets dealt with, then the move goes on
-      if (!b.auto && !b.standing) {
+      if (!b.auto && !b.standing && !w.dead) {
         const af = this.autofight(w, b);
         if (af) { this.suspended = b; this.cur = af; af.t0 = this.t; b = af; this.k = this.cfg.combatTick; }
       } else this.aimTarget = null;

@@ -47,7 +47,7 @@ export function checkSnapshot(state, profile = "topdown") {
   add("flags", "entity hostile / talk / item flags", ents.length ? has("hostile") || has("talk") || has("npc") || has("item") : null, "exact classification (else guessed from type names: Wolf → enemy, Guard → npc)",
     "hostile: true on enemies, talk: true on people, item: true on pickups");
   add("doors", "doors, exits and stairs as things (and `avoid`)", ents.length || map ? ents.some((e) => e.avoid != null || e.door || DOORS.test(String(e.type ?? e.kind ?? ""))) || !!(map && map.rows.some((row) => /\+/.test(row)) || (map && (map.door || map.avoid))) : null,
-    "goto Exit / goto Inn; paths keep off doors unless they're the goal; entering one finishes the goto", "list them as entities (type Door / Exit / Stairs, leadsTo: \"Inn\"), or mark door cells with + in map rows");
+    "goto Exit / goto Inn; paths keep off doors unless they're the goal; entering one finishes the goto; a door used by pushing a way (stand on the Exit, push south) needs enter", "list them as entities (type Door / Exit / Stairs, leadsTo: \"Inn\", enter: \"s\" when you push into it to use it), or mark door cells with + in map rows");
   add("objectives", "quest objectives as things", ents.length ? ents.some((e) => e.objective || e.quest || e.questTarget || OBJECTIVE.test(String(e.type ?? e.kind ?? ""))) : null,
     "the tester can goto / fight / talk to what the quest asks for", "mark the entities a quest needs (objective: true, or quest: \"<title>\"), or list a marker thing at the spot");
   const g = state.goal ?? state.objective ?? state.quest;

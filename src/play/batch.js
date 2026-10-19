@@ -104,7 +104,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
     const mins = +(g.minutes ?? minutes);
     const until = g.until ?? (val("until") != null ? String(val("until")) : null);
     const gameHours = g.gameHours ?? (val("game-hours") != null ? +val("game-hours") : null);
-    const wall = g.wallMinutes != null ? +g.wallMinutes : wallDefault;
+    const wall = wallCapFor({ wall: g.wallMinutes != null ? +g.wallMinutes : wallDefault, minutes: mins, until, gameHours });
     const model = g.model || (val("model") != null ? String(val("model")) : "sonnet");
     const brief = makeBrief({
       cli, configDir: configArg(root, file), launch: launchFlags(opt), name, goal: g.goal, persona, minutes: mins, game: `"${cfg.name || "the game"}"`, profile: pc.profile,
@@ -112,11 +112,11 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
       scene: g.scene ?? (val("scene") != null ? String(val("scene")) : null), params: g.params ?? (val("params") != null ? String(val("params")) : null),
       model, live: !!(g.live ?? opt.live), extra: (cfg.play && cfg.play.brief) || null, until, gameHours, wallMinutes: wall, clock: val("clock") != null ? String(val("clock")) : null,
     });
-    const timeoutMin = +(opt.timeout || (wall != null ? wall + 3 : until || gameHours != null ? 30 : Math.max(5, mins * 4 + 3)));
+    const timeoutMin = +(opt.timeout || wall + 3);
     return { i: i + 1, name, goal: g.goal, persona, minutes: mins, until, gameHours, wall, model, brief, timeoutMin };
   });
   for (const r of runs) { try { new UntilWatch({ until: r.until, gameHours: r.gameHours, clock }); } catch (e) { console.error(`✖ goal #${r.i}: ${e.message}`); process.exit(1); } }
-  if (opt["dry-run"]) { for (const r of runs) console.log(`#${r.i} ${r.name}: claude ${testerArgs({ model: r.model, effort: opt.effort || "low", cliJs, name: r.name }).join(" ")}  (brief: ${r.brief.length} chars)`); return; }
+  if (opt["dry-run"]) { for (const r of runs) console.log(`#${r.i} ${r.name}: claude ${testerArgs({ model: r.model, effort: opt.effort || "low", cliJs, name: r.name }).join(" ")}  (brief: ${r.brief.length} chars; ${budgetText(r)}, tester timeout ${r.timeoutMin} wall min)`); return; }
 
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "witness-batch-"));   // the testers' working folder (empty)
   const env = { ...process.env };
@@ -149,7 +149,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
     ch.on("close", (code) => {
       clearTimeout(timer); children.delete(r);
       stopSession(r.name);   // the tester forgot END, or was killed: the session still writes its report
-      r.code = code; r.timedOut = timedOut; r.wallSec = (r.wallSec || 0) + (Date.now() - t0) / 1000;   // elapsed (r.wall is the --wall-minutes cap) r.denials = null;
+      r.code = code; r.timedOut = timedOut; r.wallSec = (r.wallSec || 0) + (Date.now() - t0) / 1000; r.denials = null;   // elapsed (r.wall is the --wall-minutes cap)
       try { const j = JSON.parse(out.trim().split(/\r?\n/).filter((l) => l.startsWith("{")).pop() || "{}"); r.reply = j.result ?? null; r.cost = (r.cost || 0) + (j.total_cost_usd || 0); r.turns = j.num_turns ?? null; r.isError = !!j.is_error; r.denials = j.permission_denials || null; } catch { r.reply = out.trim().slice(-600) || null; }
       r.stderr = err.trim().slice(-800);
       const e = readEntry(r.name);
@@ -187,6 +187,17 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
   for (const r of runs) console.log(`  #${r.i} ${r.goal}\n     ${batchLine(r)}${r.dir ? `\n     report: ${path.join(r.dir, "report.md")}` : ""}`);
   const cost = runs.reduce((a, r) => a + (r.cost || 0), 0);
   console.log(`\n${runs.filter((r) => r.report).length}/${runs.length} reports${cost ? ` · tester cost $${cost.toFixed(2)} (shown by claude; covered by a subscription login)` : ""} · ${mdFile}`);
+}
+
+/**
+ * Each session's hard wall-clock cap (minutes), passed to its daemon with --wall-minutes: the given one, else one that
+ * scales with the game-time budget (4 wall minutes per game minute, at least 20, the daemon's own default) so a long
+ * budget (--minutes 240) isn't cut off at 20; 30 for --until / --game-hours. The tester's timeout is this + 3.
+ */
+export function wallCapFor({ wall = null, minutes = 3, until = null, gameHours = null } = {}) {
+  if (wall != null && Number.isFinite(+wall)) return +wall;
+  if (until || gameHours != null) return 30;
+  return Math.max(20, Math.ceil((+minutes || 3) * 4));
 }
 
 /** "about 3 game minutes", "4h of in-game time (game clock)", "until state.hour >= 18", plus a wall cap. */

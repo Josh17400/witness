@@ -12,7 +12,7 @@ import { makeBrief } from "../../src/play/brief.js";
 import { compass, editDistance, singular } from "../../src/play/util.js";
 import { runFixTests } from "./fixes.mjs";
 import { checkSnapshot, checkLines } from "../../src/play/check.js";
-import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, budgetText, batchLine } from "../../src/play/batch.js";
+import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, budgetText, batchLine, wallCapFor } from "../../src/play/batch.js";
 import { shimCommand } from "../../src/play/registry.js";
 import { stuckSpots, reportMarkdown as reportMd } from "../../src/play/report.js";
 import { UntilWatch, fmtHours } from "../../src/play/until.js";
@@ -482,6 +482,8 @@ function platWorld() {
   ok("batch: the retry prompt names the exact allowed form", nudge("BRIEF", { command: "cd x" }, "b1-1").includes(`${shimCommand("b1-1")} "explore"`) && /`cd x` was denied/.test(nudge("BRIEF", { command: "cd x" }, "b1-1")));
   const mdB = batchMarkdown([{ i: 1, goal: "g", persona: "newbie", report: null, blocked: { command: "cd x && ./t look" }, firstBlock: { command: "cd x && ./t look" } }], { base: tmpB, model: "sonnet", effort: "low", minutes: 3 });
   ok("batch md: a blocked tester's row says so", /\| 1 \| g \| newbie \| blocked: permission denied \(cd x && \.\/t look\) \|/.test(mdB), mdB);
+  // the batch passes each session a wall cap that fits its game-time budget (--minutes 240 was cut off at the daemon default 20)
+  ok("batch: the wall cap scales with game minutes; --wall-minutes wins; until/game-hours 30", wallCapFor({ minutes: 3 }) === 20 && wallCapFor({ minutes: 240 }) === 960 && wallCapFor({ minutes: 240, wall: 300 }) === 300 && wallCapFor({ gameHours: 4 }) === 30 && wallCapFor({ until: "state.hour >= 18" }) === 30, [wallCapFor({ minutes: 3 }), wallCapFor({ minutes: 240 })]);
   ok("batch: budget text names units", budgetText({ minutes: 3 }) === "about 3 game minutes" && budgetText({ minutes: 3, gameHours: 4.5, wall: 20 }) === "4h30m of in-game time (hard stop after 20 wall min)");
   fs.rmSync(tmpB, { recursive: true, force: true });
 }

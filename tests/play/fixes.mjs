@@ -9,6 +9,7 @@ import { Perceiver } from "../../src/play/perceive.js";
 import { EventTracker, coalesceEvents } from "../../src/play/events.js";
 import { Autopilot } from "../../src/play/autopilot.js";
 import { wakeFor } from "../../src/play/wake.js";
+import { DeadWatch } from "../../src/play/deadwatch.js";
 
 const KEYS = ["w", "a", "s", "d", "j", "k", "e", "escape", "enter"];
 
@@ -41,8 +42,12 @@ function tileWorld({ start, solid, snapState, onStep = null }) {
   return S;
 }
 
-/** Like the daemon's turn-based `do`: the reflex loop plus the event tracker and the wake rules. */
-function driveDo(S, cfgRaw, orderText, { maxFrames = 3600, cell = 1 } = {}) {
+/**
+ * Like the daemon's turn-based session: one autopilot for several `do`s (settings stick), the reflex loop plus the
+ * event tracker and the wake rules. `drv.do(text)` runs one order; `drv.sync()` takes in a change made to the game
+ * between orders (its events are dropped, as if seen in an earlier observation).
+ */
+function driver(S, cfgRaw = {}, { cell = 1 } = {}) {
   const cfg = resolvePlayConfig({ cell, controls: { move: "wasd", interact: "e", cancel: "escape" }, ...cfgRaw }, { keys: KEYS });
   const per = new Perceiver(cfg, { fps: 60 });
   let w = per.perceive(S.snap(), S.frame);
@@ -50,26 +55,37 @@ function driveDo(S, cfgRaw, orderText, { maxFrames = 3600, cell = 1 } = {}) {
   const ap = new Autopilot(cfg, { fps: 60, grid, perceiver: per, size: [320, 180] });
   const tr = new EventTracker(cfg, per);
   ap.observe(w); tr.update(null, w, {});
-  ap.setOrders(parseOrders(orderText, { named: cfg.named }));
-  const events = [];
-  let status = "run", msg = "", wake = null;
-  while (S.frame < maxFrames) {
-    const d = ap.decide(w);
-    S.queue.push(...ap.ctrl.emit(d.want, S.frame));
-    if (d.status !== "run") { status = d.status; msg = d.message; break; }
-    for (let i = 0; i < Math.max(1, d.k); i++) S.step();
-    const nw = per.perceive(S.snap(), S.frame);
-    ap.observe(nw);
-    const ev = tr.update(w, nw, {});
-    for (const e of ap.drainEvents()) ev.push({ t: nw.t, frame: S.frame, ...e });
-    w = nw;
-    events.push(...ev);
-    const b = ap.cur ? { verb: ap.cur.o?.verb, careful: false, target: ap.cur.thingId ?? null } : null;
-    wake = wakeFor(ev, b, { ap, world: w, cfg });
-    if (wake) { status = "interrupted"; msg = wake; break; }
-  }
-  return { status, msg, ap, grid, events, results: ap.results, world: w };
+  const inputs = [];
+  const drv = {
+    cfg, ap, grid, tr, inputs, get world() { return w; },
+    sync() { const nw = per.perceive(S.snap(), S.frame); ap.observe(nw); tr.update(w, nw, {}); ap.drainEvents(); w = nw; },
+    do(orderText, { maxFrames = 3600 } = {}) {
+      ap.setOrders(parseOrders(orderText, { named: cfg.named }));
+      const events = [], f0 = S.frame, t0 = S.t;
+      let status = "run", msg = "", wake = null;
+      while (S.frame - f0 < maxFrames) {
+        const d = ap.decide(w);
+        const ev0 = ap.ctrl.emit(d.want, S.frame);
+        S.queue.push(...ev0); inputs.push(...ev0.map((e) => ({ ...e, t: S.t })));
+        if (d.status !== "run") { status = d.status; msg = d.message; break; }
+        for (let i = 0; i < Math.max(1, d.k); i++) S.step();
+        const nw = per.perceive(S.snap(), S.frame);
+        ap.observe(nw);
+        const ev = tr.update(w, nw, {});
+        for (const e of ap.drainEvents()) ev.push({ t: nw.t, frame: S.frame, ...e });
+        w = nw;
+        events.push(...ev);
+        const b = ap.cur ? { verb: ap.cur.o?.verb, careful: false, target: ap.cur.thingId ?? null } : null;
+        wake = wakeFor(ev, b, { ap, world: w, cfg });
+        if (wake) { status = "interrupted"; msg = wake; break; }
+      }
+      return { status, msg, ap, grid, events, results: ap.results, world: w, seconds: S.t - t0 };
+    },
+  };
+  return drv;
 }
+/** One order on a fresh driver. */
+function driveDo(S, cfgRaw, orderText, { maxFrames = 3600, cell = 1 } = {}) { return driver(S, cfgRaw, { cell }).do(orderText, { maxFrames }); }
 
 export function runFixTests(ok) {
   // ---- 1. the scene key comes from the configured map, and a window moving over the same ground isn't a new scene
@@ -352,5 +368,159 @@ export function runFixTests(ok) {
       const gate = ap.blockerHint(w2, "stuck", { goal: [5.5, 9.5] });
       ok("bug 9: a locked gate is still named", /Gate#41 \(locked\) is right there/.test(gate) && !/Farmer/.test(gate), gate);
     }
+  }
+
+  // ---- 10. death freeze (Embervale, 0.7.1 batch): after `set retreat 30`, dying with an enemy over the body turned every
+  // order (respawn, wait, press, even `set retreat 0`) into a Flee, which can't run while dead: "you died" before a
+  // single frame, the clock frozen, the session unrecoverable. Their game respawns on Enter once the prompt shows (1.2 s)
+  {
+    const mk = () => {
+      const S = tileWorld({
+        start: [5.5, 5.5], solid: () => false,
+        snapState: (S2) => ({ dead: S2.dead, entities: [{ id: 5, type: "Skeleton", pos: S2.dead ? [S2.deathP[0] + 0.2, S2.deathP[1]] : [9.5, 5.5], hp: 6, maxHp: 6, hostile: true }] }),
+        onStep: (S2) => {
+          if (!S2.dead) return;
+          S2.p = S2.deathP.slice();   // the body doesn't move
+          if (S2.pressed.has("enter") && S2.t - S2.deathT >= 1.2) { S2.dead = false; S2.hp = 10; S2.p = [2.5, 2.5]; S2.respawns = (S2.respawns || 0) + 1; }
+        },
+      });
+      S.dead = false;
+      S.kill = () => { S.hp = 0; S.dead = true; S.deathT = S.t; S.deathP = S.p.slice(); };
+      return S;
+    };
+    const S = mk(), drv = driver(S, { controls: { move: "wasd", interact: "e", cancel: "escape", confirm: "enter" } });
+    const r0 = drv.do("set retreat 30");
+    ok("death freeze: set retreat 30", r0.status === "done" && /retreat below 30% hp/.test(r0.msg), `${r0.status} ${r0.msg}`);
+    S.kill(); drv.sync();
+    const t0 = S.t;
+    const r1 = drv.do("wait 0.5");
+    ok("death freeze: wait runs while dead (the clock moves)", r1.status === "done" && S.t - t0 >= 0.5 && !/you died/.test(r1.msg), `${r1.status} ${r1.msg} +${(S.t - t0).toFixed(2)}s`);
+    ok("death freeze: no retreat reflex while dead", !r1.events.some((e) => /retreating/.test(e.text)), r1.events.map((e) => e.text).join(" | "));
+    const r2 = drv.do("respawn");
+    ok("death freeze: respawn while dead with retreat on respawns (Enter after the 1.2 s prompt)", r2.status === "done" && /respawned after/.test(r2.msg) && S.respawns === 1 && !S.dead, `${r2.status} ${r2.msg} respawns=${S.respawns}`);
+    S.kill(); drv.sync();
+    const r3 = drv.do("set retreat 0");
+    ok("death freeze: set retreat 0 applies while dead", r3.status === "done" && /retreat below 0% hp/.test(r3.msg) && drv.ap.policy.retreat === 0, `${r3.status} ${r3.msg}`);
+    drv.do("set retreat 30");
+    const f0 = S.frame, r4 = drv.do("press enter");
+    ok("death freeze: press runs while dead", r4.status === "done" && /pressed enter/.test(r4.msg) && S.frame > f0, `${r4.status} ${r4.msg}`);
+    // heal and guard reflexes stay quiet over a body too
+    const S2 = mk(), d2 = driver(S2, { heal: 50, guard: true, controls: { move: "wasd", interact: "e", confirm: "enter", heal: "h", block: "k" } });
+    S2.kill(); d2.sync();
+    const r5 = d2.do("wait 1");
+    ok("death freeze: no heal/guard reflex while dead", r5.status === "done" && !d2.inputs.some((e) => e.key === "h" || e.key === "k"), `${r5.status} ${r5.msg} ${d2.inputs.map((e) => e.key).join(",")}`);
+  }
+
+  // ---- 11. damage over time (poison: "took 0.1 damage" every half second, no attacker in view) woke the tester and
+  // ended goto orders; a real hit by a visible attacker still wakes, and so do low hp and death
+  {
+    const mk = ({ foe = false } = {}) => {
+      const S = tileWorld({
+        start: [2.5, 2.5], solid: () => false,
+        snapState: (S2) => ({ entities: [{ id: 3, type: "Well", pos: [16.5, 2.5] }, ...(foe ? [{ id: 8, type: "Archer", pos: [S2.p[0] + 6, 2.5], hostile: true, hp: 4, maxHp: 4 }] : [])] }),
+        onStep: (S2) => { if (S2.frame % 30 === 29 && S2.hp > 6) S2.hp = +(S2.hp - 0.1).toFixed(2); if (S2.hitAt === S2.frame) S2.hp -= 2; },
+      });
+      return S;
+    };
+    for (const autofight of [false, true]) {
+      const S = mk(), drv = driver(S, { autofight });
+      const r = drv.do("goto Well");
+      ok(`DoT: poison ticks don't interrupt a goto (autofight ${autofight ? "on" : "off"})`, r.status === "done" && /arrived at Well#3/.test(r.msg) && S.hp < 10, `${r.status} ${r.msg} hp=${S.hp}`);
+      ok(`DoT: ... the ticks are still in the events (autofight ${autofight ? "on" : "off"})`, r.events.some((e) => e.kind === "hurt" && e.data && e.data.dot), r.events.filter((e) => e.kind === "hurt").map((e) => e.text).join(" | "));
+    }
+    const S2 = mk(), d2 = driver(S2, { autofight: false });
+    const r2 = d2.do("wait 3");
+    ok("DoT: poison ticks don't wake a wait", r2.status === "done" && /waited 3s/.test(r2.msg), `${r2.status} ${r2.msg}`);
+    // poison with an enemy in view but not near: autofight doesn't go after it as "it hit you"
+    const S4 = mk({ foe: true }), d4 = driver(S4, { autofight: true });
+    const r4 = d4.do("goto Well");
+    ok("DoT: autofight doesn't blame a far-off enemy for a poison tick", r4.status === "done" && !r4.events.some((e) => /hit you/.test(e.text)), `${r4.status} ${r4.msg} | ${r4.events.filter((e) => e.kind === "autofight").map((e) => e.text).join(" | ")}`);
+    // a hit by a visible attacker wakes a wait (no autofight to deal with it)
+    const S3 = mk({ foe: true }); S3.hitAt = 10;
+    const d3 = driver(S3, { autofight: false });
+    const r3 = d3.do("wait 3");
+    ok("DoT: a hit with an attacker in view still wakes", r3.status === "interrupted" && /you took 2 damage/.test(r3.msg), `${r3.status} ${r3.msg}`);
+  }
+
+  // ---- 12. leaving by an Exit you push into (Embervale's dungeons): stand on the Exit tile and push SOUTH (into the
+  // wall behind it), having stepped off it since arriving; E does nothing. A goto that stopped within 1 cell of it, or
+  // arrived from the side, did nothing. Convention: the entity's `enter` ("s", "ne", or a plane vector) is the push
+  // that uses it; without one, push from its open side into its solid side, then try the interact key
+  {
+    const DUN = [
+      "##########",
+      "#........#",
+      "#........#",
+      "#........#",
+      "#........#",
+      "##########",
+    ];
+    // the exit is (5,4): the wall (5,5) is south of it, open floor north, east and west
+    const dungeon = ({ start, exit, rule = "push-s" }) => {
+      const S = tileWorld({
+        start,
+        solid: (x, y) => S.scene !== "dungeon" ? false : !DUN[y] || DUN[y][x] === undefined || DUN[y][x] === "#",
+        snapState: (S2) => S2.scene === "dungeon" ? { entities: [exit], map: { id: "dun", cell: 1, origin: [0, 0], rows: DUN, solid: "#" } } : { entities: [], map: { id: "world", cell: 1, origin: [0, 0], rows: ["...."], solid: "#" } },
+        onStep: (S2) => {
+          if (S2.scene !== "dungeon") return;
+          const on = Math.floor(S2.p[0]) === 5 && Math.floor(S2.p[1]) === 4;
+          if (!on) { S2.steppedOff = true; return; }
+          if (rule === "push-s" && S2.steppedOff && S2.keys.has("s")) { S2.scene = "overworld"; S2.p = [1.5, 0.5]; S2.left = "push"; }
+          if (rule === "key" && S2.pressed.has("e")) { S2.scene = "overworld"; S2.p = [1.5, 0.5]; S2.left = "key"; }
+        },
+      });
+      S.scene = "dungeon"; S.steppedOff = false;
+      return S;
+    };
+    const exitE = (extra = {}) => ({ id: 70, type: "Exit", leadsTo: "Overworld", pos: [5.5, 4.5], ...extra });
+    // (a) with enter: "s", arriving from the east (the goto stops within 1 cell, short of the tile)
+    {
+      const S = dungeon({ start: [8.5, 4.5], exit: exitE({ enter: "s" }) });
+      const r = driveDo(S, {}, "goto Exit", { maxFrames: 60 * 15 });
+      ok("exit push: enter \"s\": goto Exit steps on and pushes south → leaves", r.status === "done" && S.scene === "overworld" && S.left === "push" && /entered Exit#70/.test(r.msg) && /pushed S/.test(r.msg), `${r.status} ${r.msg} scene=${S.scene}`);
+    }
+    // (b) arriving from the side, no enter field: the wall is south of it, open north → push S
+    {
+      const S = dungeon({ start: [1.5, 4.5], exit: exitE() });
+      const r = driveDo(S, {}, "goto Exit", { maxFrames: 60 * 15 });
+      ok("exit push: no enter field, from the side: pushes from its open side into the wall (S)", r.status === "done" && S.scene === "overworld" && S.left === "push" && /pushed S/.test(r.msg), `${r.status} ${r.msg} scene=${S.scene}`);
+    }
+    // (c) enter as a plane vector [0, 1] (south, y down)
+    {
+      const S = dungeon({ start: [8.5, 2.5], exit: exitE({ enter: [0, 1] }) });
+      const r = driveDo(S, {}, "goto Exit", { maxFrames: 60 * 15 });
+      ok("exit push: enter as a vector [0,1]", r.status === "done" && S.scene === "overworld" && /pushed S/.test(r.msg), `${r.status} ${r.msg} scene=${S.scene}`);
+    }
+    // (d) a hatch that opens with the interact key: pushing does nothing, then E works; the message says what was tried
+    {
+      const S = dungeon({ start: [2.5, 1.5], exit: { id: 71, type: "Hatch", leadsTo: "Cellar", pos: [5.5, 4.5] }, rule: "key" });
+      const r = driveDo(S, {}, "goto Hatch", { maxFrames: 60 * 15 });
+      ok("exit push: then the interact key", r.status === "done" && S.scene === "overworld" && S.left === "key" && /pushed S for 0\.6s, pressed e/.test(r.msg), `${r.status} ${r.msg} scene=${S.scene}`);
+    }
+    // (e) nothing works: done, standing on it, saying what was tried
+    {
+      const S = dungeon({ start: [2.5, 1.5], exit: exitE({ enter: "n" }), rule: "none" });
+      const r = driveDo(S, {}, "goto Exit", { maxFrames: 60 * 15 });
+      ok("exit push: nothing worked → says what was tried", r.status === "done" && S.scene === "dungeon" && /on Exit#70 at \(5,4\): pushed N \(that walked off it\), pressed e: the scene didn't change/.test(r.msg) && S.p.map(Math.floor).join() === "5,4", `${r.status} ${r.msg} at ${S.p.map(Math.floor)}`);
+    }
+  }
+  // ---- 13. stuck dead: dead for 20 game seconds with respawn presses and nothing changing; enemies wandering over the
+  // body and ticking timers don't count as a change, a press while alive doesn't count as an attempt
+  {
+    const dw = new DeadWatch(20);
+    const world = (t, dead, extra = {}) => ({ t, dead, snap: { state: { player: { hp: dead ? 0 : 10, pos: [3, 4] }, deathTimer: t, entities: [{ id: 5, pos: [t, 1] }], ...extra } } });
+    dw.input(0.5, [{ type: "key", key: "enter", down: true }]);
+    dw.update(world(1, true));
+    let hit = null;
+    for (let t = 1; t <= 25 && !hit; t += 0.5) hit = dw.update(world(t, true));
+    ok("stuck dead: no presses while dead is no attempt (a game with a long respawn timer)", !hit);
+    const dw2 = new DeadWatch(20);
+    dw2.update(world(1, true));
+    for (let t = 1; t <= 25 && !hit; t += 0.5) { if (t === 3) dw2.input(t, [{ type: "key", key: "enter", down: true }, { type: "key", key: "enter", down: false, frame: 9 }]); hit = dw2.update(world(t, true)); }
+    ok("stuck dead: after 20 s with a press, timers and wandering enemies ignored", hit && hit.attempts === 1 && Math.abs(hit.seconds - 20) < 0.6 && /stuck dead: dead for 20s of game time with 1 respawn attempt \(pressed enter\)/.test(dw2.text()), JSON.stringify(hit));
+    const dw3 = new DeadWatch(20);
+    let h3 = null;
+    for (let t = 1; t <= 25 && !h3; t += 0.5) { dw3.input(t, [{ type: "key", key: "enter", down: true }]); h3 = dw3.update(world(t, true, { menu: t < 15 ? "continue?" : "load save?" })); }
+    ok("stuck dead: a change in the death screen restarts the count", !h3);
   }
 }

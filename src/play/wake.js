@@ -15,6 +15,8 @@ export function wakeFor(ev, b, { ap, world, cfg, live = false }) {
     if (e.kind === "scene" && ap.sceneArrival) continue;
     if (["death", "goal", "error", "scene", "lowhp"].includes(e.kind)) return e.text;
     if (world.dead && (e.kind === "alert" || e.kind === "hurt")) continue;
+    // damage over time (poison ticks, no attacker): timeline only; low hp and death still wake
+    if (e.kind === "hurt" && e.data && e.data.dot) continue;
     if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return e.text;
     if (reflexes && (e.kind === "hurt" || e.kind === "alert")) continue;
     if (!combat && e.kind === "hurt" && b?.verb !== "flee") return e.text;

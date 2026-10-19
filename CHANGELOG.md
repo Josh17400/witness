@@ -9,10 +9,10 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 its door, was "stuck at cell (172,-101) heading S for 3.2s", twice, then "learned a wall, replanned → gave up", and
 the hint blamed a farmer standing nearby)
 - A `goto` whose target cell is solid (the map says so, or bumping into it just showed it) says so up front and
-  changes course: with a door at or next to it (map door cells `+`, or Door/`leadsTo` things) it goes in by the door
-  (`target (172,-100) is inside a wall: (172,-100) is in a building; entering by its door at (173,-100) — entered (the
-  scene changed to Inn)`); otherwise it walks to the nearest open cell and is done there (`target (15,5) is inside a
-  wall: nearest open cell (15,7), 2 cells from the target — arrived there`). Without a map it switches the moment the
+  changes course: with a door at or next to it (map door cells `+`, or Door/`leadsTo` things) it goes in by the door;
+  otherwise it walks to the nearest open cell and is done there. In the regression test's town: `target (8,6) is
+  inside a wall: (8,6) is in a building; entering by its door at (9,6) — entered (the scene changed to inn)` and
+  `target (15,5) is inside a wall: nearest open cell (15,7), 2 cells from the target — arrived there`. Without a map it switches the moment the
   bump teaches it the target is a wall, instead of failing 3.2 s later. Things in a wall keep "stand next to it"
   (a sign, a chest, a locked gate) unless no open ground touches them or they're a building beside its door.
 - The "X is right there" hint on a stuck goto names only door-like things (locked, doors, stairs) or someone standing
@@ -100,6 +100,51 @@ around it, and the batch said `STOPPED · 0s game · 0 orders`)
 - On Windows, batch `--allowedTools` also allow Git Bash's `/c/…` form of the session command, bare and quoted. A real
   probe ran it without a denial.
 - Adoption steps: none. *Optional:* make `play.clock` include the day (`state.day*24 + state.hour`).
+
+**play: fixes from Embervale's long batch runs on 0.7.1** (root-caused by the Embervale team)
+- **Dead hero, frozen session.** After `set retreat 30`, dying with an enemy over the body (0 hp < 30%) made the
+  retreat reflex swap every new order (`respawn`, `wait`, `press`, even `set retreat 0`) for a Flee, which fails while
+  dead: `✖ you died` before a single frame, the game clock frozen, the session unrecoverable. Now heal, retreat, guard
+  and autofight are off while dead; `set` applies at once (also while dead); `respawn`, `wait` and `press` run
+  normally. `respawn` presses confirm every 1.5 s instead of at 0 s and 3 s (their game takes Enter once its prompt
+  shows, 1.2 s after the death): `respawned after 1.5s (pressed confirm 2×)`.
+- **Wall cap mid-order.** On the 20-minute wall cap the daemon stopped the game while an order was stepping it, and the
+  tester was told `✖ the game disconnected (or crashed) during 'step'` (the game was fine; the replay matched the end
+  state). Now the running order stops first and answers `■ session ended: session time limit reached (max 20 min); the
+  session is over: run END with your feedback` (live mode too); report.md/json `endReason` says the same.
+- **END after the end.** `play end --feedback …` on a session that already ended (wall cap, stuck dead, game exit)
+  was refused (`session "tl" isn't running`). It now writes the feedback into report.md/json (`feedback.late`) and
+  keeps the outcome; `do` on an ended session says to run END.
+- **Real exits and hangs** are told apart from a stop: `✖ error: the game exited (code 3) at t=0.5s; last lines: "mock:
+  fatal: out of cheese"` (outcome `crashed`), and a step with no answer for 60 s gives `the game is not responding
+  since t=0.5s` (outcome `not responding`; it ran into the wall cap and said TIMEOUT before). The final snapshot
+  isn't taken from a hung game.
+- **Batch wall caps fit the budget.** Batch testers' sessions had the daemon's default 20 wall minutes whatever
+  `--minutes` said, so `--minutes 240` was cut off at 20. Batch now always passes `--wall-minutes`: the given one, else
+  max(20, 4 × game minutes) (`--minutes 240` → 960; the tester's timeout is cap + 3, as before), or 30 for `--until` /
+  `--game-hours`. `play brief` adds the same to its start line when it is over 20. The daemon reads the cap as
+  `opts.wallMinutes` (`minutes` from 0.7.1 sessions still works). The batch's `r.denials = null` reset had slipped into
+  a comment; fixed.
+- **Stuck dead.** Dead for 20 game seconds (`play.stuckDead`, 0 = off) with key presses in that time and nothing in
+  the state changing (timers, clocks and the entity list ignored) ends the session: `■ session ended: stuck dead: dead
+  for 20s of game time with 15 respawn attempts (pressed enter) and nothing in the state changing`, outcome
+  `stuck dead`, a shot, the last inputs and the state in report.json `stuckDead` and a report.md section.
+- **Damage over time doesn't wake.** Poison ticks (`you took 0.1 damage`, no attacker) woke the tester and stopped
+  gotos; with an enemy in view but far off, autofight went after it as "Archer#8 hit you" and the goto gave up after
+  30 s. A small loss (≤ 8% of max hp, at least 0.5) with nobody near, and no enemy in view or another such tick within
+  2.5 s, is now damage over time (`data.dot`): timeline only. A real hit, low hp and death still wake.
+- **Exits you push.** In their dungeons you leave by standing on the Exit tile and pushing south (E does nothing); a
+  goto stopped within 1 cell, or arrived from the side, and nothing happened. A goto to a door-like thing (or a map door
+  cell) that arrives without a scene change now steps onto the cell, holds the move toward the entity's `enter`
+  (`"s"`, `"ne"` …, or a vector in the plane) for up to 0.6 s, else pushes from the door's open side into its solid
+  side, then presses interact, and says what it tried: `entered Exit#70 (pushed S) (the scene changed to overworld)`, or
+  `arrived at Exit#70 — standing on Exit#70 at (5,4): pushed N (that walked off it), pressed e: the scene didn't
+  change`. Documented under "Doors and exits" in PLAYTEST.md and in `play check`.
+- Mock game: `MOCK_HAZARD=stuck`, `MOCK_STEP_MS`, `MOCK_EXIT_AT`, `MOCK_HANG_AT`; `WITNESS_PLAY_HANG` (seconds) shortens the
+  hang timeout for tests.
+- Adoption steps: *optional*: add `"enter": "s"` (the push that uses it) to exits and doors you use by pushing a
+  direction; *optional*: `"stuckDead": 0` in `"play"` if your game keeps the hero dead on purpose for long (a
+  spectator mode). Nothing else changes; sessions started by 0.7.1 batches still run.
 
 ## 0.7.1 (2026-10-19)
 

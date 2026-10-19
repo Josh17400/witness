@@ -13,6 +13,8 @@ import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
 import { launchFlags } from "../cli/common.js";
 import { UntilWatch } from "./until.js";
+import { addLateFeedback } from "./report.js";
+import { wallCapFor } from "./batch.js";
 
 export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the game and report back (docs/PLAYTEST.md)
 
@@ -51,7 +53,8 @@ Orders:
 Sessions live in witness/playtests/<name>/ (report.md, report.json, replay.jsonl, shots/, coverage.png). At most
 ${MAX_SESSIONS} sessions run at once machine-wide (WITNESS_PLAY_MAX). A session ends itself after --idle seconds without a
 command, after --wall-minutes (real time, default 20), when --until is reached and nobody ENDs within 3 minutes,
-or when the game exits.`;
+when the game exits or stops answering, or when the player stays dead (play.stuckDead, 20 game s) while presses change
+nothing. END still works after it ended: the feedback goes into the report.`;
 
 function fail(msg, code = 1) { console.error(`✖ ${msg}`); process.exit(code); }
 
@@ -65,7 +68,7 @@ function findSession(opt, { allowEnded = false } = {}) {
     const e = readEntry(String(name));
     if (!e) fail(`no session "${name}" — 'witness play list' shows them`);
     e.live = pidAlive(e.pid) && e.state !== "ended" && e.state !== "failed";
-    if (!e.live && !allowEnded) fail(`session "${name}" isn't running (${e.state || "gone"}${e.summary ? `: ${e.summary}` : ""})${e.dir ? ` — report: ${path.join(e.dir, "report.md")}` : ""}`);
+    if (!e.live && !allowEnded) fail(`session "${name}" isn't running (${e.state || "gone"}${e.summary ? `: ${e.summary}` : ""})${e.dir ? ` — report: ${path.join(e.dir, "report.md")}` : ""}${e.state === "ended" ? "\nThe playtest is over: run END with your feedback anyway (it is still added to the report)." : ""}`);
     return e;
   }
   const live = liveEntries();
@@ -138,7 +141,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       const opts = {
         goal: opt.goal && opt.goal !== true ? String(opt.goal) : null, persona: opt.persona && opt.persona !== true ? String(opt.persona) : null,
         seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : cfg.seed ?? 1, scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params: params ?? null,
-        minutes: opt["wall-minutes"] && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : opt.minutes ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], model: opt.model && opt.model !== true ? String(opt.model) : null,
+        wallMinutes: opt["wall-minutes"] && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : opt.minutes && opt.minutes !== true ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], model: opt.model && opt.model !== true ? String(opt.model) : null,
         live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, speed: opt.speed && opt.speed !== true ? +opt.speed : undefined,
         horizon: opt.horizon && opt.horizon !== true ? +opt.horizon : undefined, pauseAfter: opt["pause-after"] && opt["pause-after"] !== true ? +opt["pause-after"] : undefined,
         until: opt.until && opt.until !== true ? String(opt.until) : null, gameHours: opt["game-hours"] !== undefined && opt["game-hours"] !== true ? +opt["game-hours"] : null,
@@ -202,12 +205,23 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
     }
     case "status": { const e = findSession(opt, { allowEnded: true }); if (!e.live) { console.log(`session ${e.name}: ${e.state}${e.summary ? ` — ${e.summary}` : ""}\n${e.dir ? path.join(e.dir, "report.md") : ""}`); return; } print(await request(e, "status").catch((err) => fail(err.message)), opt); return; }
     case "end": case "stop": {
-      const targets = opt.all ? liveEntries() : [findSession(opt)];
+      const targets = opt.all ? liveEntries() : [findSession(opt, { allowEnded: sub === "end" })];
       if (!targets.length) { console.log("no sessions running"); return; }
       for (const e of targets) {
         const args = sub === "end" ? { fun: opt.fun !== undefined && opt.fun !== true ? +opt.fun : undefined, difficulty: opt.difficulty !== undefined && opt.difficulty !== true ? +opt.difficulty : undefined, feedback: opt.feedback && opt.feedback !== true ? String(opt.feedback) : undefined } : { reason: "stopped by the main agent", outcome: "stopped" };
+        // END after the session ended itself (wall cap, stuck dead, the game exiting): the feedback goes into its report
+        const late = () => {
+          if (!e.dir) return false;
+          const fb = { fun: args.fun ?? null, difficulty: args.difficulty ?? null, text: args.feedback ?? null };
+          const has = fb.text != null || fb.fun != null || fb.difficulty != null;
+          const rp = has ? addLateFeedback(e.dir, fb) : (() => { try { return JSON.parse(fs.readFileSync(path.join(e.dir, "report.json"), "utf8")); } catch { return null; } })();
+          if (!rp || rp.status !== "finished") return false;
+          console.log(`session ${e.name} had already ended (${rp.endReason || rp.outcome})${has ? "; your feedback was added to the report" : ""}\nreport: ${path.join(e.dir, "report.md")}`);
+          return true;
+        };
+        if (sub === "end" && !e.live) { if (!late()) fail(`session "${e.name}" isn't running (${e.state || "gone"}) and has no finished report${e.dir ? ` in ${e.dir}` : ""}`); continue; }
         let r = null;
-        try { r = await request(e, "end", args, 120000); } catch (err) { console.error(`⚠ ${e.name}: ${err.message}`); }
+        try { r = await request(e, "end", args, 120000); } catch (err) { if (sub === "end") { await waitExit(e.pid, 15000); if (late()) continue; } console.error(`⚠ ${e.name}: ${err.message}`); }
         const info = sessionInfo(e);
         if (!(await waitExit(e.pid, 15000))) { kill(e.pid); await waitExit(e.pid, 3000); }
         if (info && info.gamePid && pidAlive(info.gamePid)) kill(info.gamePid);
@@ -273,7 +287,8 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         profile: pc.profile, controls: cfg.play && cfg.play.controls ? describeControls(pc) : "", seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : null,
         scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params, model: opt.model && opt.model !== true ? String(opt.model) : null, live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, extra: opt.extra && opt.extra !== true ? String(opt.extra) : (cfg.play && cfg.play.brief) || null,
         until: opt.until && opt.until !== true ? String(opt.until) : null, gameHours: opt["game-hours"] !== undefined && opt["game-hours"] !== true ? +opt["game-hours"] : null,
-        wallMinutes: opt["wall-minutes"] !== undefined && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : null, clock: opt.clock && opt.clock !== true ? String(opt.clock) : null,
+        // the hard wall cap: given, or scaled to a long game-time budget like batch does (the daemon default is 20 min)
+        wallMinutes: opt["wall-minutes"] !== undefined && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : (() => { const c = wallCapFor({ minutes: opt.minutes ? +opt.minutes : 4, until: opt.until && opt.until !== true, gameHours: opt["game-hours"] !== undefined && opt["game-hours"] !== true ? 1 : null }); return c > 20 ? c : null; })(), clock: opt.clock && opt.clock !== true ? String(opt.clock) : null,
       }));
       return;
     }

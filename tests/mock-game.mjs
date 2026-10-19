@@ -28,6 +28,10 @@
 //   MOCK_HAZARD=1  (top-down only) lava from x = 150: the player dies the frame it reaches x >= 150 (snapped to exactly
 //                  x = 150), stays dead and still for 10 frames, then respawns at [40, 90]. state.dead / state.deaths.
 //                  Holding right from f0: deaths at f55 and f120 (respawns at f65 and f130), both at [150, 90].
+//                  MOCK_HAZARD=stuck: the player never respawns (a broken death screen).
+//   MOCK_STEP_MS=n each simulated frame takes n ms of real time (a game slower than real time)
+//   MOCK_EXIT_AT=F prints "mock: fatal: out of cheese" to stderr and exits with code 3 when frame F is simulated
+//   MOCK_HANG_AT=F stops answering step requests once frame F is reached (a hung game; other requests still answer)
 //   MOCK_PERF=1    perf replies with planted timings: update_ms 1.0 every frame, except the step that simulates frame 90,
 //                  which spawns 200 particles (state.particles, counts.particles; they live 30 frames) and reports
 //                  update_ms 25 (and really busy-waits 40 ms, so wall timing sees it too). memory_mb = 40 + 0.05 × frame
@@ -86,7 +90,8 @@ const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; ret
 let bigPlayer = false, holdCamera = false, hidden = new Set(), night = false, swap = false;
 const FIGURE = !!process.env.MOCK_FIGURE, LOOK = UI === "look";
 const NPCS = process.env.MOCK_FIGURE === "npc" ? [{ type: "NPC", name: "Bob", pos: [200, 40] }, { type: "NPC", name: "Ann", pos: [260, 140] }] : null;
-const HAZARD = !!process.env.MOCK_HAZARD;
+const HAZARD = !!process.env.MOCK_HAZARD, STUCK_DEAD = process.env.MOCK_HAZARD === "stuck";
+const STEP_MS = +process.env.MOCK_STEP_MS || 0, EXIT_AT = process.env.MOCK_EXIT_AT ? +process.env.MOCK_EXIT_AT : null, HANG_AT = process.env.MOCK_HANG_AT ? +process.env.MOCK_HANG_AT : null;
 let dead = false, deaths = 0, deadAt = -1;
 const PERF = !!process.env.MOCK_PERF;
 const PATHS = process.env.MOCK_PATHS || "";
@@ -165,7 +170,7 @@ function stepOnce(dt) {
     }
   } else if (HAZARD && dead) {
     // dead: still for 10 frames, then back at the start
-    if (frame + 1 - deadAt >= 10) { dead = false; player.pos = [40, 90]; }
+    if (frame + 1 - deadAt >= 10 && !STUCK_DEAD) { dead = false; player.pos = [40, 90]; }
   } else {
     player.pos[0] = Math.max(0, Math.min(W, player.pos[0] + dx * 120 * dt));
     player.pos[1] = Math.max(0, Math.min(H, player.pos[1] + dy * 120 * dt));
@@ -323,7 +328,16 @@ sock.on("data", (d) => {
     switch (m.cmd) {
       case "reset": reset(m.seed, m.params || {}); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
-      case "step": { const n = m.frames || 1; stepMs = []; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
+      case "step": {
+        if (HANG_AT != null && frame >= HANG_AT) break;   // hung: no answer
+        const n = m.frames || 1; stepMs = [];
+        for (let i = 0; i < n; i++) {
+          stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS);
+          if (EXIT_AT != null && frame >= EXIT_AT) { process.stderr.write("mock: fatal: out of cheese\n", () => process.exit(3)); return; }
+          if (STEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, STEP_MS);
+        }
+        reply({ frame, time }); break;
+      }
       case "snapshot": {
         let state = { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins, ...(NPCS || [])], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(PERF ? { particles } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" && UI !== "world" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) };
         if (BIG) state.world = BIG;

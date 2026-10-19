@@ -15,7 +15,8 @@ import { wakeFor as wakeRule } from "./wake.js";
 import { observeText, observeData, resultLine } from "./observe.js";
 import { parseOrders, OrderError } from "./orders.js";
 import { ReplayRecorder } from "./recorder.js";
-import { reportData, reportMarkdown, coveragePNG } from "./report.js";
+import { reportData, coveragePNG, writeReports, addLateFeedback } from "./report.js";
+import { DeadWatch } from "./deadwatch.js";
 import { updateEntry } from "./registry.js";
 import { r1, clip, oneLine } from "./util.js";
 import { PERSONAS } from "./brief.js";
@@ -35,6 +36,11 @@ export async function runDaemon(dir) {
   const setStatus = (patch) => { Object.assign(spec, patch); fs.writeFileSync(specFile, JSON.stringify(spec, null, 1)); try { updateEntry(spec.name, { ...patch, dir }); } catch { /* registry */ } };
   const opts = spec.opts || {};
   const wall0 = Date.now();
+  // the hard real-time cap: --wall-minutes (spec.opts.wallMinutes; "minutes" in sessions started by 0.7.1)
+  const wallMin = Math.max(0.01, +(opts.wallMinutes ?? opts.minutes ?? 20) || 20);
+  // a step the game doesn't answer within this long means it hung (WITNESS_PLAY_HANG seconds, for tests)
+  const hangMs = Math.max(1, +process.env.WITNESS_PLAY_HANG || 60) * 1000;
+  let stopWhy = null, doRunning = null, hung = null;   // why the session is ending (told to a running order); the running `do`
   log(`daemon ${process.pid} starting session ${spec.name} in ${spec.root}`);
 
   let g;
@@ -68,7 +74,7 @@ export async function runDaemon(dir) {
     } catch (e) { log(`play module failed: ${e.message}`); setStatus({ state: "failed", error: `play.module: ${e.message}` }); await g.stop(); process.exit(1); }
   }
   const size = S.hello.size || [640, 360];
-  let frame = 0, world = null, finalizing = false, server = null;
+  let frame = 0, world = null, finalizing = false, server = null, finalP = null;
   const timeline = [], orders = [], notes = [], shots = [], errors = [], pending = [], trail = [];
   let parseErrors = 0, lastLogFrame = 0, firstLook = true;
   const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null } : null });
@@ -171,12 +177,14 @@ export async function runDaemon(dir) {
   // watched turn-taking (--watch --turns): an order plays at real-time speed, the game waits while the tester thinks
   const turnPace = { wall: 0, frame: 0 };
   async function stepWorld(k) {
-    await S.step(k, null, dts(k));
+    try { await S.request("step", { frames: k, dts: dts(k) }, Math.max(hangMs, k * 50)); }
+    catch (e) { if (!S.closed && /didn't answer/.test(e.message)) hung ??= { t: world.t, frame }; throw e; }
     frame += k;
     if (opts.watch && !live.on) { const ahead = turnPace.wall + ((frame - turnPace.frame) / fps) * 1000 - Date.now(); if (ahead > 1) await new Promise((r) => setTimeout(r, ahead)); }
     const snap = await S.snapshot();
     let logs = [];
     if (frame - lastLogFrame >= Math.max(1, Math.round(fps / 4))) { logs = await S.drainLogs(); lastLogFrame = frame; }
+    for (const l of logs) { lastLogs.push(`${l.level ? `[${l.level}] ` : ""}${oneLine(l.message)}`); if (lastLogs.length > 5) lastLogs.shift(); }
     const nw = perceiver.perceive(snap, frame);
     if (until && !until.hit && (until.active || until.clock) && until.check(snap, nw.t)) untilReached();
     ap.observe(nw);
@@ -196,7 +204,38 @@ export async function runDaemon(dir) {
     }
     for (const fs0 of tracker.firstSight.splice(0)) if (fs0.t > 0) await keyShot(`first ${fs0.type}`);
     pending.push(...ev);
+    if (deadWatch.update(world) && !deadWatch.reported) await stuckDead();
     return ev;
+  }
+
+  // ---- stuck dead: respawn attempts change nothing for play.stuckDead game seconds (default 20) → the session ends
+  const deadWatch = new DeadWatch(rawPlay.stuckDead ?? 20);
+  const lastLogs = [];
+  async function stuckDead() {
+    deadWatch.reported = true;
+    const h = deadWatch.hit, text = deadWatch.text();
+    h.shot = await keyShot("stuck dead");
+    const e = { t: world.t, frame, kind: "stuckdead", text };
+    timeline.push({ t: +e.t.toFixed(2), frame, kind: e.kind, text }); pending.push(e);
+    recorder.mark(frame, text.slice(0, 120));
+    log(text);
+    stopWhy = text;
+    setTimeout(() => shutdown(stopWhy, "stuck dead"), 20);
+  }
+  /** Inputs went to the game: the stuck-dead watch counts presses while dead. */
+  const sent = (ev) => { if (ev.length) deadWatch.input(world.t, ev); };
+
+  /** The game went away or stopped answering: say which, when, and its last words. */
+  async function gameTrouble() {
+    const tail = () => {
+      const out = (g.output ? g.output() : "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-3);
+      const lines = [...lastLogs.slice(-3), ...out];
+      return lines.length ? `; last lines: ${lines.map((l) => `"${clip(l, 120)}"`).join(" | ")}` : "";
+    };
+    if (hung && !S.closed) return { status: "error", outcome: "not responding", msg: `the game is not responding since t=${r1(hung.t)}s (a step got no answer for ${Math.round(hangMs / 1000)}s)${tail()}` };
+    if (g.proc && g.proc.exitCode == null) await new Promise((res) => { const t = setTimeout(res, 1500); g.proc.once("exit", () => { clearTimeout(t); res(); }); });
+    const code = g.proc ? g.proc.exitCode ?? g.proc.signalCode : null;
+    return { status: "error", outcome: "crashed", msg: `the game exited${code != null ? ` (code ${code})` : ""} at t=${r1(world.t)}s${tail()}` };
   }
 
   async function runDo(text, forS) {
@@ -212,11 +251,13 @@ export async function runDaemon(dir) {
     const rec = { t: +t0.toFixed(2), text, status: null, msg: null, seconds: null };
     orders.push(rec);
     let result = null;
+    try {
     for (let guard = 0; guard < 200000; guard++) {
+      if (stopWhy) { result = { status: "ended", msg: stopWhy }; break; }
       const dec = ap.decide(world);
       if (dec.status === "call") {
         const ev0 = ap.ctrl.emit(dec.want, frame);
-        if (ev0.length) { await S.input(ev0); recorder.add(ev0); }
+        if (ev0.length) { await S.input(ev0); recorder.add(ev0); sent(ev0); }
         let msg;
         try { const r = await S.call(dec.name, dec.args); msg = `called ${dec.name}(${dec.args.join(", ")}) → ${clip(JSON.stringify(r.result ?? null), 120)}`; recorder.call(frame, dec.name, dec.args); }
         catch (e) { msg = `call ${dec.name} failed: ${e.message}`; }
@@ -225,27 +266,36 @@ export async function runDaemon(dir) {
         continue;
       }
       const ev = ap.ctrl.emit(dec.want, frame);
-      if (ev.length) { await S.input(ev); recorder.add(ev); }
+      if (ev.length) { await S.input(ev); recorder.add(ev); sent(ev); }
       if (DEBUG) {
         const nav = ap.cur && (ap.cur.nav || (ap.cur.go && ap.cur.go.nav));
         log(`tick f${frame} t${world.t.toFixed(2)} p=${world.player && world.player.p2 ? world.player.p2.map((x) => x.toFixed(1)).join(",") : "-"} ${ap.cur ? ap.cur.label : "-"} st=${dec.status} k=${dec.k} held=[${[...ap.ctrl.held.keys()].join(" ")}] ev=${ev.map((e) => `${e.key || e.type}${e.down === true ? "+" : e.down === false ? "-" : ""}@${e.frame}`).join(" ")}${nav ? ` path=${(nav.path || []).slice(0, 4).map((c) => c.join(".")).join(">")} esc=${nav.escape ? JSON.stringify(nav.escape) : ""} best=${(nav.best / world.cell).toFixed(2)}@${nav.bestT.toFixed(2)}` : ""} foes=${world.things.filter((th) => th.rel === "hostile" && th.dist < 6).map((th) => `${th.key}@${th.p2.map((x) => x.toFixed(0)).join(",")}`).join(" ")} vel=${world.player && world.player.vel ? world.player.vel.map((x) => x.toFixed(2)).join(",") : ""} g=${world.player ? world.player.onGround : ""}`);
       }
       if (dec.status === "done" || dec.status === "fail" || dec.status === "idle") { result = { status: dec.status === "idle" ? "done" : dec.status, msg: dec.message, hint: dec.hint }; break; }
-      if (S.closed) { result = { status: "error", msg: "the game disconnected (crashed?)" }; break; }
+      if (S.closed) { result = stopWhy ? { status: "ended", msg: stopWhy } : await gameTrouble(); break; }
       const b = ap.cur ? { verb: ap.cur.o?.verb, careful: !!ap.cur.o?.careful, target: ap.cur.thingId ?? ap.cur.target ?? (ap.cur.thing ? ap.cur.thing.id : null) } : null;
       const evs = await stepWorld(Math.max(1, dec.k));
+      if (deadWatch.hit) { result = { status: "ended", msg: stopWhy }; break; }
       if (until && until.hit) { result = untilResult(false); break; }
       const wake = wakeFor(evs, b);
       if (wake) { result = evs.some((e) => e.kind === "goal") ? { status: "goal", msg: "the game reports a win" } : { status: "interrupted", msg: wake }; break; }
       if (world.t - t0 >= cap - 1e-9) { result = { status: "time", msg: `stopped after ${r1(world.t - t0)}s of game time${ap.cur ? ` (${clip(ap.cur.label, 40)} still running; give a new order or the same one again)` : ""}` }; break; }
     }
+    } catch (e) {
+      // the game closed or hung under a step: a session stop (the wall cap) says so; a real exit/hang is told apart
+      if (stopWhy) result = { status: "ended", msg: stopWhy };
+      else if (S.closed || hung) result = await gameTrouble();
+      else throw e;
+    }
+    if (result.status === "ended") result.msg = endedMsg(result.msg);
+    if (result.outcome) { const why = result.msg; setTimeout(() => shutdown(why, result.outcome), 10); }
     // results of a chain: show each finished order
     const parts = ap.results.map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}${ap.results.length > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
     if (result.status === "interrupted" || result.status === "time" || result.status === "goal" || result.status === "until") { if (ap.cur) parts.push(`… ${clip(ap.cur.label, 40)} (stopped)`); ap.clear(); }
     rec.status = result.status; rec.msg = parts.length > 1 ? parts.join(" → ") : result.msg || ap.results.at(-1)?.msg || ""; rec.seconds = +(world.t - t0).toFixed(2);
     if (ap.results.length > 1 && (result.status === "done" || result.status === "fail")) result.msg = parts.join(" → ");
     // flush logs so errors/notices from the last frames show up now
-    const lateLogs = await S.drainLogs();
+    const lateLogs = S.closed || hung || stopWhy ? [] : await S.drainLogs().catch(() => []);
     if (lateLogs.length) for (const e of tracker.update(world, world, { logs: lateLogs })) { timeline.push({ t: +e.t.toFixed(2), frame: e.frame, kind: e.kind, text: e.text }); pending.push(e); if (e.kind === "error") errors.push({ t: +e.t.toFixed(2), text: e.text }); }
     const line = resultLine({ status: result.status, order: list.length > 1 && (result.status === "interrupted" || result.status === "time") ? text : list.length === 1 ? text : null, msg: result.msg, seconds: world.t - t0 }) + (result.hint && result.status === "fail" ? `\n  hint: ${result.hint.split("\n")[0]}` : "");
     writeProgress();
@@ -302,7 +352,7 @@ export async function runDaemon(dir) {
     const dec = ap.decide(world);
     if (dec.status === "call") {
       const ev0 = ap.ctrl.emit(dec.want, frame);
-      if (ev0.length) { await S.input(ev0); recorder.add(ev0); }
+      if (ev0.length) { await S.input(ev0); recorder.add(ev0); sent(ev0); }
       let msg;
       try { const r = await S.call(dec.name, dec.args); msg = `called ${dec.name}(${dec.args.join(", ")}) → ${clip(JSON.stringify(r.result ?? null), 120)}`; recorder.call(frame, dec.name, dec.args); }
       catch (e) { msg = `call ${dec.name} failed: ${e.message}`; }
@@ -311,7 +361,7 @@ export async function runDaemon(dir) {
       return;
     }
     const ev = ap.ctrl.emit(dec.want, frame);
-    if (ev.length) { await S.input(ev); recorder.add(ev); }
+    if (ev.length) { await S.input(ev); recorder.add(ev); sent(ev); }
     if ((dec.status === "done" || dec.status === "fail" || dec.status === "idle") && live.order) chainFinished(dec);
     if (S.closed) return;
     const b = ap.activeOrder();
@@ -319,6 +369,7 @@ export async function runDaemon(dir) {
     // small steps keep a watched window responsive (the game presents frames as it steps)
     const k = Math.max(1, Math.min(opts.watch ? 2 : 4, dec.k || cfg.tick));
     const evs = await stepWorld(k);
+    if (deadWatch.hit) { if (live.waiter) settle("ended", endedMsg(stopWhy)); live.stop = true; return; }
     if (until && until.hit) {
       if (live.waiter) settle("until", untilResult(false).msg);
       if (live.order && live.order.status === "running") { live.order.status = "until"; live.order.msg = until.hit.why; live.order.seconds = +(world.t - live.order.t).toFixed(2); live.order = null; }
@@ -338,13 +389,21 @@ export async function runDaemon(dir) {
       if (live.paused) { await new Promise((r) => { live.resume = r; }); rebase(); continue; }
       if (!live.waiter && Date.now() - live.lastCmd > live.pauseAfter * 1000) { pauseLive(`no orders for ${live.pauseAfter}s`); continue; }
       try { await lock.run(liveTick); }
-      catch (e) { log(`live tick failed: ${e.stack || e.message}`); if (live.waiter) settle("error", e.message); await sleep(50); }
+      catch (e) {
+        if (stopWhy || S.closed || hung) break;   // told below
+        log(`live tick failed: ${e.stack || e.message}`); if (live.waiter) settle("error", e.message); await sleep(50);
+      }
       const target = live.baseWall + ((frame - live.baseFrame) / fps / live.speed) * 1000, now = Date.now();
       if (target > now) await sleep(target - now);
       else if (now - target > 250) rebase();   // the game steps slower than real time: don't try to catch up
       else await sleep(0);                     // let HTTP commands in
     }
-    if (live.waiter) settle("error", S.closed ? "the game disconnected (crashed?)" : "the session is ending");
+    if (stopWhy) { if (live.waiter) settle("ended", endedMsg(stopWhy)); }
+    else if (S.closed || hung) {
+      const tr = await gameTrouble();
+      if (live.waiter) settle("error", tr.msg);
+      setTimeout(() => shutdown(tr.msg, tr.outcome), 10);
+    } else if (live.waiter) settle("error", "the session is ending");
     log("live loop stopped");
   }
   function pauseLive(why) {
@@ -432,20 +491,27 @@ export async function runDaemon(dir) {
     } catch (e) { log(`progress write failed: ${e.message}`); }
   }
 
-  async function finalize(reason, outcome, feedback) {
-    if (finalizing) return null;
+  /** "<why>; the session is over: run END …" for an order the session's end stopped. */
+  function endedMsg(why) { return `${why}; the session is over: run END with your feedback (it is still recorded)`; }
+  function finalize(reason, outcome, feedback) { return (finalP ??= finalizeNow(reason, outcome, feedback)); }
+  async function finalizeNow(reason, outcome, feedback) {
     finalizing = true;
     clearTimeout(idleTimer); clearTimeout(maxTimer); clearTimeout(untilTimer);
     log(`finalizing: ${reason}`);
+    // a running order stops first and is told why (it used to step on into the closed game: "the game disconnected")
+    stopWhy ??= reason;
+    if (doRunning) { await Promise.race([doRunning.catch(() => {}), sleep(hangMs + 3000)]); }
     // live: stop the loop first, so nothing steps after the final snapshot (the replay must end on the same frame)
     if (live.on) { live.stop = true; if (live.resume) { const r0 = live.resume; live.resume = null; r0(); } try { await live.loopP; } catch { /* reported */ } }
     if (live.order && live.order.status === "running") { live.order.status = "ended"; live.order.msg = "still running when the session ended"; live.order.seconds = +(world.t - live.order.t).toFixed(2); }
     pace.frozenSince = null;   // the final pause (writing feedback) isn't play time
     let endState = null;
-    try { if (!S.closed) { const snap = await S.snapshot(); endState = snap.state; for (const l of await S.drainLogs()) if (l.level === "error") errors.push({ t: +world.t.toFixed(2), text: `game error: ${l.message}` }); } } catch (e) { log(`final snapshot failed: ${e.message}`); }
+    try { if (!S.closed && !hung) { const snap = await S.snapshot(); endState = snap.state; for (const l of await S.drainLogs()) if (l.level === "error") errors.push({ t: +world.t.toFixed(2), text: `game error: ${l.message}` }); } } catch (e) { log(`final snapshot failed: ${e.message}`); }
     tracker.finish(world.t);
+    const st0 = {};
     if (!outcome) outcome = until && until.hit ? "until reached" : world.won ? "won" : world.dead ? "died" : "ended";
-    const st = state({ status: "finished", outcome, endReason: reason, feedback: feedback || null, endedAt: new Date().toISOString() });
+    if (deadWatch.hit) st0.stuckDead = deadWatch.hit;
+    const st = state({ status: "finished", outcome, endReason: reason, feedback: feedback || null, endedAt: new Date().toISOString(), ...st0 });
     let summary = "";
     try {
       const rp = path.join(dir, "replay.jsonl");
@@ -454,10 +520,7 @@ export async function runDaemon(dir) {
       const png = await coveragePNG(grid, { path: trail, deaths: tracker.deaths, stuck: ap.incidents });
       if (png) { fs.writeFileSync(path.join(dir, "coverage.png"), png); st.coverage.png = path.join(dir, "coverage.png"); }
       const r = reportData(st);
-      fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(r, null, 1));
-      const rel = (p) => path.relative(spec.root, p).replace(/\\/g, "/");
-      const link = (p) => path.relative(dir, p).replace(/\\/g, "/");
-      fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, { rel, link, replayCmd: "witness replay", config: spec.configFile ? rel(spec.configFile) : null, flags: spec.launchFlags || "" }));
+      writeReports(dir, r);
       const S2 = r.stats;
       summary = `${outcome.toUpperCase()} after ${r1(world.t)}s game time · ${S2.orders} orders · fights ${r.fights.length} (${S2.fightsWon} won) · deaths ${S2.deaths} · stuck ${S2.stuck} · notes ${notes.length}${errors.length ? ` · ${errors.length} game errors` : ""}`;
     } catch (e) { log(`report failed: ${e.stack || e.message}`); summary = `report failed: ${e.message}`; }
@@ -468,17 +531,18 @@ export async function runDaemon(dir) {
   }
 
   // ---- lifetime guards
-  const idleMs = Math.max(30, +(opts.idle || 300)) * 1000, maxMs = Math.max(0.1, +(opts.minutes || 20)) * 60000;
+  const idleMs = Math.max(30, +(opts.idle || 300)) * 1000, maxMs = wallMin * 60000;
   let idleTimer = null;
   const touch = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => shutdown("idle timeout", "idle"), idleMs); };
-  const maxTimer = setTimeout(() => shutdown("max session time", "timeout"), maxMs);
+  const maxTimer = setTimeout(() => shutdown(`session time limit reached (max ${wallMin} min)`, "timeout"), maxMs);
   touch();
-  S.conn.onClose(() => { if (!finalizing) { log("the game disconnected"); shutdown("the game exited or crashed", "crashed"); } });
+  // the game went away by itself: a running order reports it (with the exit code); otherwise the session ends here
+  S.conn.onClose(() => { if (!finalizing) { log("the game disconnected"); setTimeout(async () => { if (!finalizing && !doRunning) { const tr = await gameTrouble(); shutdown(tr.msg, tr.outcome); } }, 50); } });
   let chain = Promise.resolve();
   async function shutdown(reason, outcome, feedback) {
     const r = await finalize(reason, outcome, feedback);
     try { server && server.close(); } catch { /* closed */ }
-    setTimeout(() => process.exit(0), 150);
+    setTimeout(() => process.exit(0), 400);   // time for a late END to land its feedback
     return r;
   }
   process.on("SIGINT", () => shutdown("interrupted (SIGINT)", "stopped"));
@@ -491,7 +555,16 @@ export async function runDaemon(dir) {
     touch();
     live.lastCmd = Date.now();
     const cmd = req.cmd, a = req.args || {};
-    if (finalizing) return { ok: false, code: 1, text: "this session has ended" };
+    if (finalizing) {
+      // END after the session closed itself (the wall cap, stuck dead, the game exiting): the feedback still counts
+      if (cmd === "end") {
+        const r = await finalP;
+        const fb = { fun: a.fun != null ? +a.fun : null, difficulty: a.difficulty != null ? +a.difficulty : null, text: a.feedback ? String(a.feedback).slice(0, 4000) : null };
+        if (fb.text != null || fb.fun != null || fb.difficulty != null) addLateFeedback(dir, fb);
+        return { ok: true, text: `the session had already ended (${stopWhy || "ended"})${fb.text != null || fb.fun != null ? "; your feedback was added to the report" : ""}${r ? `\n${r.summary}\nreport: ${r.report}` : ""}`, data: r };
+      }
+      return { ok: false, code: 1, text: `this session has ended${stopWhy ? ` (${stopWhy})` : ""}: run END with your feedback` };
+    }
     const shoot = (why, scale) => (live.on ? lock.run(() => screenshot(why, scale)) : screenshot(why, scale));
     switch (cmd) {
       case "ping": return { ok: true, text: "pong" };
@@ -503,10 +576,11 @@ export async function runDaemon(dir) {
         return { ok: true, ...o, shot };
       }
       case "do": {
-        const r = live.on ? await liveDo(String(a.orders || ""), a.for) : await runDo(String(a.orders || ""), a.for);
+        let r;
+        if (live.on) r = await liveDo(String(a.orders || ""), a.for);
+        else { doRunning = runDo(String(a.orders || ""), a.for); try { r = await doRunning; } finally { doRunning = null; } }
         if (r.code === 2) return { ok: false, code: 2, text: r.text };
         const o = look(r.result, a.json);
-        if (S.closed && !finalizing) setTimeout(() => shutdown("the game exited or crashed", "crashed"), 10);
         return { ok: true, ...o };
       }
       case "shot": { const f = await shoot(a.why || "shot", a.scale ? +a.scale : 0); return f ? { ok: true, text: f, shot: f } : { ok: false, code: 1, text: "this game can't take screenshots (no 'screenshot' capability)" }; }
@@ -525,7 +599,7 @@ export async function runDaemon(dir) {
         const fb = { fun: a.fun != null ? +a.fun : null, difficulty: a.difficulty != null ? +a.difficulty : null, text: a.feedback ? String(a.feedback).slice(0, 4000) : null };
         const r = await finalize(a.reason || "ended by the tester", a.outcome || null, fb);
         try { server && server.close(); } catch { /* closed */ }
-        setTimeout(() => process.exit(0), 300);
+        setTimeout(() => process.exit(0), 400);
         return { ok: true, text: r ? `${r.summary}\nreport: ${r.report}\nreplay: ${r.replay}` : "ended", data: r };
       }
       default: return { ok: false, code: 1, text: `unknown command '${cmd}'` };
