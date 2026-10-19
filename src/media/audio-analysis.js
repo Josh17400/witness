@@ -1230,7 +1230,7 @@ export function bandPass(x, sr, t0, t1, bands) {
  */
 export function addedSound(x, sr, t) {
   const n = 2048, w = Math.round(0.04 * sr), i = Math.round(t * sr);
-  if (i - w - Math.round(0.004 * sr) < 0 || i + w > x.length) return false;
+  if (i - w - Math.round(0.004 * sr) < 0 || i + w > x.length) return null;
   const band = (a) => {
     const seg = new Float32Array(n);
     for (let k = 0; k < w; k++) seg[k] = x[a + k];
