@@ -167,6 +167,18 @@ for (const suite of ["unit", "e2e"]) {
   if (counts) console.log(`  play ${suite}: ${counts[0]}`);
 }
 
+// Python adapter (standard library only): skipped when no Python is installed
+{
+  const f = path.join(here, "python", "test_idle.py");
+  const py = ["python3", "python", "py"].find((p) => { const v = spawnSync(p, ["--version"], { encoding: "utf8", timeout: 15000 }); return v.status === 0 && /Python 3/.test(v.stdout + v.stderr); });
+  if (fs.existsSync(f) && py) {
+    const m = spawnSync(py, [f], { encoding: "utf8", timeout: 120000 });
+    ok("python adapter idle hook", m.status === 0, (m.stdout + m.stderr).slice(-1500));
+    const counts = /(\d+) passed, (\d+) failed/.exec(m.stdout || "");
+    if (counts) console.log(`  python adapter: ${counts[0]}`);
+  } else if (fs.existsSync(f)) console.log("  python adapter: skipped (no Python 3 found)");
+}
+
 // media suites (separate runner)
 if (fs.existsSync(path.join(here, "media", "run.mjs"))) {
   const m = spawnSync(process.execPath, [path.join(here, "media", "run.mjs")], { encoding: "utf8", timeout: 300000 });

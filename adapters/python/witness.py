@@ -40,6 +40,7 @@ __all__ = [
     "PROTOCOL", "DEFAULT_ADDR", "active", "recording", "address", "run", "seed", "frame", "time",
     "log", "info", "warn", "error", "input_events", "is_down", "record_frame", "record_event",
     "record_touch", "mark", "start_recording", "AudioCapture", "json_safe", "WitnessError",
+    "watching",
 ]
 
 PROTOCOL = 1
@@ -53,11 +54,26 @@ class WitnessError(Exception):
     """Raised for adapter misuse (bad arguments, connecting twice, unreachable CLI)."""
 
 
+# Fallback for run(idle=...): called repeatedly while waiting for the next command. Kept for
+# compatibility with older glue code; prefer passing idle= to run().
+IDLE = None
+
+
 # ---------------------------------------------------------------------------- mode detection
 
 def active():
     """True when the game should run in witness mode (WITNESS_ADDR is set or --witness was passed)."""
     return bool(os.environ.get("WITNESS_ADDR")) or "--witness" in sys.argv
+
+
+def watching():
+    """True when witness mode is active AND WITNESS_WATCH=1 (`witness play start --watch`).
+
+    A watched game shows its window, presents a frame every step (or every 2nd step), drops the
+    viewer's real input (only Witness-injected input reaches it) and passes idle= to run() so its
+    window stays responsive between commands. It must NOT pace itself: the CLI paces to real time.
+    """
+    return active() and os.environ.get("WITNESS_WATCH") == "1"
 
 
 def recording():
@@ -341,6 +357,7 @@ class _Adapter:
         self.recorder = None
         self.rec_pending = []    # record_event()/record_touch() events for the next record_frame()
         self.size = None         # the hello's logical size (touch helpers normalize by it)
+        self.threaded = False    # commands are read on a background thread (run(idle=...))
 
     # -------------------------------------------------------------- logging
     def log(self, level, message):
@@ -381,11 +398,15 @@ class _Adapter:
         if not self.connected:
             return
         self.connected = False
-        for closer in (self.reader.close, lambda: self.sock.shutdown(socket.SHUT_RDWR), self.sock.close):
+        closers = (self.reader.close, lambda: self.sock.shutdown(socket.SHUT_RDWR), self.sock.close)
+        if self.threaded:  # unblock the reader thread's readline first (close() would wait on its lock)
+            closers = (closers[1], closers[0], closers[2])
+        for closer in closers:
             try:
                 closer()
             except OSError:
                 pass
+        self.threaded = False
 
     # -------------------------------------------------------------- simulation
     def step_once(self, h, dt):
@@ -508,9 +529,13 @@ class _Adapter:
             "eval": self.do_eval, "logs": self.do_logs, "perf": self.do_perf,
         }
         available = set(h["capabilities"])
+        next_line = self.reader.readline
+        idle = h.get("idle")
+        if idle is not None:
+            next_line = self._threaded_reader(idle)
         while True:
             try:
-                line = self.reader.readline()
+                line = next_line()
             except OSError:
                 break
             if not line:
@@ -543,6 +568,42 @@ class _Adapter:
                 self.send({"id": mid, "ok": False, "error": _game_traceback(e)})
         self.close()
 
+    def _threaded_reader(self, idle):
+        """Read command lines on a daemon thread; call idle() about every 30 ms while none is ready."""
+        import queue
+        import threading
+        lines = queue.Queue()
+        reader = self.reader
+
+        def pump():
+            while True:
+                try:
+                    got = reader.readline()
+                except (OSError, ValueError):  # socket reset, or the file was closed under us
+                    got = b""
+                lines.put(got)
+                if not got:
+                    return
+        self.threaded = True
+        threading.Thread(target=pump, name="witness-reader", daemon=True).start()
+        failed = []
+
+        def next_line():
+            while True:
+                try:
+                    return lines.get(timeout=0.03)
+                except queue.Empty:
+                    pass
+                try:
+                    idle()
+                except Exception as e:  # never let the idle hook kill the command loop
+                    if not failed:
+                        failed.append(e)
+                        msg = "witness: idle hook failed (further errors suppressed): %s" % _game_traceback(e)
+                        self.log("error", msg)
+                        sys.stderr.write(msg + "\n")
+        return next_line
+
 
 _A = _Adapter()
 
@@ -568,7 +629,7 @@ class _LogBridge:
 
 def run(name="game", fps=60, size=None, *, reset=None, on_input=None, update=None, snapshot=None,
         screenshot=None, audio=None, calls=None, namespace=None, perf=None, keys=None,
-        engine="python", language="python", capture_logging=True, touch=False):
+        engine="python", language="python", capture_logging=True, touch=False, idle=None):
     """Connect to the Witness CLI and serve commands until it says quit (or disconnects).
 
     Handlers (all optional except `update` and `snapshot`):
@@ -585,6 +646,10 @@ def run(name="game", fps=60, size=None, *, reset=None, on_input=None, update=Non
       calls                           {"name": fn(*args)} game-specific commands
       namespace                       dict (or callable returning one) for `eval`; default __main__
       perf()                          extra perf fields, e.g. {"counts": {...}}
+      idle()                          called about every 30 ms while waiting for the next command
+                                      (e.g. pump a visible window's events in watch mode); commands
+                                      are then read on a background thread. Falls back to the
+                                      module-level witness.IDLE. Exceptions are logged once.
     Returns normally after quit so the game can exit cleanly.
     """
     if update is None or snapshot is None:
@@ -608,7 +673,8 @@ def run(name="game", fps=60, size=None, *, reset=None, on_input=None, update=Non
     _A.size = tuple(size) if size else None
     h = {"fps": fps, "reset": reset, "on_input": on_input, "update": update, "snapshot": snapshot,
          "screenshot": screenshot, "audio": audio, "calls": calls, "namespace": namespace,
-         "perf": perf, "capabilities": caps, "touch": bool(touch)}
+         "perf": perf, "capabilities": caps, "touch": bool(touch),
+         "idle": idle if idle is not None else IDLE}
     bridge = None
     if capture_logging:
         import logging

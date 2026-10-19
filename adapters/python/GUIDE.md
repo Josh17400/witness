@@ -225,6 +225,34 @@ witness.run(..., on_input=bridge.inject, update=frame, screenshot=bridge.screens
   `sound.play()` in many places, add a single `play()` helper first. To read samples as arrays,
   `pygame.sndarray.array(sound)` also works (needs numpy).
 
+### Watch mode (WITNESS_WATCH=1)
+
+`witness play start --watch` launches the game with `WITNESS_WATCH=1` so a human can watch the
+session live; `witness.watching()` is true then. The CLI steps the game continuously and paces it
+to real time, so the game must **not** pace itself (no `clock.tick`, no sleep). A watched game:
+
+* shows its window (keep the real video driver: `wp.prepare(headless=not witness.watching())`);
+* presents a frame every step (or every 2nd step) from `update`;
+* drops the viewer's real input: only Witness-injected events may reach the game;
+* passes `idle=` to `witness.run` to pump window events while waiting for the next command
+  (called about every 30 ms; commands are then read on a background thread).
+
+```python
+if witness.watching():
+    pending, real_get = [], pygame.event.get
+    pygame.event.post = lambda e, *a, **k: pending.append(e) or True   # the Bridge's events
+    def get(*a, **k):
+        real_get()                                   # pump the window, drop real input
+        out = pending[:]; del pending[:]; return out
+    pygame.event.get = get
+    def watched(dt):
+        frame(dt); window.blit(canvas, (0, 0)); pygame.display.flip()
+    witness.run(..., update=watched, idle=real_get)
+```
+
+Nothing changes when `WITNESS_WATCH` isn't set. Drawing must not change game state, so a watched
+session still replays exactly.
+
 ## 10. Arcade and Pyglet
 
 Both own the loop through `pyglet.app.run()` / `arcade.run()`. In witness mode **don't call it**.
