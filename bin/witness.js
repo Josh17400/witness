@@ -144,11 +144,15 @@ const CMD_HELP = {
       WCAG ratio and ΔE between two pixel sets. A mask is x,y,w,h | #rrggbb[~tolerance] | diff:<without.png>,
       and --b may be ring[:radius] (the pixels just outside --a, e.g. outline vs the ground around it).
   motion [frame.png ...]  |  motion --at 1 --time 0.5 [--input ...] [--region x,y,w,h]
-      per-frame box/centroid of what moves, step sizes, path length, jitter (px off a smooth path: steady motion and
-      smooth acceleration give 0), and the lowest row's span (foot slide: compare its change with the centroid's).
-      Without files it drives the game and screenshots every frame (streamed: only the background is kept).
-      --background auto|first|median|<file.png>  (auto: median for 8+ frames; first: frame 0 must not contain the
-      object; median: it must move its own size). One object at a time: use --region to keep other movers out.`,
+      every moving object, tracked frame to frame: its speed, net move, jitter (px off a smooth path: steady motion
+      and smooth acceleration give 0), stutters (a repeated frame, a double step), flicker (gone for a few frames),
+      frames where it merged with something (left out of the steps); things that appear or vanish without moving
+      are listed apart. A moving camera is detected (per-frame scroll, jitter, uneven steps like "f30 [3,0] instead
+      of ~[2,0]") and removed, so object motion is in world pixels. Prints one object's frames (--track N, or
+      --near x,y). Drives the game and screenshots every frame (needs 'reset': one pass for the camera and the
+      background, one to measure), or reads PNG files.
+      --background auto|first|median|<file.png>  (auto: median for 8+ frames; median needs movers to move their own
+      size) · --camera auto|static|moving · --min-size 6 (smallest object, px) · --threshold 16`,
   doctor: `witness doctor [--time 3]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.

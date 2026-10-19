@@ -7,6 +7,7 @@
 //             plus Lumen's analysis core (analyzeEvent, analyzeMusic, analyzeMix, ...)  (witness listen)
 //   pictures  timelinePNG, soundSheetPNG                     (witness listen)
 //   diff      diffImages                                     (witness shot --diff)
+//   tracking  components, trackObjects, trackReport, estimateShift, cameraPath, mosaicPlate  (measure motion v2)
 //   sheets    cropImage, zoomImage, contactSheet, frameDiffScore, pickKeyFrames  (witness shot --sheet/--crop/--zoom)
 //   measure   blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo,
 //             maskStats, ringMask, contrast, motion           (witness measure)
@@ -28,4 +29,7 @@ export {
   blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
   ringMask, contrast, motion, motionStream, medianPlate, medianSampleIndices, pathJitter, AUTO_MEDIAN_FRAMES,
 } from "./measure.js";
+export {
+  components, trackObjects, trackReport, estimateShift, cameraPath, summarizeCamera, mosaicPlate, maskAgainstMosaic,
+} from "./track.js";
 export { cropImage, zoomImage, frameDiffScore, pickKeyFrames, contactSheet } from "./sheet.js";

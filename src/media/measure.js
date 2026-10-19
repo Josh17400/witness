@@ -30,6 +30,7 @@
 
 import { decodePNG } from "./png.js";
 import { parseColor } from "./raster.js";
+import { components, trackObjects, trackReport, maskAgainstMosaic } from "./track.js";
 
 const MAX_WORST = 10;
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -547,10 +548,10 @@ export function pathJitter(points) {
  * Streaming version of motion(): push frames one at a time (only the plate is kept), then finish().
  * plate: a clean background image, or "first" (the first pushed frame becomes the plate).
  */
-export function motionStream({ region, threshold = 16, plate = "first", minPixels = 1 } = {}) {
+export function motionStream({ region, threshold = 16, plate = "first", minPixels = 1, objects = false, minObject = 6, mosaic = null, offsets = null } = {}) {
   const thr = clampThreshold(threshold, "motion");
   const minPx = Math.max(1, Math.floor(Number(minPixels) || 1));
-  let P = plate === "first" || plate == null ? null : toImage(plate, "motion", "background");
+  let P = mosaic ? null : plate === "first" || plate == null ? null : toImage(plate, "motion", "background");
   let R = null, w = 0, h = 0;
   const raw = [];
   return {
@@ -558,19 +559,34 @@ export function motionStream({ region, threshold = 16, plate = "first", minPixel
       const im = toImage(frame, "motion", `#${raw.length}`);
       if (!R) { w = im.width; h = im.height; R = clipRegion(region, w, h, "motion"); }
       if (im.width !== w || im.height !== h) throw new RangeError(`motion: frame #${raw.length} is ${im.width}×${im.height}, frame #0 is ${w}×${h}`);
-      if (!P) P = { width: w, height: h, data: Uint8Array.from(im.data.subarray(0, w * h * 4)) };
-      if (P.width !== w || P.height !== h) throw new RangeError(`motion: background is ${P.width}×${P.height}, frames are ${w}×${h}`);
-      const mask = diffMask(P, im, R, thr);
+      let mask;
+      if (mosaic) mask = maskAgainstMosaic(im, mosaic, offsets[raw.length] || [0, 0], R, thr);
+      else {
+        if (!P) P = { width: w, height: h, data: Uint8Array.from(im.data.subarray(0, w * h * 4)) };
+        if (P.width !== w || P.height !== h) throw new RangeError(`motion: background is ${P.width}×${P.height}, frames are ${w}×${h}`);
+        mask = diffMask(P, im, R, thr);
+      }
       const s = maskSums(mask, w, h);
-      if (s.count < minPx) { raw.push({ count: s.count, bbox: null, cx: null, cy: null, low: null }); return; }
+      const comps = objects ? components(mask, w, h, { region: R, minPixels: minObject }) : null;
+      if (s.count < minPx) { raw.push({ count: s.count, bbox: null, cx: null, cy: null, low: null, comps }); return; }
       const y = s.bbox.y + s.bbox.h - 1;
       let x0 = -1, x1 = -1;
       for (let x = s.bbox.x; x < s.bbox.x + s.bbox.w; x++) if (mask[y * w + x]) { if (x0 < 0) x0 = x; x1 = x; }
-      raw.push({ ...s, low: { y, x0, x1 } });
+      raw.push({ ...s, low: { y, x0, x1 }, comps });
     },
-    finish(mode = plate === "first" || plate == null ? "first" : "image") {
+    finish(mode = mosaic ? "mosaic" : plate === "first" || plate == null ? "first" : "image") {
       if (!raw.length) throw new TypeError("motion: no frames");
-      return motionResult(raw, { w, h, R, mode, thr });
+      const r = motionResult(raw, { w, h, R, mode, thr });
+      if (objects) {
+        // several movers: blobs of each frame's mask, followed across frames (steps in world space under a camera)
+        const tracks = trackObjects(raw.map((f) => f.comps || []));
+        const off = offsets ? (i) => offsets[i] || [0, 0] : null;
+        const reps = tracks.map((t) => ({ ...trackReport(t, off), frames: t.frames.map((f) => (f.missing ? { i: f.i, missing: f.missing } : { i: f.i, bbox: f.bbox, centroid: [r3(f.cx), r3(f.cy)], count: f.count })) }));
+        // things that never move (a prop that appears or vanishes, a stale patch of the plate) are listed apart
+        r.static = reps.filter((o) => o.static).map(({ id, first, last, size, frames }) => ({ id, first, last, size, bbox: frames.find((f) => !f.missing).bbox }));
+        r.objects = reps.filter((o) => !o.static).sort((a, b) => b.seen * b.size - a.seen * a.size).map((o, k) => ({ ...o, rank: k + 1 }));
+      }
+      return r;
     },
   };
 }

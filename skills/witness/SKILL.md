@@ -62,7 +62,8 @@ witness shot --at 3 --diff witness/shots/before.png   # what changed visually (r
 witness listen --time 8 --input "space@1" --events "land: rose(state.player.grounded)"   # sounds vs their causes
 witness replay last --shot                     # what the human saw when they hit the bug
 witness call teleport 100 200 --at 1           # run a game command, then print the state
-witness measure scale|box|contrast|motion ...  # pixel facts: integer scale/blur, sprite box, WCAG contrast, motion/jitter
+witness measure motion --at 1 --time 1 --input "right@0-2"   # every mover: speed, jitter, stutter, flicker; camera scroll + hitches
+witness measure scale|box|contrast ...         # pixel facts: integer scale/blur, sprite box, WCAG contrast
 ```
 
 * **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Timing that should "feel fair" (coyote time, buffer,

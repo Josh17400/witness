@@ -64,11 +64,31 @@ async function motionMeasure(m, fileFrames, opt, region) {
   const bgOpt = opt.background && opt.background !== true ? String(opt.background) : "auto";
   const named = ["auto", "first", "median"].includes(bgOpt);
   const bgImage = named ? null : (() => { const p = path.resolve(bgOpt); if (!fs.existsSync(p)) die(`no such image: ${bgOpt}`); return fs.readFileSync(p); })();
+  const camOpt = opt.camera && opt.camera !== true ? String(opt.camera) : "auto";
+  if (!["auto", "static", "moving"].includes(camOpt)) die("--camera is auto, static or moving");
   const threshold = +(opt.threshold || 16);
-  let r, f0 = null, fps = null;
+  const minObject = opt["min-size"] && opt["min-size"] !== true ? Math.max(1, +opt["min-size"]) : 6;
+  const copy = (im) => ({ width: im.width, height: im.height, data: Uint8Array.from(im.data) });
+  let r, f0 = null, fps = null, camera = null, choice = "";
+  // the plate and camera, then one streamed pass that finds every mover
+  const plan = (N, cam) => {
+    if (cam && cam.moving && camOpt !== "static") return "mosaic";
+    if (bgImage) return "image";
+    if (bgOpt === "auto") return N >= m.AUTO_MEDIAN_FRAMES ? "median" : "first";
+    return bgOpt;
+  };
+  const describe = (mode, N) => (mode === "mosaic" ? `a world mosaic (the camera moves)` : bgOpt === "auto" ? (mode === "median" ? `auto → median (${N} frames)` : `auto → first (only ${N} frames; median needs ${m.AUTO_MEDIAN_FRAMES})`) : mode);
   if (fileFrames.length) {
     if (fileFrames.length < 2) die("motion needs at least 2 frames");
-    r = m.motion(fileFrames, { region, threshold, background: bgImage || bgOpt });
+    const imgs = fileFrames.map((b) => m.decodePNG(b));
+    camera = camOpt === "static" ? null : m.cameraPath(imgs, { region });
+    const mode = plan(imgs.length, camera);
+    const st = mode === "mosaic"
+      ? m.motionStream({ region, threshold, objects: true, minObject, mosaic: m.mosaicPlate(imgs, camera.positions), offsets: camera.positions })
+      : m.motionStream({ region, threshold, objects: true, minObject, plate: mode === "image" ? m.decodePNG(bgImage) : mode === "median" ? m.medianPlate(imgs, region) : "first" });
+    for (const im of imgs) st.push(im);
+    r = st.finish(mode === "image" ? "image" : mode);
+    choice = describe(mode, imgs.length);
   } else {
     await withGame(opt, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
@@ -78,52 +98,104 @@ async function motionMeasure(m, fileFrames, opt, region) {
       const N = f1 - f0 + 1;
       if (N > 601) die("motion captures every frame: keep --time under 10 s");
       if (N < 2) die("motion needs at least 2 frames (--time)");
-      let mode = bgOpt === "auto" ? (N >= m.AUTO_MEDIAN_FRAMES ? "median" : "first") : bgImage ? "image" : bgOpt;
+      if (!s.has("reset")) die("measure motion needs 'reset' (one pass finds the camera and background, a second measures)");
       const grab = async () => shotImage(await s.screenshot());
-      let plate = mode === "image" ? bgImage : mode === "first" ? "first" : null;
-      if (mode === "median" && !s.has("reset")) {
-        // no reset: no second pass, so keep the frames (capped above)
-        const st = await begin(s, runOpts(opt, cfg));
-        const frames = [];
-        for (let f = f0; f <= f1; f++) { await stepTo(s, st, f); const im = await grab(); frames.push({ width: im.width, height: im.height, data: Uint8Array.from(im.data) }); }
-        r = m.motion(frames, { region, threshold, background: "median" });
-      } else {
-        if (mode === "median") {
-          // pass 1: only the 15 frames the median plate is built from
-          const want = new Set(m.medianSampleIndices(N).map((i) => f0 + i));
-          const st = await begin(s, runOpts(opt, cfg));
-          const picks = [];
-          for (const f of [...want].sort((a, b) => a - b)) { await stepTo(s, st, f); const im = await grab(); picks.push({ width: im.width, height: im.height, data: Uint8Array.from(im.data) }); }
-          plate = m.medianPlate(picks, region);
-          await s.drainLogs();
-        }
-        // stream every frame against the plate (nothing else is kept)
-        const tracker = m.motionStream({ region, threshold, plate });
-        const st = await begin(s, runOpts(opt, cfg));
-        for (let f = f0; f <= f1; f++) { await stepTo(s, st, f); tracker.push(await grab()); }
-        r = tracker.finish(mode);
+      // pass 1: every frame in order: the camera's motion, and the frames a plate is built from
+      const want = new Set(m.medianSampleIndices(N).map((i) => f0 + i));
+      const picks = [], pickIdx = [], steps = [], positions = [[0, 0]];
+      let prev = null;
+      let st = await begin(s, runOpts(opt, cfg));
+      for (let f = f0; f <= f1; f++) {
+        await stepTo(s, st, f);
+        const im = await grab();
+        if (prev && camOpt !== "static") {
+          const sh = m.estimateShift(prev, im, { region });
+          steps.push({ i: f - f0, dx: -sh.dx, dy: -sh.dy, score: sh.score });
+          const p = positions[positions.length - 1];
+          positions.push([p[0] - sh.dx, p[1] - sh.dy]);
+        } else if (prev) positions.push([0, 0]);
+        if (want.has(f)) { picks.push(copy(im)); pickIdx.push(f - f0); }
+        if (camOpt !== "static") prev = copy(im);
+        else if (!prev) prev = true;
       }
-      if (bgOpt === "auto") r.backgroundChoice = mode === "median" ? `auto → median (${N} frames)` : `auto → first (only ${N} frames; median needs ${m.AUTO_MEDIAN_FRAMES})`;
+      await s.drainLogs();
+      camera = camOpt === "static" ? null : m.summarizeCamera(steps, positions);
+      if (camOpt === "moving" && camera) camera.moving = true;
+      const mode = plan(N, camera);
+      const plate = mode === "mosaic" ? null : mode === "image" ? m.decodePNG(bgImage) : mode === "median" ? m.medianPlate(picks, region) : "first";
+      const mosaic = mode === "mosaic" ? m.mosaicPlate(picks, pickIdx.map((i) => positions[i])) : null;
+      // pass 2: stream every frame against the plate
+      const tracker = m.motionStream({ region, threshold, objects: true, minObject, plate, mosaic, offsets: mode === "mosaic" ? positions : null });
+      st = await begin(s, runOpts(opt, cfg));
+      for (let f = f0; f <= f1; f++) { await stepTo(s, st, f); tracker.push(await grab()); }
+      r = tracker.finish(mode);
+      choice = describe(mode, N);
       printLogs(await s.drainLogs());
     });
   }
+  r.backgroundChoice = choice;
+  r.camera = camera ? { moving: camera.moving, perFrame: camera.perFrame, total: camera.total, jitter: camera.jitter, uneven: camera.uneven, steps: camera.steps.map(({ i, dx, dy }) => ({ i, dx, dy })) } : null;
+  reportMotion(r, opt, f0, fps);
+}
+
+function reportMotion(r, opt, f0, fps) {
   const sm = r.summary;
+  const objs = r.objects || [];
   const fl = (i) => (f0 != null ? `f${f0 + i}` : `#${i}`);
   const box = (b) => (b ? `x=${b.x} y=${b.y} ${b.w}×${b.h}` : "-");
+  // which object's frames to list: --track N (rank), --near x,y (closest in its first frame), else the main one
+  let pick = objs[0] || null;
+  if (opt.track && opt.track !== true) { pick = objs.find((o) => o.rank === +opt.track) || die(`--track ${opt.track}: there are ${objs.length} objects`); }
+  if (opt.near && opt.near !== true) {
+    const [nx, ny] = String(opt.near).split(",").map(Number);
+    const firstPos = (o) => o.frames.find((f) => !f.missing).centroid;
+    pick = [...objs].sort((a, b) => Math.hypot(firstPos(a)[0] - nx, firstPos(a)[1] - ny) - Math.hypot(firstPos(b)[0] - nx, firstPos(b)[1] - ny))[0] || pick;
+  }
+  const world = r.camera && r.camera.moving ? " (world px, camera removed)" : "";
   if (opt.json) {
     printJSON(envelope("measure motion", {
-      verdict: `object in ${sm.framesWithObject}/${r.frames.length} frames, mean step ${sm.meanStep} px, jitter ${sm.jitter}`,
-      summary: { framesWithObject: sm.framesWithObject, pathLength: sm.pathLength, netDistance: sm.netDistance, meanStep: sm.meanStep, maxStep: sm.maxStep, jitter: sm.jitter },
+      verdict: `${objs.length} moving object${objs.length === 1 ? "" : "s"}${pick ? `; #${pick.rank}: ${pick.meanStep} px/f, jitter ${pick.jitter}` : ""}; camera ${r.camera ? (r.camera.moving ? `moves ${r.camera.perFrame} px/f` : "static") : "not checked"}`,
+      summary: {
+        objects: objs.length, framesWithObject: sm.framesWithObject, pathLength: sm.pathLength, netDistance: sm.netDistance, meanStep: sm.meanStep, maxStep: sm.maxStep, jitter: sm.jitter,
+        main: pick ? { rank: pick.rank, meanStep: pick.meanStep, jitter: pick.jitter, stutters: pick.stutters.length, flicker: pick.flicker.length } : null,
+        camera: r.camera ? { moving: r.camera.moving, perFrame: r.camera.perFrame, jitter: r.camera.jitter, uneven: r.camera.uneven.length } : null,
+      },
       data: { ...r, firstFrame: f0, fps },
     }));
     return;
   }
-  const lines = [
-    `motion ${f0 != null ? `f${f0}..f${f0 + r.frames.length - 1}` : `${r.frames.length} images`} (${r.frames.length} frames, background ${r.backgroundChoice || r.background}): object in ${sm.framesWithObject} · path ${sm.pathLength} px · net [${sm.net}] (${sm.netDistance} px) · step mean ${sm.meanStep} / max ${sm.maxStep}${fps ? ` (${r3(sm.meanStep * fps)} px/s)` : ""} · jitter ${sm.jitter ?? "n/a (<5 frames)"}${sm.jitter != null ? " px off a smooth path" : ""}`,
-    ...r.warnings.map((w) => `⚠ ${w}`),
-  ];
-  const rows = r.frames.map((f, i) => `  ${fl(i)}  box ${box(f.bbox)}  centroid ${f.centroid ? `[${f.centroid}]` : "-"}  lowest row ${f.lowestRowSpan ? `y=${f.lowestRowSpan.y} x=${f.lowestRowSpan.x0}..${f.lowestRowSpan.x1}` : "-"}${r.steps[i - 1] ? `  step [${r.steps[i - 1]}]` : ""}`);
-  lines.push(...(rows.length > 60 ? [...rows.slice(0, 30), `  … ${rows.length - 60} frames (--json) …`, ...rows.slice(-30)] : rows));
+  const N = r.frames.length;
+  const lines = [`motion ${f0 != null ? `f${f0}..f${f0 + N - 1}` : `${N} images`} (${N} frames, background ${r.backgroundChoice || r.background}): ${objs.length} moving object${objs.length === 1 ? "" : "s"}${r.camera ? ` · camera ${r.camera.moving ? `moves [${r.camera.perFrame}] px/f` : "static"}` : ""}`];
+  for (const o of objs.slice(0, 8)) {
+    const fate = o.last < N - 1 ? ` · gone after ${fl(o.last)}` : "";
+    const born = o.first > 0 ? ` · appears ${fl(o.first)}` : "";
+    lines.push(`  #${o.rank}  ${fl(o.first)}–${fl(o.last)}  ~${o.size} px · net [${o.net}]${world} · ${o.meanStep} px/f${fps ? ` (${r3(o.meanStep * fps)} px/s)` : ""} · jitter ${o.jitter ?? "n/a"} · stutter ${o.stutters.length ? o.stutters.map((q) => `${q.kind} at ${fl(q.i)}`).join(", ") : "none"}${o.flicker.length ? ` · ⚠ flickers: gone ${o.flicker.map((q) => `${fl(q.from)}${q.to > q.from ? `–${fl(q.to)}` : ""}`).join(", ")}` : ""}${o.occluded ? ` · hidden ${o.occluded}f (overlapping another)` : ""}${o.irregular.length ? ` · merged/cut ${o.irregular.length}f (${fl(o.irregular[0])}${o.irregular.length > 1 ? `…${fl(o.irregular[o.irregular.length - 1])}` : ""}: left out of the steps)` : ""}${born}${fate}`);
+  }
+  if (objs.length > 8) lines.push(`  … ${objs.length - 8} more (--json)`);
+  const stat = r.static || [];
+  if (stat.length) lines.push(`  static changes (appear or vanish without moving: props, pickups, or a background patch the plate got wrong): ${stat.slice(0, 5).map((q) => `${box(q.bbox)} ${fl(q.first)}–${fl(q.last)}`).join(" · ")}${stat.length > 5 ? " · …" : ""}`);
+  if (r.camera && r.camera.moving) {
+    const u = r.camera.uneven;
+    lines.push(`  camera: [${r.camera.perFrame}] px/f on average (net [${r.camera.total}] px) · jitter ${r.camera.jitter} px/f${u.length ? ` · uneven steps: ${u.slice(0, 6).map((q) => `${fl(q.i)} [${q.got}] instead of ~[${q.expected.map(r3)}]`).join(", ")}${u.length > 6 ? ", …" : ""}` : " · steady"}`);
+  }
+  lines.push(...r.warnings.map((w) => `⚠ ${w}`));
+  lines.push(`  all movers as one mask: path ${sm.pathLength} px · net [${sm.net}] · step mean ${sm.meanStep} / max ${sm.maxStep} · jitter ${sm.jitter ?? "n/a"}`);
+  if (pick) {
+    lines.push(`  frames of #${pick.rank}${objs.length > 1 ? " (--track N or --near x,y for another)" : ""}:`);
+    let prevC = null;
+    const rows = pick.frames.map((f) => {
+      if (f.missing) { prevC = null; return `  ${fl(f.i)}  ${f.missing === "occluded" ? "hidden (merged with another object)" : "GONE"}`; }
+      if (pick.irregular.includes(f.i)) { prevC = null; return `  ${fl(f.i)}  box ${box(f.bbox)}  (merged or cut: ${f.count} px vs ~${pick.size})`; }
+      const st = prevC ? `  step [${r3(f.centroid[0] - prevC[0])},${r3(f.centroid[1] - prevC[1])}]` : "";
+      prevC = f.centroid;
+      return `  ${fl(f.i)}  box ${box(f.bbox)}  centroid [${f.centroid}]${st}`;
+    });
+    lines.push(...(rows.length > 60 ? [...rows.slice(0, 30), `  … ${rows.length - 60} frames (--json) …`, ...rows.slice(-30)] : rows));
+  } else {
+    // nothing tracked (e.g. specks below --min-size): the whole-mask table as before
+    const rows = r.frames.map((f, i) => `  ${fl(i)}  box ${box(f.bbox)}  centroid ${f.centroid ? `[${f.centroid}]` : "-"}  lowest row ${f.lowestRowSpan ? `y=${f.lowestRowSpan.y} x=${f.lowestRowSpan.x0}..${f.lowestRowSpan.x1}` : "-"}${r.steps[i - 1] ? `  step [${r.steps[i - 1]}]` : ""}`);
+    lines.push(...(rows.length > 60 ? [...rows.slice(0, 30), `  … ${rows.length - 60} frames (--json) …`, ...rows.slice(-30)] : rows));
+  }
   console.log(lines.join("\n"));
 }
 

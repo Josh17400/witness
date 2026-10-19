@@ -10,6 +10,8 @@
 //                  still works in the step the ground disappears and the 4 after it (5 frames); jump buffer: a press
 //                  up to 4 frames before the landing step jumps on landing. state.player gains vy, vx, grounded, jumps.
 //   MOCK_LEDGE=1   (with MOCK_JUMP) the floor at y=90 ends at x=200; past it the player falls to y=150
+//   MOCK_CAMERA=1  a textured world; the camera scrolls right 2 px per frame, with one 3 px step into frame 30;
+//                  state.camera.pos = [x, 0] (sprites are drawn at world x - camera x)
 //   MOCK_LAG=1     x: the state reacts 3 frames after the press (state.lagged), the picture 5 frames after (a white
 //                  square at 300,10), and a beep starts in the press frame's own audio (+1f)
 //   MOCK_SOUNDS=1  j plays an 80 ms noise burst, but only on odd presses (a planted cooldown bug); landing plays a
@@ -28,7 +30,9 @@ let player, coins, score;
 let leakT = 0;
 const JUMP = !!process.env.MOCK_JUMP, LAG = !!process.env.MOCK_LAG, SOUNDS = process.env.MOCK_SOUNDS || "";
 let edges = [], freeze = 0, xAt = null, lagged = false, jPresses = 0, coyote = 0, buffer = 0;
-const LEDGE = !!process.env.MOCK_LEDGE;
+const LEDGE = !!process.env.MOCK_LEDGE, CAMERA = !!process.env.MOCK_CAMERA;
+// MOCK_CAMERA: the camera scrolls 2 px a frame, with one 3 px step (frame 29 → 30): a planted 1 px hitch
+const camX = () => 2 * frame + (frame >= 30 ? 1 : 0);
 const groundY = (x) => (LEDGE && x >= 200 ? 150 : 90);
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
@@ -124,8 +128,12 @@ const beep = () => Float32Array.from({ length: Math.round(SR * 0.1) }, (_, i) =>
 function screenshot() {
   const px = Buffer.alloc(W * H * 4);
   const put = (x, y, r, g, b) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const i = (y * W + x) * 4; px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255; };
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 20, 24, 40);
-  const blob = (p, r, c) => { for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= r * r) put(Math.round(p[0]) + x, Math.round(p[1]) + y, ...c); };
+  const cam = CAMERA ? camX() : 0;
+  if (CAMERA) {
+    // a textured world (4×4 blocks) seen through the camera, so scrolling is visible
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const h = (Math.imul((x + cam) >> 2, 73856093) ^ Math.imul(y >> 2, 19349663)) >>> 0; put(x, y, 20 + (h & 63), 24 + ((h >> 6) & 63), 40 + ((h >> 12) & 63)); }
+  } else for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 20, 24, 40);
+  const blob = (p, r, c) => { for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= r * r) put(Math.round(p[0]) - cam + x, Math.round(p[1]) + y, ...c); };
   coins.forEach((c) => blob(c.pos, 5, [255, 210, 60]));
   blob(player.pos, 7, [80, 200, 255]);
   if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
@@ -162,7 +170,7 @@ sock.on("data", (d) => {
       case "reset": reset(m.seed); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
-      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}) } }); break;
+      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(CAMERA ? { camera: { pos: [camX(), 0] } } : {}) } }); break;
       case "screenshot": reply(screenshot()); break;
       case "audio": reply(audio()); break;
       case "call":
