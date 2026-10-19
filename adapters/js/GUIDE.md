@@ -206,6 +206,13 @@ The `audio` command returns everything mixed (taps and mixers summed) since the 
 reset, exactly `dt × sampleRate` frames per step. For full control, pass `audio()` returning
 `{sampleRate, channels, format, data}`.
 
+**Name your sounds:** call `witness.sound("jump")` (optionally `{ volume, pos: [x, y] }`) wherever the game starts a
+sound. In witness mode it sends a `{"event": "sound"}` line (docs/PROTOCOL.md §3), so `witness listen` says "jump"
+instead of "sound 2" and checks that each input/event got its sound; elsewhere it does nothing. A helper like
+`const sfx = (name) => { mixer.play(SFX[name]); witness.sound(name); }` does both at once (see examples/arena).
+Note: the Mixer starts a sound at the end of the frame being simulated, so listen hears it one frame after the
+frame the game announced (`+2f` after the press that caused it, where `+1f` is the earliest possible).
+
 ## 8. Screenshots
 
 The default captures the canvas (or the canvases you pass, composited in order, e.g. a WebGL
@@ -416,6 +423,7 @@ await witness.start(options) // hello (witness) / reset + start recording (recor
 witness.takeover()           // Node: virtualize timers + clocks
 witness.seed(); witness.random()
 witness.log("message"); witness.log("warn" | "error", ...)    // errors fail tests
+witness.sound("jump", { volume, pos })                       // name a sound for witness listen (no-op off-witness)
 witness.mark("label")        // replay marker
 witness.recordFrame(dt, events) -> dt                          // Node record mode
 witness.recordInput(ev); witness.recordTouch(id, x, y, phase)   // record input for the next frame line

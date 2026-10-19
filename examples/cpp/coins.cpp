@@ -19,7 +19,10 @@ namespace {
 
 coins_game game;
 
-void log_collect(void *, int coin_id) { witness_log(WITNESS_INFO, "coin %d collected", coin_id); }
+void log_collect(void *, int coin_id) {
+    witness_log(WITNESS_INFO, "coin %d collected", coin_id);
+    witness::sound("coin");
+}
 
 void write_entity(witness::Json &j, int id, const char *type, double x, double y) {
     j.begin_object().field("id", id).field("type", type).key("pos").vec(x, y);

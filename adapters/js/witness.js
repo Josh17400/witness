@@ -1330,6 +1330,18 @@ const api = {
     if (["info", "warn", "error"].includes(level)) pushLog(level, formatArgs(message));
     else pushLog("info", formatArgs([level, ...message]));
   },
+  /**
+   * witness.sound("jump") or witness.sound("hit", { volume: 0.8, pos: [x, y] }): announce a sound the game just
+   * started, so 'witness listen' can name it and tie it to its cause (docs/PROTOCOL.md §3). No-op unless Witness
+   * drives the game.
+   */
+  sound(name, { volume, pos } = {}) {
+    if (MODE !== "witness" || !conn) return;
+    const ev = { event: "sound", name: String(name), frame: sim.frame };
+    if (typeof volume === "number" && Number.isFinite(volume)) ev.volume = volume;
+    if (Array.isArray(pos) && pos.length >= 2 && pos.every((v) => Number.isFinite(+v))) ev.pos = [+pos[0], +pos[1]];
+    try { conn.send(ev); } catch { /* the connection is gone: nothing to tell */ }
+  },
   mark(label = "mark") { if (rec.on) rec.mark = String(label); },
   recordFrame,
   recordInput(ev) { if (rec.on && isObj(ev)) rec.pending.push(ev); },
@@ -1379,5 +1391,6 @@ export const seed = api.seed;
 export const random = api.random;
 export const log = api.log;
 export const mark = api.mark;
+export const sound = api.sound;
 export const createMixer = api.createMixer;
 export default api;

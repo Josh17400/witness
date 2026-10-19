@@ -37,6 +37,7 @@ function step(dt) {
       score++;
       witness.log(`coin ${c.id} collected`);
       mixer.play(DING);
+      witness.sound("coin");   // named in witness listen (docs/PROTOCOL.md: sound events)
     }
   }
 }

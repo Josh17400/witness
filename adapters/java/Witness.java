@@ -785,6 +785,25 @@ public final class Witness {
     public static void warn(String message) { log("warn", message); }
     public static void error(String message) { log("error", message); }
 
+    /**
+     * Announces a sound the game just started ("jump", "coin"): one {"event":"sound"} line, sent at
+     * once and stamped with frame(). Optional; no-op when not connected (normal play, recording).
+     */
+    public static void sound(String name) { sound(name, -1, Double.NaN, Double.NaN); }
+    /** With a volume (0..1; negative = not given). */
+    public static void sound(String name, double volume) { sound(name, volume, Double.NaN, Double.NaN); }
+    /** With a volume (negative = not given) and a screen position in pixels (NaN = not given). */
+    public static void sound(String name, double volume, double x, double y) {
+        if (!connected || name == null || name.isEmpty()) return;
+        Map<String, Object> s = new LinkedHashMap<>();
+        s.put("event", "sound");
+        s.put("name", name);
+        s.put("frame", frame);
+        if (volume >= 0) s.put("volume", Math.min(1, volume));
+        if (!Double.isNaN(x) && !Double.isNaN(y)) s.put("pos", new double[] { x, y });
+        sendLine(Json.write(s));
+    }
+
     private static List<Map<String, Object>> drainLogs() {
         synchronized (LOGS) {
             List<Map<String, Object>> o = new ArrayList<>(LOGS);

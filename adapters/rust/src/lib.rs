@@ -535,6 +535,44 @@ pub fn error(message: impl Into<String>) {
     log(Level::Error, message)
 }
 
+// ------------------------------------------------------------------ sound events (global)
+
+/// The connection's socket, for unsolicited `sound` events. Its lock also guards replies.
+static SOUND_OUT: Mutex<Option<TcpStream>> = Mutex::new(None);
+
+/// Announce a sound the game just started (`"jump"`, `"coin"`): one `sound` event, sent at once
+/// and stamped with the frame being simulated. Optional; a no-op unless connected.
+pub fn sound(name: &str) {
+    sound_with(name, None, None)
+}
+
+/// [`sound`] with an optional volume (0..1) and screen position in pixels.
+pub fn sound_with(name: &str, volume: Option<f64>, pos: Option<(f64, f64)>) {
+    if name.is_empty() || !ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let line = sound_line(name, FRAME.load(Ordering::Relaxed), volume, pos);
+    let mut out = SOUND_OUT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = out.as_mut() {
+        let _ = s.write_all(line.as_bytes()); // a dead socket shows up on the next reply
+    }
+}
+
+fn sound_line(name: &str, frame: u64, volume: Option<f64>, pos: Option<(f64, f64)>) -> String {
+    let mut ev = obj! { "event" => "sound", "name" => name, "frame" => frame };
+    if let Value::Object(fields) = &mut ev {
+        if let Some(v) = volume.filter(|v| *v >= 0.0) {
+            fields.push(("volume".into(), v.min(1.0).into()));
+        }
+        if let Some((x, y)) = pos {
+            fields.push(("pos".into(), [x, y].into()));
+        }
+    }
+    let mut line = ev.to_string();
+    line.push('\n');
+    line
+}
+
 // ------------------------------------------------------------------ the game trait
 
 /// RGBA8 pixels for a screenshot. Set `bottom_up` for OpenGL-style readbacks (row 0 = bottom).
@@ -714,6 +752,7 @@ impl Connection {
             },
             quit: false,
         };
+        *SOUND_OUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(c.writer.try_clone()?);
         ACTIVE.store(true, Ordering::Relaxed);
         FRAME.store(0, Ordering::Relaxed);
         c.send(&hello.to_json().to_string())?;
@@ -778,6 +817,7 @@ impl Connection {
         let mut buf = Vec::with_capacity(line.len() + 1);
         buf.extend_from_slice(line.as_bytes());
         buf.push(b'\n');
+        let _sounds = SOUND_OUT.lock().unwrap_or_else(|e| e.into_inner()); // never mid-line with a sound
         self.writer.write_all(&buf)
     }
 
@@ -976,6 +1016,7 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         ACTIVE.store(false, Ordering::Relaxed);
+        *SOUND_OUT.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -1127,6 +1168,16 @@ mod tests {
             Some(mouse) => mouse.to_json().to_string(),
             None => String::new(),
         }
+    }
+
+    #[test]
+    fn sound_event_shape() {
+        let jump = r#"{"event":"sound","name":"jump","frame":60}"#;
+        assert_eq!(sound_line("jump", 60, None, None), format!("{jump}\n"));
+        let coin = r#"{"event":"sound","name":"coin","frame":3,"volume":0.8,"pos":[212,140]}"#;
+        let line = sound_line("coin", 3, Some(0.8), Some((212.0, 140.0)));
+        assert_eq!(line, format!("{coin}\n"));
+        sound("ignored"); // not connected: a no-op
     }
 
     #[test]

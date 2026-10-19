@@ -168,6 +168,8 @@ export interface WitnessApi {
   random(): number;
   /** A game log line: log("coin collected") or log("warn" | "error" | "info", ...). Errors fail tests. */
   log(levelOrMessage: unknown, ...message: unknown[]): void;
+  /** Announce a sound the game just started (named sounds in 'witness listen'). No-op unless Witness drives the game. */
+  sound(name: string, opts?: { volume?: number; pos?: [number, number] }): void;
   /** Flag this moment in the recording (F8 does it in browsers). */
   mark(label?: string): void;
   /** Normal play with recording on (Node / custom loops): append one frame; returns the dt to simulate. */
@@ -208,6 +210,7 @@ export declare const seed: WitnessApi["seed"];
 export declare const random: WitnessApi["random"];
 export declare const log: WitnessApi["log"];
 export declare const mark: WitnessApi["mark"];
+export declare const sound: WitnessApi["sound"];
 export declare const recordFrame: WitnessApi["recordFrame"];
 export declare const createMixer: WitnessApi["createMixer"];
 export declare class Mixer implements WitnessMixer {

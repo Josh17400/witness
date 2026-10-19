@@ -38,7 +38,7 @@ from array import array
 
 __all__ = [
     "PROTOCOL", "DEFAULT_ADDR", "active", "recording", "address", "run", "seed", "frame", "time",
-    "log", "info", "warn", "error", "input_events", "is_down", "record_frame", "record_event",
+    "log", "info", "warn", "error", "sound", "input_events", "is_down", "record_frame", "record_event",
     "record_touch", "mark", "start_recording", "AudioCapture", "json_safe", "WitnessError",
     "watching",
 ]
@@ -367,6 +367,25 @@ class _Adapter:
         self.logs.append({"frame": self.frame, "level": level, "message": str(message)})
         if len(self.logs) > 10000:
             del self.logs[: len(self.logs) - 10000]
+
+    def sound(self, name, volume=None, pos=None):
+        """Announce a sound the game started: an unsolicited {"event": "sound"} line (docs/PROTOCOL.md section 3)."""
+        if not self.connected:
+            return
+        ev = {"event": "sound", "name": str(name), "frame": self.frame}
+        if isinstance(volume, (int, float)) and not isinstance(volume, bool) and math.isfinite(volume):
+            ev["volume"] = float(volume)
+        if pos is not None:
+            try:
+                x, y = float(pos[0]), float(pos[1])
+                if math.isfinite(x) and math.isfinite(y):
+                    ev["pos"] = [x, y]
+            except (TypeError, ValueError, IndexError):
+                pass
+        try:
+            self.send(ev)
+        except OSError:
+            pass  # the CLI is gone: nothing to tell
 
     # -------------------------------------------------------------- connection
     def connect(self, hello, retries=20):
@@ -713,6 +732,13 @@ def log(level, message):
     """Send a log line ("info" | "warn" | "error"). Errors fail Witness tests. No-op when inactive."""
     if _A.connected:
         _A.log(level, message)
+
+
+def sound(name, volume=None, pos=None):
+    """Announce a sound the game just started, e.g. witness.sound("coin") or witness.sound("hit", 0.8, (x, y)).
+    'witness listen' then names it and ties it to its cause. No-op when Witness isn't driving the game."""
+    if _A.connected:
+        _A.sound(name, volume, pos)
 
 
 def info(message):

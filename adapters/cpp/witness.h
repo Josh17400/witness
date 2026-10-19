@@ -256,6 +256,15 @@ WITNESS_API void witness_audio_write_s16(const short *interleaved, int frames);
  * (no drift, even with irregular replay dts). */
 WITNESS_API int witness_audio_frames_for_step(double dt);
 
+/* ---------------------------------------------------------------- sound events */
+
+/* Announce that the game started a sound ("jump", "coin"): sent at once as a protocol "sound"
+ * event stamped with the current frame. Call from the sim thread (e.g. inside step()).
+ * No-op when not connected (normal play, recording). */
+WITNESS_API void witness_sound(const char *name);
+/* The same with a volume (0..1; < 0 = not given) and a screen position in pixels (has_pos 0 = not given). */
+WITNESS_API void witness_sound_ex(const char *name, double volume, int has_pos, double x, double y);
+
 /* ---------------------------------------------------------------- replay recording */
 
 /* Normal play only: if WITNESS_RECORD=<file.jsonl> is set (and Witness is not active),
@@ -367,6 +376,11 @@ struct Handlers {
 
 inline void fail(const char *message) { witness_error("%s", message ? message : "failed"); }
 inline void fail(const std::string &message) { witness_error("%s", message.c_str()); }
+
+/* Sound events: witness::sound("jump"), sound("jump", 0.8), sound("jump", 0.8, x, y). */
+inline void sound(const char *name) { witness_sound(name); }
+inline void sound(const char *name, double volume) { witness_sound_ex(name, volume, 0, 0, 0); }
+inline void sound(const char *name, double volume, double x, double y) { witness_sound_ex(name, volume, 1, x, y); }
 
 namespace detail {
 inline Handlers &handlers() { static Handlers h; return h; }
@@ -1083,6 +1097,7 @@ typedef struct witness__state {
     size_t rec_len, rec_cap;
     char rec_mark[64];
     witness_json rec_line;
+    witness_json sound_line;                 /* unsolicited "sound" events (sim thread) */
 } witness__state;
 
 static witness__state witness__g;
@@ -1443,6 +1458,30 @@ static witness__socket witness__dial(const char *host, const char *port) {
 #endif
     }
     return s;
+}
+
+/* ---------------------------------------------------------------- sound events */
+
+void witness_sound(const char *name) { witness_sound_ex(name, -1, 0, 0, 0); }
+
+/* Own buffer, so a sound started inside a handler never touches the reply being built.
+ * A failed send is left for the next reply to detect (it disconnects then). */
+void witness_sound_ex(const char *name, double volume, int has_pos, double x, double y) {
+    witness_json *w = &witness__g.sound_line;
+    if (!witness__g.connected || !name || !*name) return;
+    witness__jw_clear(w);
+    witness_json_begin_object(w);
+    witness_json_field_string(w, "event", "sound");
+    witness_json_field_string(w, "name", name);
+    witness_json_field_int(w, "frame", witness__g.frame);
+    if (volume >= 0) witness_json_field_number(w, "volume", volume < 1 ? volume : 1.0);
+    if (has_pos) {
+        witness_json_key(w, "pos");
+        witness_json_vec2(w, x, y);
+    }
+    witness_json_end_object(w);
+    witness__jw_putc(w, '\n');
+    if (!w->failed) witness__send_all(w->buf, w->len);
 }
 
 /* ---------------------------------------------------------------- commands */
@@ -2168,12 +2207,13 @@ void witness_shutdown(void) {
     witness__g.logs = NULL; witness__g.log_len = witness__g.log_cap = 0;
     witness__g.audio = NULL; witness__g.audio_cap = witness__g.audio_len = witness__g.audio_head = 0;
     witness__unlock();
-    free(witness__g.in); free(witness__g.out.buf); free(witness__g.rec_line.buf);
+    free(witness__g.in); free(witness__g.out.buf); free(witness__g.rec_line.buf); free(witness__g.sound_line.buf);
     free(witness__g.parser.nodes); free(witness__g.values);
     free(witness__g.queue); free(witness__g.cur); free(witness__g.pixels); free(witness__g.rec_events);
     witness__g.in = NULL; witness__g.in_len = witness__g.in_cap = 0;
     memset(&witness__g.out, 0, sizeof witness__g.out);
     memset(&witness__g.rec_line, 0, sizeof witness__g.rec_line);
+    memset(&witness__g.sound_line, 0, sizeof witness__g.sound_line);
     witness__g.parser.nodes = NULL; witness__g.parser.cap = 0;
     witness__g.values = NULL; witness__g.values_cap = 0;
     witness__g.queue = NULL; witness__g.queue_len = witness__g.queue_cap = 0;

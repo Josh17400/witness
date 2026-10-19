@@ -189,8 +189,9 @@ def play(sound_samples, volume=1.0):     # the game's single "play a sound" entr
 * Music or streams: decode once (`wave` module, or `Sound.get_raw()`) and feed the samples in
   chunks per frame, e.g. `capture.play(music[i:i+n])` with `n = round(dt * rate) * channels`,
   advancing `i` each frame.
-* A sound log (`witness.info(f"sfx {name}")`) next to `play` makes sounds testable even without
-  audio analysis.
+* Name your sounds: `witness.sound("coin")` (optionally `volume`, `pos=(x, y)`) next to `play` sends a
+  `{"event": "sound"}` line in witness mode (docs/PROTOCOL.md §3), so `witness listen` names the sound and checks that
+  each input or state change got its sound. It does nothing when Witness isn't driving the game.
 
 ## 9. pygame / pygame-ce (`witness_pygame.py`)
 

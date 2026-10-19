@@ -49,10 +49,18 @@ def fake_cli(server, out, commands):
         for msg in commands:
             time.sleep(GAP)
             conn.sendall((json.dumps(msg) + "\n").encode("utf-8"))
-            line = f.readline()
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                obj = json.loads(line.decode("utf-8"))
+                if "event" in obj:  # unsolicited lines (sound events) come before the reply
+                    out["events"].append(obj)
+                    continue
+                out["replies"].append(obj)
+                break
             if not line:
                 break
-            out["replies"].append(json.loads(line.decode("utf-8")))
         f.close()
         conn.close()
     except Exception as e:  # reported by the main thread
@@ -61,13 +69,13 @@ def fake_cli(server, out, commands):
         server.close()
 
 
-def session(idle, commands=COMMANDS):
+def session(idle, commands=COMMANDS, sounds=False):
     """Run one witness.run() session against the fake CLI; return what happened."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("127.0.0.1", 0))
     server.listen(1)
     os.environ["WITNESS_ADDR"] = "127.0.0.1:%d" % server.getsockname()[1]
-    out = {"replies": [], "hello": None, "error": None}
+    out = {"replies": [], "hello": None, "error": None, "events": []}
     cli = threading.Thread(target=fake_cli, args=(server, out, commands), daemon=True)
     cli.start()
 
@@ -78,6 +86,8 @@ def session(idle, commands=COMMANDS):
 
     def update(dt):
         state["x"] += 1
+        if sounds and witness.frame() == 1:
+            witness.sound("tick", 0.5, (1, 2))
         state["reader_threads"].append(any(t.name == "witness-reader" for t in threading.enumerate()))
 
     def snapshot():
@@ -148,6 +158,12 @@ def main():
     out = session(idle, COMMANDS[:2])
     check("disconnect: replies before the drop", [x.get("id") for x in out["replies"]] == [1, 2], out["replies"])
     check("disconnect: run() returned", out["cli_done"] and not witness._A.connected and out["elapsed"] < 5, out.get("elapsed"))
+
+    # 5. sound events: an unsolicited {"event": "sound"} line with the frame being simulated; a no-op when not connected
+    witness.sound("ignored")
+    out = session(None, sounds=True)
+    check_replies("sounds", out)
+    check("sounds: one sound line, frame 1, volume and pos", out["events"] == [{"event": "sound", "name": "tick", "frame": 1, "volume": 0.5, "pos": [1.0, 2.0]}], out["events"])
 
     print("%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0

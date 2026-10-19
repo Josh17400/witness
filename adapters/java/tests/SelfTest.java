@@ -196,6 +196,24 @@ public final class SelfTest {
             eq(false, Witness.recording(), "not recording without WITNESS_RECORD");
         }
 
+        // Sound events: no-op while disconnected, one unsolicited line once connected
+        Witness.sound("ignored");
+        if (System.getenv("WITNESS_ADDR") == null) {
+            try (java.net.ServerSocket server = new java.net.ServerSocket(7357, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+                eq(true, Witness.connect(new Witness.Hello("SelfTest"), null), "connect to a fake CLI");
+                try (java.net.Socket cli = server.accept()) {
+                    java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(cli.getInputStream(), StandardCharsets.UTF_8));
+                    in.readLine();   // hello
+                    Witness.sound("jump");
+                    Witness.sound("coin", 0.8, 212, 140);
+                    eq("{\"event\":\"sound\",\"name\":\"jump\",\"frame\":0}", in.readLine(), "sound event line");
+                    eq("{\"event\":\"sound\",\"name\":\"coin\",\"frame\":0,\"volume\":0.8,\"pos\":[212,140]}", in.readLine(), "sound event with volume + pos");
+                }
+            } catch (java.net.BindException e) {
+                System.out.println("skip sound-event check: port 7357 is busy");
+            }
+        }
+
         System.out.println(failed == 0 ? "selftest: all " + passed + " checks passed" : "selftest: " + failed + " FAILED, " + passed + " passed");
         System.exit(failed == 0 ? 0 : 1);
     }

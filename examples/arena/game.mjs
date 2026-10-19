@@ -197,7 +197,7 @@ function step(dt) {
       const dmg = w.state === "stagger" ? 2 : 1;
       w.hp -= dmg;
       say(`You hit ${tag(w)} (-${dmg})`);
-      sfx(SFX.hit);
+      sfx("hit");
       if (w.hp <= 0) killWolf(w);
       else if (w.state === "idle") { w.state = "chase"; w.lost = 0; w.homing = false; }
     }
@@ -212,7 +212,7 @@ function step(dt) {
       else if (it.type === "Coin") p.gold++;
       else p.hasKey = true;
       say(it.type === "Key" ? "You pick up the Key" : `You pick up a ${it.type}`);
-      sfx(SFX.pickup);
+      sfx("pickup");
     }
   }
 
@@ -230,7 +230,7 @@ function step(dt) {
       for (const w of things.filter(isWolf)) { w.state = "idle"; w.timer = 0; }
       setNotice("You escaped the arena!");
       say("You escaped the arena!");
-      sfx(SFX.win);
+      sfx("win");
     }
   }
   // notices fade after 3 s, except "you died" (until you respawn) and "you escaped" (for good)
@@ -262,20 +262,20 @@ function handleEdge(k) {
   if (k === "j" || k === "space") {
     if (p.blocking || p.cooldown > EPS) return;
     p.swing = PLAYER.swing; p.cooldown = PLAYER.attackCooldown; p.hits = [];
-    sfx(SFX.swing);
+    sfx("swing");
   } else if (k === "l" || k === "shift") {
     if (p.dashCooldown > EPS) return;
     const [ix, iy] = moveInput(), len = Math.hypot(ix, iy);
     p.dashDir = len ? [ix / len, iy / len] : [...FACE[p.facing]];
     p.dash = PLAYER.dash; p.dashCooldown = PLAYER.dashCooldown;
-    sfx(SFX.dodge);
+    sfx("dodge");
   } else if (k === "e") interact();
   else if (k === "q") {
     if (p.potions > 0 && p.hp < p.maxHp) {
       const heal = Math.min(PLAYER.potion, p.maxHp - p.hp);
       p.hp += heal; p.potions--;
       say(`You drink a potion (+${heal})`);
-      sfx(SFX.drink);
+      sfx("drink");
     }
   }
 }
@@ -298,7 +298,7 @@ function choose(n) {
   if (!dialogue || n > dialogue.options.length) return;
   if (dialogue === DIALOGUE.intro) {
     if (n === 1) {
-      if (!guardGave) { guardGave = true; player.potions++; say("The Old Guard gives you a Potion"); sfx(SFX.pickup); }
+      if (!guardGave) { guardGave = true; player.potions++; say("The Old Guard gives you a Potion"); sfx("pickup"); }
       quest = QUEST; declined = false;
       dialogue = DIALOGUE.accepted;
     } else { declined = true; dialogue = DIALOGUE.declined; }
@@ -312,7 +312,7 @@ function openGate() {
   grid[gate.ty][gate.tx] = ".";
   setNotice("The gate swings open.");
   say("The gate swings open");
-  sfx(SFX.gate);
+  sfx("gate");
   return true;
 }
 
@@ -323,7 +323,7 @@ function die() {
   dialogue = null;
   setNotice("You died. Press ENTER to respawn.");
   say("You died");
-  sfx(SFX.death);
+  sfx("death");
 }
 
 function respawn() {
@@ -338,7 +338,7 @@ function killWolf(w) {
   if (i < 0) return;
   things.splice(i, 1);
   say(`${tag(w)} dies`);
-  sfx(SFX.wolfDie);
+  sfx("wolfDie");
   if (w.type === "AlphaWolf") {
     things.push({ id: nextId++, type: "Key", x: w.x, y: w.y });
     say("The Alpha Wolf drops the key!");
@@ -391,13 +391,13 @@ function strike(w, k) {
   if (p.blocking && inArc(w, PLAYER.blockArc)) {
     w.state = "stagger"; w.timer = STAGGER;
     say(`You block ${tag(w)}'s bite. It staggers!`);
-    sfx(SFX.block);
+    sfx("block");
     return;
   }
   const dmg = god ? 0 : k.damage;
   p.hp -= dmg;
   say(`${tag(w)} bites you (-${dmg})`);
-  sfx(SFX.bite);
+  sfx("bite");
 }
 
 function stepToward(w, tx, ty, maxStep) {
@@ -514,7 +514,8 @@ const SFX = {
   gate: tone(0.35, 90, 60, 0.15, 0.6, 0.3, 17),
   win: concat(tone(0.12, 523, 523, 0.08, 0.4), tone(0.12, 659, 659, 0.08, 0.4), tone(0.3, 784, 784, 0.15, 0.4)),
 };
-const sfx = (s) => mixer.play(s);
+// every sound effect is also announced to Witness, so listen names it ("swing", "hit") and ties it to its cause
+const sfx = (name) => { mixer.play(SFX[name]); witness.sound(name); };
 
 // ------------------------------------------------------------------ screenshot (480x288 RGBA, drawn in software)
 // 3x5 pixel font: each glyph is 5 rows of 3 bits (4 = left, 2 = middle, 1 = right).

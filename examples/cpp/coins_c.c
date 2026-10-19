@@ -14,6 +14,7 @@ static float mix[COINS_SAMPLE_RATE]; /* one step never needs more than a second 
 static void log_collect(void *user, int coin_id) {
     (void)user;
     witness_log(WITNESS_INFO, "coin %d collected", coin_id);
+    witness_sound("coin");
 }
 
 static int on_reset(void *user, long long seed, const char *scene, const witness_value *params) {

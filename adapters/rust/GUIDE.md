@@ -194,6 +194,11 @@ With cpal, the device callback is usually
 `move |data: &mut [f32], _| synth.lock().unwrap().render(data)`. Factor out `render(&mut [f32])`
 and call it from both places.
 
+**Sound events (optional):** where the game starts a sound, call `witness::sound("jump")` (or
+`witness::sound_with("jump", Some(0.8), Some((x, y)))` with a volume and screen position). It sends
+one `sound` event at once, stamped with the current frame, so `witness listen` can name what it
+hears. No-op outside witness mode.
+
 ## 8. Screenshots
 
 Return RGBA8 from `Game::screenshot`. It borrows `&mut self`, so point at a buffer you own:
@@ -352,5 +357,6 @@ witness shot --at 1       # look at the PNG
 | `Hello::new(name).fps().size().call().keys().screenshot().audio().eval().perf().touch()` | the hello (`touch()`: no mouse fallback for finger 0) |
 | `Value`, `obj!`, `arr!` | JSON |
 | `witness::info/warn/error/log` | logs (errors fail tests) |
+| `witness::sound(name)`, `witness::sound_with(name, volume, pos)` | announce a sound (optional) |
 | `Recorder::from_env(name, fps)`, `.seed()`, `.key()`, `.mouse()`, `.touch()`, `.input()`, `.mark()`, `.frame(dt)` | replays |
 | `witness::seed()`, `witness::normalize_key()`, `witness::base64()` | helpers |

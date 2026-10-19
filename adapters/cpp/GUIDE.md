@@ -320,6 +320,13 @@ void render_audio_for_step(double dt) {
 * Sample rate and channels come from the hello (`audio_sample_rate`, `audio_channels`).
   `witness listen` then reports pitches, loudness, tempo and clipping, and draws spectrograms.
 
+**Sound events (optional).** Where the game starts a sound, also announce it:
+`witness_sound("jump")`, or `witness_sound_ex("jump", 0.8, 1, x, y)` with a volume (0..1, `< 0` =
+not given) and a screen position (`has_pos` 0 = not given). C++: `witness::sound("jump")`,
+`witness::sound("jump", 0.8)`, `witness::sound("jump", 0.8, x, y)`. It is sent at once, stamped with
+the current frame, so `witness listen` can name what it hears and flag sounds announced but silent.
+Call it from the sim thread (inside `step`); it does nothing outside witness mode.
+
 ## 8. Screenshots from a GPU renderer
 
 The handler fills a `witness_image` with RGBA8 pixels. They must stay valid until it returns.
@@ -486,6 +493,7 @@ witness listen --time 3   # audio report + spectrogram
 | `hello.touch = 1` | the game handles `WITNESS_EV_TOUCH` itself: no mouse events from finger 0 |
 | `witness_log(level, fmt, ...)` | logs (errors fail tests) |
 | `witness_audio_frames_for_step(dt)`, `witness_audio_write(f32, frames)`, `witness_audio_write_s16` | audio capture |
+| `witness_sound(name)`, `witness_sound_ex(name, volume, has_pos, x, y)`, `witness::sound(...)` | announce a sound (optional) |
 | `witness_record_start/begin/key/mouse/touch/event/frame/stop`, `witness_mark(label)` | replays |
 | `witness_json_*`, `witness::Json` | snapshot / result writer |
 | `witness_get/at/number/int/string/bool`, `witness::Value` | read command arguments |

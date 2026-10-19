@@ -146,6 +146,7 @@ export class Session {
     this.nextId = 1;
     this.pending = new Map();
     this.logs = [];          // {frame, level, message}
+    this.events = [];        // unsolicited structured events other than logs, e.g. {event: "sound", name, frame}
     this.closed = false;
     this.hello = null;
     this.helloP = new Promise((res, rej) => { this._helloRes = res; this._helloRej = rej; });
@@ -167,6 +168,11 @@ export class Session {
       }
       if (m.event) {
         if (m.event === "log") this.logs.push({ frame: m.frame ?? null, level: m.level || "info", message: String(m.message ?? "") });
+        else {
+          // structured events (e.g. {"event": "sound", "name": "jump", "frame": 61}): kept for the command to read
+          this.events.push(m);
+          if (this.events.length > 20000) this.events.splice(0, this.events.length - 20000);
+        }
         return;
       }
       if (m.id != null && this.pending.has(m.id)) {
@@ -214,6 +220,12 @@ export class Session {
     }
     const out = this.logs;
     this.logs = [];
+    return out;
+  }
+  /** Take the collected events of one kind (e.g. "sound"), oldest first; others stay. */
+  drainEvents(kind) {
+    const out = this.events.filter((e) => e.event === kind);
+    this.events = this.events.filter((e) => e.event !== kind);
     return out;
   }
   quit() { return this.closed ? Promise.resolve() : this.request("quit", {}, 5000).catch(() => {}); }

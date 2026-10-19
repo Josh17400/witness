@@ -69,6 +69,28 @@ The adapter may also send **unsolicited** lines at any time:
 `{"event": "log", "level": "error", "message": "...", "frame": 12}`. The CLI collects
 them like `logs`.
 
+**Sound events (optional).** When the game starts a sound, the adapter may announce it:
+
+```json
+{"event": "sound", "name": "jump", "frame": 60, "volume": 0.8, "pos": [212, 140]}
+```
+
+* `name` (string, required): what the game calls the sound (`"jump"`, `"coin"`, `"hit"`).
+* `frame` (int, required): the frame being simulated when the sound started, the same number a `log`
+  event made at that moment carries (0 for the first step after `reset`).
+* `volume` (0–1) and `pos` (`[x, y]` in screen pixels) are optional.
+
+`witness listen` uses them to name the sounds it hears ("jump" instead of "sound 2"), to cut the
+analysis at the right moments, and to tie each sound to the input or state change that caused it.
+It also lines each announced sound up with the audio and reports sounds announced but not audible,
+and audible sounds nobody announced. Adapters offer it as one call (`witness.sound("jump")`,
+`witness_sound("jump")`, ...) that does nothing outside witness mode. It is additive: older CLIs ignore
+unknown events, and games that never send it still get every check from the audio alone.
+
+**Times.** Everywhere the CLI takes a time (`--at`, `--time`, `--every`, `--from`/`--to`, test `at`/`from`/`to`,
+input specs like `space@1.5`), it means seconds, or frames with an `f` suffix: `--at 90f`, `space@60f`,
+`{"at": "120f"}`. Frame `n` is the state after `n` steps from `reset`.
+
 ## 4. Input events
 
 ```json

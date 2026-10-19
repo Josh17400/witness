@@ -146,6 +146,11 @@ when a sound starts (mixed at the current simulated time) or `write(block, 0, n)
 The buffer stays exactly `round(time × rate)` frames long. Don't open a real audio line in witness
 mode.
 
+**Sound events (optional):** next to each `sound.play()`, call `Witness.sound("jump")` (or
+`Witness.sound("jump", volume)`, `Witness.sound("jump", volume, x, y)`). It sends one `sound` event at
+once, stamped with the current frame, so `witness listen` can name what it hears. No-op outside
+witness mode.
+
 ## 9. Replay recording
 
 Normal play with `WITNESS_RECORD=run.jsonl`: `Witness.start(hello, null)` opens it; once per frame

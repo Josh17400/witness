@@ -72,6 +72,7 @@ class Coins:
                 self.score += 1
                 witness.info("coin %d collected" % coin["id"])
                 self.audio.play(self.ding)
+                witness.sound("coin")  # named in witness listen (docs/PROTOCOL.md: sound events)
 
     def snapshot(self):
         return {"score": self.score, "scene": "level1", "player": self.player,
