@@ -97,6 +97,8 @@ r = lw(["play", "look", "-s", "lv"]);
 ok("live: play went on after do returned", tOf(r.out) - lt2 >= 0.4 && /your order \(still running\)/.test(r.out), r.out);
 r = lw(["play", "next", "-s", "lv"]);
 ok("live next: waits for the horizon, plan unchanged", /⏩ running/.test(r.out) && /your order \(still running\): wait/.test(r.out), r.out);
+r = lw(["play", "do", "wait  20", "-s", "lv"]);
+ok("live do: the same order again keeps the running one going", /same order as the one running, so it carried on/.test(r.out) && /your order \(still running\): wait/.test(r.out), r.out);
 r = lw(["play", "do", "wait 0.5", "-s", "lv"]);
 ok("live do: a short order answers done (and replaces the long one)", /✔ done: wait 0\.5/.test(r.out) && /no order running: standing by/.test(r.out), r.out);
 sleepMs(4500);

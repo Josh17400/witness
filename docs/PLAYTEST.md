@@ -216,7 +216,8 @@ time). The game never pauses between orders:
   an important event (death, low hp, goal, scene change, dialogue, a game error), or the **check-in horizon**
   (`--horizon`, default 4 s game time; `do … --for S` per order). Play goes on after it answers. A result that came
   back at the horizon says `⏩ running: … is still running`, and every live observation says
-  `your order (still running): …` or `no order running: standing by …`.
+  `your order (still running): …` or `no order running: standing by …`. Sending the same order again while it's
+  still running doesn't restart it: it carries on, and the `do` just waits like `next`.
 * `play next` (= `look --wait`) keeps the plan and answers at the next important moment or the horizon. `look`,
   `shot` and `note` work any time; all game access goes through one lock, so a screenshot is taken between two ticks.
 * An order that finishes while nobody is waiting is reported in the next observation's events

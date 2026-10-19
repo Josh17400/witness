@@ -252,7 +252,7 @@ export async function runDaemon(dir) {
     let m = msg;
     if ((status === "done" || status === "fail") && parts.length > 1) m = parts.join(" → ");
     if (status === "event" && running && !world.dead) m = `${msg} — ${running} keeps running`;
-    if (status === "running") m = running ? `${running} is still running; the game keeps going (give a new order to change it, or look --wait)` : "nothing to do: standing by (the game keeps going)";
+    if (status === "running") m = running ? `${wt.same ? "same order as the one running, so it carried on: " : ""}${running} is still running; the game keeps going (give a new order to change it, or use next)` : "nothing to do: standing by (the game keeps going)";
     const line = resultLine({ status, order: wt.list && wt.list.length === 1 && status !== "running" ? wt.text : null, msg: m, seconds: world.t - wt.t0 }) + (hint && status === "fail" ? `\n  hint: ${hint.split("\n")[0]}` : "");
     wt.resolve({ code: 0, result: { status, msg: m, line } });
   }
@@ -337,6 +337,10 @@ export async function runDaemon(dir) {
     if (live.stop || S.closed) return { code: 0, result: { status: "error", line: "✖ the game isn't running any more" } };
     const answer = new Promise((resolve) => {
       lock.run(() => {
+        // the same order again while it's still running: keep it going (restarting it would throw away its progress)
+        const norm = (x) => String(x || "").trim().toLowerCase().replace(/\s+/g, " ");
+        const same = list && live.order && live.order.status === "running" && norm(live.order.text) === norm(text) && !!ap.activeOrder();
+        if (same) list = null;
         if (list) {
           if (live.order && live.order.status === "running") { live.order.status = "replaced"; live.order.msg = `replaced by "${clip(text, 40)}"`; live.order.seconds = +(world.t - live.order.t).toFixed(2); }
           ap.setOrders(list);
@@ -344,7 +348,7 @@ export async function runDaemon(dir) {
           orders.push(rec); live.order = rec;
         }
         if (live.waiter) settle("running");   // a newer command supersedes an older wait
-        live.waiter = { t0: world.t, cap: forS != null ? +forS : live.horizon, resolve, text, list, rec: live.order, results0: list ? 0 : ap.results.length };
+        live.waiter = { t0: world.t, cap: forS != null ? +forS : live.horizon, resolve, text, list, same, rec: live.order, results0: list ? 0 : ap.results.length };
       });
     });
     resumeLive();
