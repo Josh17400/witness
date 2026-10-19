@@ -74,12 +74,56 @@ function frame(px, py, { w = 320, h = 180, score = "SCORE 0120" } = {}) {
   const d = diffImages(a, b, { title: "1080p" });
   save("diff-1080p.png", d.png);
   ok("1080p: box in original coordinates", d.boxes.length === 1 && d.boxes[0].x === 1500 && d.boxes[0].w === 100, d.boxes);
-  ok("1080p: visualization fits 1280 px", decodePNG(d.png).width <= 1280, decodePNG(d.png).width);
+  ok("1080p: the three-panel picture fits 1600 px", decodePNG(d.png).width <= 1600, decodePNG(d.png).width);
 }
 {
   let msg = "";
   try { diffImages(Buffer.from("nope"), frame(0, 0)); } catch (e) { msg = e.message; }
   ok("bad input: clear error", /image A is not a readable PNG/.test(msg), msg);
+}
+
+// ---- diff v2: what each region is, camera shifts, SSIM
+{
+  const a = frame(60, 100), b = frame(140, 100);
+  const d = diffImages(a, b);
+  const mv = d.boxes.filter((x) => x.kind === "moved");
+  show("v2 moved square", d.moves.map((m) => `${m.from.x},${m.from.y} → ${m.to.x},${m.to.y} by ${m.by}`).join(" · "));
+  ok("v2: the two regions are one move of +80,0", mv.length === 2 && d.moves.length === 1 && d.moves[0].by.join() === "80,0" && d.moves[0].from.x === 60 && d.moves[0].to.x === 140, d.boxes);
+}
+{
+  const a = frame(60, 100), b = frame(60, 100);
+  b.circle(250, 80, 6, "#ffd166");                     // a coin appears
+  const c = frame(60, 100); c.fillRect(60, 100, 20, 20, "#1b2a4a");   // the player is gone (sky colour)
+  const d = diffImages(a, b), e = diffImages(a, c);
+  ok("v2: a new coin is 'appeared'", d.boxes.length === 1 && d.boxes[0].kind === "appeared", d.boxes);
+  ok("v2: a vanished square is 'gone'", e.boxes.length === 1 && e.boxes[0].kind === "gone", e.boxes);
+  const f = frame(60, 100); f.fillRect(60, 100, 20, 20, "#4cc9f0");   // recoloured in place
+  ok("v2: a recoloured square is 'changed'", diffImages(a, f).boxes[0].kind === "changed");
+  const g = frame(62, 100);                                            // moved 2 px: one box, moved within it
+  const gd = diffImages(a, g);
+  ok("v2: a 2 px move inside one box is 'moved' +2,0", gd.boxes.length === 1 && gd.boxes[0].kind === "moved" && gd.boxes[0].moved.join() === "2,0", gd.boxes);
+}
+{
+  // the camera moved 1 px: everything changes, but after aligning nothing did
+  const a = frame(60, 100);
+  for (let i = 0; i < 400; i++) a.fillRect((i * 37) % 320, 140 + ((i * 13) % 40), 2, 2, i % 2 ? "#3a6e4a" : "#24502f");   // grass texture
+  const b = new Raster(320, 180, "#1b2a4a");
+  b.drawImage(a, { dx: 1, dy: 0 });
+  const raw = diffImages(a, b), al = diffImages(a, b, { align: true });
+  show("1 px camera shift", `raw ${raw.changedPercent}% → aligned ${al.changedPercent}% · shift ${al.shift && [al.shift.dx, al.shift.dy]} · SSIM ${al.ssim}`);
+  ok("shift: without aligning, every edge changes", raw.changedPercent > 1, raw.changedPercent);
+  ok("shift: found (+1, 0); after aligning ~0% changed", al.shift && al.shift.dx === 1 && al.shift.dy === 0 && al.changedPercent < 0.1 && al.shift.rawPercent === raw.changedPercent, [al.shift, al.changedPercent]);
+}
+{
+  // SSIM: 1 for identical images, falling as noise grows
+  const a = frame(60, 100);
+  const noisy = (amt) => { const b = new Raster(320, 180); b.data.set(a.data); let s = 9; for (let i = 0; i < b.data.length; i += 4) { s = (s * 1103515245 + 12345) & 0x7fffffff; const n = ((s / 0x7fffffff) * 2 - 1) * amt; for (let c = 0; c < 3; c++) b.data[i + c] = Math.max(0, Math.min(255, b.data[i + c] + n)); } return b; };
+  const v = [0, 8, 24, 64].map((amt) => diffImages(a, amt ? noisy(amt) : a).ssim);
+  show("SSIM vs noise 0/8/24/64", v.join(" / "));
+  ok("ssim: 1 for identical, falling monotonically with noise", v[0] === 1 && v[1] < 1 && v[1] > v[2] && v[2] > v[3], v);
+  let msg = "";
+  try { diffImages(frame(0, 0), frame(0, 0, { w: 640, h: 360 }), { resize: false }); } catch (e) { msg = e.message; }
+  ok("resize: false refuses different sizes", /sizes differ/.test(msg), msg);
 }
 
 done("diff");

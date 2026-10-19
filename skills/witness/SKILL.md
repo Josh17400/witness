@@ -58,7 +58,7 @@ witness trace --watch "state.player.pos, state.score" --time 4 --input "space@1"
 witness shot --at 1,4 --input "right@0-3"      # PNGs: OPEN THEM with your image tool and look
 witness shot --from 1 --to 1.5 --every 2f --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
 witness shot --from 0 --to 4 --auto 9          # the 9 frames where the picture changes most (key moments)
-witness shot --at 3 --diff witness/shots/before.png   # what changed visually (regions listed)
+witness shot --at 3 --diff witness/shots/before.png   # what changed: "moved +80,0", appeared, gone; camera shifts undone
 witness listen --time 8 --input "space@1" --events "land: rose(state.player.grounded)"   # sounds vs their causes
 witness replay last --shot                     # what the human saw when they hit the bug
 witness call teleport 100 200 --at 1           # run a game command, then print the state

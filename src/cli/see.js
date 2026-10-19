@@ -133,17 +133,28 @@ async function singleShots(opt) {
       const r = { frame: it.f, t: +(it.f / fps).toFixed(3), file, width: img.width, height: img.height, source: rect };
       if (!opt.json) say(`✔ f${it.f} (${fmtT(it.f / fps)}) → ${file}${rect || fr.zoom > 1 ? `  (${img.width}×${img.height}: ${describeFraming(fr)})` : ""}`);
       if (opt.diff) {
-        const ignore = opt.ignore && opt.ignore !== true ? parseRects(opt.ignore) : [];
+        // regions never compared: --ignore "x,y,w,h; ..." plus witness.json "diff": { "ignore": ["x,y,w,h", ...] }
+        const cfgIgnore = cfg.diff && Array.isArray(cfg.diff.ignore) ? cfg.diff.ignore.map((q) => parseRect(q, "witness.json diff.ignore")) : [];
+        const ignore = [...cfgIgnore, ...(opt.ignore && opt.ignore !== true ? parseRects(opt.ignore) : [])];
         const ref = path.resolve(String(opt.diff));
         if (!fs.existsSync(ref)) die(`no such image: ${opt.diff}`);
-        const d = m.diffImages(fs.readFileSync(ref), { width: img.width, height: img.height, data: img.data }, { threshold: +(opt.threshold || 16), ignore });
+        let d;
+        try { d = m.diffImages(fs.readFileSync(ref), { width: img.width, height: img.height, data: img.data }, { threshold: +(opt.threshold || 16), ignore, align: !opt["no-align"], resize: !!opt.resize, title: `diff vs ${path.basename(ref)}` }); }
+        catch (e) { if (/sizes differ/.test(e.message)) die(`${e.message.replace(/^diffImages: /, "")}: the reference ${path.basename(ref)} and the shot have different sizes (add --resize to compare anyway, or shoot with the same --window/--crop/--zoom)`); throw e; }
         const dfile = file.replace(/\.png$/i, "-diff.png");
         fs.writeFileSync(dfile, d.png);
-        r.diff = { changedPercent: d.changedPercent, changedPixels: d.changedPixels, regions: d.boxes.map(({ x, y, w, h, pixels }) => ({ x, y, w, h, pixels })), sizeMismatch: d.sizeMismatch, file: dfile };
+        const desc = (b) => (b.kind === "moved" && b.from ? `moved ${b.moved[0] >= 0 ? "+" : ""}${b.moved[0]},${b.moved[1] >= 0 ? "+" : ""}${b.moved[1]}: x=${b.from.x} y=${b.from.y} → x=${b.x} y=${b.y} ${b.w}×${b.h}`
+          : b.kind === "moved" && b.within ? `moved ${b.moved[0] >= 0 ? "+" : ""}${b.moved[0]},${b.moved[1] >= 0 ? "+" : ""}${b.moved[1]} inside x=${b.x} y=${b.y} ${b.w}×${b.h}`
+          : `${b.kind} x=${b.x} y=${b.y} ${b.w}×${b.h} (${b.pixels} px)`);
+        const shown = d.boxes.filter((b) => !b.isFrom);
+        r.diff = { changedPercent: d.changedPercent, changedPixels: d.changedPixels, ssim: d.ssim, shift: d.shift, regions: shown.map(({ x, y, w, h, pixels, kind, moved, from }) => ({ x, y, w, h, pixels, kind, moved, from })), sizeMismatch: d.sizeMismatch, file: dfile };
         if (!opt.json) {
-          const regs = d.boxes.slice(0, 6).map((b, i) => `${i + 1}: x=${b.x} y=${b.y} ${b.w}×${b.h} (${b.pixels} px)`).join(" · ");
-          say(`  diff vs ${opt.diff}: ${d.changedPixels ? `${(+d.changedPercent).toFixed(3)}% changed (${d.changedPixels} px) in ${d.boxes.length} region${d.boxes.length === 1 ? "" : "s"}${regs ? `: ${regs}${d.boxes.length > 6 ? " · …" : ""}` : ""}` : "identical"}${ignore.length ? ` (ignoring ${ignore.length} region${ignore.length === 1 ? "" : "s"})` : ""} → ${dfile}`);
-          if (d.sizeMismatch) say(`  ⚠ sizes differ: reference ${d.sizeMismatch.a.join("×")} vs shot ${d.sizeMismatch.b.join("×")} (the shot was scaled to compare: crop/zoom the reference the same way)`);
+          const head = d.changedPixels ? `${(+d.changedPercent).toFixed(3)}% changed (${d.changedPixels} px) in ${shown.length} region${shown.length === 1 ? "" : "s"}` : d.shift ? "nothing changed but the camera" : "identical";
+          say(`  diff vs ${opt.diff}: ${head} · SSIM ${d.ssim}${d.shift ? ` · the camera moved (picture shifted ${d.shift.dx},${d.shift.dy}; compared after undoing it, ${d.shift.rawPercent}% differed before)` : ""}${ignore.length ? ` · ignoring ${ignore.length} region${ignore.length === 1 ? "" : "s"}` : ""}`);
+          shown.slice(0, 8).forEach((b, i) => say(`    ${i + 1} ${desc(b)}`));
+          if (shown.length > 8) say(`    … ${shown.length - 8} more (--json)`);
+          say(`    → ${dfile}  (A │ B │ changes: green appeared, red gone, blue moved, yellow changed)`);
+          if (d.sizeMismatch) say(`  ⚠ sizes differ: reference ${d.sizeMismatch.a.join("×")} vs shot ${d.sizeMismatch.b.join("×")} (--resize scaled the shot to compare)`);
         }
       }
       results.push(r);
@@ -152,8 +163,8 @@ async function singleShots(opt) {
   });
   {
     emit(envelope("shot", {
-      verdict: `${results.length} shot${results.length === 1 ? "" : "s"}${results.some((r) => r.diff) ? `; diff ${results.map((r) => r.diff ? `${r.diff.changedPercent}%` : "-").join(", ")}` : ""}`,
-      summary: { shots: results.length, frames: results.map((r) => r.frame), ...(results.length === 1 && results[0].diff ? { changedPercent: results[0].diff.changedPercent, regions: results[0].diff.regions.length } : {}) },
+      verdict: `${results.length} shot${results.length === 1 ? "" : "s"}${results.some((r) => r.diff) ? `; diff ${results.map((r) => r.diff ? `${r.diff.changedPercent}% (SSIM ${r.diff.ssim})` : "-").join(", ")}` : ""}`,
+      summary: { shots: results.length, frames: results.map((r) => r.frame), ...(results.length === 1 && results[0].diff ? { changedPercent: results[0].diff.changedPercent, regions: results[0].diff.regions.length, ssim: results[0].diff.ssim, moved: results[0].diff.regions.filter((q) => q.kind === "moved").length, shift: results[0].diff.shift ? [results[0].diff.shift.dx, results[0].diff.shift.dy] : null } : {}) },
       data: { shots: results },
       files: results.flatMap((r) => [r.file, ...(r.diff ? [r.diff.file] : [])]),
     }), null, opt);

@@ -95,7 +95,11 @@ const CMD_HELP = {
   shot: `witness shot [--at 1,4,90f] [--out shots/s.png] [--scale 0.5] [--json]
   --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)
   --zoom 3                     crisp nearest-neighbour enlargement (small sprites)
-  --diff ref.png [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16]      changed % and every changed region's box
+  --diff ref.png [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16] [--resize] [--no-align]
+                               what changed vs a reference: %, SSIM, and each region as appeared / gone / moved
+                               (+dx,+dy) / changed; a camera shift is found and undone first; A │ B │ changes picture.
+                               Ignore regions also from witness.json "diff": {"ignore": ["x,y,w,h"]}; gate with
+                               --expect "ssim >= 0.99" or "changedPercent < 0.5"
   --annotate [--types Wolf,Player] [--fields hp,state] [--project "[e.pos[0]*2, e.pos[1]*2]"] [--fit]
                                boxes and labels for every entity, placed by its "screen", else --project, else
                                state.camera, else a fit of the state positions to the sprites found

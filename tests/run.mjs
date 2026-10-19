@@ -368,9 +368,20 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   const s1 = path.join(work, "a.png"), s2 = path.join(work, "b.png");
   cli(["shot", "--at", "0.5", "--out", s1, "--input", "right@0-1"]);
   r = cli(["shot", "--at", "0.5", "--out", s2, "--input", "right@0-1", "--seed", "2", "--diff", s1, "--json"]);
-  ok("shot B11: --json envelope with the diff's regions", (() => { const j = J(r); const d = j?.data.shots[0].diff; return j && j.command === "shot" && d && d.regions.length === 5 && d.changedPixels === 552 && d.regions.every((b) => b.w > 0 && b.h > 0 && b.pixels > 0); })(), r.stdout + r.stderr);
+  ok("shot B11: --json envelope with the diff's regions (v2: each coin's move, exactly)", (() => { const j = J(r); const d = j?.data.shots[0].diff; return j && j.command === "shot" && d && d.changedPixels === 552 && d.regions.length === 4 && d.regions.slice(0, 3).every((q) => q.kind === "moved" && q.moved.join() === "0,7") && d.regions[3].moved.join() === "0,-54" && j.summary.ssim > 0.9; })(), r.stdout + r.stderr);
   r = cli(["shot", "--at", "0.5", "--out", s2, "--input", "right@0-1", "--seed", "2", "--diff", s1]);
-  ok("shot B11: regions printed in the text", /0\.958% changed \(552 px\) in 5 regions: 1: x=\d+ y=\d+ \d+×\d+ \(\d+ px\)/.test(r.stdout), r.stdout);
+  ok("shot B11: regions printed in the text", /0\.958% changed \(552 px\) in 4 regions · SSIM 0\.9\d+/.test(r.stdout) && /1 moved \+0,\+7 inside x=115 y=75 11×18/.test(r.stdout) && /4 moved \+0,-54: x=235 y=114 → x=235 y=60 11×11/.test(r.stdout), r.stdout);
+  // diff v2: a walk inside one region, a camera-only change, a size mismatch
+  const w1 = path.join(work, "w1.png"), w2 = path.join(work, "w2.png");
+  cli(["shot", "--at", "0.2", "--out", w1]);
+  r = cli(["shot", "--at", "0.2", "--out", w2, "--input", "right@0-1", "--diff", w1]);
+  ok("diff v2: the player's 24 px walk is one move +24,0", /1 moved \+24,\+0 inside x=33 y=83 39×15/.test(r.stdout), r.stdout);
+  const c1 = path.join(work, "cam1.png"), c2 = path.join(work, "cam2.png");
+  cli(["shot", "--at", "10f", "--out", c1], { MOCK_CAMERA: "1" });
+  r = cli(["shot", "--at", "11f", "--out", c2, "--diff", c1, "--json"], { MOCK_CAMERA: "1" });
+  ok("diff v2: a camera scroll is the only change (shift -2,0, then 0%)", (() => { const q = J(r)?.summary; return q && q.changedPercent === 0 && q.shift.join() === "-2,0" && q.ssim === 1; })(), r.stdout.slice(0, 500) + r.stderr);
+  r = cli(["shot", "--at", "0.2", "--out", path.join(work, "z.png"), "--zoom", "2", "--diff", w1]);
+  ok("diff v2: different sizes are an error unless --resize", r.status !== 0 && /different sizes \(add --resize/.test(r.stderr), r.stderr);
   if (fs.existsSync(path.join(root, "src", "media", "sheet.js"))) {
     const { decodePNG } = await import("../src/media/png.js");
     r = cli(["shot", "--at", "1", "--crop", "60,70,40,40", "--zoom", "4", "--out", path.join(work, "crop.png")]);
