@@ -12,6 +12,9 @@ export const PERSONAS = {
 
 const q = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
 
+/** A brief's start line --config: the folder, or the file itself when it isn't named witness.json. */
+export const configArg = (root, file) => (file && !/[\\/]witness\.json$/i.test(file) ? file : root).replace(/\\/g, "/");
+
 export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie", minutes = 4, game = "the game", profile = "topdown", controls = "", seed, scene, params, extra, model, live = false, watch = false, turns = false }) {
   const P = PERSONAS[persona] ? persona : "newbie";
   const W = `${cli} play`;

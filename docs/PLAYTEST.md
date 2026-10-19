@@ -124,7 +124,8 @@ Never leave sessions running: `witness play list` shows them, `witness play stop
 ## Commands
 
 All commands are thin clients: each sends one request to the session's daemon on 127.0.0.1 and exits in a fraction
-of a second. `--config DIR` (or `--cmd "<launch>"`) works as in every Witness command.
+of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` beside `witness.json`; briefs and
+`play batch` pass the same file on), or `--cmd "<launch>"`, works as in every Witness command.
 
 | command | options | what it does |
 |---|---|---|

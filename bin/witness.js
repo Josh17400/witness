@@ -54,6 +54,7 @@ Common options:
   --window 1920x1080  --dpi 2   (sent as reset params "window"/"dpi" for games that support them)
   --hold-camera   reset param "camera": "hold": games that support it keep the camera still (pixel measures)
   --attach (wait for an already-running game)  --cmd "<launch command>" (no witness.json needed)
+  --config DIR|file.json  the project folder, or a config file of any name (witness.web.json beside witness.json)
   Browser games (launch.url): --device iphone-15|iphone-15-safari|iphone-15-pro-max|iphone-se|ipad[-landscape]
   (viewport, DPR, touch, mobile, user agent, platform, 5 touch points, portrait screen size; safe areas are NOT
   emulated) · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a

@@ -3,6 +3,20 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.1 (unreleased)
+
+Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web builds).
+
+**Config**
+- `--config path/to/file.json` loads that file (any name; its folder is the project root), so a `witness.web.json`
+  can sit beside the desktop `witness.json`. `--config DIR` still walks up to a `witness.json`. Every command takes
+  it (play start/brief/check/suggest/batch, doctor, test, clean); `play brief` and `play batch` pass the same file
+  on to the tester's start line. A missing path is an error instead of a silent search from its parent.
+
+**Adoption steps**
+1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
+   `--config witness.web.json`.
+
 ## 0.7.0 (2026-10-19)
 
 **Chart v2: compare runs, paths, heatmaps, histograms**

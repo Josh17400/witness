@@ -30,7 +30,9 @@ export function loadConfig(opt) {
     // ad-hoc launch: the whole command line goes to the shell as one string
     return { cfg: { name: "game", launch: { command: String(opt.cmd), args: [], shell: true }, tests: "witness", seed: 1, timeout: +(opt.timeout || 60), shots: "witness/shots", replays: "witness/replays" }, root: process.cwd() };
   }
-  const found = findConfig(opt.config ? path.resolve(opt.config) : process.cwd());
+  if (opt.config === true) die(`--config needs a folder or a file (--config web/witness.web.json)`);
+  if (opt.config && !fs.existsSync(path.resolve(String(opt.config)))) die(`--config ${opt.config}: no such ${/\.json$/i.test(String(opt.config)) ? "file" : "folder"}`);
+  const found = findConfig(opt.config ? path.resolve(String(opt.config)) : process.cwd());
   if (!found) die(`no ${CONFIG_NAME} found here or in any parent folder — run 'witness init' (or pass --cmd "<how to start the game>")`);
   return { cfg: browserOverrides(found.config, opt), root: found.root, file: found.file };
 }

@@ -779,6 +779,22 @@ fs.mkdirSync(path.join(tmp, "cc"));
 fs.writeFileSync(path.join(tmp, "cc", "witness.json"), '{ "build": "tools\\build.bat", "launch": { "command": "x" } }');
 r = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "doctor"], { cwd: path.join(tmp, "cc"), encoding: "utf8", timeout: 30000 });
 ok("config control character refused", r.status !== 0 && /control character/.test(r.stdout + r.stderr) && /tools\\\\build\.bat/.test(r.stdout + r.stderr), r.stdout + r.stderr);
+// ---- --config FILE: a second config (witness.web.json) beside witness.json
+{
+  const proj = path.join(tmp, "two"), W = path.join(root, "bin", "witness.js");
+  fs.mkdirSync(proj);
+  fs.writeFileSync(path.join(proj, "witness.json"), JSON.stringify({ name: "desktop", launch: { command: "no-such-desktop-build" } }));
+  fs.writeFileSync(path.join(proj, "witness.web.json"), JSON.stringify({ name: "web", launch: { command: process.execPath, args: [path.join(here, "mock-game.mjs")] }, play: {} }));
+  const e = spawnSync(process.execPath, [W, "eval", "--at", "0.1", "frame", "--json", "--config", path.join(proj, "witness.web.json")], { cwd: tmp, encoding: "utf8", timeout: 60000 });
+  let j = null; try { j = JSON.parse(e.stdout); } catch { /* shown below */ }
+  ok("--config FILE loads that file (not the witness.json beside it)", e.status === 0 && j && j.ok, e.stdout + e.stderr);
+  const b = spawnSync(process.execPath, [W, "play", "brief", "--config", path.join(proj, "witness.web.json")], { cwd: tmp, encoding: "utf8", timeout: 30000 });
+  ok("play brief: the start line passes the config file on", b.status === 0 && b.stdout.includes(`--config "${path.join(proj, "witness.web.json").replace(/\\/g, "/")}"`), b.stdout + b.stderr);
+  const b2 = spawnSync(process.execPath, [W, "play", "brief", "--config", proj], { cwd: tmp, encoding: "utf8", timeout: 30000 });
+  ok("play brief: --config DIR still passes the folder", b2.status === 0 && b2.stdout.includes(`--config "${proj.replace(/\\/g, "/")}"`) && /"desktop"/.test(b2.stdout), b2.stdout + b2.stderr);
+  const m = spawnSync(process.execPath, [W, "eval", "--at", "0.1", "frame", "--config", path.join(proj, "nope.json")], { cwd: tmp, encoding: "utf8", timeout: 30000 });
+  ok("--config with a missing file: a clear error", m.status !== 0 && /--config .*nope\.json: no such file/.test(m.stdout + m.stderr), m.stdout + m.stderr);
+}
 fs.rmSync(tmp, { recursive: true, force: true });
 fs.rmSync(work, { recursive: true, force: true });
 

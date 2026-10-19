@@ -7,7 +7,6 @@ import { listen, WitnessError } from "./session.js";
 export const CONFIG_NAME = "witness.json";
 export const DEFAULT_ATTACH_PORT = 7357;
 
-/** Walk up from `start` to find witness.json. Returns {config, root, file} or null. */
 // A Windows path written with single backslashes is still valid JSON but silently wrong: "tools\build.bat" holds a
 // backspace (\b), "src\new" a newline. No real command or path contains control characters, so refuse them.
 function checkControlChars(v, file, at = "") {
@@ -22,18 +21,25 @@ function checkControlChars(v, file, at = "") {
   else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) checkControlChars(x, file, at ? `${at}.${k}` : k);
 }
 
+function readConfig(f) {
+  let config;
+  try { config = JSON.parse(fs.readFileSync(f, "utf8")); }
+  catch (e) { throw new WitnessError(`${f} isn't valid JSON: ${e.message}`); }
+  checkControlChars(config, f);
+  return { config: normalize(config), root: path.dirname(f), file: f };
+}
+
+/** `start` is a folder (walk up from it to a witness.json) or a config file of any name (witness.web.json beside
+ *  witness.json): that file is loaded, and its folder is the project root. */
 export function findConfig(start = process.cwd()) {
   let dir = path.resolve(start);
-  if (fs.existsSync(dir) && fs.statSync(dir).isFile()) dir = path.dirname(dir);
+  if (fs.existsSync(dir) && fs.statSync(dir).isFile()) {
+    if (/\.json$/i.test(dir)) return readConfig(dir);
+    dir = path.dirname(dir);
+  }
   for (;;) {
     const f = path.join(dir, CONFIG_NAME);
-    if (fs.existsSync(f)) {
-      let config;
-      try { config = JSON.parse(fs.readFileSync(f, "utf8")); }
-      catch (e) { throw new WitnessError(`${f} isn't valid JSON: ${e.message}`); }
-      checkControlChars(config, f);
-      return { config: normalize(config), root: dir, file: f };
-    }
+    if (fs.existsSync(f)) return readConfig(f);
     const up = path.dirname(dir);
     if (up === dir) return null;
     dir = up;
