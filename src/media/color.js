@@ -263,3 +263,105 @@ export function offPaletteImage(img, mask) {
   }
   return { width: img.width, height: img.height, data: out };
 }
+
+// ---------------------------------------------------------------------------
+// figure vs ground (witness measure figure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Greedy colour clusters: distinct colours (key = r<<16|g<<8|b -> count) taken most common first, each joining the
+ * first cluster whose seed (its most common colour) is within `tol` ΔE, else starting a new one. Returns
+ * { clusters: [{ seed: lab, color: mean [r, g, b] (unrounded), count }], of: Map(key -> cluster index) }.
+ */
+export function clusterColors(counts, tol = 12) {
+  const clusters = [], of = new Map();
+  for (const [k, n] of [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])) {
+    const r = k >> 16, g = (k >> 8) & 255, b = k & 255, lab = labOf(r, g, b);
+    let best = -1, bd = Infinity;
+    for (let i = 0; i < clusters.length; i++) { const s = clusters[i].seed, dd = Math.hypot(lab[0] - s[0], lab[1] - s[1], lab[2] - s[2]); if (dd < bd) { bd = dd; best = i; } }
+    if (best < 0 || bd > tol) { clusters.push({ seed: lab, key: k, sum: [0, 0, 0], count: 0 }); best = clusters.length - 1; }
+    const c = clusters[best];
+    c.sum[0] += r * n; c.sum[1] += g * n; c.sum[2] += b * n; c.count += n;
+    of.set(k, best);
+  }
+  for (const c of clusters) c.color = c.sum.map((v) => v / c.count);
+  return { clusters, of };
+}
+
+/** The value at fraction q of an ascending array (nearest rank). */
+const rank = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))];
+
+/**
+ * A figure's (a sprite's) edge contrast against every kind of ground around it. mask: its silhouette (1 = figure).
+ * Ground pixels are the pixels outside the mask touching it (8-neighbours); each is compared with the figure pixels
+ * within `edge` px (Chebyshev) of it and keeps the strongest (the edge the eye sees there: WCAG ratio and ΔE, each its
+ * own maximum). edge 1 = the silhouette's own rim (exact for pixel art); edge 2 also reaches past a 1 px
+ * anti-aliased rim. Ground colours are clustered into surfaces (ΔE ≤ merge); a surface under minShare of the ring is minor.
+ * Per surface: count, share, mean colour, worst / p10 / median ratio and ΔE, the share of its edge under `min`, and
+ * where the worst edge is. label(x, y) -> string|null names the ground under a pixel (a map tile); a surface takes
+ * its most common label. Returns null when the mask is empty or touches no ground.
+ */
+export function figureGround(img, mask, { edge = 1, merge = 12, minShare = 0.05, min = 3, label = null } = {}) {
+  const W = img.width, H = img.height, d = img.data, E = Math.max(1, Math.round(edge));
+  let x0 = W, y0 = H, x1 = -1, y1 = -1, figure = 0;
+  for (let i = 0; i < W * H; i++) if (mask[i]) { const x = i % W, y = (i - x) / W; figure++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (!figure) return null;
+  const lum = new Map(), lab = new Map();
+  const keyAt = (i) => (d[i * 4] << 16) | (d[i * 4 + 1] << 8) | d[i * 4 + 2];
+  const L = (k) => { let v = lum.get(k); if (v === undefined) { v = luminanceOf(k >> 16, (k >> 8) & 255, k & 255); lum.set(k, v); } return v; };
+  const B = (k) => { let v = lab.get(k); if (!v) { v = labOf(k >> 16, (k >> 8) & 255, k & 255); lab.set(k, v); } return v; };
+  const ground = [];   // { i, k, ratio, de, fk }
+  const counts = new Map();
+  for (let y = Math.max(0, y0 - 1); y <= Math.min(H - 1, y1 + 1); y++) for (let x = Math.max(0, x0 - 1); x <= Math.min(W - 1, x1 + 1); x++) {
+    const i = y * W + x;
+    if (mask[i]) continue;
+    let touches = false;   // the ground ring: pixels touching the silhouette (8-neighbours)
+    for (let dy = -1; dy <= 1 && !touches; dy++) for (let dx = -1; dx <= 1 && !touches; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H && mask[yy * W + xx]) touches = true; }
+    if (!touches) continue;
+    const k = keyAt(i), lg = L(k), bg = B(k);
+    let ratio = 0, de = 0, fk = -1;
+    for (let dy = -E; dy <= E; dy++) for (let dx = -E; dx <= E; dx++) {
+      const xx = x + dx, yy = y + dy;
+      if (xx < 0 || yy < 0 || xx >= W || yy >= H || !mask[yy * W + xx]) continue;
+      const f = keyAt(yy * W + xx), lf = L(f), bf = B(f);
+      const r = (Math.max(lf, lg) + 0.05) / (Math.min(lf, lg) + 0.05);
+      if (r > ratio) { ratio = r; fk = f; }
+      const e = Math.hypot(bf[0] - bg[0], bf[1] - bg[1], bf[2] - bg[2]);
+      if (e > de) de = e;
+    }
+    if (fk < 0) continue;
+    ground.push({ i, k, ratio, de, fk });
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  if (!ground.length) return null;
+  const { clusters, of } = clusterColors(counts, merge);
+  const per = clusters.map(() => []);
+  for (const g of ground) per[of.get(g.k)].push(g);
+  const stats = (list) => {
+    const rs = list.map((g) => g.ratio).sort((a, b) => a - b), es = list.map((g) => g.de).sort((a, b) => a - b);
+    const worst = list.reduce((a, g) => (g.ratio < a.ratio ? g : a));
+    return {
+      ratio: { worst: r2(rs[0]), p10: r2(rank(rs, 0.1)), median: r2(rank(rs, 0.5)) },
+      deltaE: { worst: r2(es[0]), p10: r2(rank(es, 0.1)), median: r2(rank(es, 0.5)) },
+      under: r2((100 * rs.filter((r) => r < min).length) / rs.length),
+      worstAt: [worst.i % W, Math.floor(worst.i / W)], worstGround: hex([worst.k >> 16, (worst.k >> 8) & 255, worst.k & 255]), worstFigure: hex([worst.fk >> 16, (worst.fk >> 8) & 255, worst.fk & 255]),
+    };
+  };
+  const surfaces = clusters.map((c, j) => {
+    const list = per[j], color = c.color.map(Math.round);
+    let lab0 = null;
+    if (label) {
+      const lc = new Map();
+      for (const g of list) { const l = label(g.i % W, Math.floor(g.i / W)); if (l != null) lc.set(l, (lc.get(l) || 0) + 1); }
+      const top = [...lc].sort((a, b) => b[1] - a[1])[0];
+      if (top) lab0 = { label: top[0], labelShare: r2(top[1] / list.length) };
+    }
+    return { cluster: j, color, hex: hex(color), count: list.length, share: r4(list.length / ground.length), minor: list.length / ground.length < minShare, ...(lab0 || {}), ...stats(list) };
+  }).sort((a, b) => b.count - a.count);
+  const sorted = new Map(surfaces.map((s, n) => [s.cluster, n]));
+  for (const s of surfaces) delete s.cluster;
+  // [pixel index, ratio, surface index] per ground pixel (for pictures and matching surfaces across shots; not JSON)
+  const ring = new Float32Array(ground.length * 3);
+  ground.forEach((g, n) => { ring[3 * n] = g.i; ring[3 * n + 1] = g.ratio; ring[3 * n + 2] = sorted.get(of.get(g.k)); });
+  return { figure, ground: ground.length, edge: E, min, merge, bbox: { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }, surfaces, all: stats(ground), ring };
+}

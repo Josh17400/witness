@@ -39,7 +39,7 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
                                       --clip: an animated PNG for a person to watch
   witness listen --time 8             hear the game: sounds tied to their causes, audio report + PNGs
   witness measure <what> ...          numbers: jump, move, hitstop, curve (state) · scale, box, contrast, motion, anim
-                                      (pixels) · ui, colorblind, palette (readability) · perf (frame cost, memory)
+                                      (pixels) · ui, colorblind, palette, figure (readability) · perf (frame cost, memory)
   witness replay [file|last]          play back a recorded human session (WITNESS_RECORD)
   witness call <name> [args] --at 1   run a game-specific command, then show the state
   witness raw '<json command>'        send one raw protocol command (for adapter authors)
@@ -214,8 +214,8 @@ const CMD_HELP = {
   contrast <shot.png> --a <mask> --b <mask>
       WCAG ratio and ΔE between two pixel sets. A mask is x,y,w,h | #rrggbb[~tolerance] | diff:<without.png>,
       and --b may be ring[:radius] (the pixels just outside --a, e.g. outline vs the ground around it).
-  ui [shot.png] [--at 1] [--ui ui.json] [--safe 5%] [--min-text 2%|12] [--min-contrast 4.5] [--align 3]
-     [--window 1280x720,1920x1080] [--pixels] [--out ui.png]
+  ui [shot.png] [--at 1] [--ui ui.json] [--safe 5%|iphone-portrait|iphone-landscape|iphone-se|ipad] [--min-text 2%|12]
+     [--min-contrast 4.5] [--align 3] [--window 1280x720,1920x1080] [--pixels] [--out ui.png]
       UI layout from the game's state.ui = [{id, kind: text|button|panel|icon, rect: [x,y,w,h], text?, fontPx?,
       layer?}] (or --ui file): ✖ clipped by / entirely off the screen, ✖ overlapping (same layer; panels and buttons
       may hold others), ✖ text smaller than --min-text (default 2% of the screen height), ✖ text contrast under 4.5
@@ -227,6 +227,28 @@ const CMD_HELP = {
      [--a <mask> --b <mask>] [--min-de 20] [--out dir] [--no-images]
       colour-vision deficiency (Machado 2009, linear RGB): writes <name>-cvd.png (normal + each type side by side)
       and one picture per type, and reports which key colours stop being distinguishable (ΔE under --min-de that
+      ✖ the same text shown twice at once (both rects; from pixels: rows with the same ink, a ⚠). ✖ text not held by a
+      panel/button over a busy background (no plate): judged by its WORST glyph edge (text pixel vs the background
+      pixel next to it, anti-aliased pixels skipped), not the average, with where and the two colours.
+      --safe <device>: env(safe-area-inset-*) in points scaled to the screenshot (each axis: px per pt), ✖ text, buttons
+      and icons in an unsafe zone (⚠ panels). iphone-portrait = iPhone 14 Pro/15/16: top 59 pt (status bar + Dynamic
+      Island), bottom 34 (home indicator); iphone-landscape: left/right 59, bottom 21 (16 Pro/Pro Max: 62; notched
+      12-14: 47); iphone-se: portrait top 20 (status bar), landscape none; ipad (10th gen/Air 11"): top 24, bottom 20.
+  ui --from 0 --to 30 [--every 1f] [--within 10] [--input ...]
+      sweep state.ui: ✖ a text shown again within --within s of its last showing (a repeated toast: both times, how
+      long it was hidden, its rect) and ✖ the same text twice at once (first frame, how many sampled frames).
+  figure --of <Type | id | state.path> [--scenes a,b] [--params '[{"hour":12},{"hour":22}]'] [--at 1,2] [--input ...]
+     [--without "params={...}"] [--edge 1] [--min 3] [--merge 12] [--min-share 5%] [--surfaces sand=#c2b280,...] [--out dir]
+  figure <shot.png> --mask diff:<without.png> | #rrggbb[~tol] | x,y,w,h
+      a sprite's edge contrast against every ground around it, per scene × param set × time: the silhouette from the
+      same run without it (reset param "hide": [its id], or --without), else its state box/rect minus the ground's
+      colours, else the sprite found at its state position (both marked as guesses). Ground = the ring of pixels
+      touching the silhouette, each compared with the figure pixels within --edge px (strongest edge there; --edge 2
+      reaches past an anti-aliased rim), clustered into surfaces (ΔE ≤ --merge; under --min-share of the ring: minor).
+      Per surface: WCAG ratio and ΔE worst / p10 / median, % of its edge under --min, the worst pixel and colours;
+      surfaces are named by state.map tiles, --surfaces colours (ΔE < 15), or by position from an earlier shot of the
+      same scene and frame (day → night). ✖ when a surface's median < --min. --expect "worstMedianRatio >= 3".
+      --out: each figure and its ground ring, red where the edge is under --min.
       were distinct normally). Key colours: --colors, else (driving the game) each entity type's sprite colour
       (sprites fitted to state positions, like align) + the background, else the picture's most common colours.
       --a/--b: the contrast of two masks under each type (as in contrast).

@@ -524,7 +524,7 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   ok("motion --camera state: the camera from state.camera (the f30 step exact), world motion [2,2]", (() => { const j = J(r)?.data; return j && j.camera.moving && j.camera.uneven.length === 1 && j.camera.uneven[0].i === 30 && j.objects[0].meanStep === 2.828; })(), r.stdout.slice(0, 400) + r.stderr);
 
   // measure ui (MOCK_UI: the planted layout bugs), colorblind and palette
-  const { contrastRatio } = await import("../src/media/color.js");
+  const { contrastRatio, deltaE, hex: hexOf } = await import("../src/media/color.js");
   const hintRatio = Math.round(contrastRatio([70, 70, 90], [20, 24, 40]) * 1000) / 1000;
   r = cli(["measure", "ui", "--json", "--out", path.join(work, "ui.png")], { MOCK_UI: "1" });
   ok("measure ui: exactly the planted findings from state.ui", (() => { const j = J(r); const q = j?.summary; return j && !j.ok && r.status === 1 && q.source === "state.ui" && q.elements === 11 && q.problems === 5 && q.warnings === 3 && q.clipped === 1 && q.offscreen === 1 && q.overlaps === 1 && q.smallText === 1 && q.lowContrast === 1 && q.unsafe === 1 && q.misaligned === 2 && j.data.checks.clipped[0].id === "minimap" && j.data.checks.clipped[0].past.right === 10 && j.data.checks.offscreen[0].id === "toast" && j.data.checks.overlaps[0].area === 200 && j.data.checks.small[0].id === "tiny" && j.data.checks.unsafe[0].into.left === 6 && fs.existsSync(path.join(work, "ui.png")) && j.files.length === 1; })(), r.stdout.slice(0, 900) + r.stderr);
@@ -557,6 +557,49 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   ok("measure palette: the player's 149 px are off a 2-colour palette, 3 colours > max 2, picture written", (() => { const j = J(r); const q = j?.summary; return q && !j.ok && q.colors === 3 && q.offPixels === 149 && q.offColors === 1 && q.over === true && j.data.offColors[0].hex === "#50c8ff" && j.data.offColors[0].bbox.w === 15 && j.data.offColors[0].bbox.h === 15 && fs.existsSync(path.join(work, "off.png")); })(), r.stdout.slice(0, 600) + r.stderr);
   r = cli(["measure", "palette", cvShot, "--palette", "#141828,#ffd23c,#50c8ff"]);
   ok("measure palette: all on the palette", r.status === 0 && /✔ every pixel is on the 3-colour palette/.test(r.stdout), r.stdout + r.stderr);
+  // measure ui (MOCK_UI=look): the same text twice, text over the world without a plate, a repeated toast; device safe areas
+  {
+    const rr = (v) => Math.round(v * 100) / 100;
+    r = cli(["measure", "ui", "--at", "0.6", "--json"], { MOCK_UI: "look" });
+    ok("measure ui: QUEST UPDATED twice at once, with both rects", (() => { const j = J(r); const d = j?.data.duplicates; return j && j.summary.duplicates === 1 && d.length === 1 && d[0].ids.join() === "quest1,quest2" && d[0].rects.map((q) => q.join()).join("|") === "30,36,104,16|30,56,104,16"; })(), r.stdout.slice(0, 900) + r.stderr);
+    ok("measure ui: WEARY over the sand patch without a plate: worst glyph edge = white on sand exactly, the average hides it", (() => { const j = J(r); const c = j?.data.contrast.find((x) => x.id === "status"); const f = j?.data.findings.find((x) => x.kind === "no-plate"); return j && j.summary.noPlate === 1 && c.plate.busy && c.plate.edge.worst === rr(contrastRatio([240, 240, 240], [222, 205, 160])) && c.plate.edge.best === rr(contrastRatio([240, 240, 240], [20, 24, 40])) && c.ratio > 4.5 && f.ids[0] === "status" && f.at[0] >= 170 && !j.data.findings.some((x) => x.kind === "contrast" && x.ids[0] === "status") && !j.data.contrast.find((x) => x.id === "quest1").plate.busy; })(), r.stdout.slice(0, 900) + r.stderr);
+    r = cli(["measure", "ui", "--from", "0", "--to", "5", "--within", "4", "--json"], { MOCK_UI: "look" });
+    ok("measure ui --from/--to: SAVED GAME again at f150, 2 s after it appeared at f30, hidden 1 s; the doubled quest line from f0", (() => { const j = J(r); const q = j?.data.repeats; return j && !j.ok && j.summary.repeats === 1 && q[0].text === "SAVED GAME" && q[0].first.f0 === 30 && q[0].first.f1 === 90 && q[0].again.f0 === 150 && q[0].sinceStart === 2 && q[0].hidden === 1 && q[0].again.rect.join() === "180,10,80,16" && j.summary.duplicates === 1 && j.data.duplicates[0].first === 0 && j.data.duplicates[0].frames === 301 && j.summary.samples === 301; })(), r.stdout.slice(0, 900) + r.stderr);
+    r = cli(["measure", "ui", "--from", "0", "--to", "5", "--within", "1.5"], { MOCK_UI: "look" });
+    ok("measure ui sweep text: no repeat within 1.5 s; the doubled line still printed", r.status === 1 && !/shown again/.test(r.stdout) && /"QUEST UPDATED" shown twice at once from f0/.test(r.stdout), r.stdout + r.stderr);
+    r = cli(["measure", "ui", "--safe", "iphone-landscape", "--json"], { MOCK_UI: "1" });
+    ok("measure ui --safe iphone-landscape: 59 pt sides = 22.16 px, 21 pt bottom = 9.62 px on 320×180; what sits in the island zones", (() => { const j = J(r); const s = j?.data.safe; const f = j?.data.findings.filter((x) => x.kind === "safe"); return j && s.px.left === 22.16 && s.px.right === 22.16 && s.px.bottom === 9.62 && s.px.top === 0 && /aspect 1.78/.test(s.mismatch) && f.map((x) => `${x.ids[0]}:${x.level}`).join() === "hud:warn,score:fail,btn_b:fail,badge:fail" && j.data.checks.unsafe.find((u) => u.id === "badge").into.left === 12.16 && j.summary.safePreset === "iphone-landscape"; })(), r.stdout.slice(0, 900) + r.stderr);
+    r = cli(["measure", "ui", "--safe", "pixel-8"], { MOCK_UI: "1" });
+    ok("measure ui --safe: an unknown preset names the presets", r.status === 1 && /iphone-portrait, iphone-landscape, iphone-se, ipad or a percentage/.test(r.stderr), r.stderr);
+  }
+
+  // measure figure (MOCK_FIGURE: four ground quadrants around the player; hide and hour params)
+  {
+    const rr = (v) => Math.round(v * 100) / 100;
+    const F = [80, 200, 255], G = { sand: [194, 178, 128], snow: [240, 244, 250], grass: [60, 140, 60], road: [70, 70, 75] };
+    const night = (c) => c.map((v) => Math.round(v * 0.3));
+    r = cli(["measure", "figure", "--of", "Player", "--params", '[{"hour":12},{"hour":22}]', "--at", "0.1", "--surfaces", "sand=#c2b280,snow=#f0f4fa,grass=#3c8c3c,road=#46464b", "--out", path.join(work, "fig"), "--json"], { MOCK_FIGURE: "1" });
+    const sh = J(r)?.data.shots;
+    ok("measure figure: the silhouette from the hide param, 4 named surfaces by day with the exact ratio and ΔE of each pair", (() => { if (!sh) return false; const d = sh[0]; return /hide: \[1\]/.test(d.silhouette) && d.figurePixels === 149 && d.surfaces.length === 4 && Object.entries(G).every(([n, g]) => { const s = d.surfaces.find((x) => x.name === n); return s && s.ratio.worst === rr(contrastRatio(F, g)) && s.ratio.median === s.ratio.worst && s.deltaE.median === rr(deltaE(F, g)); }); })(), r.stdout.slice(0, 900) + r.stderr);
+    ok("measure figure: at night (×0.3) the same surfaces named by position, with the night colours' exact ratios", (() => { if (!sh) return false; const d = sh[1]; return Object.entries(G).every(([n, g]) => { const s = d.surfaces.find((x) => x.name === n); return s && s.nameFrom && s.hex === hexOf(night(g)) && s.ratio.worst === rr(contrastRatio(night(F), night(g))); }); })(), JSON.stringify(sh && sh[1].surfaces));
+    ok("measure figure: verdict, summary and picture: 7 surfaces under 3:1 (all but day road), worst sand at night 1.04", (() => { const j = J(r); return j && !j.ok && r.status === 1 && j.summary.failing === 7 && j.summary.worstMedianRatio === rr(contrastRatio(night(F), night(G.sand))) && j.summary.worstSurface === "sand" && fs.existsSync(path.join(work, "fig", "figure.png")); })(), r.stdout.slice(0, 600) + r.stderr);
+    r = cli(["measure", "figure", "--of", "Player", "--params", '{"hour":12}', "--at", "0.1", "--min", "1.05", "--expect", "worstMedianRatio >= 1.1"], { MOCK_FIGURE: "1" });
+    ok("measure figure --min / --expect: every surface over 1.05, worst median 1.11", r.status === 0 && /✔ expect worstMedianRatio >= 1.1: got 1.11/.test(r.stdout), r.stdout + r.stderr);
+    // no hide support: a box in the state (MOCK_ALIGN) or the sprite found at its state position; exact on a flat floor
+    const flat = rr(contrastRatio(F, [20, 24, 40]));
+    r = cli(["measure", "figure", "--of", "state.player", "--without", "seed=1", "--at", "0.1", "--json"], { MOCK_ALIGN: "1" });
+    ok("measure figure: when --without changes nothing, the state box minus the ground's colours", (() => { const d = J(r)?.data.shots[0]; return d && /^box 33,83 15×15/.test(d.silhouette) && /--without changed no pixels/.test(d.silhouette) && d.figurePixels === 149 && d.surfaces[0].ratio.worst === flat; })(), r.stdout.slice(0, 600) + r.stderr);
+    r = cli(["measure", "figure", "--of", "Coin", "--at", "0.1", "--params", '{"hide":"none"}', "--json"]);
+    ok("measure figure: --of a type measures each one; without hide support or a box, each sprite at its state position", (() => { const d = J(r)?.data.shots; return d && d.length === 5 && d.every((x) => /the sprite at its state position/.test(x.silhouette) && x.surfaces[0].ratio.worst === rr(contrastRatio([255, 210, 60], [20, 24, 40]))) && /the game ignored the hide param/.test(d[0].silhouette); })(), r.stdout.slice(0, 600) + r.stderr);
+    r = cli(["measure", "figure", "--of", "Wizard"]);
+    ok("measure figure: an unknown --of is named", r.status === 1 && /--of Wizard: nothing in state.entities/.test(r.stderr), r.stderr);
+    // from files: --mask diff:<without.png>
+    const withP = path.join(work, "fig-with.png"), withoutP = path.join(work, "fig-without.png");
+    cli(["shot", "--at", "0.1", "--out", withP], { MOCK_FIGURE: "1" });
+    cli(["shot", "--at", "0.1", "--out", withoutP, "--params", '{"hide":["Player"]}'], { MOCK_FIGURE: "1" });
+    r = cli(["measure", "figure", withP, "--mask", `diff:${withoutP}`, "--json"]);
+    ok("measure figure <png> --mask diff:<without.png>: the same 4 surfaces as driving the game", (() => { const d = J(r)?.data.shots[0]; return d && d.figurePixels === 149 && d.surfaces.length === 4 && J(r).summary.worstMedianRatio === rr(contrastRatio(F, G.sand)); })(), r.stdout.slice(0, 600) + r.stderr);
+  }
   r = cli(["measure", "registration", "--pos", "state.player.pos", "--at", "0", "--time", "36f", "--input", "right@0-1, down@0-1", "--json"], { MOCK_CAMERA: "1" });
   ok("registration: the sprite sits on its state position (offset 0, spread 0); a disc's feet glide", (() => { const q = J(r)?.summary; return q && q.offset.join() === "0,0" && q.spread.join() === "0,0" && q.gliding === 36 && q.planted === 0; })(), r.stdout.slice(0, 400) + r.stderr);
   r = cli(["shot", "--sheet", "--at", "0.2,0.5,1.1", "--out", path.join(work, "mom.png"), "--input", "right@0-1", "--json"]);

@@ -50,6 +50,40 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
   checks) and `src/media/ui.js` (`layoutChecks`, `textContrast`, `findTextRows`); `measure.js` exports `labOf`,
   `luminanceOf`, `LINEAR`.
 
+**Phone safe areas, doubled and repeated text, text without a plate, figure vs ground**
+- `measure ui --safe iphone-portrait | iphone-landscape | iphone-se | ipad`: the device's `env(safe-area-inset-*)`
+  in points, scaled to the screenshot per axis (screenshot px ÷ device pt; a warning when the aspect differs).
+  iPhone 14 Pro/15/16 (393×852 pt @3x): portrait top 59 pt (status bar + Dynamic Island), bottom 34 (home
+  indicator); landscape left and right 59 (the island can be on either side), bottom 21 (16 Pro / Pro Max report
+  62, notched 12–14 report 47). iPhone SE 2/3 (375×667 @2x): portrait top 20 (status bar), landscape none. iPad
+  10th gen / Air 11" (820×1180 @2x): top 24, bottom 20. Text, buttons and icons inside a zone are ✖ with the zone
+  named ("Dynamic Island / rounded corner (25.24 px into the 33.24 px left inset), home indicator (…)"); panels ⚠.
+  The `%` form is unchanged.
+- `measure ui`: ✖ the same text shown twice at once (case and spacing ignored, ≥ 3 characters with a letter; a
+  button's own label listed twice is not a copy), both rects; without `state.ui`, text rows with the same ink (⚠).
+- `measure ui --from 0 --to 30 [--within 10] [--every 1f]`: samples `state.ui` and reports texts shown again within
+  `--within` s of their previous showing (a repeated toast: when it showed, when it came back, how long it was
+  hidden, its rect), and texts doubled at any sampled frame (first frame, how many frames).
+- `measure ui`: text not held by a panel or button is checked for a backing plate. When the background around the
+  glyphs is busy (its main colour under 80% of it), the text is judged by its worst glyph edge (each text pixel vs
+  the background pixel next to it; anti-aliased in-between pixels stand for the colour they blend into), not the
+  averaged ratio: "status (text "WEARY") over the world without a plate: worst glyph-edge contrast 1.38:1 < 4.5
+  (rgb(240,240,240) on rgb(222,205,160) at 171,115; median 15.47 …)". The averaged ratio of that text is 6.13.
+- `witness measure figure --of <Type | id | state.path> [--scenes a,b] [--params '[{"hour":12},{"hour":22}]']
+  [--at 1,2]`: a sprite's edge contrast against every ground around it, per scene × param set × time. Silhouette:
+  the same run with the new reserved reset param `hide: [id]` (or `--without <variant>`), diffed; else the
+  entity's state `box`/`rect` minus the ground's colours, else the sprite at its state position (both marked as
+  guesses). The ring of ground pixels touching it is compared with the figure pixels within `--edge` px, clustered
+  into surfaces (ΔE ≤ 12), and each surface gets WCAG ratio and ΔE worst / p10 / median, the share of its edge under
+  `--min 3`, the worst pixel and colours. Surfaces are named from `state.map` tiles, `--surfaces sand=#c2b280,…`, or
+  by position from an earlier shot of the same scene and frame (so night surfaces keep their day names). ✖ when a
+  surface's median is under `--min`; `--expect "worstMedianRatio >= 3"`; `--out` draws each figure and its ring
+  (red under `--min`). Also from files: `measure figure shot.png --mask diff:without.png`. On `examples/arena`: the
+  player's dark outline against the floor 2.93:1 worst / 3.53:1 median, against the wall 1.19:1.
+- `examples/arena` honours `hide` (drawing only).
+- Media: `safePreset`, `duplicateTexts`, `pixelDuplicates`, `textTimeline`, `repeatedTexts`, `plateCheck` in
+  `ui.js`; `figureGround`, `clusterColors` in `color.js`; `layoutChecks` takes per-side safe margins.
+
 **Performance, animation timing, clips**
 - `witness measure perf [--time 3] [--input ...]`: steps one frame at a time and reads the adapter's `perf` after each:
   the game's `update_ms` (else `frame_ms`; else wall time) p50 / p95 / p99 / max with its frame, frames over the 1/fps
@@ -136,6 +170,14 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
    teleports no longer count as distance, and each heatmap run is one frame shorter).
 8. *Optional:* C#, Unity, Godot, Go and Lua games can re-vendor their adapter and call its `sound(...)` helper where
    a sound starts, so `listen` and `effect` can name sounds.
+9. If a test or script gates on `measure ui` (`ok`, `problems`, `lowContrast`): two new ✖ kinds can appear (`duplicate`,
+   `no-plate`), and text over a busy background is now judged by its worst glyph edge (`no-plate`) instead of the
+   averaged `contrast` finding. Re-run it once and fix or accept what it finds.
+10. *Optional:* honour the reserved reset param `hide: [ids or type names]` (don't draw those entities; change
+   nothing else) so `measure figure` gets exact silhouettes; without it the silhouette is estimated from the
+   entity's state `box`/`rect` or the sprite at its position. Phone/web builds: `measure ui --safe iphone-landscape`
+   (or `iphone-portrait`, `iphone-se`, `ipad`) on a screenshot of the phone-sized layout; list toasts in `state.ui`
+   only while they show, so `measure ui --from/--to` can catch repeats.
 
 ## 0.6.0 (2026-10-19)
 

@@ -43,6 +43,13 @@
 //                  tiny text with fontPx 3, hint text (70,70,90) on the background (20,24,40) (low contrast), btn_c
 //                  2 px right of btn_a and tiny. Reset param window [w, h] resizes the screen (btn_b stays at x 240..300,
 //                  the minimap stays 30 px from the right edge): at 280×180 btn_b is clipped too.
+//                  MOCK_UI=look adds: "QUEST UPDATED" twice at once (quest1 30,36 and quest2 30,56, 104×16), a "SAVED GAME"
+//                  toast (180,10 80×16) shown f30–f90 and again f150–f210, and "WEARY" (240,240,240) at 150,112 40×16
+//                  without a plate, half over a sand patch (222,205,160) at x ≥ 170 (worst edge 1.38:1, else 15.4:1).
+//   MOCK_FIGURE=1  the ground is four quadrants meeting at the player's start (40,90): sand (194,178,128) top-left,
+//                  snow (240,244,250) top-right, grass (60,140,60) bottom-left, road (70,70,75) bottom-right; no coins.
+//                  Reset params: "hide": [ids or types] (the reserved param) leaves those out of the picture;
+//                  "hour": h before 6 or from 20 is night (every colour × 0.3, rounded).
 import net from "node:net";
 import { encodePNG } from "../src/media/png.js";
 import { glyph } from "../src/media/font.js";
@@ -66,7 +73,8 @@ const camY = ZOOM > 1 ? 40 : 0;   // zoomed in, the camera looks a little lower 
 const groundY = (x) => (LEDGE && x >= 200 ? 150 : 90);
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
-let bigPlayer = false, holdCamera = false;
+let bigPlayer = false, holdCamera = false, hidden = new Set(), night = false;
+const FIGURE = !!process.env.MOCK_FIGURE, LOOK = UI === "look";
 const HAZARD = !!process.env.MOCK_HAZARD;
 let dead = false, deaths = 0, deadAt = -1;
 const PERF = !!process.env.MOCK_PERF;
@@ -80,6 +88,8 @@ const BIG = process.env.MOCK_BIG ? Array.from({ length: Math.round(+process.env.
 let particles = 0, particleLife = 0, stepMs = [];
 function reset(seed = 1, params = {}) {
   bigPlayer = !!params.big; holdCamera = params.camera === "hold";
+  hidden = new Set((Array.isArray(params.hide) ? params.hide : params.hide != null ? [params.hide] : []).map(String));
+  night = params.hour != null && (+params.hour < 6 || +params.hour >= 20);
   [W, H] = UI && Array.isArray(params.window) ? params.window : [320, 180];
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
@@ -90,7 +100,7 @@ function reset(seed = 1, params = {}) {
   dead = false; deaths = 0; deadAt = -1;
   particles = 0; particleLife = 0; stepMs = [];
   edges = []; freeze = 0; xAt = null; lagged = false; jPresses = 0; coyote = 0; buffer = 0;
-  coins = params.nocoins ? [] : Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)], ...(ALIGN ? { box: [16, 16] } : {}) }));   // MOCK_ALIGN: a hitbox bigger than the 11 px art
+  coins = params.nocoins || FIGURE ? [] : Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)], ...(ALIGN ? { box: [16, 16] } : {}) }));   // MOCK_ALIGN: a hitbox bigger than the 11 px art
 }
 
 function stepOnce(dt) {
@@ -186,7 +196,14 @@ const tone660 = () => Float32Array.from({ length: Math.round(SR * 0.12) }, (_, i
 const beep = () => Float32Array.from({ length: Math.round(SR * 0.1) }, (_, i) => Math.sin(2 * Math.PI * 440 * i / SR) * 0.4 * (1 - i / (SR * 0.1)));
 
 // MOCK_UI: the HUD (see the header for the planted bugs)
-const uiElements = () => [
+const lookElements = () => [
+  { id: "quest1", kind: "text", rect: [30, 36, 104, 16], text: "QUEST UPDATED", fontPx: 16, ink: [255, 255, 255] },
+  { id: "quest2", kind: "text", rect: [30, 56, 104, 16], text: "QUEST UPDATED", fontPx: 16, ink: [255, 255, 255] },
+  ...((frame >= 30 && frame <= 90) || (frame >= 150 && frame <= 210) ? [{ id: "toast2", kind: "text", rect: [180, 10, 80, 16], text: "SAVED GAME", fontPx: 16, ink: [255, 255, 255] }] : []),
+  { id: "status", kind: "text", rect: [150, 112, 40, 16], text: "WEARY", fontPx: 16, ink: [240, 240, 240] },
+];
+const uiElements = () => [...baseElements(), ...(LOOK ? lookElements() : [])];
+const baseElements = () => [
   { id: "hud", kind: "panel", rect: [16, 10, 140, 20], fill: [40, 40, 60] },
   { id: "score", kind: "text", rect: [20, 12, 40, 16], text: "SCORE", fontPx: 16, ink: [255, 255, 255] },
   { id: "lives", kind: "text", rect: [70, 12, 32, 16], text: "HP 3", fontPx: 16, ink: [255, 255, 255] },
@@ -213,16 +230,18 @@ function drawUI(put) {
 
 function screenshot() {
   const px = Buffer.alloc(W * H * 4);
-  const put = (x, y, r, g, b) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const i = (y * W + x) * 4; px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255; };
+  const put = (x, y, r, g, b) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const i = (y * W + x) * 4; const k = night ? 0.3 : 1; px[i] = Math.round(r * k); px[i + 1] = Math.round(g * k); px[i + 2] = Math.round(b * k); px[i + 3] = 255; };
   const cam = CAMERA ? camX() : 0;
   if (CAMERA && process.env.MOCK_CAMERA !== "flat") {
     // a textured world (4×4 blocks) seen through the camera, so scrolling is visible
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const h = (Math.imul((x + cam) >> 2, 73856093) ^ Math.imul(y >> 2, 19349663)) >>> 0; put(x, y, 20 + (h & 63), 24 + ((h >> 6) & 63), 40 + ((h >> 12) & 63)); }
-  } else for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 20, 24, 40);
+  } else if (FIGURE) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, ...(y < 90 ? (x < 40 ? [194, 178, 128] : [240, 244, 250]) : x < 40 ? [60, 140, 60] : [70, 70, 75]));
+  else for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 20, 24, 40);
+  if (LOOK) for (let y = 100; y < 140; y++) for (let x = 170; x < 230; x++) put(x, y, 222, 205, 160);   // a sand patch in the world
   // screen = (world - camera) × zoom; MOCK_ALIGN draws coin 12 six screen pixels left of its state position
   const blob = (p, r, c, dx = 0) => { const R = r * ZOOM, sx = Math.round((p[0] - cam) * ZOOM) + dx, sy = Math.round((p[1] - (CAMERA ? camY : 0)) * ZOOM); for (let y = -R; y <= R; y++) for (let x = -R; x <= R; x++) if (x * x + y * y <= R * R) put(sx + x, sy + y, ...c); };
   coins.forEach((c) => blob(c.pos, 5, [255, 210, 60], ALIGN && c.id === 12 ? -6 : 0));
-  blob(player.pos, bigPlayer ? 9 : 7, [80, 200, 255]);
+  if (!hidden.has("1") && !hidden.has("Player")) blob(player.pos, bigPlayer ? 9 : 7, [80, 200, 255]);
   if (ANIM) {
     const [ox, oy] = [[-4, -4], [0, -4], [0, 0], [-4, 0]][poseAt(frame)];
     const sx = Math.round((player.pos[0] - cam) * ZOOM), sy = Math.round((player.pos[1] - (CAMERA ? camY : 0)) * ZOOM);

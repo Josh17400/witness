@@ -1,15 +1,19 @@
-// Witness CLI: measure ui | colorblind | palette — readability checks on a screenshot (a PNG, or the game's frame).
-//   ui          layout from the state.ui convention (clipped, off screen, safe area, overlaps, text size, text
-//               contrast, almost-aligned edges), or text-like rows found from pixels when the game has no state.ui
+// Witness CLI: measure ui | colorblind | palette | figure — readability checks on a screenshot (a PNG, or the game's frame).
+//   ui          layout from the state.ui convention (clipped, off screen, safe area or a device preset, overlaps, text
+//               size, text contrast, text over the world without a plate, the same text twice, almost-aligned edges),
+//               or text-like rows found from pixels when the game has no state.ui; --from/--to: repeated toasts
 //   colorblind  protan / deutan / tritan (/ achroma) simulation: simulated pictures, and which key colours (given,
 //               the entities' sprite colours, or the picture's most common colours) stop being distinguishable
 //   palette     colour count and palette compliance for pixel art: off-palette pixels, where, and their nearest colour
+//   figure      a sprite's edge contrast against each ground surface around it, over scenes / params / times
 import fs from "node:fs";
 import path from "node:path";
 import { begin, stepTo } from "../core/runner.js";
 import { parseRect } from "./see.js";
-import { die, withGame, runOpts, media, printLogs, framesOf, shotImage, envelope, emit } from "./common.js";
+import { die, withGame, runOpts, media, printLogs, framesOf, fmtT, shotImage, envelope, emit } from "./common.js";
+import { sampleExprs, frameGrid } from "../core/sample.js";
 import { entitiesOf, cameraHint } from "./measure.js";
+import { backgroundPalette } from "../media/align.js";
 
 const r2 = (v) => (v == null ? v : Math.round(v * 100) / 100);
 const val = (v) => (v !== undefined && v !== true ? String(v) : null);
@@ -22,6 +26,7 @@ export async function lookMeasure(what, files, opt) {
   if (what === "ui") return uiMeasure(m, files, opt);
   if (what === "colorblind" || what === "cvd") return colorblindMeasure(m, c, files, opt);
   if (what === "palette") return paletteMeasure(m, c, files, opt);
+  if (what === "figure") return figureMeasure(m, c, files, opt);
 }
 
 /** The frame(s) to look at: a PNG file, or the game's screenshot (+ snapshot) at --at, once per --window size. */
@@ -65,8 +70,61 @@ function pctOrPx(s, size, def) {
 
 // ------------------------------------------------------------------ measure ui
 
+/**
+ * measure ui --from/--to: state.ui sampled over a span: texts shown again within --within seconds of their last
+ * showing (a repeated toast), and the same text shown twice at once at any sampled frame.
+ */
+async function uiSweep(ui, opt) {
+  const within = val(opt.within) != null ? +opt.within : 10;
+  if (!(within > 0)) die("--within wants seconds > 0");
+  let res;
+  await withGame(opt, async (s, cfg) => {
+    const fps = s.fps;
+    const f0 = framesOf(val(opt.from) ?? "0", fps), f1 = framesOf(val(opt.to) ?? `${f0 + 10 * fps}f`, fps);
+    if (f1 <= f0) die("--to must be after --from");
+    const every = val(opt.every) != null ? Math.max(1, framesOf(val(opt.every), fps)) : 1;
+    const st = await begin(s, runOpts(opt, cfg));
+    const frames = frameGrid(f0, f1, every);
+    const r = await sampleExprs(s, st, ["state.ui"], frames);
+    printLogs(await s.drainLogs());
+    const [W, H] = Array.isArray(s.hello.size) ? s.hello.size : [Infinity, Infinity];
+    let missing = 0;
+    const samples = r.frames.map((f, i) => {
+      const v = r.values[0][i];
+      if (!Array.isArray(v)) { missing++; return { f, els: [] }; }
+      try { return { f, els: ui.normalizeUI(v) }; } catch (e) { die(`f${f}: ${e.message}`); }
+    });
+    if (missing === samples.length) die("no state.ui in any sampled frame: the sweep needs the game's state.ui (see witness help measure)");
+    const tl = ui.textTimeline(samples, { width: W, height: H });
+    const repeats = ui.repeatedTexts(tl, { within, fps });
+    const dupAt = new Map();   // text -> { first frame, frames, ids, rects }
+    for (const sm of samples) for (const d of ui.duplicateTexts(sm.els, { width: W, height: H })) {
+      const k = ui.normText(d.text), e = dupAt.get(k);
+      if (e) { e.frames++; e.last = sm.f; } else dupAt.set(k, { text: d.text, first: sm.f, last: sm.f, frames: 1, ids: d.ids, rects: d.rects });
+    }
+    res = { fps, f0, f1, every, samples: samples.length, missing, tl, repeats, dups: [...dupAt.values()] };
+  });
+  const { fps, f0, f1, every, tl, repeats, dups } = res;
+  const t = (f) => `f${f} (${fmtT(f / fps)})`;
+  const rect = (q) => `${q[0]},${q[1]} ${q[2]}×${q[3]}`;
+  const lines = [`measure ui sweep ${t(f0)} → ${t(f1)}, every ${every}f (${res.samples} samples${res.missing ? `, ${res.missing} without state.ui` : ""}): ${tl.size} distinct texts · repeats within ${within} s`];
+  for (const r of repeats) lines.push(`  ✖ "${r.text}" shown again ${r.sinceStart} s after it last appeared: ${t(r.first.f0)}–${t(r.first.f1)} at ${rect(r.first.rect)}, then ${t(r.again.f0)} at ${rect(r.again.rect)} (hidden ${r.hidden} s between; ${r.shows} showings in the span)`);
+  for (const d of dups) lines.push(`  ✖ "${d.text}" shown twice at once from ${t(d.first)} (${d.frames} sampled frame${d.frames > 1 ? "s" : ""}, to ${t(d.last)}): ${d.ids.map((id, i) => `${id} at ${rect(d.rects[i])}`).join(" and ")}`);
+  if (!repeats.length && !dups.length) lines.push(`  ✔ no text shown again within ${within} s, none shown twice at once`);
+  const shown = [...tl.values()].sort((a, b) => a.shows[0].f0 - b.shows[0].f0);
+  lines.push(`  texts: ${shown.slice(0, 12).map((x) => `"${x.text.length > 30 ? x.text.slice(0, 29) + "…" : x.text}" ${x.shows.map((q) => (q.f0 === q.f1 ? `f${q.f0}` : `f${q.f0}–f${q.f1}`)).join(", ")}`).join(" · ")}${shown.length > 12 ? ` (+${shown.length - 12})` : ""}`);
+  const env = envelope("measure ui", {
+    ok: !repeats.length && !dups.length,
+    verdict: repeats.length || dups.length ? [repeats.length ? `${repeats.length} text${repeats.length > 1 ? "s" : ""} shown again within ${within} s` : "", dups.length ? `${dups.length} text${dups.length > 1 ? "s" : ""} shown twice at once` : ""].filter(Boolean).join(", ") : `no repeated or doubled text over ${fmtT((f1 - f0) / fps)}`,
+    summary: { sweep: true, samples: res.samples, texts: tl.size, repeats: repeats.length, duplicates: dups.length, within },
+    data: { from: f0, to: f1, every, fps, repeats, duplicates: dups, texts: shown.map((x) => ({ text: x.text, shows: x.shows })) },
+  });
+  return emit(env, lines.join("\n"), opt);
+}
+
 async function uiMeasure(m, files, opt) {
   const ui = await import("../media/ui.js");
+  if (opt.from !== undefined || opt.to !== undefined) return uiSweep(ui, opt);
   const got = await getFrames(m, files, opt);
   let uiFile = null;
   if (val(opt.ui)) {
@@ -78,10 +136,17 @@ async function uiMeasure(m, files, opt) {
   }
   const alignTol = val(opt.align) != null ? +opt.align : 3;
   const results = [], written = [];
+  const safeName = val(opt.safe) && /^[a-z]/i.test(val(opt.safe)) ? val(opt.safe).toLowerCase() : null;
   for (const fr of got.frames) {
     const { img } = fr, W = img.width, H = img.height;
-    const safe = pctOrPx(opt.safe, 1, "5%");
-    const safeM = safe.pct != null ? safe.pct / 100 : { x: safe.px, y: safe.px };
+    let safe, safeM, preset = null;
+    if (safeName) {
+      try { preset = ui.safePreset(safeName, W, H); } catch (e) { die(`--safe: ${e.message}`); }
+      safe = { px: null, pct: null }; safeM = preset.px;
+    } else {
+      safe = pctOrPx(opt.safe, 1, "5%");
+      safeM = safe.pct != null ? safe.pct / 100 : { x: safe.px, y: safe.px };
+    }
     const minT = pctOrPx(opt["min-text"], H, "2%");
     const list = uiFile || (opt.pixels ? null : fr.snap?.state?.ui);
     let els, source;
@@ -102,12 +167,19 @@ async function uiMeasure(m, files, opt) {
     const contrasts = [];
     const offIds = new Set(chk.offscreen.map((o) => o.id));
     const zero = els.filter((e) => !(e.w > 0 && e.h > 0) && (e.kind === "text" || e.text));
+    // text not held by a panel or button sits straight on the world: its background may be busy (no plate)
+    const held = (e) => els.some((p) => p !== e && (p.kind === "panel" || p.kind === "button") && p.x <= e.x && p.y <= e.y && p.x + p.w >= e.x + e.w && p.y + p.h >= e.y + e.h);
     for (const e of els) {
       if (offIds.has(e.id) || !(e.kind === "text" || e.text) || zero.includes(e)) continue;
       const tc = ui.textContrast(img, e);
       const need = minC ?? ((e.fontPx ?? e.h) >= 24 ? 3 : 4.5);
-      contrasts.push({ id: e.id, need, ...(tc ? tc : { ratio: null }) });
+      const outlined = tc && tc.outline && tc.outline.textVsOutline >= need;
+      const plate = e.kind === "text" && !held(e) && !outlined ? ui.plateCheck(img, e) : null;
+      contrasts.push({ id: e.id, need, ...(tc ? tc : { ratio: null }), ...(plate ? { plate } : {}) });
     }
+    const dups = source === "pixels"
+      ? ui.pixelDuplicates(img, els.filter((e) => e.kind === "text")).map((d) => ({ ids: [d.a.id, d.b.id], rects: [[d.a.x, d.a.y, d.a.w, d.a.h], [d.b.x, d.b.y, d.b.w, d.b.h]], iou: d.iou }))
+      : ui.duplicateTexts(els, { width: W, height: H });
     // pixel mode: things touching the screen edge may be cut off
     const touching = source === "pixels" ? els.filter((e) => e.x <= 0 || e.y <= 0 || e.x + e.w >= W || e.y + e.h >= H).map((e) => e.id) : [];
     const byId = new Map(els.map((e) => [e.id, e]));
@@ -122,19 +194,34 @@ async function uiMeasure(m, files, opt) {
     for (const s of chk.small) { const e = byId.get(s.id); if (zero.includes(e)) continue; add("fail", "small", [s.id], source === "pixels" ? `${name(s.id)} glyphs ${e.glyphPx} px tall (≈ ${s.fontPx} px font) < ${r2(chk.minText)} px` : `${name(s.id)} ${s.estimated ? "rect height" : "font"} ${s.fontPx} px < ${r2(chk.minText)} px`); }
     for (const c of contrasts) {
       if (c.ratio == null) { const e = byId.get(c.id); if (e.text) add("warn", "invisible", [c.id], `${name(c.id)}: its rect is one flat colour (text not drawn?)`); continue; }
+      if (c.plate && c.plate.busy) {
+        // over a busy background the averaged ratio hides the weak spots: judge the worst glyph edge instead
+        const p = c.plate, g = p.edge;
+        if (g.worst < c.need) add("fail", "no-plate", [c.id], `${name(c.id)} over the world without a plate: worst glyph-edge contrast ${g.worst.toFixed(2)}:1 < ${c.need} (${rgb(g.textAt)} on ${rgb(g.bgAt)} at ${g.at.join(",")}; median ${g.median.toFixed(2)}, best ${g.best.toFixed(2)}; background ${Math.round(p.bgShare * 100)}% one colour)`, { worst: g.worst, at: g.at });
+        continue;
+      }
       const ol = c.outline ? ` (outlined in ${rgb(c.outline.color)}: text/outline ${c.outline.textVsOutline.toFixed(2)}, outline/background ${c.outline.outlineVsBg.toFixed(2)}, without the outline ${c.outline.plainRatio.toFixed(2)})` : "";
       if (c.ratio < c.need) add("fail", "contrast", [c.id], `${name(c.id)} contrast ${c.ratio.toFixed(2)}:1 < ${c.need} (text ${rgb(c.fg)} on ${rgb(c.bg)})${ol}`);
     }
-    for (const u of chk.unsafe) if (!touching.includes(u.id)) add("warn", "safe", [u.id], `${name(u.id)} outside the safe area: ${Object.entries(u.into).map(([k, v]) => `${v} px into the ${k} margin`).join(", ")}`);
+    for (const d of dups) {
+      if (source === "pixels") add("warn", "duplicate", d.ids, `the same text twice? ${d.ids[0]} and ${d.ids[1]} have the same ink (${Math.round(d.iou * 100)}% overlap): ${d.rects.map((r) => `${r[0]},${r[1]} ${r[2]}×${r[3]}`).join(" and ")}`);
+      else add("fail", "duplicate", d.ids, `"${d.text}" shown ${d.ids.length === 2 ? "twice" : `${d.ids.length} times`} at once: ${d.ids.map((id, i) => `${id} at ${d.rects[i][0]},${d.rects[i][1]} ${d.rects[i][2]}×${d.rects[i][3]}`).join(" and ")}`);
+    }
+    for (const u of chk.unsafe) {
+      if (touching.includes(u.id)) continue;
+      if (!preset) { add("warn", "safe", [u.id], `${name(u.id)} outside the safe area: ${Object.entries(u.into).map(([k, v]) => `${v} px into the ${k} margin`).join(", ")}`); continue; }
+      const e = byId.get(u.id), zones = Object.keys(u.into).map((k) => preset.zones[k] || `${k} edge`);
+      add(e.kind === "panel" ? "warn" : "fail", "safe", [u.id], `${name(u.id)} in the ${safeName} unsafe zone: ${Object.entries(u.into).map(([k, v]) => `${preset.zones[k] || `${k} edge`} (${v} px into the ${preset.px[k]} px ${k} inset)`).join(", ")}${e.kind === "panel" ? " (a panel: a background may extend there, keep its content out)" : ""}`, { zones });
+    }
     for (const a of chk.aligned) add("warn", "align", [a.a, a.b], `${a.a} / ${a.b} almost aligned: ${a.edges.map((e) => `${e.edge} ${e.a} vs ${e.b}`).join(", ")} (${Math.max(...a.edges.map((e) => e.diff))} px off)`);
     const fails = F.filter((f) => f.level === "fail").length, warns = F.length - fails;
-    const readable = contrasts.filter((c) => c.ratio != null && c.ratio >= c.need && !chk.small.some((s) => s.id === c.id));
+    const readable = contrasts.filter((c) => c.ratio != null && (c.plate && c.plate.busy ? c.plate.edge.worst >= c.need : c.ratio >= c.need) && !chk.small.some((s) => s.id === c.id));
     // the annotated picture
     if (val(opt.out) || opt.picture) {
       const bad = new Set(F.filter((f) => f.level === "fail").flatMap((f) => f.ids)), warn = new Set(F.filter((f) => f.level === "warn").flatMap((f) => f.ids));
       const items = els.filter((e) => e.w > 0 && e.h > 0).map((e) => ({ x: e.x, y: e.y, w: e.w, h: e.h, label: e.id, color: bad.has(e.id) ? "#ff4d5e" : warn.has(e.id) ? "#ffd166" : "#3ddc97" }));
-      const mx = chk.margins.x, my = chk.margins.y;
-      items.push({ x: mx, y: my, w: W - 2 * mx, h: H - 2 * my, color: "#8ecae6" });
+      const M = chk.margins, ml = M.left ?? M.x, mr = M.right ?? M.x, mt = M.top ?? M.y, mb = M.bottom ?? M.y;
+      items.push({ x: ml, y: mt, w: W - ml - mr, h: H - mt - mb, color: "#8ecae6" });
       const png = m.annotate(img, items, { title: `ui ${fr.label}: red problem · yellow warning · green fine · blue safe area` });
       const dir = outDir(opt, got);
       const file = val(opt.out) && /\.png$/i.test(val(opt.out)) ? path.resolve(val(opt.out).replace(/\.png$/i, got.frames.length > 1 && fr.window ? `-${fr.window}.png` : ".png")) : path.join(dir, `${stemOf(got, "ui")}-ui${fr.window ? `-${fr.window}` : ""}.png`);
@@ -142,14 +229,15 @@ async function uiMeasure(m, files, opt) {
       fs.writeFileSync(file, png);
       written.push(file);
     }
-    results.push({ fr, W, H, source, els, chk, contrasts, F, fails, warns, readable, minT, safe });
+    results.push({ fr, W, H, source, els, chk, contrasts, F, fails, warns, readable, minT, safe, preset, dups });
   }
   // text
   const lines = [];
   for (const r of results) {
     const heur = r.source === "pixels";
     lines.push(`measure ui ${r.fr.label} (${r.W}×${r.H}): ${heur ? `no state.ui — ${r.els.filter((e) => e.kind === "text").length} text-like rows and ${r.els.filter((e) => e.kind === "panel").length} panels found from pixels (a heuristic: expose state.ui for exact checks)` : `${r.els.length} elements from ${r.source}`}`);
-    lines.push(`  safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? "4.5 (3 for 24 px+)"} · edges within ${alignTol} px`);
+    if (r.preset) { const p = r.preset; lines.push(`  safe area ${p.name}: ${p.device}, ${p.orientation} ${p.pt.join("×")} pt @${p.dpr}x · env(safe-area-inset-*) ${["top", "bottom", "left", "right"].filter((k) => p.insetsPt[k]).map((k) => `${k} ${p.insetsPt[k]} pt = ${p.px[k]} px (${p.zones[k] || k})`).join(" · ") || "none"}${p.mismatch ? "" : ` (${p.scale.x} px/pt across, ${p.scale.y} down)`}`); if (p.mismatch) lines.push(`  ⚠ ${p.mismatch}`); }
+    lines.push(`  ${r.preset ? "" : `safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · `}min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? "4.5 (3 for 24 px+)"} · edges within ${alignTol} px`);
     lines.push(r.F.length ? `  ${r.fails ? "✖" : "⚠"} ${r.fails} problem${r.fails === 1 ? "" : "s"}, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : r.els.length ? `  ✔ no layout problems` : "  nothing to check: no UI elements found");
     for (const f of r.F) lines.push(`  ${f.level === "fail" ? "✖" : "⚠"} ${f.text}`);
     if (r.readable.length) lines.push(`  ✔ readable: ${r.readable.slice(0, 8).map((c) => { const e = r.els.find((x) => x.id === c.id); return `${c.id} ${e.glyphPx != null ? `glyphs ${e.glyphPx}` : e.fontPx ?? e.h} px ${c.ratio.toFixed(1)}:1${c.outline ? ` (outline; ${c.outline.plainRatio.toFixed(1)}:1 without)` : ""}`; }).join(" · ")}${r.readable.length > 8 ? ` (+${r.readable.length - 8})` : ""}`);
@@ -165,11 +253,11 @@ async function uiMeasure(m, files, opt) {
   if (written.length) lines.push(`picture: ${written.join(", ")} (open it: boxes by status, the safe area in blue)`);
   const first = results[0];
   const count = (r, k) => r.F.filter((f) => f.kind === k).length;
-  const sumOf = (r) => ({ elements: r.els.length, source: r.source, problems: r.fails, warnings: r.warns, clipped: count(r, "clipped"), offscreen: count(r, "offscreen"), overlaps: count(r, "overlap"), smallText: count(r, "small"), lowContrast: count(r, "contrast"), unsafe: count(r, "safe"), misaligned: count(r, "align"), touchingEdge: count(r, "edge") });
+  const sumOf = (r) => ({ elements: r.els.length, source: r.source, problems: r.fails, warnings: r.warns, clipped: count(r, "clipped"), offscreen: count(r, "offscreen"), overlaps: count(r, "overlap"), smallText: count(r, "small"), lowContrast: count(r, "contrast"), noPlate: count(r, "no-plate"), duplicates: count(r, "duplicate"), unsafe: count(r, "safe"), misaligned: count(r, "align"), touchingEdge: count(r, "edge"), ...(r.preset ? { safePreset: r.preset.name } : {}) });
   const dataOf = (r) => ({
     frame: r.fr.f ?? null, window: r.fr.window ?? null, width: r.W, height: r.H, source: r.source, margins: r.chk.margins, minText: r.chk.minText,
     elements: r.els.map((e) => ({ id: e.id, kind: e.kind, rect: [e.x, e.y, e.w, e.h], text: e.text, fontPx: e.fontPx, ...(e.glyphPx != null ? { glyphPx: e.glyphPx, glyphs: e.glyphs } : {}) })),
-    findings: r.F, contrast: r.contrasts, checks: { clipped: r.chk.clipped, offscreen: r.chk.offscreen, unsafe: r.chk.unsafe, overlaps: r.chk.overlaps, small: r.chk.small, aligned: r.chk.aligned },
+    findings: r.F, contrast: r.contrasts, duplicates: r.dups, ...(r.preset ? { safe: r.preset } : {}), checks: { clipped: r.chk.clipped, offscreen: r.chk.offscreen, unsafe: r.chk.unsafe, overlaps: r.chk.overlaps, small: r.chk.small, aligned: r.chk.aligned },
   });
   const totalFails = results.reduce((s, r) => s + r.fails, 0);
   const env = envelope("measure ui", {
@@ -362,6 +450,283 @@ async function paletteMeasure(m, c, files, opt) {
     verdict: pc ? (pc.offPixels ? `${pc.offPixels} px off the palette (${pc.offColors.length} colours)` : "every pixel on the palette") + (budget.over ? `, ${budget.colors} colours > max ${max}` : "") : max != null ? (budget.over ? `${budget.colors} colours > max ${max}` : `${budget.colors} colours ≤ max ${max}`) : `${budget.colors} colours`,
     summary: { colors: budget.colors, pixels: budget.pixels, rareColors: budget.rare.colors, ...(max != null ? { max, over: budget.over } : {}), ...(pc ? { paletteSize: palette.length, offPixels: pc.offPixels, offPercent: pc.offPercent, offColors: pc.offColors.length, unused: pc.unused.length } : {}) },
     data: { top: budget.top, rare: budget.rare, leastUsed: budget.leastUsed, ...(pc ? { offColors: pc.offColors.map(({ color, ...o }) => o), sample: pc.sample, bbox: pc.bbox, unused: pc.unused } : {}) },
+    files: written,
+  });
+  return emit(env, lines.join("\n"), opt);
+}
+
+// ------------------------------------------------------------------ measure figure
+
+/** "a,b" -> ["a", "b"]; a JSON array of objects for --params stays one list of param sets. */
+function paramSets(spec) {
+  if (spec == null) return [undefined];
+  let v;
+  try { v = JSON.parse(spec); } catch (e) { die(`--params: ${e.message}`); }
+  if (Array.isArray(v)) { if (!v.length || v.some((p) => !p || typeof p !== "object" || Array.isArray(p))) die("--params: a JSON object, or an array of objects (one run each)"); return v; }
+  if (!v || typeof v !== "object") die("--params: a JSON object, or an array of objects (one run each)");
+  return [v];
+}
+
+/** The things --of names in a snapshot: [{ id, type, name, x, y, box, rect, label }] (state units). */
+function figureTargets(snap, of, evaluate) {
+  const pick = (e, label) => {
+    const p = Array.isArray(e?.pos) ? e.pos : e && typeof e === "object" && "x" in e ? [e.x, e.y] : null;
+    return { id: e?.id, type: e?.type ?? e?.kind ?? null, name: e?.name ?? null, x: p ? +p[0] : NaN, y: p ? +p[1] : NaN, box: Array.isArray(e?.box) ? e.box : null, rect: Array.isArray(e?.rect) ? e.rect : null, label };
+  };
+  if (/^state\b/.test(of)) {
+    let v;
+    try { v = evaluate(of, snap); } catch (e) { die(`--of ${of}: ${e.message}`); }
+    if (!v || typeof v !== "object") die(`--of ${of}: not an object with a pos (got ${JSON.stringify(v)?.slice(0, 80)})`);
+    const t = pick(v, of);
+    if (!Number.isFinite(t.x) && !t.rect) die(`--of ${of}: no pos ([x, y]), x/y or rect`);
+    return [t];
+  }
+  const ents = Array.isArray(snap?.state?.entities) ? snap.state.entities : [];
+  const key = of.replace(/^#/, "").toLowerCase();
+  const hit = ents.filter((e) => String(e.id).toLowerCase() === key || String(e.type ?? e.kind ?? "").toLowerCase() === key || String(e.name ?? "").toLowerCase() === key);
+  return hit.map((e) => pick(e, `${e.type ?? e.kind ?? "?"}${e.id != null ? ` #${e.id}` : ""}`));
+}
+
+/** The pixels connected to (x, y) that differ from the background palette: a sprite found from its position. */
+function blobAt(m, img, x, y, threshold = 24) {
+  const W = img.width, H = img.height, d = img.data, pal = backgroundPalette(img);
+  const fg = (i) => { const o = i * 4; return !pal.some((c) => Math.abs(d[o] - c[0]) <= threshold && Math.abs(d[o + 1] - c[1]) <= threshold && Math.abs(d[o + 2] - c[2]) <= threshold); };
+  let seed = -1, bd = Infinity;
+  for (let dy = -8; dy <= 8; dy++) for (let dx = -8; dx <= 8; dx++) {
+    const xx = Math.round(x) + dx, yy = Math.round(y) + dy;
+    if (xx < 0 || yy < 0 || xx >= W || yy >= H || !fg(yy * W + xx)) continue;
+    if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; seed = yy * W + xx; }
+  }
+  if (seed < 0) return null;
+  const mask = new Uint8Array(W * H), stack = [seed];
+  mask[seed] = 1;
+  let n = 0;
+  while (stack.length) {
+    const i = stack.pop(), px = i % W, py = (i - px) / W;
+    if (++n > W * H * 0.05) return null;   // spilled into the scenery: not a sprite
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = px + dx, ny = py + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      const j = ny * W + nx;
+      if (!mask[j] && fg(j)) { mask[j] = 1; stack.push(j); }
+    }
+  }
+  return mask;
+}
+
+/** Inside a screen rect, the pixels unlike every main colour of the 3 px around it (the ground): a silhouette guess. */
+function rectSilhouette(c, img, R) {
+  const W = img.width, H = img.height, d = img.data;
+  const x0 = Math.max(0, Math.floor(R.x)), y0 = Math.max(0, Math.floor(R.y)), x1 = Math.min(W, Math.ceil(R.x + R.w)), y1 = Math.min(H, Math.ceil(R.y + R.h));
+  if (x1 <= x0 || y1 <= y0) return null;
+  const counts = new Map();
+  let n = 0;
+  for (let y = Math.max(0, y0 - 3); y < Math.min(H, y1 + 3); y++) for (let x = Math.max(0, x0 - 3); x < Math.min(W, x1 + 3); x++) {
+    if (x >= x0 && x < x1 && y >= y0 && y < y1) continue;
+    const o = (y * W + x) * 4, k = (d[o] << 16) | (d[o + 1] << 8) | d[o + 2];
+    counts.set(k, (counts.get(k) || 0) + 1); n++;
+  }
+  if (!n) return null;
+  const ground = c.clusterColors(counts, 10).clusters.filter((q) => q.count >= 0.05 * n).map((q) => [q.key >> 16, (q.key >> 8) & 255, q.key & 255]);
+  const mask = new Uint8Array(W * H);
+  let any = 0;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const o = (y * W + x) * 4, px = [d[o], d[o + 1], d[o + 2]];
+    if (!ground.some((g) => c.deltaE(px, g) <= 10)) { mask[y * W + x] = 1; any++; }
+  }
+  return any ? mask : null;
+}
+
+/** Keep the diff's connected parts nearest a screen point (the diff may hold more than one hidden thing). */
+function partNear(m, mask, W, H, x, y) {
+  let seed = -1, bd = Infinity;
+  for (let i = 0; i < W * H; i++) if (mask[i]) { const px = i % W, py = (i - px) / W, dd = (px - x) ** 2 + (py - y) ** 2; if (dd < bd) { bd = dd; seed = i; } }
+  if (seed < 0) return null;
+  const out = new Uint8Array(W * H), stack = [seed];
+  out[seed] = 1;
+  while (stack.length) {
+    const i = stack.pop(), px = i % W, py = (i - px) / W;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {   // 2 px gaps join (a sword held apart)
+      const nx = px + dx, ny = py + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      const j = ny * W + nx;
+      if (mask[j] && !out[j]) { out[j] = 1; stack.push(j); }
+    }
+  }
+  return out;
+}
+
+async function figureMeasure(m, c, files, opt) {
+  const of = val(opt.of);
+  const edge = val(opt.edge) != null ? Math.max(1, Math.round(+opt.edge)) : 1;
+  const merge = val(opt.merge) != null ? +opt.merge : 12;
+  const min = val(opt.min) != null ? +opt.min : 3;
+  const minShare = pctOrPx(opt["min-share"], 1, "5%");
+  const minShareF = minShare.pct != null ? minShare.pct / 100 : minShare.px;
+  const threshold = +(opt.threshold || 16);
+  const named = val(opt.surfaces) ? parseColors(c, opt.surfaces) : [];
+  const fgOpts = { edge, merge, min, minShare: minShareF };
+  const shots = [];   // { label, img, mask, method, target, mapLabel }
+  if (files[0]) {
+    // a PNG: the silhouette from --mask diff:<without.png> | #rrggbb[~tol] | x,y,w,h (a rect: the pixels unlike its surroundings)
+    const img = readImage(m, files[0]);
+    const spec = val(opt.mask);
+    if (!spec) die("usage: witness measure figure <shot.png> --mask diff:<without.png> | #rrggbb[~tol] | x,y,w,h   (or --of <entity> to drive the game)");
+    let mask, method;
+    if (spec.startsWith("diff:")) { const p = path.resolve(spec.slice(5)); if (!fs.existsSync(p)) die(`no such image: ${spec.slice(5)}`); mask = m.maskDiff(img, fs.readFileSync(p), { threshold }).mask; method = `with/without diff (${path.basename(p)})`; }
+    else if (spec.startsWith("#") || spec.startsWith("rgb")) { const [col, tol] = spec.split("~"); mask = m.maskFromColor(img, col, +(tol || 0)); method = `colour ${spec}`; }
+    else { mask = rectSilhouette(c, img, parseRect(spec)); method = `rect ${spec} minus its surroundings' colours (a guess)`; }
+    if (!mask || !mask.some((v) => v)) die(`--mask ${spec} selects no pixels`);
+    shots.push({ label: path.basename(String(files[0])), img, mask, method, target: "figure" });
+  } else {
+    if (!of) die("usage: witness measure figure --of <Type | id | state.path> [--scenes a,b] [--params '[{...},{...}]'] [--at 1,2] [--without \"params={...}\"]");
+    const { evaluate } = await import("../core/expr.js");
+    const { parseVariant } = await import("./ab.js");
+    const scenes = val(opt.scenes) ? val(opt.scenes).split(",").map((s) => s.trim()).filter(Boolean) : [val(opt.scene) ?? undefined];
+    const sets = paramSets(val(opt.params));
+    const ats = (val(opt.at) || "1").split(",").map((s) => s.trim()).filter(Boolean);
+    const without = val(opt.without) ? parseVariant(opt.without, "without") : null;
+    if (without && (Object.keys(without.env).length || without.cmd !== undefined)) die("--without: params=, scene=, seed= or input= (env variables and cmd= need a second process: use witness ab, then measure figure <with.png> --mask diff:<without.png>)");
+    if (scenes.length * sets.length * ats.length > 24) die(`${scenes.length * sets.length * ats.length} shots: keep scenes × params × times at 24 or fewer`);
+    await withGame({ ...opt, params: undefined, scene: undefined }, async (s, cfg) => {
+      if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+      const base = runOpts({ ...opt, params: undefined, scene: undefined }, cfg);
+      for (const scene of scenes) for (const params of sets) {
+        const frames = [...new Set(ats.map((t) => framesOf(t, s.fps)))].sort((a, b) => a - b);
+        const run = { ...base, scene, params: params || base.params ? { ...(base.params || {}), ...(params || {}) } : undefined };
+        const st = await begin(s, run);
+        const caps = [];
+        for (const f of frames) { await stepTo(s, st, f); const im = await shotImage(await s.screenshot()); caps.push({ f, img: { width: im.width, height: im.height, data: Uint8Array.from(im.data) }, snap: await s.snapshot() }); }
+        // the same run without the figure: --without, else the reserved "hide" param with the targets' ids (or types)
+        const targets0 = figureTargets(caps[0].snap, of, evaluate);
+        if (!targets0.length) die(`--of ${of}: nothing in state.entities has that id, type or name at f${caps[0].f}${scene ? ` (scene ${scene})` : ""}`);
+        const hide = targets0.map((t) => t.id ?? t.type).filter((v) => v != null);
+        const runB = without
+          ? { seed: without.seed ?? run.seed, scene: without.scene ?? run.scene, params: { ...(run.params || {}), ...(without.params || {}) }, input: [run.input, without.input].filter(Boolean).join(", ") || undefined }
+          : hide.length ? { ...run, params: { ...(run.params || {}), hide } } : null;
+        const capsB = new Map();
+        if (runB) {
+          const stB = await begin(s, runB);
+          for (const f of frames) { await stepTo(s, stB, f); const im = await shotImage(await s.screenshot()); capsB.set(f, { width: im.width, height: im.height, data: Uint8Array.from(im.data) }); }
+        }
+        printLogs((await s.drainLogs()).filter((l) => l.level === "error"));
+        for (const cap of caps) {
+          const targets = figureTargets(cap.snap, of, evaluate);
+          const ents = entitiesOf(cap.snap);
+          const blobs = m.findBlobs(cap.img, { threshold: 24 });
+          const fit = m.fitProjection(ents, blobs, { hint: cameraHint(cap.snap) });
+          const proj = fit.ok ? fit : (() => { const h = cameraHint(cap.snap); return h ? { ax: h.scale, bx: h.ox, ay: h.scale, by: h.oy, assumed: "state.camera" } : { ax: 1, bx: 0, ay: 1, by: 0, assumed: "screen = state" }; })();
+          const toScreen = (x, y) => [proj.ax * x + proj.bx, proj.ay * y + proj.by];
+          const map = cap.snap?.state?.map;
+          const mapLabel = map && Array.isArray(map.rows) && +map.cell > 0 ? (x, y) => {
+            const wx = (x + 0.5 - proj.bx) / proj.ax, wy = (y + 0.5 - proj.by) / proj.ay, o = Array.isArray(map.origin) ? map.origin : [0, 0];
+            const row = map.rows[Math.floor((wy - o[1]) / map.cell)], ch = row ? row[Math.floor((wx - o[0]) / map.cell)] : undefined;
+            return ch === undefined ? null : `tile '${ch}'`;
+          } : null;
+          const B = capsB.get(cap.f);
+          const diff = B ? m.maskDiff(cap.img, B, { threshold }) : null;
+          const label = `${scene ? `scene ${scene} · ` : ""}${params ? `${JSON.stringify(params)} · ` : ""}f${cap.f}`;
+          for (const t of targets) {
+            const [sx, sy] = Number.isFinite(t.x) ? toScreen(t.x, t.y) : [NaN, NaN];
+            let mask = null, method = null;
+            if (diff && diff.count) {
+              mask = targets.length > 1 && Number.isFinite(sx) ? partNear(m, diff.mask, cap.img.width, cap.img.height, sx, sy) : diff.mask;
+              method = without ? `with/without diff (--without ${without.label})` : `with/without diff (reset param hide: ${JSON.stringify(hide)})`;
+            }
+            const note = runB && !(diff && diff.count) ? (without ? "--without changed no pixels" : `the game ignored the hide param (${JSON.stringify(hide)})`) : null;
+            if (!mask && (t.rect || (t.box && Number.isFinite(sx)))) {
+              const R = t.rect ? { x: t.rect[0], y: t.rect[1], w: t.rect[2], h: t.rect[3] }
+                : t.box.length >= 4 ? { x: sx + t.box[0] * proj.ax, y: sy + t.box[1] * proj.ay, w: t.box[2] * proj.ax, h: t.box[3] * proj.ay }
+                  : { x: sx - (t.box[0] * proj.ax) / 2, y: sy - (t.box[1] * proj.ay) / 2, w: t.box[0] * proj.ax, h: t.box[1] * proj.ay };
+              mask = rectSilhouette(c, cap.img, R);
+              if (mask) method = `${t.rect ? "rect" : "box"} ${Math.round(R.x)},${Math.round(R.y)} ${Math.round(R.w)}×${Math.round(R.h)} minus the ground's colours (a guess: edge pixels that match the ground drop out${note ? `; ${note}` : ""})`;
+            }
+            if (!mask && Number.isFinite(sx)) {
+              mask = blobAt(m, cap.img, sx, sy);
+              if (mask) method = `the sprite at its state position ${Math.round(sx)},${Math.round(sy)} (${proj.assumed ? proj.assumed : "fitted to the entities"}; a guess: edge pixels that match the ground drop out${note ? `; ${note}` : ""})`;
+            }
+            if (!mask) { shots.push({ label, target: t.label, error: `no silhouette for ${t.label}${note ? ` (${note})` : ""}: give it a box/rect in the state, support the reset param "hide", or pass --without` }); continue; }
+            shots.push({ label, img: cap.img, mask, method, target: t.label, mapLabel, scene, params, f: cap.f });
+          }
+        }
+      }
+    });
+  }
+  // measure every shot
+  // --surfaces names: a surface takes the name of the one that held the same ground pixels in an earlier shot of the
+  // same scene, frame and figure (day → night: same place, other colours), else the nearest given colour within ΔE 15
+  const nameOf = (col) => { let best = null, bd = 15; for (const n of named) { const dd = c.deltaE(col, n.color); if (dd < bd) { bd = dd; best = n.name; } } return best; };
+  const results = [], owners = [];   // owners: per named shot, Map(pixel index -> name)
+  for (const sh of shots) {
+    if (sh.error) { results.push(sh); continue; }
+    const r = c.figureGround(sh.img, sh.mask, { ...fgOpts, label: sh.mapLabel || null });
+    if (!r) { results.push({ ...sh, error: `${sh.target}: its silhouette touches no ground (fills the screen?)` }); continue; }
+    const pix = r.surfaces.map(() => []);
+    for (let n = 0; n < r.ring.length; n += 3) pix[r.ring[n + 2]].push(r.ring[n]);
+    r.surfaces.forEach((s, j) => {
+      if (!named.length) return;
+      for (const o of owners) {
+        if (o.key !== `${sh.scene}|${sh.f}|${sh.target}` || o.w !== sh.img.width || o.h !== sh.img.height) continue;
+        const votes = new Map();
+        for (const i of pix[j]) { const v = o.names.get(i); if (v) votes.set(v, (votes.get(v) || 0) + 1); }
+        const top = [...votes].sort((a, b) => b[1] - a[1])[0];
+        if (top && top[1] >= 0.5 * pix[j].length) { s.name = top[0]; s.nameFrom = `the same pixels in ${o.label}`; return; }
+      }
+      const nm = nameOf(s.color);
+      if (nm) s.name = nm;
+    });
+    const names = new Map();
+    r.surfaces.forEach((s, j) => { if (s.name && !s.nameFrom) for (const i of pix[j]) names.set(i, s.name); });
+    if (names.size) owners.push({ key: `${sh.scene}|${sh.f}|${sh.target}`, w: sh.img.width, h: sh.img.height, label: sh.label, names });
+    results.push({ ...sh, r });
+  }
+  const good = results.filter((x) => x.r);
+  if (!good.length) die(results.map((x) => x.error).join("\n"));
+  const sName = (s) => s.name || (s.label ? `${s.hex} ${s.label}` : s.hex);
+  const failing = [];
+  for (const x of good) for (const s of x.r.surfaces) if (!s.minor && s.ratio.median < min) failing.push({ shot: x.label, target: x.target, surface: sName(s), median: s.ratio.median, worst: s.ratio.worst });
+  // pictures: each figure's neighbourhood ×4, its ground ring coloured by the ratio there (red < min, green ≥ min)
+  const written = [];
+  if (val(opt.out) || opt.picture) {
+    const cells = good.map((x) => {
+      const b = x.r.bbox, pad = 6, R = { x: b.x - pad, y: b.y - pad, w: b.w + 2 * pad, h: b.h + 2 * pad };
+      const im = { width: x.img.width, height: x.img.height, data: Uint8Array.from(x.img.data) };
+      for (let n = 0; n < x.r.ring.length; n += 3) { const o = x.r.ring[n] * 4, bad = x.r.ring[n + 1] < min; im.data[o] = bad ? 255 : 61; im.data[o + 1] = bad ? 77 : 220; im.data[o + 2] = bad ? 94 : 151; }
+      const crop = m.cropImage(im, R), k = Math.max(2, Math.min(10, Math.floor(240 / Math.max(R.w, R.h))));
+      const worst = x.r.surfaces.filter((s) => !s.minor).reduce((a, s) => (s.ratio.median < a.ratio.median ? s : a), x.r.surfaces[0]);
+      return [{ img: m.zoomImage(m.cropImage(x.img, R), k), label: `${x.label} ${x.target}` }, { img: m.zoomImage(crop, k), label: `${sName(worst)} median ${worst.ratio.median}:1`, color: worst.ratio.median < min ? "#ff4d5e" : "#3ddc97" }];
+    }).flat();
+    const sheet = m.contactSheet(cells, { cols: Math.min(6, cells.length), title: `figure vs ground: ${of || good[0].target}`, subtitle: `each figure, then its ground ring: green ≥ ${min}:1, red < ${min}:1` });
+    const dir = val(opt.out) && !/\.png$/i.test(val(opt.out)) ? path.resolve(val(opt.out)) : null;
+    const file = dir ? path.join(dir, "figure.png") : val(opt.out) ? path.resolve(val(opt.out)) : path.join(process.cwd(), "figure.png");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, sheet.png);
+    written.push(file);
+  }
+  // text
+  const fmtS = (s) => `${s.ratio.median < min && !s.minor ? "✖" : s.minor ? "·" : "✔"} ${sName(s)}${s.nameFrom ? ` (${s.hex}, by position)` : ""}${s.name && s.label ? ` (${s.label})` : ""} ${Math.round(s.share * 100)}%${s.minor ? " (minor)" : ""}: ratio worst ${s.ratio.worst} · median ${s.ratio.median}${s.under ? ` (${s.under}% of this edge < ${min})` : ""} · ΔE worst ${s.deltaE.worst} · median ${s.deltaE.median}${s.ratio.worst < min ? ` — worst at ${s.worstAt.join(",")} (${s.worstFigure} on ${s.worstGround})` : ""}`;
+  const lines = [`measure figure ${of || good[0].target}: ${good.length} shot${good.length > 1 ? "s" : ""} · edge contrast vs each ground surface touching the silhouette (surfaces ≥ ${minShare.pct != null ? `${minShare.pct}%` : minShareF} of the ring judged) · fail when a surface's median < ${min}:1`];
+  for (const x of results) {
+    if (x.error) { lines.push(`  ✖ ${x.label ? `${x.label}: ` : ""}${x.error}`); continue; }
+    const b = x.r.bbox;
+    lines.push(`  ${x.label} · ${x.target}: ${b.w}×${b.h} px at ${b.x},${b.y}, ${x.r.figure} px, ring ${x.r.ground} px · silhouette: ${x.method}`);
+    for (const s of x.r.surfaces.slice(0, 8)) lines.push(`    ${fmtS(s)}`);
+    if (x.r.surfaces.length > 8) lines.push(`    … ${x.r.surfaces.length - 8} more surfaces (--json)`);
+  }
+  // the same surface across shots (named or map-labelled surfaces)
+  const byName = new Map();
+  for (const x of good) for (const s of x.r.surfaces) if (!s.minor && (s.name || s.label)) { const k = s.name || s.label; if (!byName.has(k)) byName.set(k, []); byName.get(k).push({ shot: x.label, s }); }
+  if (good.length > 1 && byName.size) lines.push(`  across shots: ${[...byName].map(([k, list]) => { const w = list.reduce((a, q) => (q.s.ratio.median < a.s.ratio.median ? q : a)); return `${k} lowest median ${w.s.ratio.median}:1 (${w.shot})`; }).join(" · ")}`);
+  if (written.length) lines.push(`  picture: ${written[0]} (open it: each figure, then its ground ring red where the edge is under ${min}:1)`);
+  const judged = good.flatMap((x) => x.r.surfaces.filter((s) => !s.minor));
+  const lowest = (k, f) => judged.length ? Math.min(...judged.map((s) => s[k][f])) : null;
+  const worstS = judged.length ? judged.reduce((a, s) => (s.ratio.median < a.ratio.median ? s : a)) : null;
+  const errors = results.filter((x) => x.error).length;
+  const env = envelope("measure figure", {
+    ok: !failing.length && !errors,
+    verdict: failing.length ? `${failing.length} surface${failing.length > 1 ? "s" : ""} under ${min}:1 (median edge): ${failing.slice(0, 4).map((f) => `${f.surface} ${f.median}:1 at ${f.shot}`).join(", ")}` : errors ? `${errors} shot${errors > 1 ? "s" : ""} without a silhouette` : `edge contrast ≥ ${min}:1 (median) on every surface in ${good.length} shot${good.length > 1 ? "s" : ""}`,
+    summary: { shots: good.length, errors, surfaces: judged.length, failing: failing.length, min, worstRatio: lowest("ratio", "worst"), worstMedianRatio: lowest("ratio", "median"), worstDeltaE: lowest("deltaE", "worst"), worstMedianDeltaE: lowest("deltaE", "median"), worstSurface: worstS ? sName(worstS) : null },
+    data: { edge, merge, minShare: minShareF, shots: results.map((x) => (x.error ? { shot: x.label, target: x.target, error: x.error } : { shot: x.label, target: x.target, scene: x.scene ?? null, params: x.params ?? null, frame: x.f ?? null, silhouette: x.method, bbox: x.r.bbox, figurePixels: x.r.figure, ringPixels: x.r.ground, surfaces: x.r.surfaces, all: x.r.all })), failing },
     files: written,
   });
   return emit(env, lines.join("\n"), opt);

@@ -57,12 +57,15 @@ const DIALOGUE = {
 // ------------------------------------------------------------------ state (all of it is rebuilt by reset)
 let grid, start, player, things, nextId, time, won, deaths, quest, declined, guardGave, notice, noticeAt, dialogue, god, draws;
 let edges = [], pressSeq = 0;
+let hidden = new Set();   // the reserved reset param "hide": entity ids / types not drawn this run (drawing only)
+const shown = (t) => !hidden.has(String(t.id)) && !hidden.has(t.type);
 const held = new Set(), pressOrder = new Map(), recent = [];
 const rand = () => { draws++; return witness.random(); };    // every random number comes from the seeded stream
 
 function reset({ seed, scene, params } = {}) {
   void seed;   // witness reseeds witness.random() before calling reset
   params = params || {};
+  hidden = new Set((Array.isArray(params.hide) ? params.hide : params.hide != null ? [params.hide] : []).map(String));
   held.clear(); pressOrder.clear(); edges = []; pressSeq = 0; recent.length = 0;
   draws = 0; nextId = 1; time = 0; won = false; deaths = 0; declined = false; guardGave = !!params.quest;
   quest = params.quest ? QUEST : null; notice = null; noticeAt = 0; dialogue = null; god = !!params.god;
@@ -594,6 +597,7 @@ function screenshot() {
   // things
   const t2 = Math.floor(time * 10) % 2;
   for (const t of things) {
+    if (!shown(t)) continue;
     const x = t.x, y = t.y;
     if (t.type === "Exit") {
       for (let j = -8; j <= 8; j++) for (let i = -8; i <= 8; i++) { const m = Math.abs(i) + Math.abs(j); if (m <= 7) put(x + i, y + j, m >= 6 ? C.exitEdge : C.exit); }
@@ -609,8 +613,8 @@ function screenshot() {
   }
   // the swing arc goes under the wolves, so the target stays visible
   const p = player, [fx, fy] = FACE[p.facing];
-  if (!p.dead && p.swing > EPS) arc(p.x, p.y, 11, PLAYER.reach, fx, fy, PLAYER.arc, [255, 250, 190], 0.5);
-  for (const w of things.filter(isWolf)) {
+  if (shown(p) && !p.dead && p.swing > EPS) arc(p.x, p.y, 11, PLAYER.reach, fx, fy, PLAYER.arc, [255, 250, 190], 0.5);
+  for (const w of things.filter((t) => isWolf(t) && shown(t))) {
     const big = w.type === "AlphaWolf", r = big ? 8 : 6;
     let fill = big ? C.alpha : C.wolf;
     const edge = big ? C.alphaEdge : C.wolfEdge;
@@ -626,7 +630,7 @@ function screenshot() {
     }
   }
   // the player: blue circle, white facing tick, shield arc while blocking
-  if (p.dead) {
+  if (!shown(p)) { /* hidden this run */ } else if (p.dead) {
     disc(p.x, p.y, 6.5, [60, 60, 70]);
     for (let i = -4; i <= 4; i++) { put(p.x + i, p.y + i, C.hp); put(p.x + i, p.y - i, C.hp); }
   } else {

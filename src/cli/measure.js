@@ -1,5 +1,5 @@
 // Witness CLI: measure — exact numbers instead of eyeballing.
-//   pixels:  scale, box, contrast, motion, align, registration; ui, colorblind, palette (measure-look.js)
+//   pixels:  scale, box, contrast, motion, align, registration; ui, colorblind, palette, figure (measure-look.js)
 //   state:   curve, jump, move, hitstop  (an expression sampled every frame of a scripted run)
 import fs from "node:fs";
 import path from "node:path";
@@ -75,9 +75,9 @@ async function pixelMeasure(what, files, opt) {
     return alignMeasure(m, opt);
   } else if (what === "registration" || what === "slide") {
     return registrationMeasure(m, opt);
-  } else if (["ui", "colorblind", "cvd", "palette"].includes(what)) {
+  } else if (["ui", "colorblind", "cvd", "palette", "figure"].includes(what)) {
     return lookMeasure(what, files, opt);
-  } else die("usage: witness measure scale|box|contrast|motion|anim|align|registration|ui|colorblind|palette|perf|curve|jump|move|hitstop ...  (witness help measure)");
+  } else die("usage: witness measure scale|box|contrast|motion|anim|align|registration|ui|colorblind|palette|figure|perf|curve|jump|move|hitstop ...  (witness help measure)");
 }
 
 export async function motionMeasure(m, fileFrames, opt, region) {

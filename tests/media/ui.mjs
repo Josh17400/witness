@@ -1,6 +1,6 @@
 // UI layout tests: `node tests/media/ui.mjs` — geometry checks on a planted layout, text contrast with anti-aliased
 // edges, and text-like rows found from pixels alone (drawn with the embedded 8×16 font, so the glyph boxes are known).
-import { normalizeUI, layoutChecks, textContrast, findTextRows } from "../../src/media/ui.js";
+import { normalizeUI, layoutChecks, textContrast, findTextRows, safePreset, duplicateTexts, pixelDuplicates, textTimeline, repeatedTexts, plateCheck } from "../../src/media/ui.js";
 import { contrastRatio } from "../../src/media/color.js";
 import { glyph } from "../../src/media/font.js";
 import { ok, show, done } from "./harness.mjs";
@@ -105,6 +105,77 @@ const LAYOUT = [
   for (const k of ink) { const [x, y] = k.split(",").map(Number); put(p2, x, y, [255, 255, 0]); }
   const tp = textContrast(p2, { x: 0, y: 0, w: 60, h: 20 });
   ok("textContrast: the same letters without an outline stay low contrast, no outline reported", tp && !tp.outline && Math.abs(tp.ratio - plain) < 0.01, tp);
+}
+
+// ---- device safe areas: points × (screenshot px / device pt), per side
+{
+  const p = safePreset("iphone-portrait", 1179, 2556);   // an iPhone 15 screenshot at @3x
+  ok("iphone-portrait at device pixels: top 59 pt = 177 px, bottom 34 pt = 102 px, sides 0", p.px.top === 177 && p.px.bottom === 102 && p.px.left === 0 && p.px.right === 0 && p.devicePx.top === 177 && !p.mismatch, p);
+  const l = safePreset("iphone-landscape", 852, 393);   // a game rendering at 1 px per point
+  ok("iphone-landscape at 852×393: left/right 59, bottom 21, top 0; zones named", l.px.left === 59 && l.px.right === 59 && l.px.bottom === 21 && l.px.top === 0 && l.zones.bottom === "home indicator" && /Dynamic Island/.test(l.zones.left) && !l.zones.top, l);
+  const g = safePreset("iphone-landscape", 1280, 720);
+  ok("a 16:9 game on a landscape iPhone: insets scaled per axis and the aspect flagged", g.px.left === Math.round(59 * 1280 / 852 * 100) / 100 && g.px.bottom === Math.round(21 * 720 / 393 * 100) / 100 && /aspect 1.78/.test(g.mismatch), g);
+  ok("iphone-portrait on a landscape shot: flagged", /landscape \(1280×720\) but iphone-portrait is portrait/.test(safePreset("iphone-portrait", 1280, 720).mismatch));
+  ok("iphone-se follows the shot: portrait top 20 pt (×2 = 40 px at 750×1334), landscape none", safePreset("iphone-se", 750, 1334).px.top === 40 && Object.values(safePreset("iphone-se", 1334, 750).px).every((v) => v === 0));
+  ok("ipad landscape 2360×1640: top 24 pt = 48 px, bottom 20 pt = 40 px", (() => { const q = safePreset("ipad", 2360, 1640); return q.px.top === 48 && q.px.bottom === 40 && q.orientation === "landscape"; })());
+  ok("unknown preset: a clear error", (() => { try { safePreset("pixel-8", 1, 1); return false; } catch (e) { return /iphone-portrait, iphone-landscape, iphone-se, ipad/.test(e.message); } })());
+  const els = normalizeUI([{ id: "hp", kind: "text", text: "HP", rect: [10, 10, 40, 12] }, { id: "pause", kind: "button", rect: [790, 300, 50, 80] }, { id: "mid", kind: "text", text: "ok", rect: [300, 150, 40, 12] }]);
+  const c = layoutChecks(els, { width: 852, height: 393, safe: l.px });
+  ok("per-side margins: hp 49 px into the left inset; pause 47 px into the right one and 8 px into the bottom one", c.unsafe.length === 2 && c.unsafe[0].id === "hp" && c.unsafe[0].into.left === 49 && !c.unsafe[0].into.top && c.unsafe[1].id === "pause" && c.unsafe[1].into.right === 47 && c.unsafe[1].into.bottom === 8 && c.margins.right === 59 && c.margins.bottom === 21, c.unsafe);
+}
+
+// ---- the same text twice at once; a toast that shows again
+{
+  const els = normalizeUI([
+    { id: "q1", kind: "text", text: "Quest updated: Find the key", rect: [10, 10, 200, 12] },
+    { id: "q2", kind: "text", text: "quest  updated: find the key ", rect: [10, 30, 200, 12] },
+    { id: "btn", kind: "button", text: "Quit", rect: [300, 10, 60, 20] }, { id: "btnlabel", kind: "text", text: "QUIT", rect: [310, 14, 40, 12] },
+    { id: "n1", kind: "text", text: "3", rect: [0, 100, 8, 8] }, { id: "n2", kind: "text", text: "3", rect: [20, 100, 8, 8] },
+    { id: "off", kind: "text", text: "Quest updated: Find the key", rect: [500, 10, 200, 12] },
+  ]);
+  const d = duplicateTexts(els, { width: 400, height: 200 });
+  ok("duplicateTexts: the quest line twice (case/spaces ignored) with both rects; not a button's own label, not a digit, not off screen", d.length === 1 && d[0].ids.join() === "q1,q2" && d[0].rects[1].join() === "10,30,200,12", d);
+  const mk = (f, list) => ({ f, els: normalizeUI(list) });
+  const toast = { id: "toast", kind: "text", text: "Quest updated", rect: [100, 20, 90, 12] };
+  const samples = [];
+  for (let f = 0; f <= 600; f += 6) samples.push(mk(f, (f >= 60 && f <= 180) || (f >= 300 && f <= 360) || f >= 594 ? [toast] : []));
+  const tl = textTimeline(samples);
+  ok("textTimeline: three showings f60-f180, f300-f360, f594-f600", tl.get("quest updated").shows.map((s) => `${s.f0}-${s.f1}`).join() === "60-180,300-360,594-600");
+  const rep = repeatedTexts(tl, { within: 5, fps: 60 });
+  ok("repeatedTexts within 5 s: again at f300, 4 s after it first showed, hidden 2 s; f594 is 4.9 s after f300", rep.length === 2 && rep[0].again.f0 === 300 && rep[0].sinceStart === 4 && rep[0].hidden === 2 && rep[1].sinceStart === 4.9, rep);
+  ok("repeatedTexts within 3 s: none", repeatedTexts(tl, { within: 3, fps: 60 }).length === 0);
+  // pixel mode: two identical rendered rows are duplicates, a different word is not
+  const bg = [20, 24, 40], im = img(200, 80, bg);
+  const a = text(im, "SAVED", 10, 5, [255, 255, 255]), b = text(im, "SAVED", 100, 40, [255, 255, 255]), c = text(im, "SAVES", 10, 40, [255, 255, 255]);
+  const pd = pixelDuplicates(im, [a, b, c]);
+  ok("pixelDuplicates: SAVED twice (IoU 1), SAVES is not a copy", pd.length === 1 && pd[0].a === a && pd[0].b === b && pd[0].iou === 1, pd.map((p) => [p.a, p.b, p.iou]));
+}
+
+// ---- text without a plate: worst contrast over the glyph edge, not the average
+{
+  const white = [240, 240, 240], grass = [40, 90, 40], sand = [222, 205, 160];
+  const im = img(120, 30, grass);
+  rect(im, 60, 0, 60, 30, sand);                      // the world: dark grass on the left, bright sand on the right
+  const box = text(im, "WEARY", 36, 7, white);        // straddles both
+  const r = plateCheck(im, box);
+  const wantWorst = Math.round(contrastRatio(white, sand) * 100) / 100, wantBest = Math.round(contrastRatio(white, grass) * 100) / 100;
+  show("WEARY over grass|sand", `worst ${r.edge.worst} (want ${wantWorst}) at ${r.edge.at} best ${r.edge.best} (want ${wantBest}) bgShare ${r.bgShare}`);
+  ok("no plate: busy background, worst edge = white on sand, best = white on grass", r.busy && r.text.join() === white.join() && r.edge.worst === wantWorst && r.edge.best === wantBest && r.edge.bgAt.join() === sand.join() && r.edge.at[0] >= 60, r);
+  const tc = textContrast(im, box);
+  ok("…while the averaged textContrast passes it (6.13:1 ≥ 4.5): why busy backgrounds use the worst edge", tc && tc.ratio === 6.129, tc);
+  const plate = img(120, 30, grass); rect(plate, 30, 3, 50, 24, [10, 10, 30]); rect(plate, 60, 0, 60, 3, sand);
+  const box2 = text(plate, "WEARY", 36, 7, white);
+  const p2 = plateCheck(plate, box2);
+  ok("on a plate: not busy, every edge the same ratio", p2 && !p2.busy && p2.edge.worst === p2.edge.best && p2.edge.worst === Math.round(contrastRatio(white, [10, 10, 30]) * 100) / 100, p2);
+  // anti-aliased: a half-way ring between white text and sand is skipped for the sand behind it (outer edges; a 1 px
+  // gap between two strokes has no ground behind it and counts as it is)
+  const aa = img(120, 30, grass); rect(aa, 60, 0, 60, 30, sand);
+  const box3 = text(aa, "WEARY", 36, 7, white), ink = new Set();
+  for (let y = box3.y; y < box3.y + box3.h; y++) for (let x = box3.x; x < box3.x + box3.w; x++) { const o = (y * 120 + x) * 4; if (aa.data[o] === 240) ink.add(y * 120 + x); }
+  const mid = (p, q) => p.map((v, i) => Math.round((v + q[i]) / 2));
+  for (const k of ink) { const x = k % 120, y = (k - x) / 120; for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const n = (y + dy) * 120 + x + dx; if (!ink.has(n) && !ink.has(n + dy * 120 + dx) && x + dx >= 62) put(aa, x + dx, y + dy, mid(white, sand)); } }
+  const p3 = plateCheck(aa, box3);
+  ok("anti-aliased edge pixels are skipped: worst is still white vs sand", p3 && p3.edge.worst === wantWorst, p3 && p3.edge);
 }
 
 done("ui");

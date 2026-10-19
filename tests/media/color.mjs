@@ -2,7 +2,7 @@
 // synthesized pictures whose right answers are known by construction.
 import {
   CVD_TYPES, cvdMatrix, simulateColor, simulateCVD, deltaE, contrastRatio, hex, dominantColors, pairsUnderCVD,
-  parsePalette, paletteOfImage, paletteCheck, colorBudget, offPaletteImage,
+  parsePalette, paletteOfImage, paletteCheck, colorBudget, offPaletteImage, figureGround, clusterColors,
 } from "../../src/media/color.js";
 import { ok, show, done } from "./harness.mjs";
 
@@ -97,6 +97,45 @@ const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
   for (let i = 0; i < W * H; i++) { const k = i % 8; const c = i < 3000 ? [200, 30, 30] : i < 5500 ? [30, 30, 200] : [46 + (k & 1) * 4, 206 + ((k >> 1) & 1) * 4, 30 + ((k >> 2) & 1) * 4]; put(big, i % W, Math.floor(i / W), c); }
   const dc = dominantColors(big, { max: 2 });
   ok("dominantColors: re-sorted after merging, so a colour that grew by merging (45%) isn't cut by max", dc.map((x) => `${x.hex} ${x.share}`).join() === "#30d020 0.45,#c81e1e 0.3", dc);
+}
+
+// ---- figure vs ground: a disc on four solid quadrants; every edge pair is (figure, that ground): exact ratios
+{
+  const F = [80, 200, 255], G = { sand: [194, 178, 128], snow: [240, 244, 250], grass: [60, 140, 60], road: [70, 70, 75] };
+  const im = img(64, 64, [0, 0, 0]);
+  rect(im, 0, 0, 32, 32, G.sand); rect(im, 32, 0, 32, 32, G.snow); rect(im, 0, 32, 32, 32, G.grass); rect(im, 32, 32, 32, 32, G.road);
+  const mask = new Uint8Array(64 * 64);
+  for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) { const dx = x + 0.5 - 32, dy = y + 0.5 - 32; if (dx * dx + dy * dy <= 49) { mask[y * 64 + x] = 1; put(im, x, y, F); } }
+  const r = figureGround(im, mask, { min: 3 });
+  show("figure surfaces", r.surfaces.map((s) => `${s.hex} ${s.share} ${s.ratio.worst}/${s.ratio.median}`).join(" · "));
+  ok("figure: 4 surfaces, one per quadrant, a quarter of the ring each", r.surfaces.length === 4 && r.surfaces.every((s) => s.share === 0.25 && !s.minor), r.surfaces);
+  for (const [name, g] of Object.entries(G)) {
+    const s = r.surfaces.find((x) => x.hex === hex(g)), want = Math.round(contrastRatio(F, g) * 100) / 100, wantE = Math.round(deltaE(F, g) * 100) / 100;
+    ok(`figure vs ${name}: worst = median = ${want}:1, ΔE ${wantE}`, s && s.ratio.worst === want && s.ratio.median === want && s.deltaE.worst === wantE && s.worstFigure === hex(F), s);
+  }
+  const snow = r.surfaces.find((x) => x.hex === hex(G.snow));
+  ok("figure: the share of the edge under min 3 (snow 1.72:1 → 100%, road 4.94 → 0%); overall worst = sand 1.11", snow.under === 100 && r.surfaces.find((x) => x.hex === hex(G.road)).under === 0 && r.all.ratio.worst === 1.11 && r.all.worstGround === hex(G.sand));
+  // a 1 px dark outline equal to the road colour: against the road the edge vanishes (1:1), elsewhere it's the outline's
+  const sq = img(48, 48, G.sand); rect(sq, 24, 0, 24, 48, G.road);
+  const m2 = new Uint8Array(48 * 48);
+  rect(sq, 16, 16, 16, 16, G.road); rect(sq, 17, 17, 14, 14, F);
+  for (let y = 16; y < 32; y++) for (let x = 16; x < 32; x++) m2[y * 48 + x] = 1;
+  const r2 = figureGround(sq, m2, {});
+  const road = r2.surfaces.find((x) => x.hex === hex(G.road)), sand = r2.surfaces.find((x) => x.hex === hex(G.sand));
+  ok("outline = road colour: 1:1 against the road (the fill behind the outline doesn't count at edge 1)", road && road.ratio.worst === 1 && road.ratio.median === 1 && road.under === 100, road);
+  ok("…and the outline vs sand elsewhere", sand && sand.ratio.worst === Math.round(contrastRatio(G.road, G.sand) * 100) / 100, sand);
+  const r3 = figureGround(sq, m2, { edge: 2 });
+  ok("edge 2 reaches the fill behind a 1 px rim (anti-aliased sprites)", r3.surfaces.find((x) => x.hex === hex(G.road)).ratio.median === Math.round(contrastRatio(F, G.road) * 100) / 100);
+  // textured ground merges into one surface (ΔE ≤ 12), a 1 px line is a minor surface
+  const tx = img(40, 40, [60, 140, 60]);
+  for (let y = 0; y < 40; y++) for (let x = 0; x < 40; x++) if ((x + y) % 3 === 0) put(tx, x, y, [66, 150, 64]);
+  rect(tx, 0, 20, 40, 1, [250, 250, 250]);
+  const m3 = new Uint8Array(40 * 40); rect(tx, 15, 15, 10, 10, [200, 40, 40]); for (let y = 15; y < 25; y++) for (let x = 15; x < 25; x++) m3[y * 40 + x] = 1;
+  const r4 = figureGround(tx, m3, {});
+  ok("textured grass is one surface; the 1 px white line is minor", r4.surfaces.length === 2 && !r4.surfaces[0].minor && r4.surfaces[1].minor && r4.surfaces[1].count === 2, r4.surfaces.map((s) => [s.hex, s.count, s.minor]));
+  ok("figureGround: an empty mask is null", figureGround(tx, new Uint8Array(1600)) === null);
+  const cc = clusterColors(new Map([[0x102030, 5], [0x112131, 3], [0xffffff, 1]]), 12);
+  ok("clusterColors: near colours join the most common one's cluster", cc.clusters.length === 2 && cc.clusters[0].count === 8 && cc.of.get(0x112131) === 0);
 }
 
 done("color");
