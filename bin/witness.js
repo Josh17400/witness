@@ -38,6 +38,7 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness shot --at 1,4               screenshots; --sheet/--auto filmstrips, --crop/--follow/--zoom, --diff ref.png
   witness listen --time 8             hear the game: sounds tied to their causes, audio report + PNGs
   witness measure <what> ...          numbers: jump, move, hitstop, curve (state) · scale, box, contrast, motion (pixels)
+                                      · ui, colorblind, palette (readability: layout, colour vision, pixel-art palette)
   witness replay [file|last]          play back a recorded human session (WITNESS_RECORD)
   witness call <name> [args] --at 1   run a game-specific command, then show the state
   witness raw '<json command>'        send one raw protocol command (for adapter authors)
@@ -204,6 +205,28 @@ const CMD_HELP = {
   contrast <shot.png> --a <mask> --b <mask>
       WCAG ratio and ΔE between two pixel sets. A mask is x,y,w,h | #rrggbb[~tolerance] | diff:<without.png>,
       and --b may be ring[:radius] (the pixels just outside --a, e.g. outline vs the ground around it).
+  ui [shot.png] [--at 1] [--ui ui.json] [--safe 5%] [--min-text 2%|12] [--min-contrast 4.5] [--align 3]
+     [--window 1280x720,1920x1080] [--pixels] [--out ui.png]
+      UI layout from the game's state.ui = [{id, kind: text|button|panel|icon, rect: [x,y,w,h], text?, fontPx?,
+      layer?}] (or --ui file): ✖ clipped by / entirely off the screen, ✖ overlapping (same layer; panels and buttons
+      may hold others), ✖ text smaller than --min-text (default 2% of the screen height), ✖ text contrast under 4.5
+      (3 for 24 px+; the text and background colours inside the rect, anti-aliased edges left out), ⚠ inside the
+      safe-area margin, ⚠ edges almost aligned (1..--align px apart). Without state.ui (or with --pixels): text-like
+      rows and solid panels found from pixels, a weaker heuristic (marked as such). --window runs once per size (the
+      reserved reset param) and says what breaks only at one size. --out: boxes coloured by status, safe area in blue.
+  colorblind [shot.png] [--at 1] [--type protan|deutan|tritan|achroma|all] [--colors name=#hex,...] [--types Wolf,Guard]
+     [--a <mask> --b <mask>] [--min-de 20] [--out dir] [--no-images]
+      colour-vision deficiency (Machado 2009, linear RGB): writes <name>-cvd.png (normal + each type side by side)
+      and one picture per type, and reports which key colours stop being distinguishable (ΔE under --min-de that
+      were distinct normally). Key colours: --colors, else (driving the game) each entity type's sprite colour
+      (sprites fitted to state positions, like align) + the background, else the picture's most common colours.
+      --a/--b: the contrast of two masks under each type (as in contrast).
+  palette <shot.png | --at 1> [--palette pal.png|pal.hex|pal.gpl|pal.json|"#a,#b"] [--max N] [--tolerance 0]
+     [--region x,y,w,h] [--list 20] [--out off.png]
+      distinct colours (most used, rare ones: blending or scaling blur in pixel art), --max: over budget lists the
+      least used colours and the closest colour to merge each into; --palette: every off-palette pixel counted,
+      grouped by colour (count, first pixel, box, nearest palette colour + ΔE), the first --list coordinates, unused
+      palette colours; --out draws the off-palette pixels in magenta.
   motion [frame.png ...]  |  motion --at 1 --time 0.5 [--input ...] [--region x,y,w,h]
       every moving object, tracked frame to frame: its speed, net move, jitter (px off a smooth path: steady motion
       and smooth acceleration give 0), stutters (a repeated frame, a double step), flicker (gone for a few frames),

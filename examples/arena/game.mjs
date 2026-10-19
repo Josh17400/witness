@@ -467,6 +467,7 @@ function snapshot() {
     entities: [pl, ...things.map(view)],
     dialogue: dialogue ? { speaker: dialogue.speaker, text: dialogue.text, options: [...dialogue.options] } : null,
     map: { cell: TILE, origin: [0, 0], rows: grid.map((r) => r.join("")), solid: "#G" },
+    ui: hudLayout().map(({ color, ...e }) => e),
     digest: digest(),
   };
 }
@@ -569,8 +570,6 @@ function screenshot() {
       x += 4 * scale;
     }
   };
-  const wrap = (s, n) => { const out = []; let line = ""; for (const w of s.split(" ")) { if (line && (line + " " + w).length > n) { out.push(line); line = w; } else line = line ? line + " " + w : w; } if (line) out.push(line); return out; };
-
   // tiles: dark walls (lit edges facing the floor), lighter floor with a subtle grid
   for (let ty = 0; ty < ROWS; ty++) for (let tx = 0; tx < COLS; tx++) {
     const x0 = tx * TILE, y0 = ty * TILE, c = grid[ty][tx];
@@ -636,31 +635,50 @@ function screenshot() {
     for (let i = 2; i <= 9; i++) { put(p.x + fx * i, p.y + fy * i, C.white); put(p.x + fx * i + fy, p.y + fy * i + fx, C.white); }
     if (p.blocking) arc(p.x, p.y, 8.5, 11, fx, fy, 60, [225, 225, 240]);
   }
-  // HUD on the top wall row: hp bar, hp, potions, gold, key
-  rect(3, 3, 62, 10, [0, 0, 0]);
-  rect(4, 4, 60, 8, C.hpBg);
-  rect(4, 4, Math.round((60 * Math.max(0, p.hp)) / p.maxHp), 8, C.hp);
-  text(`${p.hp}/${p.maxHp}  POTIONS ${p.potions}  GOLD ${p.gold}${p.hasKey ? "  KEY" : ""}`, 72, 3, 2, C.text);
-  // bottom wall row: the notice, else the goal
-  if (notice) text(notice, 8, 275, 2, C.yellow);
-  else text(`GOAL: ${goalText()}`, 8, 275, 2, C.dim);
-  if (p.dead || won) {
-    rect(0, 16, W, H - 32, [0, 0, 0], 0.35);
-    const s = p.dead ? "YOU DIED" : "YOU ESCAPED!";
-    text(s, Math.round(W / 2 - (s.length * 16) / 2), 120, 4, p.dead ? C.hp : C.exit);
+  // the HUD (hp bar and counters on the top wall row, notice or goal on the bottom one, banner, dialogue box), laid
+  // out once by hudLayout() so the snapshot's state.ui lists exactly what is drawn
+  for (const e of hudLayout()) {
+    const [x, y] = e.rect;
+    if (e.id === "hp") {
+      rect(x, y, 62, 10, [0, 0, 0]);
+      rect(x + 1, y + 1, 60, 8, C.hpBg);
+      rect(x + 1, y + 1, Math.round((60 * Math.max(0, p.hp)) / p.maxHp), 8, C.hp);
+    } else if (e.id === "banner") {
+      rect(0, 16, W, H - 32, [0, 0, 0], 0.35);
+      text(e.text, x, y, 4, p.dead ? C.hp : C.exit);
+    } else if (e.id === "dialogue") {
+      rect(x, y, e.rect[2], e.rect[3], C.boxEdge);
+      rect(x + 1, y + 1, e.rect[2] - 2, e.rect[3] - 2, C.box);
+    } else if (e.kind === "text") text(e.text, x, y, 2, e.color);
   }
+  return { width: W, height: H, format: "rgba8", data: px };
+}
+
+const wrap = (s, n) => { const out = []; let line = ""; for (const w of s.split(" ")) { if (line && (line + " " + w).length > n) { out.push(line); line = w; } else line = line ? line + " " + w : w; } if (line) out.push(line); return out; };
+
+/** The HUD as screen rects (the state.ui convention): drawn by screenshot(), listed in snapshot(). */
+function hudLayout() {
+  const p = player;
+  const tw = (s, scale = 2) => String(s).length * 4 * scale - scale;   // the 3x5 font: 4 columns per glyph, no trailing gap
+  const label = (id, s, x, y, color, scale = 2) => ({ id, kind: "text", rect: [x, y, tw(s, scale), 5 * scale], text: s, fontPx: 5 * scale, color });
+  const hud = `${p.hp}/${p.maxHp}  POTIONS ${p.potions}  GOLD ${p.gold}${p.hasKey ? "  KEY" : ""}`;
+  const ui = [
+    { id: "hp", kind: "panel", rect: [3, 3, 62, 10] },
+    label("counters", hud, 72, 3, C.text),
+    notice ? label("notice", notice, 8, 275, C.yellow) : label("goal", `GOAL: ${goalText()}`, 8, 275, C.dim),
+  ];
+  if (p.dead || won) { const s = p.dead ? "YOU DIED" : "YOU ESCAPED!"; ui.push(label("banner", s, Math.round(W / 2 - (s.length * 16) / 2), 120, null, 4)); }
   if (dialogue) {
     const lines = wrap(dialogue.text, 56);
     const opts = dialogue.options.map((o, i) => `${i + 1}) ${o}`);
     const h = 14 + (1 + lines.length + opts.length) * 12;
     const y0 = 268 - h;
-    rect(8, y0, W - 16, h, C.boxEdge);
-    rect(9, y0 + 1, W - 18, h - 2, C.box);
-    text(dialogue.speaker, 16, y0 + 7, 2, C.yellow);
-    lines.forEach((l, i) => text(l, 16, y0 + 19 + i * 12, 2, C.text));
-    opts.forEach((o, i) => text(o, 24, y0 + 19 + (lines.length + i) * 12 + 2, 2, [150, 210, 255]));
+    ui.push({ id: "dialogue", kind: "panel", rect: [8, y0, W - 16, h] });
+    ui.push(label("speaker", dialogue.speaker, 16, y0 + 7, C.yellow));
+    lines.forEach((l, i) => ui.push(label(`line${i + 1}`, l, 16, y0 + 19 + i * 12, C.text)));
+    opts.forEach((o, i) => ui.push(label(`option${i + 1}`, o, 24, y0 + 19 + (lines.length + i) * 12 + 2, [150, 210, 255])));
   }
-  return { width: W, height: H, format: "rgba8", data: px };
+  return ui;
 }
 
 // ------------------------------------------------------------------ calls (test setup)

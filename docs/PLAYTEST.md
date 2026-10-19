@@ -578,6 +578,7 @@ ones.
 | `state.camera = {pos: [x, y], zoom?}` (pos = the world point at the screen's top-left; screen = (world − pos) × zoom) | `shot --annotate` boxes in the right place; `measure align` checks the drawing against it |
 | entity `screen: [x, y, w, h]` (screen pixels) | exact annotation boxes for games with any projection (3D included) |
 | entity `box: [w, h]` or `[x, y, w, h]` (the hitbox, state units) | `measure align` compares hitboxes with the drawn art ("hitbox larger than the art") |
+| `state.ui = [{id, kind: "text"\|"button"\|"panel"\|"icon", rect: [x, y, w, h], text?, fontPx?, layer?, hidden?}]` (screen pixels; what the HUD/menus draw this frame) | `measure ui` checks exactly: clipped or off-screen elements, the safe area, overlaps on a layer, text size and contrast, almost-aligned edges ([examples/arena](../examples/arena) lists its HUD and dialogue box) |
 
 ### Make your game playtest-friendly (in priority order)
 

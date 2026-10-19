@@ -3,7 +3,8 @@
 Status: plan (2026-10-18), written against Witness 0.5.0 (`dc8a70c`). **Phase 1 is implemented** (B1–B13, the state
 schema, `effect`, `measure curve|jump|move|hitstop`, filmstrips, temporal ask, sound↔event matching with the optional
 `event: sound` line in the js, python, cpp, java and rust adapters, and the chart quick wins). Most of phase 2
-shipped in 0.6.0 (not yet: UI layout, palette, `measure perf`, APNG), and chart v2 (§3.12: `trace --compare` / `--save` / `--against` overlays, `--xy` paths, `--hist`, plus
+shipped in 0.6.0 (not yet: `measure perf`, APNG; UI layout, colour-blind and palette checks (§3.14, §3.15) are in
+0.7.0 as `measure ui | colorblind | palette`), and chart v2 (§3.12: `trace --compare` / `--save` / `--against` overlays, `--xy` paths, `--hist`, plus
 `witness heatmap` over replays and playtests, pulled forward from "not doing") is in 0.7.0.
 Not done from phase 1's text: the `snapshot.paths` filter for per-frame sampling (§1.4/§3.4, a speed item).
 

@@ -413,13 +413,13 @@ export function ringMask(mask, width, height, radius = 2) {
 // ---------------------------------------------------------------------------
 
 // sRGB channel (0..255) -> linear light (IEC 61966-2-1)
-const LINEAR = Float64Array.from({ length: 256 }, (_, v) => { const c = v / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+export const LINEAR = Float64Array.from({ length: 256 }, (_, v) => { const c = v / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
 
 /** WCAG relative luminance (0 = black, 1 = white) of an sRGB colour. */
-const luminanceOf = (r, g, b) => 0.2126 * LINEAR[r] + 0.7152 * LINEAR[g] + 0.0722 * LINEAR[b];
+export const luminanceOf = (r, g, b) => 0.2126 * LINEAR[r] + 0.7152 * LINEAR[g] + 0.0722 * LINEAR[b];
 
 /** CIE L*a*b* (D65) of an sRGB colour. */
-function labOf(r, g, b) {
+export function labOf(r, g, b) {
   const R = LINEAR[r], G = LINEAR[g], B = LINEAR[b];
   const X = (0.4124564 * R + 0.3575761 * G + 0.1804375 * B) / 0.95047;
   const Y = 0.2126729 * R + 0.7151522 * G + 0.072175 * B;

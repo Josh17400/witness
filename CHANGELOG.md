@@ -27,6 +27,29 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 - Media: `histogram`, `sharedHistograms`, `heatGrid`, `pathStats`, `renderWorld`, `renderHist` in `src/media/plot.js`;
   line charts take per-series `dash` and `lane` keys.
 
+**Readability: UI layout, colour vision, palettes**
+- `witness measure ui [shot.png] --at 2`: HUD and menu layout from an optional `state.ui = [{id, kind: text|button|
+  panel|icon, rect: [x, y, w, h], text?, fontPx?, layer?}]` (screen pixels): elements clipped by or entirely off the
+  screen, overlaps on the same layer (panels and buttons may hold others), text under `--min-text` (default 2% of the
+  screen height), text contrast under 4.5:1 (3 for 24 px+; text vs background colour inside the rect, anti-aliased
+  edges left out), elements in the `--safe 5%` margin and edges 1–3 px off alignment (warnings). `--window
+  1280x720,1920x1080` runs once per size and prints what breaks only at one size; `--out ui.png` boxes each element
+  by status. Without `state.ui` (or with `--pixels`) it finds text-like rows and solid panels from pixels: edges,
+  safe area, glyph height and contrast, marked as a heuristic.
+- `witness measure colorblind [shot.png] [--type protan|deutan|tritan|achroma|all]`: Machado 2009 simulation in
+  linear RGB; writes `<name>-cvd.png` (normal + each type side by side) and one picture per type, and lists the key
+  colours that become confusable (ΔE under `--min-de 20` that were distinct normally: "Wolf vs Guard ΔE 83.75 →
+  15.57" under protan). Key colours: `--colors name=#hex,...`, else each entity type's sprite colour (sprites fitted
+  to state positions) plus the background, else the picture's most common colours; `--a/--b` masks as in `contrast`.
+- `witness measure palette <shot.png> [--palette pal.png|.hex|.gpl|.json|"#a,#b"] [--max N]`: colour count, rare
+  colours (blending or scaling blur in pixel art), every off-palette pixel grouped by colour with its first pixel,
+  box and nearest palette colour, unused palette colours, and over a `--max` budget the least used colours with the
+  closest colour to merge each into. `--out` draws off-palette pixels in magenta.
+- `examples/arena` lists its HUD and dialogue box in `state.ui` (the drawing is unchanged, pixel for pixel).
+- Media: `src/media/color.js` (CVD matrices, `simulateCVD`, `dominantColors`, `pairsUnderCVD`, palette parsing and
+  checks) and `src/media/ui.js` (`layoutChecks`, `textContrast`, `findTextRows`); `measure.js` exports `labOf`,
+  `luminanceOf`, `LINEAR`.
+
 **Behaviour changes**
 - `trace --json` `summary`: vector series are summarized per axis (`"state.player.pos.x": {start, end, min, ...}`)
   instead of `{"error": null}`. `trace` now accepts `--expect` (over the summary).
@@ -36,6 +59,9 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 2. If a script reads `trace --json` `summary` for a vector expression: read the per-axis keys (`<expr>.x`, `<expr>.y`).
 3. *Optional:* expose `state.dead` (or `state.player.dead`) so `trace --xy` and `heatmap` mark deaths without
    `--deaths`, and `state.map` with a `cell` size so paths and heatmaps are drawn over the level.
+4. *Optional:* list the HUD and menus in `state.ui` (see [PLAYTEST.md](docs/PLAYTEST.md#snapshot-conventions)) so
+   `measure ui` checks exact rects instead of guessing text rows from pixels; games that honour the reserved reset
+   param `window` can be swept with `measure ui --window`.
 
 ## 0.6.0 (2026-10-19)
 

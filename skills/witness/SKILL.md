@@ -72,6 +72,9 @@ witness measure motion --at 1 --time 1 --input "right@0-2"   # every mover: spee
 witness shot --at 2 --annotate                 # every entity boxed + labelled (#5 Wolf hp=3 state=windup) on the shot
 witness measure align --at 2                   # are sprites drawn where the state says? art offsets, hitbox vs art
 witness measure scale|box|contrast ...         # pixel facts: integer scale/blur, sprite box, WCAG contrast
+witness measure ui --at 2 --out ui.png         # HUD/menus: clipped, off-screen, overlaps, tiny or low-contrast text, safe area (state.ui; else a pixel guess)
+witness measure colorblind --at 2              # protan/deutan/tritan pictures + which sprite colours become confusable (ΔE)
+witness measure palette shot.png --palette pal.hex   # pixel art: off-palette pixels and where; --max 16 colour budget
 ```
 
 * **A/B anything** (a flag, a rig, a mask, a param, an input): `witness ab` (pictures) or `trace --compare` (values over
@@ -79,7 +82,7 @@ witness measure scale|box|contrast ...         # pixel facts: integer scale/blur
   `--hold-camera` asks games that support it (reset param `"camera": "hold"`) to keep the camera still for pixel work.
 * **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Timing that should "feel fair" (coyote time, buffer,
   parry, i-frames, combo windows) → `window`. Animation or juice → `shot --sheet` (and look). "When does X happen?" → `eval --when`. "What did that do?" → `eval --diff` or
-  `effect`. A rule that must always hold → a test range (section 3). Sound wiring → `listen --events`. The numbers
+  `effect`. A rule that must always hold → a test range (section 3). Sound wiring → `listen --events`. HUD or menu work → `measure ui` (expose `state.ui`); colours that mean something (enemy vs ally, danger) → `measure colorblind`. The numbers
   come from the game's own state, pixels and audio: quote them to the user instead of "feels fine".
 * **Frames.** Offsets read `+Nf`: N frames after the input's frame; `+1f` is the next frame (immediate). Any time can
   be given in frames: `--at 90f`, `--every 1f`, `space@60f`.

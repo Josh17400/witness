@@ -27,6 +27,7 @@ witness shot --at 1,4 --diff witness/shots/before.png
 witness listen --time 8 --input "space@1"        # every sound tied to its cause, audio report + PNGs
 witness replay last --shot                       # what the human saw when they pressed F8
 witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
+witness measure ui --at 2                        # readability: HUD layout, text size/contrast; also colorblind, palette
 witness play start --goal "Escape the arena"     # agent playtests: a cheap model PLAYS the game, Witness reports
 witness clean                                    # prune old playtests, recordings, screenshots (also automatic)
 ```

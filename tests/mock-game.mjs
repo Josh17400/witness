@@ -27,10 +27,19 @@
 //                  x = 150), stays dead and still for 10 frames, then respawns at [40, 90]. state.dead / state.deaths.
 //                  Holding right from f0: deaths at f55 and f120 (respawns at f65 and f130), both at [150, 90].
 //   MOCK_PNG=1     screenshots come back as format "png" (like Unity, or the JS adapter's screenshotFormat "png")
+//   MOCK_UI=1      a HUD drawn over the game and listed in state.ui (MOCK_UI=pixels draws it without state.ui), with
+//                  planted layout bugs (320×180, safe margins 16×9 px): minimap clipped 10 px past the right edge,
+//                  toast entirely off screen, badge 6 px into the left safe margin, btn_a × btn_b overlapping 20×10 px,
+//                  tiny text with fontPx 3, hint text (70,70,90) on the background (20,24,40) (low contrast), btn_c
+//                  2 px right of btn_a and tiny. Reset param window [w, h] resizes the screen (btn_b stays at x 240..300,
+//                  the minimap stays 30 px from the right edge): at 280×180 btn_b is clipped too.
 import net from "node:net";
 import { encodePNG } from "../src/media/png.js";
+import { glyph } from "../src/media/font.js";
 
-const FPS = 60, W = 320, H = 180, SR = 22050;
+const FPS = 60, SR = 22050;
+let W = 320, H = 180;
+const UI = process.env.MOCK_UI || "";
 let rngState = 1, frame = 0, time = 0, queue = [], keys = new Set(), logs = [], audioBuf = [];
 let pointer = { x: 0, y: 0, down: false }, fingers = new Map();
 let player, coins, score;
@@ -52,6 +61,7 @@ const HAZARD = !!process.env.MOCK_HAZARD;
 let dead = false, deaths = 0, deadAt = -1;
 function reset(seed = 1, params = {}) {
   bigPlayer = !!params.big; holdCamera = params.camera === "hold";
+  [W, H] = UI && Array.isArray(params.window) ? params.window : [320, 180];
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
@@ -146,6 +156,32 @@ function burst() {   // 80 ms of noise, 1 ms attack, decaying
 const tone660 = () => Float32Array.from({ length: Math.round(SR * 0.12) }, (_, i) => Math.sin(2 * Math.PI * 660 * i / SR) * 0.4 * Math.min(1, i / (SR * 0.002)) * (1 - i / (SR * 0.12)));
 const beep = () => Float32Array.from({ length: Math.round(SR * 0.1) }, (_, i) => Math.sin(2 * Math.PI * 440 * i / SR) * 0.4 * (1 - i / (SR * 0.1)));
 
+// MOCK_UI: the HUD (see the header for the planted bugs)
+const uiElements = () => [
+  { id: "hud", kind: "panel", rect: [16, 10, 140, 20], fill: [40, 40, 60] },
+  { id: "score", kind: "text", rect: [20, 12, 40, 16], text: "SCORE", fontPx: 16, ink: [255, 255, 255] },
+  { id: "lives", kind: "text", rect: [70, 12, 32, 16], text: "HP 3", fontPx: 16, ink: [255, 255, 255] },
+  { id: "hint", kind: "text", rect: [100, 150, 56, 16], text: "PRESS E", fontPx: 16, ink: [70, 70, 90] },
+  { id: "tiny", kind: "text", rect: [200, 150, 30, 4], text: "tiny", fontPx: 3, ink: [255, 255, 255] },
+  { id: "btn_a", kind: "button", rect: [200, 40, 60, 20], fill: [60, 90, 160] },
+  { id: "btn_b", kind: "button", rect: [240, 50, 60, 20], fill: [160, 60, 60] },
+  { id: "btn_c", kind: "button", rect: [202, 74, 60, 20], text: "QUIT", fontPx: 16, fill: [60, 90, 160], ink: [255, 255, 255] },
+  { id: "minimap", kind: "panel", rect: [W - 30, 120, 40, 40], fill: [30, 80, 50] },
+  { id: "badge", kind: "icon", rect: [10, 100, 12, 12], fill: [250, 200, 0] },
+  { id: "toast", kind: "text", rect: [330, 20, 48, 16], text: "SAVED!", fontPx: 16, ink: [255, 255, 255] },
+];
+function drawUI(put) {
+  for (const e of uiElements()) {
+    const [x0, y0, w, h] = e.rect;
+    if (e.fill) for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) put(x, y, ...e.fill);
+    if (!e.text) continue;
+    if (e.fontPx === 3) { for (let i = 0; i < 7; i++) for (let y = 0; y < 3; y++) for (let x = 0; x < 2 + (i % 2); x++) put(x0 + i * 4 + x, y0 + y, ...e.ink); continue; }   // 3 px letters, 2 and 3 px wide
+    // the 8×16 font, centred in the rect
+    const tx = x0 + Math.floor((w - e.text.length * 8) / 2), ty = y0 + Math.floor((h - 16) / 2);
+    [...e.text].forEach((ch, i) => { const g = glyph(ch); for (let y = 0; y < 16; y++) for (let x = 0; x < 8; x++) if (g[y * 8 + x]) put(tx + i * 8 + x, ty + y, ...e.ink); });
+  }
+}
+
 function screenshot() {
   const px = Buffer.alloc(W * H * 4);
   const put = (x, y, r, g, b) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const i = (y * W + x) * 4; px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255; };
@@ -160,6 +196,7 @@ function screenshot() {
   blob(player.pos, bigPlayer ? 9 : 7, [80, 200, 255]);
   if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
   if (LAG && xAt != null && frame - xAt >= 5) for (let y = 10; y < 20; y++) for (let x = 300; x < 310; x++) put(x, y, 255, 255, 255);
+  if (UI) drawUI(put);
   if (process.env.MOCK_PNG) return { width: W, height: H, format: "png", data: Buffer.from(encodePNG(W, H, px)).toString("base64") };
   return { width: W, height: H, format: "rgba8", data: px.toString("base64") };
 }
@@ -192,7 +229,7 @@ sock.on("data", (d) => {
       case "reset": reset(m.seed, m.params || {}); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
-      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}) } }); break;
+      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) } }); break;
       case "screenshot": reply(screenshot()); break;
       case "audio": reply(audio()); break;
       case "call":

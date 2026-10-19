@@ -1,5 +1,5 @@
 // Witness CLI: measure — exact numbers instead of eyeballing.
-//   pixels:  scale, box, contrast, motion
+//   pixels:  scale, box, contrast, motion, align, registration; ui, colorblind, palette (measure-look.js)
 //   state:   curve, jump, move, hitstop  (an expression sampled every frame of a scripted run)
 import fs from "node:fs";
 import path from "node:path";
@@ -10,6 +10,7 @@ import { parseWitnessInput } from "../core/input-spec.js";
 import { inputSpans, errorLines } from "./ask.js";
 import { parseRect } from "./see.js";
 import { WitnessError } from "../core/session.js";
+import { lookMeasure } from "./measure-look.js";
 import {
   die, withGame, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
@@ -71,7 +72,9 @@ async function pixelMeasure(what, files, opt) {
     return alignMeasure(m, opt);
   } else if (what === "registration" || what === "slide") {
     return registrationMeasure(m, opt);
-  } else die("usage: witness measure scale|box|contrast|motion|align|registration|curve|jump|move|hitstop ...  (witness help measure)");
+  } else if (["ui", "colorblind", "cvd", "palette"].includes(what)) {
+    return lookMeasure(what, files, opt);
+  } else die("usage: witness measure scale|box|contrast|motion|align|registration|ui|colorblind|palette|curve|jump|move|hitstop ...  (witness help measure)");
 }
 
 async function motionMeasure(m, fileFrames, opt, region) {
