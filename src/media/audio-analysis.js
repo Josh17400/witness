@@ -1204,6 +1204,67 @@ export function refineOnset(x, sr, t, lo = 0) {
   return t;
 }
 
+/** x band-limited to [[lo, hi] Hz, ...] over [t0, t1) seconds, zero elsewhere: causal 4th-order high- and low-pass
+ *  per range (Butterworth biquads, twice), so nothing rings before an attack and an onset is never pulled early. */
+export function bandPass(x, sr, t0, t1, bands) {
+  const i0 = Math.max(0, Math.round(t0 * sr)), i1 = Math.min(x.length, Math.round(t1 * sr));
+  const y = new Float32Array(x.length);
+  if (i1 <= i0) return y;
+  const seg = x.subarray(i0, i1);
+  const hp = (v, f) => { const w = 2 * Math.PI * f / sr, al = Math.sin(w) / (2 * Math.SQRT1_2), c = Math.cos(w); return biquad(v, (1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al); };
+  const lp = (v, f) => { const w = 2 * Math.PI * f / sr, al = Math.sin(w) / (2 * Math.SQRT1_2), c = Math.cos(w); return biquad(v, (1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al); };
+  for (const [lo, hi] of bands) {
+    let v = hp(hp(seg, lo), lo);
+    if (hi < sr * 0.45) v = lp(lp(v, hi), hi);
+    for (let k = 0; k < v.length; k++) y[i0 + k] += v[k];
+  }
+  return y;
+}
+
+/**
+ * Did a new sound start at t on top of one already playing? Third-octave band energies over the 40 ms before t
+ * (ending 4 ms before it) vs the 40 ms from t. A band that rose 10x (10 dB) or more adds its rise minus what the
+ * bands up to 2 away (2/3 octave) lost: a pitch change, a sweep or vibrato moves energy into a neighbouring band, an
+ * added sound leaves the old bands sounding. New sound when that adds at least 1% of the energy after t (a sound up
+ * to 20 dB under the one playing, in bands it leaves free). Returns the rising band edges in Hz, or null.
+ */
+export function addedSound(x, sr, t) {
+  const n = 2048, w = Math.round(0.04 * sr), i = Math.round(t * sr);
+  if (i - w - Math.round(0.004 * sr) < 0 || i + w > x.length) return false;
+  const band = (a) => {
+    const seg = new Float32Array(n);
+    for (let k = 0; k < w; k++) seg[k] = x[a + k];
+    const p = powerSpectrum(seg, 0, n), out = [];
+    for (let lo = 50; lo < Math.min(12000, sr / 2); lo *= Math.pow(2, 1 / 3)) {
+      const k0 = Math.ceil((lo * n) / sr), k1 = Math.min(n / 2, Math.floor((lo * Math.pow(2, 1 / 3) * n) / sr));
+      let s = 0;
+      for (let k = k0; k <= k1; k++) s += p[k];
+      out.push(s);
+    }
+    return out;
+  };
+  const before = band(i - w - Math.round(0.004 * sr)), after = band(i);
+  const rose = after.map((v, b) => v > before[b] * 10);
+  let total = 0, added = 0;
+  const bands = [];
+  for (let b = 0; b < after.length; b++) {
+    total += after[b];
+    if (!rose[b]) continue;
+    let moved = 0;
+    for (let j = Math.max(0, b - 2); j <= Math.min(after.length - 1, b + 2); j++) if (!rose[j]) moved += Math.max(0, before[j] - after[j]);
+    const add = after[b] - before[b] - moved;
+    if (add > 0) { added += add; bands.push([b, add]); }
+  }
+  if (!(total > 0 && added >= 0.01 * total)) return null;
+  // the bands that carry it (5%+ of what was added), adjacent ones merged
+  const edge = (b) => 50 * Math.pow(2, b / 3), out = [];
+  for (const [b] of bands.filter(([, a]) => a >= 0.05 * added)) {
+    const last = out[out.length - 1];
+    if (last && Math.abs(last[1] - edge(b)) < 1e-6) last[1] = edge(b + 1); else out.push([edge(b), edge(b + 1)]);
+  }
+  return out;
+}
+
 /**
  * Onset times of distinct sounds in a (mono) signal: spectral-flux peaks that come with a real
  * rise in level (a pitch change inside one sound is not a new sound), plus the starts of sounds
@@ -1213,7 +1274,7 @@ export function refineOnset(x, sr, t, lo = 0) {
  */
 export function detectOnsets(x, sr, { minGap = 0.06, refine = true } = {}) {
   if (!x.length) return [];
-  const fine = envelope([x], sr, 0.001);
+  const fine = envelope([x], sr, 0.001), fineAll = fine;
   let peak = 0;
   for (let i = 0; i < fine.length; i++) if (fine[i] > peak) peak = fine[i];
   if (peak < 1e-5) return [];
@@ -1236,8 +1297,16 @@ export function detectOnsets(x, sr, { minGap = 0.06, refine = true } = {}) {
     // the flux frame spans [k*hop, k*hop + 1024): the new energy entered in its last part
     const tk = (k * 256 + 768) / sr;
     const pre = levelAt(fine, tk - 0.045, tk - 0.012), post = levelAt(fine, tk - 0.004, tk + 0.03);
-    if (post < floor || !(post > pre * 1.5 || (pre < floor * 3 && post > pre * 1.2))) continue;
-    found.push({ t: tk, strength: v / ref });
+    if (post < floor) continue;
+    // a level rise, or (under a longer, louder sound the level hardly moves) new energy in bands that were quiet
+    // while the bands already sounding carry on: a sound added on top, not a pitch change inside one sound
+    let bands = null, at = tk;
+    if (!(post > pre * 1.5 || (pre < floor * 3 && post > pre * 1.2))) {
+      // the flux frame is 46 ms long: look for the added sound from 30 ms before tk
+      for (let q = tk - 0.03; q <= tk + 0.0051 && !bands; q += 0.005) { bands = addedSound(x, sr, q); if (bands) at = q; }
+      if (!bands) continue;
+    }
+    found.push({ t: at, strength: v / ref, bands });
   }
   // sounds that swell out of silence have no sharp flux peak: catch them on the level gate
   const gate = envelope([x], sr, 0.005);
@@ -1251,9 +1320,13 @@ export function detectOnsets(x, sr, { minGap = 0.06, refine = true } = {}) {
   // refine each time on the 1 ms envelope (the first millisecond 20 dB up from the level before
   // it towards the new peak, so a bed of music underneath doesn't pull it early) and enforce the
   // minimum gap (keep the stronger)
+  // a sound that started under a louder one is timed on its own bands (the louder sound's level would hide its rise)
   const out = [];
   for (const f of found) {
     let lp = 0;
+    const y = f.bands ? bandPass(x, sr, f.t - 0.15, f.t + 0.1, f.bands) : null;
+    f.signal = y;
+    const fine = y ? envelope([y], sr, 0.001) : fineAll;
     const a = Math.max(0, Math.floor((f.t - 0.03) * 1000)), b = Math.min(fine.length, Math.ceil((f.t + 0.06) * 1000));
     for (let i = a; i < b; i++) if (fine[i] > lp) lp = fine[i];
     const before = Array.from(fine.subarray(Math.max(0, a - 50), a)).sort((p, q) => p - q);
@@ -1265,9 +1338,10 @@ export function detectOnsets(x, sr, { minGap = 0.06, refine = true } = {}) {
     const t = Math.min(f.t + 0.03, i / 1000);
     const last = out[out.length - 1];
     if (last && t - last.t < minGap) { if (f.strength > last.strength) last.strength = f.strength; continue; }
-    out.push({ t, strength: f.strength });
+    out.push({ t, strength: f.strength, ...(y ? { over: true, signal: y } : {}) });
   }
-  if (refine) for (let k = 0; k < out.length; k++) out[k].t = refineOnset(x, sr, out[k].t, k ? out[k - 1].t + 0.01 : 0);
+  if (refine) for (let k = 0; k < out.length; k++) out[k].t = refineOnset(out[k].signal || x, sr, out[k].t, k ? out[k - 1].t + 0.01 : 0);
+  for (const o of out) delete o.signal;
   return out;
 }
 
@@ -1538,10 +1612,32 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
   // ---- segments: the given events, or the onsets that stand out --------------------------
   let segs;
   if (evs.length) {
+    // a sound ends at the quiet point before the next event, unless it is still sounding when that one starts (a
+    // swing inside a long jingle): then it runs on under it, to where it falls back to the level before it began
+    const fine = envelope([x], sr, 0.001), env5 = envelope([x], sr, 0.005);
+    const lvl = (a, b) => levelAt(fine, a, b);
     segs = evs.map((e, i) => {
-      const next = evs.slice(i + 1).find((n) => n.t >= e.t + 0.05);
-      return { t: e.t, label: e.label, t0: Math.max(0, e.t - 0.01), t1: Math.min(duration, next ? next.t : Infinity, e.t + 4) };
+      const bed = lvl(e.t - 0.05, e.t - 0.002);
+      let pk = 0;
+      for (let k = Math.floor(e.t / 0.005); k < Math.min(env5.length, Math.ceil((e.t + 0.1) / 0.005)); k++) if (env5[k] > pk) pk = env5[k];
+      let t1 = Math.min(duration, e.t + 4), cut = false;
+      for (const n of evs.slice(i + 1)) {
+        if (n.t < e.t + 0.05) continue;
+        if (n.label === e.label || lvl(n.t - 0.02, n.t - 0.002) <= Math.max(bed * 2, pk * 0.25)) { t1 = Math.min(t1, quietPoint(fine, e.t + 0.02, n.t)); cut = true; break; }
+      }
+      if (!cut) {   // its own end: back to the level before it (or 40 dB under its peak), held for 20 ms
+        const stop = Math.max(bed * 2, pk * 0.01);
+        for (let k = Math.ceil((e.t + 0.02) / 0.005); k < env5.length; k++) {
+          if (k * 0.005 >= t1) break;
+          let quiet = true;
+          for (let j = k; j < Math.min(env5.length, k + 4); j++) if (env5[j] > stop) { quiet = false; break; }
+          if (quiet) { t1 = Math.min(t1, k * 0.005 + 0.005); break; }
+        }
+      }
+      return { t: e.t, label: e.label, t0: Math.max(0, e.t - 0.01), t1 };
     });
+    // which sounds overlap another (their own analysis would hold both)
+    for (const sg of segs) sg.over = segs.filter((o) => o !== sg && o.label !== sg.label && o.t < sg.t1 - 0.005 && sg.t < o.t1 - 0.005).map((o) => o.label);
   } else {
     // inside music every beat is an onset: keep only sounds that rise >= 6 dB above the bed
     // (and not the music's own first note)
@@ -1580,7 +1676,14 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
   let skipped = 0;
   for (const s of segs) {
     let g = s.label !== undefined ? groups.find((q) => q.label === s.label) : null;
-    if (g) { g.times.push(s.t); continue; }
+    if (g) {
+      g.times.push(s.t);
+      if (g.over.length && !(s.over || []).length) {   // describe it from an occurrence that plays alone
+        const seg = sliceChannels(chs, sr, s.t0, s.t1);
+        Object.assign(g, { t0: s.t0, t1: s.t1, analysis: analyzeEvent(seg, sr), channels: seg, over: [], from: s.t });
+      }
+      continue;
+    }
     if (groups.length >= maxSounds) { skipped++; continue; }
     const seg = sliceChannels(chs, sr, s.t0, s.t1);
     const a = analyzeEvent(seg, sr);
@@ -1589,7 +1692,7 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
       g = groups.find((q) => sameSound(q.analysis, a));
       if (g) { g.times.push(s.t); continue; }
     }
-    groups.push({ label: s.label, t: s.t, t0: s.t0, t1: s.t1, times: [s.t], analysis: a, channels: seg, overMusic: !!inMusic(s.t) });
+    groups.push({ label: s.label, t: s.t, t0: s.t0, t1: s.t1, times: [s.t], analysis: a, channels: seg, overMusic: !!inMusic(s.t), over: s.over || [] });
   }
   groups.forEach((g, i) => { if (g.label === undefined) g.label = `sound ${i + 1}`; });
   if (skipped) notes.push(`${skipped} more segments were not analyzed (limit ${maxSounds} distinct sounds)`);
@@ -1690,7 +1793,7 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
   const sounds = groups.map((g) => ({
     label: g.label, t: r3(g.t), times: g.times.map(r3), count: g.times.length, overMusic: g.overMusic,
     musicLoudness: g.musicLoudness ?? null, ownLoudness: g.ownLoudness ?? null,
-    description: g.buried ? "barely audible over the music (it adds almost nothing to the mix there), so it can't be described on its own" : describeEvent(g.analysis),
+    description: g.buried ? "barely audible over the music (it adds almost nothing to the mix there), so it can't be described on its own" : describeEvent(g.analysis) + (g.over && g.over.length ? ` (always overlapped by ${[...new Set(g.over)].join(", ")}: measured with it)` : ""),
     analysis: g.analysis,
   }));
   const report = jsonSafe({

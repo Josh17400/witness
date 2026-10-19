@@ -38,8 +38,9 @@ export async function listenCommand(pos, opt) {
     const dec = m.decodePCM(pcm);
     const onsets = m.detectOnsets(m.mono(dec.channels), dec.sampleRate);
     const aligned = soundEvents.length ? alignSoundEvents(soundEvents, onsets, fps) : null;
-    // with sound events, the analysis cuts sounds where the game said they start (heard time) and names them
-    const rep = m.analyzePCM(pcm, { title: `${s.hello.name} — ${fmtT(endF / fps)}`, events: aligned ? aligned.sounds.map((x) => ({ t: x.t, label: x.label })) : null });
+    // with sound events, the analysis cuts sounds where the game said they start (heard time) and names them; an
+    // announced sound with no onset is left out (cutting there would describe whatever else is playing as it)
+    const rep = m.analyzePCM(pcm, { title: `${s.hello.name} — ${fmtT(endF / fps)}`, events: aligned ? aligned.sounds.filter((x) => x.heard).map((x) => ({ t: x.t, label: x.label })) : null });
     // the sounds to match: the game's named events, else every analysed occurrence
     let sounds;
     if (aligned) sounds = [...aligned.sounds, ...aligned.unreported.map((o) => ({ label: `unreported sound`, t: o.t, f: o.f, unreported: true }))];
@@ -83,7 +84,7 @@ function report(r, opt) {
   const fr = (f) => `f${f}`;
   let counts = null;
   if (match) {
-    counts = { events: match.matches.length, matched: 0, missing: 0, doubled: 0, early: 0 };
+    counts = { events: match.matches.length, matched: 0, missing: 0, doubled: 0, early: 0, unheard: 0 };
     lines.push(`Events vs sounds (window +0..+${within}f after each event; +1f is the earliest an input's sound can be heard, +0f for a state change):`);
     const w = Math.max(...match.matches.map((x) => `${x.action.label} ${fr(x.action.f)}`.length));
     for (const x of match.matches) {
@@ -91,7 +92,8 @@ function report(r, opt) {
       if (x.sound) {
         counts.matched++;
         if (x.doubles.length) { counts.doubled++; lines.push(`  ⚠ ${head} → ${x.sound.label} ${x.doubles.length + 1} times (+${x.offset}f, ${x.doubles.map((d) => `+${d.offset}f`).join(", ")}): double-triggered?`); }
-        else lines.push(`  ✔ ${head} → ${x.sound.label} at +${x.offset}f${x.sound.heard === false ? " (announced, but nothing audible starts there)" : ""}`);
+        else if (x.sound.heard === false) { counts.matched--; counts.unheard++; lines.push(`  ⚠ ${head} → ${x.sound.label} announced at +${x.offset}f, but nothing audible starts there`); }
+        else lines.push(`  ✔ ${head} → ${x.sound.label} at +${x.offset}f`);
       } else {
         counts.missing++;
         if (x.early) counts.early++;
@@ -123,7 +125,7 @@ function report(r, opt) {
     const ma = match ? match.matches.map((x) => ({ event: x.action.label, frame: x.action.f, kind: x.action.kind, sound: x.sound ? x.sound.label : null, soundFrame: x.sound ? x.sound.f : null, offset: x.offset, doubles: x.doubles.map((d) => d.offset), early: x.early ? x.early.offset : null })) : [];
     // a report, not a test: missing sounds don't fail it (movement keys have none); gate with --expect "missing == 0"
     const env = envelope("listen", {
-      verdict: rep.text.split("\n")[0] + (counts ? ` · events: ${counts.matched}/${counts.events} have their sound, ${counts.missing} missing, ${counts.doubled} doubled` : ""),
+      verdict: rep.text.split("\n")[0] + (counts ? ` · events: ${counts.matched}/${counts.events} have their sound, ${counts.missing} missing, ${counts.doubled} doubled${counts.unheard ? `, ${counts.unheard} announced but not audible` : ""}` : ""),
       summary: { ...(r.seam ? { loopOk: r.seam.ok, loopJoint: r.seam.joint, loopLevelStep: r.seam.levelStep } : {}), truePeakDb: rep.report.mix.truePeakDb, sounds: rep.report.sounds.length, occurrences: rep.report.sounds.reduce((a, x) => a + x.count, 0), problems: rep.report.problems.length, ...(counts || {}), unexplained: match ? match.unexplained.length : null, announced: aligned ? aligned.sounds.length : 0 },
       data: { report: rep.report, matches: ma, unexplained: match ? match.unexplained.map((x) => ({ sound: x.label, frame: x.f, t: x.t })) : [], soundEvents: aligned ? aligned.sounds : [], unreported: aligned ? aligned.unreported : [], fps },
       files: r.files,

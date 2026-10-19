@@ -23,6 +23,21 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
 - A projection fitted from a single entity on a single sprite is no longer trusted (one entity lands on any blob:
   the player was mapped onto the far-away prop): screen = state, or `state.camera`, unless 2+ entities agree.
 
+**listen: sounds that start under another sound**
+- Onsets under a longer, louder sound are found: when the level hardly rises, a spectral-flux peak still counts if
+  third-octave bands that were quiet rise 10 dB and add at least 1% of the energy (what neighbouring bands lost is
+  subtracted, so a pitch change, sweep or vibrato inside one sound is still one sound); the onset is timed on those
+  bands (causal filters, never early). A 0.15 swing at 1.2 s inside a 555 ms chord at 1.1 s: found at 1.2002 s.
+- The sections agree: `listen --input "j@0.5,j@1.2"` said "swing at +1f (announced, but nothing audible starts
+  there)" and then listed "swing ×2" under Sounds. Now both swings are ✔ +1f. An announced sound that really has no
+  onset is ⚠ in the events list (`summary.unheard`, not counted as matched) and is left out of the Sounds analysis
+  instead of describing whatever else plays there as it.
+- With announced sounds, a sound still playing when the next one starts runs on under it (quest_start: 555 ms, not
+  cut to 100 ms at the swing); a sound is described from an occurrence that plays alone when there is one, else marked
+  "(always overlapped by swing: measured with it)". A segment no longer takes in the first samples of the next sound
+  (a swing read 605 ms long). A chord's beating (or tremolo) is no longer reported as a double trigger.
+- Mock game: `MOCK_SOUNDS=overlap`; sounds now start at the current time even when an earlier one wrote past it.
+
 **Adoption steps**
 1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
    `--config witness.web.json`.

@@ -411,6 +411,30 @@ console.log("\naudio analysis — raw game audio (analyzePCM)");
   ok("labelled: overlapping sounds keep their names and counts", report.segmentation === "events" && by.beep?.count === 2 && by.hit?.count === 1 && by.beep.times.join() === "0.5,1.5", report.sounds.map((q) => [q.label, q.times]));
 }
 
+// ---- a sound starting under a longer, louder one (a swing inside a 555 ms quest jingle) ---------------------
+{
+  // C-major chord (523/659/784 Hz, 0.2 each: its envelope beats every 4-8 ms), 5 ms attack, decaying to half, 10 ms fade
+  const chord = (x, t0, dur) => { for (const f of [523.25, 659.25, 783.99]) addTone(x, t0, dur, () => f, (t) => 0.2 * Math.min(1, t / 0.005, (dur - t) / 0.01) * (1 - 0.5 * t / dur)); };
+  const swing = (x, t0) => addNoise(x, t0, 0.08, (t) => 0.15 * Math.min(1, t / 0.001) * Math.exp(-t / 0.03));
+  const x = buf(2);
+  swing(x, 0.5); chord(x, 1.1, 0.555); swing(x, 1.2);
+  const on = detectOnsets(x, SR);
+  show("overlap onsets", on.map((o) => o.t.toFixed(4)).join(" "));
+  ok("overlap: the swing inside the louder jingle is an onset (0.5, 1.1, 1.2 s, within 2 ms)", on.length === 3 && [0.5, 1.1, 1.2].every((t, i) => Math.abs(on[i].t - t) <= 0.002), on.map((o) => o.t));
+  const alone = buf(2);
+  chord(alone, 1.1, 0.555);
+  ok("overlap: the jingle alone (a beating chord, decaying) is one onset", detectOnsets(alone, SR).length === 1, detectOnsets(alone, SR));
+  const vib = buf(2);
+  addTone(vib, 0.2, 1.2, (t) => 440 * (1 + 0.03 * Math.sin(2 * Math.PI * 6 * t)), (t) => 0.3 * Math.min(1, t / 0.005, (1.2 - t) / 0.01) * (1 + 0.3 * Math.sin(2 * Math.PI * 5 * t)));
+  ok("overlap: vibrato + tremolo on one tone is one onset", detectOnsets(vib, SR).length === 1, detectOnsets(vib, SR));
+  const { report } = analyzePCM(toPCM([x]), { events: [{ t: 0.5, label: "swing" }, { t: 1.1, label: "quest_start" }, { t: 1.2, label: "swing" }] });
+  const by = Object.fromEntries(report.sounds.map((q) => [q.label, q]));
+  show("overlap analysis", report.sounds.map((q) => `${q.label} ×${q.count} ${Math.round(q.analysis.length * 1000)} ms`).join(" · "));
+  ok("overlap: quest_start is 555 ms long (not cut at the swing inside it)", by.quest_start && Math.abs(by.quest_start.analysis.length - 0.555) <= 0.01, by.quest_start?.analysis.length);
+  ok("overlap: swing ×2 described from the clean one: 80 ms, noisy", by.swing && by.swing.count === 2 && Math.abs(by.swing.analysis.length - 0.08) <= 0.006 && by.swing.analysis.tonality === "noisy", [by.swing?.count, by.swing?.analysis.length, by.swing?.analysis.tonality]);
+  ok("overlap: no double trigger read into the chord's beating or the overlap", !report.problems.some((q) => /second attack/.test(q.text)), report.problems.map((q) => q.text));
+}
+
 // ---- hygiene: clicks at sound edges, pops, true peak, double triggers, repetition, loop seams ----------------
 {
   const { edges, pops, truePeak, secondAttack, loopSeam } = await import("../../src/media/hygiene.js");

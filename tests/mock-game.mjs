@@ -21,6 +21,8 @@
 //   MOCK_SOUNDS=1  j plays an 80 ms noise burst, but only on odd presses (a planted cooldown bug); landing plays a
 //                  120 ms 660 Hz tone; coins ding. Each sound is announced with an {"event": "sound"} line;
 //                  MOCK_SOUNDS=quiet plays the same sounds without the lines (an adapter without sound events).
+//                  MOCK_SOUNDS=overlap: every j press plays a quieter swing (the same burst at 0.15), and frame 66 (1.1 s)
+//                  starts "quest_start", a louder 555 ms chord: a swing at 1.2 s starts inside it.
 //   reset params: {"nocoins": true} starts with no coins; {"big": true} draws the player with radius 9 instead of 7 (an A/B difference);
 //                  {"camera": "hold"} (the reserved camera-hold param) keeps MOCK_CAMERA's camera still
 //   MOCK_HAZARD=1  (top-down only) lava from x = 150: the player dies the frame it reaches x >= 150 (snapped to exactly
@@ -129,7 +131,10 @@ function stepOnce(dt) {
   const pressed = edges.splice(0);
   if (LAG && pressed.includes("x")) { xAt = frame; addSound(beep(), null); }
   if (LAG && xAt != null && frame - xAt >= 2) lagged = true;
-  if (SOUNDS && pressed.includes("j") && ++jPresses % 2 === 1) addSound(burst(), "swing");
+  if (SOUNDS === "overlap") {
+    if (pressed.includes("j")) addSound(burst(0.15), "swing");
+    if (frame === 66) addSound(questStart(), "quest_start");
+  } else if (SOUNDS && pressed.includes("j") && ++jPresses % 2 === 1) addSound(burst(), "swing");
   if (JUMP) {
     if (pressed.includes("h")) freeze = 5;
     if (freeze > 0) freeze--;
@@ -188,17 +193,19 @@ function stepOnce(dt) {
 
 // a sound starts at the current simulated time (the start of the frame being stepped)
 function addSound(samples, name) {
-  const start = audioBuf.length;
+  const start = Math.round(time * SR);   // now, even when an earlier sound already wrote past it
   for (let i = 0; i < samples.length; i++) audioBuf[start + i] = (audioBuf[start + i] || 0) + samples[i];
   if (name && SOUNDS !== "quiet") sock.write(JSON.stringify({ event: "sound", name, frame }) + "\n");
 }
 let noiseSeed = 7;
-function burst() {   // 80 ms of noise, 1 ms attack, decaying
+function burst(amp = 0.5) {   // 80 ms of noise, 1 ms attack, decaying
   const n = Math.round(SR * 0.08), out = new Float32Array(n);
-  for (let i = 0; i < n; i++) { noiseSeed = (noiseSeed * 1103515245 + 12345) & 0x7fffffff; out[i] = ((noiseSeed / 0x7fffffff) * 2 - 1) * 0.5 * Math.min(1, i / (SR * 0.001)) * Math.exp(-i / (SR * 0.03)); }
+  for (let i = 0; i < n; i++) { noiseSeed = (noiseSeed * 1103515245 + 12345) & 0x7fffffff; out[i] = ((noiseSeed / 0x7fffffff) * 2 - 1) * amp * Math.min(1, i / (SR * 0.001)) * Math.exp(-i / (SR * 0.03)); }
   return out;
 }
 const tone660 = () => Float32Array.from({ length: Math.round(SR * 0.12) }, (_, i) => Math.sin(2 * Math.PI * 660 * i / SR) * 0.4 * Math.min(1, i / (SR * 0.002)) * (1 - i / (SR * 0.12)));
+// MOCK_SOUNDS=overlap: a 555 ms C-major chord (523/659/784 Hz, 0.2 each, 5 ms attack, slow decay), louder than the swing
+const questStart = () => Float32Array.from({ length: Math.round(SR * 0.555) }, (_, i) => [523.25, 659.25, 783.99].reduce((a, f) => a + Math.sin(2 * Math.PI * f * i / SR), 0) * 0.2 * Math.min(1, i / (SR * 0.005), (SR * 0.555 - i) / (SR * 0.01)) * (1 - 0.5 * i / (SR * 0.555)));
 const beep = () => Float32Array.from({ length: Math.round(SR * 0.1) }, (_, i) => Math.sin(2 * Math.PI * 440 * i / SR) * 0.4 * (1 - i / (SR * 0.1)));
 
 // MOCK_UI: the HUD (see the header for the planted bugs)

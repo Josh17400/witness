@@ -135,6 +135,9 @@ export function secondAttack(env, t0, step = 0.002) {
   for (let i = i0; i < Math.min(env.length, i0 + win(12)); i++) if (env[i] > env[p]) p = i;
   if (env[p] <= 1e-5) return null;
   let dip = env[p], dipI = p;
+  // a level that already dips and recovers 4 dB inside the first 10 ms is the sound's own texture (a chord's beats,
+  // tremolo), not a restart
+  { let lo = env[p]; for (let i = p + 1; i < Math.min(env.length, p + win(10)); i++) { if (env[i] < lo) lo = env[i]; else if (lo > 0 && 20 * Math.log10(env[i] / lo) >= 4) return null; } }
   for (let i = p + 1; i < Math.min(env.length, p + win(45) + 1); i++) {
     if (env[i] < dip) { dip = env[i]; dipI = i; }
     if (i - p >= win(10) && i > dipI && dip > 0 && 20 * Math.log10(env[i] / dip) >= 4 && env[i] >= 0.7 * env[p]) return { dt: Math.round((i - p) * step * 1000), rise: r1(20 * Math.log10(env[i] / dip)) };
