@@ -164,7 +164,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 
 | order | synonyms | meaning |
 |---|---|---|
-| `goto <thing>` · `goto x,y` · `goto goal` | go to, walk to, move to, run to, head to, travel to, navigate to, get to, return to, go back to, approach, reach | Path there around walls, keeping off doors, stairs and exits that aren't the goal; stop in reach (items: pickup reach; NPCs: talk reach; enemies: attack reach; places: step onto them; a solid door: stand next to it). Entering the target (a building, a door, an exit) finishes the goto, and a chain like `goto Inn; talk Innkeeper` goes on in the new scene. Arrived at a door, exit or stairs and nothing happened: it steps onto the cell, pushes the way the door is used (its `enter`, see [Doors and exits](#doors-and-exits)) for up to 0.6 s, then presses interact, and says what it tried. `goto <Type>` switches to another listed one of that type if its pick leaves the view. `x,y` is a map cell. `goto goal` needs a goal position in the snapshot. |
+| `goto <thing>` · `goto x,y` · `goto goal` | go to, walk to, move to, run to, head to, travel to, navigate to, get to, return to, go back to, approach, reach | Path there around walls, keeping off doors, stairs and exits that aren't the goal; stop in reach (items: pickup reach; NPCs: talk reach; enemies: attack reach; places: step onto them; a solid door: stand next to it). Entering the target (a building, a door, an exit) finishes the goto, and a chain like `goto Inn; talk Innkeeper` goes on in the new scene. Arrived at a door, exit or stairs and nothing happened: it steps onto the cell, pushes each way the door may be used (its `enter`, or each wall beside it, see [Doors and exits](#doors-and-exits)) for up to 0.6 s, then presses interact, and says what it tried. `goto <Type>` switches to another listed one of that type if its pick leaves the view. `x,y` is a map cell. `goto goal` needs a goal position in the snapshot. |
 | `go <dir> [n]` | walk, move, head, step; a bare direction (`north 3`) | n cells (default 5) that way. Directions: n s e w ne nw se sw, north…, up/down/left/right, up-right…; fps: forward/back/left/right. |
 | `explore [dir]` | wander, scout, search, roam | Frontier exploration of unvisited ground, biased toward dir. Runs until the time cap or nothing is left. |
 | `follow <thing>` | | Stay near it (teammates, NPCs). |
@@ -183,7 +183,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `wait for <thing>` | | Until it passes, moves away, or 8 s. |
 | `stop` | halt, freeze | Release everything. |
 | `respawn` | revive, continue | Press confirm while dead, again every 1.5 s (a "press Enter" prompt often shows a second after the death), for up to 8 s. |
-| `set <k> <v>` | | Standing policies: `set retreat 30`, `set heal 40`, `set guard on\|off`, `set reaction 0.3`. Applies at once, also while dead. |
+| `set <k> <v>` | | Standing policies: `set retreat 30`, `set heal 40`, `set guard on\|off`, `set reaction 0.3`. Applies at once, also while dead or at low hp (no reflex replaces it). |
 | `combo <name>` | special; a bare combo name | A frame-exact input sequence from `play.combos` (left/right mirror when the foe is on the left). |
 | `call <name> [args]` | | A game `call` (cheats, setup). Only with `--allow-calls` or `play.allowCalls`; recorded in the replay. |
 | platformer: `run <left\|right> [n] [to x]` · `jump [left\|right] [short\|long\|high]` · `stomp [thing]` | hop, leap; dash, sprint | Side-view locomotion (see Profiles). |
@@ -413,7 +413,7 @@ A `do` returns when its chain is done or failed, at the time cap, or on a **wake
 |---|---|
 | always | death, goal reached (`won`), a game error log, a scene change, low hp (first drop below 35% or the retreat level; re-armed after healing above 45%). A scene change the order caused on purpose doesn't wake: a goto that was next to its goal (or by a door leading to it) is done, and any walking order whose target is still listed in the new scene carries on. |
 | dialogue | a dialogue opens or changes, unless the order is talk / interact / choose / press / use |
-| outside fights | being hurt by a hit (small damage with nobody near and no enemy in view, or right after another such tick, is damage over time: poison, burning; it goes in the timeline only); a hostile entering the alert range (`play.alert`, 6 cells), unless it's the order's own target. `flee` ignores both. In the platformer profile, an approaching enemy doesn't wake run / goto / go / explore / pickup / jump (the runner jumps or stomps on its own). With **autofight** on (below), neither wakes a movement order (goto, go, explore, follow, pickup, talk) or anything in live mode: the reflex layer deals with it and reports it as an event. |
+| outside fights | being hurt by a hit (a small loss, ≤ 8% of max hp (0.5 when there's no max), with nobody near and no enemy in view attacking, is damage over time when no enemy is in view at all or another such loss came within 2.5 s: poison, burning; it goes in the timeline only, and autofight doesn't answer it); a hostile entering the alert range (`play.alert`, 6 cells), unless it's the order's own target. `flee` ignores both. In the platformer profile, an approaching enemy doesn't wake run / goto / go / explore / pickup / jump (the runner jumps or stomps on its own). With **autofight** on (below), neither wakes a movement order (goto, go, explore, follow, pickup, talk) or anything in live mode: the reflex layer deals with it and reports it as an event. |
 | `careful` | also items or NPCs appearing, notices, pickups, kills |
 
 **Time cap** (game seconds): `--for S` if given. Otherwise, if every order is open-ended (explore, wait, follow,
@@ -509,12 +509,16 @@ and nothing happens within 0.3 s on the tile, it:
 1. steps onto the door's cell (a goto stops within 1 cell of a thing, or next to it from the side),
 2. holds the move toward the entity's `enter` for up to 0.6 s: `"s"`, `"ne"` … or a vector in the plane (state
    coordinates; a 3D vector is projected onto the ground plane). Without `enter`, it pushes from the door's open side
-   into its solid side (an exit with a wall behind it), else on in the direction it came,
+   into each solid side in turn, 0.6 s each (a corner exit has two walls; the way it was walking goes first), else on
+   in the direction it came. A push that walks it off the tile steps back on before the next one,
 3. presses the interact key,
 
-and reports what it tried: `entered Exit#70 (pushed S) (the scene changed to overworld)`, or `arrived at Exit#70 —
-standing on Exit#70 at (5,4): pushed S for 0.6s, pressed e: the scene didn't change`. If the push walks it off the tile,
-it steps back on before the key. Set `enter` on doors that need a push; it costs one field.
+and reports what it tried: `entered Exit#70 (pushed W for 0.6s, pushed S) (the scene changed to overworld)`, or
+`arrived at Exit#70 — standing on Exit#70 at (1,2): pushed W for 0.6s, pushed S for 0.6s, pressed e: the scene didn't
+change`. A door drawn in a wall cell (it can't be stood on) is pushed into from the open cell beside it: `arrived at
+Door#71 — next to Door#71 at (4,3): pushed S for 0.6s, pressed e: the scene didn't change`. Set `enter` on doors that
+need a push; it costs one field. In the platformer profile a goto just arrives (no push, no key): use `press up` or
+`interact` there.
 
 ```json
 { "id": 70, "type": "Exit", "leadsTo": "Overworld", "pos": [5.5, 4.5], "enter": "s" }
@@ -607,7 +611,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `speed` | measured | walking speed in world units/s |
 | `reach` | `{attack: 1.2, interact: 1.2, pickup: 0.5}` | in cells |
 | `alert` | 6 | cells: a hostile this close wakes the tester |
-| `stuckDead` | 20 | game seconds dead, with key presses and no state change, before the session ends as `stuck dead` (0 = off) |
+| `stuckDead` | 20 | game seconds dead, with key presses and no state change (a respawn countdown going down is a change), before the session ends as `stuck dead` (0 = off; raise it above a long respawn the state has no countdown for) |
 | `leash` | 14 | cells: a melee fight stops chasing a target this far from where the fight started (0 = never stop) |
 | `sight` | 3 | cells around the path counted as seen when exploring |
 | `reaction` | 0.25 (or the persona's) | seconds before the guard reacts to a windup |
@@ -698,9 +702,11 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 * **END after the end.** `play end --feedback …` on a session that already ended (any reason above) still writes the
   feedback into report.md/json (marked "given after the session had ended"); the outcome stays.
 * **Stuck dead.** Dead for `play.stuckDead` game seconds (default 20; 0 = off) with at least one key press in that
-  time and nothing in the state changing (timers, clocks and the entity list don't count): the session ends with
+  time and nothing in the state changing (timers, clocks and the entity list don't count; a respawn countdown such as
+  `respawnTimer`, `deathTimer`, `reviveTime` going down does): the session ends with
   outcome `stuck dead`, a shot, the last inputs and the state in report.json `stuckDead` and report.md, instead of the
-  tester spending its turns on respawn.
+  tester spending its turns on respawn. A game whose respawn takes longer than that with no countdown in the state
+  (arena/MOBA timers of 25–60 s) needs `stuckDead` raised above it (say 70), or a `respawnTimer` in the state.
 * **Process cap.** `start` refuses when `WITNESS_PLAY_MAX` sessions (default 2) are already live machine-wide, unless
   `--force`. Each session is one game plus one light daemon. `play suggest` runs a game too but isn't counted.
 * **Cleanup.** `witness play list` shows what's alive. `witness play stop --all` ends every live session.

@@ -8,6 +8,7 @@ import { makeProfile, moveControls, lookOf } from "./profiles.js";
 import { PlatformRunner, SAFE_STATES } from "./platformer.js";
 import { OrderError, resolveTarget } from "./orders.js";
 import { thingLabel } from "./perceive.js";
+import { DotClassifier } from "./events.js";
 import { parseWitnessInput } from "../core/input-spec.js";
 
 // ------------------------------------------------------------------ controller: wanted controls → protocol events
@@ -326,50 +327,78 @@ class GoTo extends Behaviour {
     return d ? { cell: gc, enter: (d.thing && d.thing.enter) || null, key: d.thing ? d.thing.key : `the door at ${fmtCell(gc)}` } : null;
   }
   /**
-   * Which way to push on a door: its `enter` ("S", or a vector), else from its open side into its solid side (an
-   * Exit with the wall behind it), else on in the direction we came. {v, name} or null.
+   * Which ways to push on a door, in order: its `enter` ("S", or a vector); else from its open side into each solid
+   * side (an Exit with the wall behind it; a corner exit has two), the one we came moving toward first; else on in the
+   * direction we came. [{v, name}], maybe empty.
    */
-  pushDir(w, door) {
+  pushDirs(w, door) {
     const ns = w.northSign ?? -1;
-    if (typeof door.enter === "string") return { v: dirVector(door.enter, ns), name: door.enter };
-    if (Array.isArray(door.enter) && len(door.enter) > 1e-9) return { v: norm(door.enter), name: compass(door.enter, ns) };
+    if (typeof door.enter === "string") return [{ v: dirVector(door.enter, ns), name: door.enter }];
+    if (Array.isArray(door.enter) && len(door.enter) > 1e-9) return [{ v: norm(door.enter), name: compass(door.enter, ns) }];
     const grid = this.ap.grid, t = this.ap.t, [cx, cy] = door.cell, came = this.ap.lastMoveDir;
     const cands = [[0, 1], [0, -1], [1, 0], [-1, 0]].filter(([dx, dy]) => grid.isBlocked(cx + dx, cy + dy, t) && !grid.isBlocked(cx - dx, cy - dy, t));
-    if (cands.length) {
-      const v = cands.map((c) => ({ c, s: came ? dot(c, came) : 0 })).sort((a, b) => b.s - a.s)[0].c;
-      return { v, name: compass(v, ns) };
-    }
-    if (came && len(came) > 1e-9) { const v = Math.abs(came[0]) >= Math.abs(came[1]) ? [Math.sign(came[0]), 0] : [0, Math.sign(came[1])]; return { v, name: compass(v, ns) }; }
-    return null;
+    if (cands.length) return cands.map((c) => ({ c, s: came ? dot(c, came) : 0 })).sort((a, b) => b.s - a.s).map(({ c }) => ({ v: c, name: compass(c, ns) }));
+    if (came && len(came) > 1e-9) { const v = Math.abs(came[0]) >= Math.abs(came[1]) ? [Math.sign(came[0]), 0] : [0, Math.sign(came[1])]; return [{ v, name: compass(v, ns) }]; }
+    return [];
   }
   /**
-   * Arrived at a door and the scene didn't change: step onto its cell, push toward `enter` (or the inferred way) for
-   * up to 0.6 s, then press the interact key. The scene changing at any point finishes the goto (observe).
+   * Arrived at a door and the scene didn't change: step onto its cell and push each way it may be used (`enter`, or
+   * the inferred ones) for 0.6 s, stepping back on if a push walks off it; a door in a wall cell (can't stand on it)
+   * is pushed into from where we stand. Then press the interact key. The scene changing at any point finishes the
+   * goto (observe).
    */
   pushTick(w, want) {
     const ap = this.ap, grid = ap.grid, t = ap.t, P = this.push, door = P.door;
     const pc = grid.toCell(w.player.p2), on = pc[0] === door.cell[0] && pc[1] === door.cell[1];
-    for (let i = 0; i < 6; i++) {
+    const startPush = () => {
+      const d = P.dirs[P.i];
+      if (!d) { P.phase = "key"; P.t0 = t; return; }
+      P.phase = "push"; P.t0 = t; P.tried.push(`pushed ${d.name}`);
+    };
+    // next to it: push into it from here (the way from our cell to its cell)
+    const pushInto = () => {
+      P.beside = true; P.i = 0;
+      const dv = sub(grid.center(door.cell), grid.center(pc)), ns = w.northSign ?? -1;
+      const v = Math.abs(dv[0]) >= Math.abs(dv[1]) ? [Math.sign(dv[0]), 0] : [0, Math.sign(dv[1])];
+      P.dirs = len(dv) > 1e-9 ? [{ v, name: compass(v, ns) }] : [];
+    };
+    for (let i = 0; i < 8; i++) {
+      if (P.phase === "side") {
+        // diagonal to it: first step to the open cell beside it, so the push goes into it
+        const there = pc[0] === P.side[0] && pc[1] === P.side[1];
+        if (!there && t - P.t0 <= 1.5) { ap.moveTo(w, sub(grid.center(P.side), w.player.p2), want); return this.run(); }
+        pushInto();
+        if (!P.dirs.length) { P.tried.push("no push direction"); P.phase = "key"; P.t0 = t; continue; }
+        startPush();
+        continue;
+      }
       if (P.phase === "step" || P.phase === "back") {
-        if (!on && t - P.t0 <= (P.phase === "step" ? 2 : 1.5)) { ap.moveTo(w, sub(grid.center(door.cell), w.player.p2), want); return this.run(); }
-        if (!on) P.tried.push(P.phase === "step" ? "couldn't step onto it" : "couldn't step back onto it");
-        if (P.phase === "back") { P.phase = "key"; P.t0 = t; continue; }
-        P.phase = "push"; P.t0 = t; P.dir = this.pushDir(w, door);
-        if (P.dir) P.tried.push(`pushed ${P.dir.name}`);
-        else { P.tried.push("no push direction (no enter field, no wall beside it)"); P.phase = "key"; }
+        // a door drawn in a wall cell can't be stood on: no point walking into it for 2 s
+        const solid = grid.isBlocked(door.cell[0], door.cell[1], t);
+        if (!on && !solid && t - P.t0 <= (P.phase === "step" ? 2 : 1.5)) { ap.moveTo(w, sub(grid.center(door.cell), w.player.p2), want); return this.run(); }
+        if (P.phase === "back") { if (!on) P.tried.push("couldn't step back onto it"); P.i++; startPush(); continue; }
+        if (!on) {
+          const sides = [[0, 1], [0, -1], [1, 0], [-1, 0]].map(([dx, dy]) => [door.cell[0] + dx, door.cell[1] + dy]).filter(([x, y]) => !grid.isBlocked(x, y, t));
+          const beside = sides.some(([x, y]) => x === pc[0] && y === pc[1]);
+          if (!beside && sides.length) { P.side = sides.sort((a, b) => dist2(a, pc) - dist2(b, pc))[0]; P.phase = "side"; P.t0 = t; continue; }
+          pushInto();
+        } else { P.dirs = this.pushDirs(w, door); P.i = 0; }
+        if (!P.dirs.length) { P.tried.push("no push direction (no enter field, no wall beside it)"); P.phase = "key"; P.t0 = t; continue; }
+        startPush();
         continue;
       }
       if (P.phase === "push") {
-        if (!on) { P.tried[P.tried.length - 1] = `pushed ${P.dir.name} (that walked off it)`; P.phase = "back"; P.t0 = t; continue; }
-        if (t - P.t0 < 0.6 - 1e-9) { ap.moveTo(w, P.dir.v, want); return this.run(); }
-        P.tried[P.tried.length - 1] = `pushed ${P.dir.name} for 0.6s`;
-        P.phase = "key"; P.t0 = t;
+        const d = P.dirs[P.i];
+        if (!on && !P.beside) { P.tried[P.tried.length - 1] = `pushed ${d.name} (that walked off it)`; P.phase = "back"; P.t0 = t; continue; }
+        if (t - P.t0 < 0.6 - 1e-9) { ap.moveTo(w, d.v, want); return this.run(); }
+        P.tried[P.tried.length - 1] = `pushed ${d.name} for 0.6s`;
+        P.i++; startPush();
         continue;
       }
       const c = ap.cfg.controls.interact;
       if (c && !P.pressed) { want.taps.push({ label: "interact", c, frames: ap.cfg.controls.tapFrames }); P.pressed = true; P.t0 = t; P.tried.push(`pressed ${controlLabel(c)}`); return this.run(); }
       if (c && t - P.t0 < 0.5) return this.run();
-      return this.done(`arrived at ${this.desc} — standing on ${door.key} at ${fmtCell(door.cell)}: ${P.tried.join(", ")}: the scene didn't change`);
+      return this.done(`arrived at ${this.desc} — ${P.beside ? "next to" : "standing on"} ${door.key} at ${fmtCell(door.cell)}: ${P.tried.join(", ")}: the scene didn't change`);
     }
     return this.run();
   }
@@ -898,7 +927,7 @@ export class Autopilot {
     // already deal with enemies, so it's off there.
     this.policy = { retreat: cfg.retreat, heal: cfg.heal, guard: cfg.guard, reaction: cfg.reaction, autofight: cfg.autofight ?? cfg.profile !== "platformer" };
     this.standingMode = false;   // live mode: a Standing behaviour runs whenever no order does
-    this.lastHurtT = -1e9; this.lastHp = null;
+    this.lastHurtT = -1e9; this.lastHp = null; this.dot = new DotClassifier();
     this.ctrl = new Controller(size);
     this.profile = makeProfile(cfg.profile, this);
     this.platform = cfg.profile === "platformer" ? new PlatformRunner(this) : null;
@@ -987,7 +1016,7 @@ export class Autopilot {
     if (p.hp != null) {
       const src = this.lastHp != null && p.hp < this.lastHp ? w.things.filter((th) => th.rel === "hostile" && !th.dead).sort((a, b) => a.dist - b.dist)[0] : undefined;
       // a small loss with no enemy near is damage over time (poison), not a hit: autofight doesn't go after a bystander
-      const dot = src !== undefined && this.lastHp - p.hp <= Math.max(0.5, p.maxHp ? 0.08 * p.maxHp : 0) && !(src && src.dist <= reachW(w, this.cfg.reach.attack) * 2.6);
+      const dot = src !== undefined && this.dot.loss(this.t, this.lastHp - p.hp, p.maxHp, { near: !!(src && src.dist <= reachW(w, this.cfg.reach.attack) * 2.6), things: w.things });
       if (src !== undefined && !dot) { this.lastHurtT = this.t; this.lastHurtBy = src ? src.id : null; }
       this.lastHp = p.hp;
     }
@@ -1110,6 +1139,7 @@ export class Autopilot {
     catch { return null; }
     fight.auto = true;
     fight.leashCells = this.cfg.autofightLeash ?? 6;
+    if (hurtBy === th) this.lastHurtT = -1e9;   // that hit is answered: a fight that ends on the leash doesn't restart over it
     this.emit("autofight", `${thingLabel(th)} ${hurtBy === th ? "hit you" : "came at you"}: fighting it, then back to ${clip(b.label, 40)}`);
     return fight;
   }
@@ -1356,7 +1386,8 @@ export class Autopilot {
       }
       // the reflexes (heal, retreat, guard, autofight) are for a living hero: over a body (0 hp, an enemy standing on
       // it) a retreat would swap every order (respawn, wait, press, even `set retreat 0`) for a Flee that can't run
-      const pct = w.dead ? null : hpPct(w);
+      // and a `set` order always applies as given: `set retreat 0` at 20% hp next to an enemy isn't a Flee
+      const pct = w.dead || (b instanceof Instant && b.o?.verb === "set") ? null : hpPct(w);
       if (this.policy.heal && pct != null && pct < this.policy.heal && this.cfg.controls.heal && this.t - this.lastHealT > 1.2) {
         want.taps.push({ label: "heal", c: this.cfg.controls.heal, frames: this.cfg.controls.tapFrames }); this.lastHealT = this.t;
         this.emit("reflex", `healing at ${Math.round(pct)}% hp`);

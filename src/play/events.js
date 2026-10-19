@@ -6,6 +6,25 @@ import { thingLabel } from "./perceive.js";
 
 const LOW_HP = 35;
 
+/**
+ * Damage over time (poison, burning, hunger) vs a hit: a small loss (8% of max hp, or 0.5 when the max isn't known)
+ * with no enemy near, while no enemy in view is attacking, and either no enemy in view at all or another such loss
+ * within 2.5 s (a periodic tick). Shared by the event tracker (wakes) and the autopilot (autofight's "X hit you").
+ */
+export class DotClassifier {
+  constructor() { this.lastSmallT = null; }
+  /** `near`: an enemy within 2.6× attack reach; `things`: the perceived things. True when the loss is a DoT tick. */
+  loss(t, amount, maxHp, { near = false, things = [] } = {}) {
+    const small = maxHp ? amount <= 0.08 * maxHp + 1e-9 : amount <= 0.5;
+    if (near || !small) return false;
+    const foes = things.filter((th) => th.rel === "hostile" && !th.dead);
+    const attacking = foes.some((th) => th.telegraph || /attack|strike|shoot|fire|aim|cast|bite|hit|throw/i.test(th.state || ""));
+    const periodic = this.lastSmallT != null && t - this.lastSmallT <= 2.5;
+    this.lastSmallT = t;
+    return !attacking && (!foes.length || periodic);
+  }
+}
+
 export class EventTracker {
   constructor(cfg, perceiver) {
     this.cfg = cfg;
@@ -23,7 +42,8 @@ export class EventTracker {
     this.firstSight = [];       // {t, type, key} first time each hostile type is seen (for key-moment shots)
     this.recentLogs = [];       // game log lines of the last 1.5 s (death causes)
     this.drift = null;          // hp changes too small to show (regen ticks of 0.02): added up until they're worth a line
-    this.goneAt = new Map();    // id -> t of its last "is gone" (a thing flickering at the edge of the list is gone once)
+    this.goneAt = new Map();
+    this.dot = new DotClassifier();    // id -> t of its last "is gone" (a thing flickering at the edge of the list is gone once)
   }
 
   /** prev may be null (the first snapshot). `ctx` = {lastAttackT, logs: [{frame, level, message}], fps}. Returns events. */
@@ -65,11 +85,8 @@ export class EventTracker {
           .sort((a, b) => (b.telegraph || /strike|attack|bite|hit/i.test(b.state || "") ? 1 : 0) - (a.telegraph || /strike|attack|bite|hit/i.test(a.state || "") ? 1 : 0) || a.dist - b.dist)[0];
         this.lastHurtBy = src ? src.key : null;
         this.hurtTimes.push(t);
-        // damage over time (poison, burning, hunger): a small loss with nobody near, and no enemy in view or another
-        // such tick just before. It goes in the timeline but doesn't wake the tester or stop an order (wake.js)
-        const small = -d <= Math.max(0.5, P.maxHp ? 0.08 * P.maxHp : 0);
-        const dot = !src && small && (!cur.things.some((th) => th.rel === "hostile" && !th.dead) || t - (this.lastDotT ?? -1e9) <= 2.5);
-        if (dot) this.lastDotT = t;
+        // damage over time (poison, burning, hunger): timeline only, it doesn't wake the tester or stop an order (wake.js)
+        const dot = this.dot.loss(t, -d, P.maxHp, { near: !!src, things: cur.things });
         ev.push({ t, frame, kind: "hurt", text: `you took ${r1(-d)} damage${src ? ` from ${src.key}` : ""} (hp ${r1(from)}→${r1(P.hp)})`, data: { amount: -d, by: src ? src.key : null, from, to: P.hp, ...(dot ? { dot: true } : {}) } });
         const pct = P.maxHp ? (100 * P.hp) / P.maxHp : null;
         const lowAt = Math.max(LOW_HP, ctx.retreat || 0);

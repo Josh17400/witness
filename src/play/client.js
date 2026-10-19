@@ -54,7 +54,7 @@ Sessions live in witness/playtests/<name>/ (report.md, report.json, replay.jsonl
 ${MAX_SESSIONS} sessions run at once machine-wide (WITNESS_PLAY_MAX). A session ends itself after --idle seconds without a
 command, after --wall-minutes (real time, default 20), when --until is reached and nobody ENDs within 3 minutes,
 when the game exits or stops answering, or when the player stays dead (play.stuckDead, 20 game s) while presses change
-nothing. END still works after it ended: the feedback goes into the report.`;
+nothing (a respawnTimer counting down in the state is a change; raise stuckDead above a longer respawn without one). END still works after it ended: the feedback goes into the report.`;
 
 function fail(msg, code = 1) { console.error(`✖ ${msg}`); process.exit(code); }
 

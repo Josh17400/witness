@@ -431,10 +431,11 @@ export function runFixTests(ok) {
     const S2 = mk(), d2 = driver(S2, { autofight: false });
     const r2 = d2.do("wait 3");
     ok("DoT: poison ticks don't wake a wait", r2.status === "done" && /waited 3s/.test(r2.msg), `${r2.status} ${r2.msg}`);
-    // poison with an enemy in view but not near: autofight doesn't go after it as "it hit you"
+    // poison with an enemy in view but not near: the first tick can't be told from a shot (it may answer that once,
+    // up to the leash); every tick after it is periodic, so autofight doesn't keep going after it as "it hit you"
     const S4 = mk({ foe: true }), d4 = driver(S4, { autofight: true });
     const r4 = d4.do("goto Well");
-    ok("DoT: autofight doesn't blame a far-off enemy for a poison tick", r4.status === "done" && !r4.events.some((e) => /hit you/.test(e.text)), `${r4.status} ${r4.msg} | ${r4.events.filter((e) => e.kind === "autofight").map((e) => e.text).join(" | ")}`);
+    ok("DoT: autofight doesn't keep blaming a far-off enemy for poison ticks", r4.status === "done" && r4.events.filter((e) => /hit you/.test(e.text)).length <= 1 && r4.events.filter((e) => e.kind === "hurt").slice(1).every((e) => e.data && e.data.dot), `${r4.status} ${r4.msg} | ${r4.events.filter((e) => e.kind === "autofight" || e.kind === "hurt").map((e) => `${e.t.toFixed(2)} ${e.text}${e.data?.dot ? " (dot)" : ""}`).join(" | ")}`);
     // a hit by a visible attacker wakes a wait (no autofight to deal with it)
     const S3 = mk({ foe: true }); S3.hitAt = 10;
     const d3 = driver(S3, { autofight: false });
@@ -522,5 +523,104 @@ export function runFixTests(ok) {
     let h3 = null;
     for (let t = 1; t <= 25 && !h3; t += 0.5) { dw3.input(t, [{ type: "key", key: "enter", down: true }]); h3 = dw3.update(world(t, true, { menu: t < 15 ? "continue?" : "load save?" })); }
     ok("stuck dead: a change in the death screen restarts the count", !h3);
+  }
+
+  // ---- 14. review of 10-13: `set` swapped for a Flee at low hp; poison ticks with a far enemy in view; an archer's
+  // small hits taken for poison; the 0.5 floor on hp 0..1; respawn countdowns; corner exits; doors in a wall cell
+  {
+    // (a) `set retreat 0` at low hp (alive, an enemy next to you) applies; so does `set autofight on`
+    {
+      const S = tileWorld({ start: [5.5, 5.5], solid: () => false, snapState: () => ({ entities: [{ id: 5, type: "Skeleton", pos: [6.5, 5.5], hp: 6, maxHp: 6, hostile: true }] }) });
+      const drv = driver(S, { autofight: false });
+      drv.do("set retreat 30");
+      S.hp = 2; drv.sync();
+      const r = drv.do("set retreat 0");
+      ok("review: `set retreat 0` at low hp alive applies (not swapped for a Flee)", r.status === "done" && /retreat below 0% hp/.test(r.msg) && drv.ap.policy.retreat === 0 && !r.events.some((e) => /retreating/.test(e.text)), `${r.status} ${r.msg} retreat=${drv.ap.policy.retreat}`);
+      drv.do("set retreat 30");
+      const r2 = drv.do("set autofight on");
+      ok("review: `set autofight on` at low hp alive applies", r2.status === "done" && drv.ap.policy.autofight === true, `${r2.status} ${r2.msg}`);
+    }
+    // poison: -0.1 every 30 frames (or `hit(S)`); an Archer somewhere
+    const poisoned = ({ archer = null, hit = null, maxHp = 10, hp0 = 10, entities = [] } = {}) => {
+      const S = tileWorld({
+        start: [2.5, 2.5], solid: () => false,
+        snapState: (S2) => ({ player: { id: 1, type: "Player", pos: [...S2.p], hp: S2.hp, maxHp, facing: S2.facing }, entities: [...entities, ...(archer ? [{ id: 8, type: "Archer", hostile: true, hp: 4, maxHp: 4, ...archer }] : [])] }),
+        onStep: (S2) => { if (hit) hit(S2); else if (S2.frame % 30 === 29 && S2.hp > 6) S2.hp = +(S2.hp - 0.1).toFixed(2); },
+      });
+      S.hp = hp0;
+      return S;
+    };
+    // (b) poison with an Archer 7 tiles away (not attacking): every tick after the first is damage over time
+    {
+      const S = poisoned({ archer: { pos: [9.5, 2.5] } }), drv = driver(S, { autofight: false });
+      const r = drv.do("wait 3"), r2 = drv.do("wait 3");
+      ok("review: poison ticks with a far idle enemy in view don't wake every wait", r2.status === "done" && /waited 3s/.test(r2.msg) && (r.status === "done" || r.seconds < 0.6), `${r.status} ${r.msg} | ${r2.status} ${r2.msg}`);
+    }
+    // (c) an Archer (state attack) 5 tiles off shooting 0.5 (5%) every second: not poison; autofight turns on it
+    {
+      const S = poisoned({ archer: { pos: [4.5, 7.5], state: "attack" }, entities: [{ id: 3, type: "Well", pos: [16.5, 2.5] }], hit: (S2) => { if (S2.frame % 60 === 29) S2.hp = +(S2.hp - 0.5).toFixed(2); } });
+      const drv = driver(S, { autofight: true, controls: { move: "wasd", interact: "e", cancel: "escape", attack: "j" } });
+      const r = drv.do("goto Well", { maxFrames: 60 * 4 });
+      const hurts = r.events.filter((e) => e.kind === "hurt");
+      ok("review: small hits while an enemy in view is attacking aren't damage over time", hurts.length && !hurts.some((e) => e.data && e.data.dot), hurts.map((e) => `${e.text}${e.data?.dot ? " (dot)" : ""}`).join(" | "));
+      ok("review: autofight turns on an archer shooting you from range", r.events.some((e) => e.kind === "autofight" && /Archer#8 hit you/.test(e.text)), r.events.filter((e) => e.kind === "autofight").map((e) => e.text).join(" | ") || `no autofight: ${r.status} ${r.msg}`);
+    }
+    // (d) hp 0..1: a 30% hit with nobody in view is a hit, not damage over time; 3 hearts: half a heart too
+    {
+      const S = poisoned({ maxHp: 1, hp0: 1, hit: (S2) => { if (S2.frame === 20) S2.hp = 0.7; } }), drv = driver(S, { autofight: false });
+      const r = drv.do("wait 2");
+      ok("review: hp 0..1, a 30% hit wakes (no 0.5 floor when maxHp is known)", r.status === "interrupted" && /you took 0\.3 damage/.test(r.msg), `${r.status} ${r.msg}`);
+      const S2 = poisoned({ maxHp: 3, hp0: 3, hit: (S3) => { if (S3.frame === 20) S3.hp = 2.5; } }), d2 = driver(S2, { autofight: false });
+      const r2 = d2.do("wait 2");
+      ok("review: 3 hearts, a half-heart hit wakes", r2.status === "interrupted" && /you took 0\.5 damage/.test(r2.msg), `${r2.status} ${r2.msg}`);
+    }
+    // (e) stuck dead: a respawn countdown in the state (respawnTimer 30 - t) going down is progress
+    {
+      const dw = new DeadWatch(20);
+      let hit = null;
+      for (let t = 0; t <= 29.5 && !hit; t += 0.5) {
+        if (t % 1.5 === 0) dw.input(t, [{ type: "key", key: "enter", down: true }]);
+        hit = dw.update({ t, dead: true, snap: { state: { dead: true, player: { hp: 0 }, respawnTimer: +(30 - t).toFixed(2) } } });
+      }
+      ok("review: stuck dead: a respawn countdown going down isn't stuck", !hit, JSON.stringify(hit));
+      for (let t = 30; t <= 52 && !hit; t += 0.5) {
+        dw.input(t, [{ type: "key", key: "enter", down: true }]);
+        hit = dw.update({ t, dead: true, snap: { state: { dead: true, player: { hp: 0 }, respawnTimer: 0 } } });
+      }
+      ok("review: stuck dead: ... once it stops at 0, 20 s with presses is stuck", hit && Math.abs(hit.seconds - 20) < 0.6, JSON.stringify(hit));
+    }
+    // a room with one exit; `rule(S)` says when the scene changes
+    const room = ({ rows, start, exit, rule }) => {
+      const S = tileWorld({
+        start,
+        solid: (x, y) => S.scene !== "dungeon" ? false : !rows[y] || rows[y][x] === undefined || rows[y][x] === "#",
+        snapState: (S2) => S2.scene === "dungeon" ? { entities: [exit], map: { id: "dun", cell: 1, origin: [0, 0], rows, solid: "#" } } : { entities: [], map: { id: "world", cell: 1, origin: [0, 0], rows: ["...."], solid: "#" } },
+        onStep: (S2) => { if (S2.scene === "dungeon" && rule(S2)) { S2.scene = "overworld"; S2.p = [1.5, 0.5]; } },
+      });
+      S.scene = "dungeon";
+      return S;
+    };
+    const cellIs = (S2, x, y) => Math.floor(S2.p[0]) === x && Math.floor(S2.p[1]) === y;
+    // (f) a corner exit at (1,2): walls S and W; the game wants S, the hero comes moving west
+    {
+      const exit = { id: 70, type: "Exit", leadsTo: "Overworld", pos: [1.5, 2.5] }, rows = ["######", "#....#", "#....#", "######"];
+      const S = room({ rows, start: [4.5, 2.5], exit, rule: (S2) => cellIs(S2, 1, 2) && S2.keys.has("s") });
+      const r = driveDo(S, {}, "goto Exit", { maxFrames: 60 * 15 });
+      ok("review: a corner exit tries both walls (W, then S)", r.status === "done" && S.scene === "overworld" && /entered Exit#70 \(pushed W for 0\.6s, pushed S\)/.test(r.msg), `${r.status} ${r.msg} scene=${S.scene}`);
+      const S2 = room({ rows, start: [4.5, 2.5], exit, rule: () => false });
+      const r2 = driveDo(S2, {}, "goto Exit", { maxFrames: 60 * 15 });
+      ok("review: a corner exit, nothing works: lists every push", r2.status === "done" && /standing on Exit#70 at \(1,2\): pushed W for 0\.6s, pushed S for 0\.6s, pressed e: the scene didn't change/.test(r2.msg), `${r2.status} ${r2.msg}`);
+    }
+    // (g) a door drawn in a wall cell (4,3): push into it from beside it, say "next to", don't waste seconds
+    {
+      const rows = ["######", "#....#", "#....#", "###.##"];
+      const door = { id: 71, type: "Door", leadsTo: "Cellar", pos: [4.5, 3.5] };
+      const S = room({ rows, start: [1.5, 1.5], exit: door, rule: () => false });
+      const r = driveDo(S, {}, "goto Door", { maxFrames: 60 * 15 });
+      ok("review: a door in a wall cell: 'next to' it, pushed into it, pressed e", r.status === "done" && /next to Door#71 at \(4,3\): pushed [SE] for 0\.6s, pressed e: the scene didn't change/.test(r.msg) && !/standing on|walked off|step back/.test(r.msg) && r.seconds < 3.2, `${r.status} ${r.msg} in ${r.seconds.toFixed(2)}s`);
+      const S2 = room({ rows, start: [1.5, 1.5], exit: door, rule: (S3) => (cellIs(S3, 4, 2) && S3.keys.has("s")) || (cellIs(S3, 3, 3) && S3.keys.has("d")) });
+      const r2 = driveDo(S2, {}, "goto Door", { maxFrames: 60 * 15 });
+      ok("review: a door in a wall cell you push into from beside it: entered", r2.status === "done" && S2.scene === "overworld" && /entered Door#71/.test(r2.msg), `${r2.status} ${r2.msg} trail ${S2.trail.map((c) => c.join(",")).join(" ")}`);
+    }
   }
 }

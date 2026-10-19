@@ -218,7 +218,8 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 * **Never leave sessions running.** `witness play list` shows them; `witness play stop --all` ends them. Sessions
   also end themselves after 5 idle minutes, 20 wall-clock minutes (`--wall-minutes`; batch scales it to `--minutes`),
   when the game exits or hangs (said with the exit code / time and its last lines), or when the hero stays dead while
-  presses change nothing for 20 game seconds (outcome `stuck dead`: check the respawn key, `play.controls.confirm`).
+  presses change nothing for 20 game seconds (outcome `stuck dead`: check the respawn key, `play.controls.confirm`;
+  a longer respawn needs a `respawnTimer` countdown in the state or `play.stuckDead` raised above it).
 * Judge the feedback: the reflex layer plays like a decent human, not a pro, and a stuck incident can be a harness
   limit (moving blockers, no `state.map`) rather than a game bug. Check with a replay before changing the game.
 

@@ -127,7 +127,7 @@ around it, and the batch said `STOPPED · 0s game · 0 orders`)
   a comment; fixed.
 - **Stuck dead.** Dead for 20 game seconds (`play.stuckDead`, 0 = off) with key presses in that time and nothing in
   the state changing (timers, clocks and the entity list ignored) ends the session: `■ session ended: stuck dead: dead
-  for 20s of game time with 15 respawn attempts (pressed enter) and nothing in the state changing`, outcome
+  for 20s of game time with 12 respawn attempts (pressed enter) and nothing in the state changing` (the mock game), outcome
   `stuck dead`, a shot, the last inputs and the state in report.json `stuckDead` and a report.md section.
 - **Damage over time doesn't wake.** Poison ticks (`you took 0.1 damage`, no attacker) woke the tester and stopped
   gotos; with an enemy in view but far off, autofight went after it as "Archer#8 hit you" and the goto gave up after
@@ -144,7 +144,40 @@ around it, and the batch said `STOPPED · 0s game · 0 orders`)
   hang timeout for tests.
 - Adoption steps: *optional*: add `"enter": "s"` (the push that uses it) to exits and doors you use by pushing a
   direction; *optional*: `"stuckDead": 0` in `"play"` if your game keeps the hero dead on purpose for long (a
-  spectator mode). Nothing else changes; sessions started by 0.7.1 batches still run.
+  spectator mode), or a higher value for a long respawn (see the review fixes below). Nothing else changes; sessions started by 0.7.1 batches still run.
+
+**play: review fixes for the dead-hero, damage-over-time, stuck-dead and exit fixes** (from a review of the entry above)
+- **`set` at low hp.** The retreat reflex was only off while dead: alive at 20% hp next to a Skeleton with `set retreat
+  30`, `set retreat 0` was swapped for a Flee (`got away (hp 20%)`, retreat still 30). Now no reflex replaces a `set`
+  order: `retreat below 0% hp`.
+- **One damage-over-time rule** for wakes and autofight. A small loss is ≤ 8% of max hp (0.5 only when there's no
+  max). It's damage over time when nobody is near, no enemy in view is attacking (`state` attack/shoot/strike… or a
+  telegraph), and either no enemy is in view or another small loss came within 2.5 s. Before:
+  - poison ticks with an idle Archer 7 tiles away woke every `wait` (`you took 0.1 damage (hp 10→9.9)`, then
+    `9.9→9.8` …), since the "another tick within 2.5 s" clause could never apply; now the first tick wakes once and
+    the next `wait 3` runs to `waited 3s`;
+  - an Archer in state `attack` 5 tiles off hitting for 0.5 (5%) every second was taken for poison by the autopilot,
+    so autofight let it shoot (`arrived at Well#3`, hp down); now `Archer#8 hit you: fighting it, then back to goto
+    Well`. An autofight answering a hit no longer restarts over the same hit when it stops on its leash;
+  - with hp 0..1 a 30% hit (1→0.7), and with 3 hearts a half-heart hit, counted as damage over time and didn't wake
+    (`waited 2s`); now `you took 0.3 damage (hp 1→0.7)` / `you took 0.5 damage (hp 3→2.5)` wake.
+- **Respawn countdowns.** Stuck dead ignored `respawnTimer`/`deathTimer`/`reviveTime` (any key ending in time/timer),
+  so a game respawning at 30 s with `respawnTimer: 30 - t` and `respawn` pressing Enter was ended as `stuck dead` at
+  20 s. A number under a respawn/revive/death/countdown key going down now counts as a change; the 20 s start when it
+  stops.
+- **Corner exits.** Without `enter`, only one wall was pushed (the one it was walking toward). An Exit at (1,2) in a
+  corner, used by pushing S, gave `standing on Exit#70 at (1,2): pushed W for 0.6s, pressed e: the scene didn't change`;
+  now each wall is pushed in turn: `entered Exit#70 (pushed W for 0.6s, pushed S) (the scene changed to overworld)`.
+- **A door drawn in a wall cell.** Before, after 4.65 s: `standing on Door#71 at (4,3): couldn't step onto it, pushed E
+  (that walked off it), couldn't step back onto it, pressed e`. Now it steps to the open cell beside it and pushes
+  into it, in 1.8 s: `next to Door#71 at (4,3): pushed S for 0.6s, pressed e: the scene didn't change`.
+- **Platformer doors** (reported as "an inferred push down into the floor"): not reproducible; in the platformer
+  profile a goto arrives without any push or key press. PLAYTEST.md now says so (use `press up` or `interact`).
+- PLAYTEST.md's example `standing on Exit#70 at (5,4): pushed S for 0.6s` was never produced by any test, and the
+  stuck-dead example above said 15 attempts where the mock game gives 12; both are now real output.
+- Adoption steps: *optional*: if your hero stays dead longer than 20 s before respawning (arena/MOBA timers), put a
+  `respawnTimer` countdown in the state or raise `"stuckDead"` above the longest respawn (say 70); don't just set it to
+  0. *Optional*: give corner exits an `enter` so the right wall is pushed first.
 
 ## 0.7.1 (2026-10-19)
 
