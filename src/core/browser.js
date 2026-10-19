@@ -120,6 +120,7 @@ function makeWeb(page, browser, opts, pwInfo) {
     engine: opts.engine, engineVersion: browser.version(), playwright: pwInfo.version, device: opts.device, policy: opts.policy, captureMode: opts.capture, page,
     info: () => evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.info() : null)),
     audio: () => evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.audio() : null)),
+    webgl: () => evalWeb(() => (globalThis.__witnessWeb && globalThis.__witnessWeb.webgl ? globalThis.__witnessWeb.webgl() : null)),
     unlock: () => evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.unlock() : 0)),
     /** Compact facts for expressions: web.dpr, web.device, web.audio.state, web.audio.running ... */
     async state() {

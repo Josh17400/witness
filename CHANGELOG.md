@@ -58,9 +58,42 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   "(low confidence)", each finding carries `confidence: "low"`, `summary.confidence` is `low` (else `exact`).
 - Mock game: `MOCK_UI=world` (an INN sign and three villagers in the world).
 
+**Web builds: WebGL and audio in witness mode**
+- `witness doctor` on a browser game prints WebGL: whether the engine has WebGL 1 / 2, its (unmasked) renderer and
+  max texture size, and the context the game's main canvas draws with (the page's init script now records each
+  canvas's `getContext` type: `web.info().canvases[].context`). ✖ when the game asked for WebGL and got none, ⚠
+  when the engine has no WebGL.
+  `--json`: `summary.web.webgl {webgl, webgl2, renderer, software, canvasContext}`. Checked on Windows with
+  Playwright 1.64.1: headless Chromium 156 renders WebGL 1 and 2 in software ("ANGLE (Google, Vulkan 1.3.0
+  (SwiftShader Device (Subzero) …), SwiftShader driver)"); WebKit 27.2 renders WebGL 1 and 2 too and names its
+  renderer "Apple GPU". In both a shader draws, `readPixels` and element screenshots are right and repeat exactly
+  (the two engines differ by 1 in some channels on a gradient).
+- `doctor --no-auto-unlock` on a page that creates no AudioContext (a build that skips opening audio in witness
+  mode) says so plainly: "no AudioContext was created … so there is no unlock path to test: open audio in witness
+  mode too (… adapters/cpp/GUIDE.md §13)"; `summary.web.audioLocked` is `null` (was `false`, which read as a pass)
+  and `summary.web.noAudioContext` is `true`.
+- adapters/cpp/GUIDE.md §13: web builds open the SDL audio device in witness mode too, fed silence (so the page has
+  its AudioContext and the unlock path can be tested), while `listen` keeps hearing `witness_audio_write()` from
+  `step`; §7 says so. The JS guide notes WebGL in WebKit and Chromium.
+- Web test page `tests/web/pages/gl.html`: a WebGL2 game with no audio.
+
 **Adoption steps**
 1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
-   `--config witness.web.json`.
+   `--config witness.web.json`. Briefs made before this pointed at the folder (the desktop config): re-make them.
+2. If a script gates on `measure figure` numbers made with the `hide` param: re-run it once; a silhouette that held
+   far-away pixels (a draw-order change) is smaller now, and its surfaces and ratios change with it. A new ⚠ names
+   the other regions: if it says "unstable sort?", sort tied sprites stably (e.g. by y, then id) so hiding one
+   doesn't reorder the rest.
+3. If a script gates on `listen` counts (`matched`, `unexplained`, sound counts, `problems`): sounds that start
+   under a louder one are now heard, so "announced but nothing audible" entries and unexplained onsets can move
+   into matches; announced sounds with no onset no longer count as matched (`summary.unheard`). Sound lengths for
+   overlapped sounds and the double-trigger problems on chords change for the better; re-check thresholds.
+4. Nothing to do for `measure ui --safe` on the game's canvas (the warning just went away). Scripts that gate on
+   pixel-mode `measure ui` (`problems`) will see fewer: world sprites are no longer text. Better: list the HUD in
+   `state.ui`.
+5. *Optional, web (Emscripten/SDL) builds:* open the SDL audio device in witness mode too, fed silence (cpp GUIDE §13),
+   so `doctor --no-auto-unlock` and `web.audio.state` can check the iPhone unlock path; keep `witness_audio_write()`
+   for what `listen` hears. Then `witness doctor` also shows the WebGL renderer.
 
 ## 0.7.0 (2026-10-19)
 

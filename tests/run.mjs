@@ -62,6 +62,20 @@ ok("keyPaths", keyPaths(snap.state).some((k) => k.startsWith("state.player.hp"))
   ok("check: failing detail shows both sides", check("state.n == 3", s1).detail === "got 1 == 3");
 }
 
+// ---- doctor's WebGL lines (browser pages): what the engine has vs what the game's canvas asked for
+{
+  const { webglReport } = await import("../src/cli/web.js");
+  const sw = { available: true, version: "WebGL 2.0", renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)", maxTexture: 8192 };
+  const web = (g, engine = "chromium") => ({ engine, webgl: async () => g });
+  const page = (context) => ({ canvases: [{ id: "game", w: 160, h: 90, rect: [0, 0, 320, 180], context }] });
+  const a = await webglReport(web({ webgl: sw, webgl2: sw }), page("webgl2 (failed)"));
+  ok("webglReport: a canvas whose WebGL request returned null is ✖", a.lines[0][0] === "✖" && /the game asked for webgl2 and got none/.test(a.lines[0][1]) && a.summary.canvasContext === "webgl2 (failed)", a.lines);
+  const b = await webglReport(web({ webgl: { available: false }, webgl2: { available: false } }, "webkit"), page(null));
+  ok("webglReport: no WebGL at all is ⚠ (a WebGL build would be blank)", b.lines[0][0] === "⚠" && /no WebGL in this engine \(webkit\)/.test(b.lines[0][1]) && b.summary.webgl === false, b.lines);
+  const c = await webglReport(web({ webgl: sw, webgl2: sw }), page("webgl2"));
+  ok("webglReport: SwiftShader is named software", c.lines[0][0] === "✔" && c.summary.software === true && /software: slower/.test(c.lines[0][1]), c.lines);
+}
+
 // ---- chart v2 helpers: comparing two runs, positions, conventions
 {
   const c = compareSeries([0, 1, 2, 3], [1, 2, 3, 4], [1, 2, 5, 3]);

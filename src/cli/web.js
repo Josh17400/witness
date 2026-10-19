@@ -114,7 +114,7 @@ export async function unlockProbe(s, seed = 1) {
   if (startState === "running") out.push(["⚠", `audio unlock (--no-auto-unlock): the AudioContext was already running before any gesture (${audioLine(start)}) — created inside a gesture?`]);
   else if (got && !got.tap && web.device && web.device.touch) out.push(["⚠", `audio unlock (--no-auto-unlock): a tap at the centre did NOT resume the AudioContext, only ${got.name} did (${got.ev} at frame ${got.frame}): on ${web.device.name} (a touch screen) players hear nothing until the game resumes audio in a touchend / click handler: ${audioLine(a)}`]);
   else if (got) out.push(["✔", `audio unlock (--no-auto-unlock, like iPhone Safari): ${startState === "none" ? "no AudioContext at start; " : "AudioContext suspended at start; "}running after ${got.name} (${got.ev} at frame ${got.frame}): ${audioLine(a)}`]);
-  else if (!a.contexts.length) out.push(["⚠", "audio unlock (--no-auto-unlock): no AudioContext was created, even after a tap, a click, space and enter at the centre (no WebAudio, or it starts later in the game)"]);
+  else if (!a.contexts.length) out.push(["⚠", "audio unlock (--no-auto-unlock): no AudioContext was created (none at start, none after a tap, a click, space and enter at the centre), so there is no unlock path to test: open audio in witness mode too (an SDL/Emscripten build: open the audio device, fed silence; adapters/cpp/GUIDE.md §13), then re-run"]);
   else out.push(["⚠", `audio stayed SUSPENDED after a tap, a click, space and enter at the centre (${audioLine(a)}): on iPhone Safari this game is silent until it calls ctx.resume() inside a touchend / click / keydown handler (resume() from the game loop or a timer doesn't count)`]);
   return out;
 }
@@ -127,6 +127,30 @@ export async function audioReport(web) {
   const out = [["", `audio: ${a.contexts.length} AudioContext${a.contexts.length > 1 ? "s" : ""} (${audioLine(a)}); policy ${a.policy === "auto" ? `auto: Witness counts as the player's first gesture${web.autoUnlocked ? ` (resumed ${web.autoUnlocked} at connect)` : ""}; check the iPhone path with --no-auto-unlock` : a.policy}`]];
   if (a.policy === "auto" && a.suspended) out.push(["⚠", "an AudioContext is suspended at the end (the game suspended it and never resumed it): players would hear nothing from it"]);
   return out;
+}
+
+/**
+ * WebGL in this engine (probed on a scratch canvas) and what the game's main canvas draws with. Returns
+ * { lines: [[mark, text]], summary }. SwiftShader = software rendering (Chromium headless: slow, but the same pixels
+ * on every machine); WebKit reports a generic "Apple GPU" whatever renders underneath.
+ */
+export async function webglReport(web, info) {
+  let g = null;
+  try { g = web.webgl ? await web.webgl() : null; } catch { /* page gone */ }
+  if (!g) return { lines: [], summary: null };
+  const c = mainCanvas(info);
+  const uses = c && c.context ? c.context : null;
+  const gl = (k) => g[k] && g[k].available;
+  const r = (gl("webgl2") ? g.webgl2 : gl("webgl") ? g.webgl : null);
+  const soft = r && /swiftshader|llvmpipe|software|microsoft basic render/i.test(r.renderer || "");
+  const masked = r && /^apple gpu$/i.test(r.renderer || "") && web.engine === "webkit";
+  const what = r ? `${gl("webgl2") ? "WebGL 2" : "WebGL 1 only (no WebGL 2)"} · renderer ${r.renderer}${soft ? " (software: slower, not tied to the machine's GPU)" : masked ? " (WebKit's generic name; the real backend isn't shown)" : ""} · max texture ${r.maxTexture}` : "no WebGL in this engine";
+  const lines = [];
+  if (uses && uses.endsWith(" (failed)")) lines.push(["✖", `WebGL: the game asked for ${uses.slice(0, -9)} and got none: ${what}`]);
+  else if (uses === "webgl" || uses === "webgl2") lines.push(["✔", `WebGL: the game's canvas draws with ${uses} · ${what}`]);
+  else if (!r && !uses) lines.push(["⚠", `WebGL: ${what} (${web.engine}): a WebGL build would show a blank canvas here`]);
+  else lines.push(["", `WebGL: ${what}${uses ? ` · the game's canvas uses ${uses}` : ""}`]);
+  return { lines, summary: { webgl: !!gl("webgl"), webgl2: !!gl("webgl2"), renderer: r ? r.renderer : null, software: !!soft, canvasContext: uses } };
 }
 
 export function describeWeb(web) {

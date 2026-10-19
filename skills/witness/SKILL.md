@@ -111,7 +111,9 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
   follow, annotate and state-rect measures refuse device-pixel captures). Safe areas are not emulated: run the
   `measure ui --safe` preset doctor names. `doctor --no-auto-unlock` tests the iPhone "no sound until a tap" bug
   (audio is frozen while suspended, as on the phone); tests assert `web.audio.state == 'running'` after
-  `touch:x,y@t` (or a real `dom:tap:x,y@t`).
+  `touch:x,y@t` (or a real `dom:tap:x,y@t`). A web build needs an AudioContext in witness mode for that check
+  (SDL: open the device, fed silence; cpp GUIDE §13). Keep a web config beside the desktop one: `--config
+  witness.web.json`.
 
 ## 3. Test files: prove gameplay, keep it proven
 

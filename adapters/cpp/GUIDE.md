@@ -295,7 +295,8 @@ h.snapshot = [&](witness::Json& j) {
 
 ## 7. Audio: render the mixer per step, not to a device
 
-In witness mode **don't open an audio device**. After each step, render exactly the samples
+In witness mode **don't feed an audio device from your synth** (web builds still open one, fed silence: §13).
+After each step, render exactly the samples
 that step covers and give them to the adapter. `witness_audio_frames_for_step(dt)` returns
 that count from simulated time, so it never drifts, even with irregular replay dts.
 
@@ -532,13 +533,35 @@ user gesture (key down, mouse button, finger lifted) while your `input` handler 
 resumes its context from its own DOM listeners, which Witness input does not go through: test that path with real
 browser taps, `dom:tap:x,y@t`, and expect `web.audio.state == 'running'`.
 
+**Open the audio device in witness mode too (web builds).** If witness mode skips `SDL_OpenAudioDevice` /
+`SDL_OpenAudioDeviceStream`, the page never creates an `AudioContext`: `doctor --no-auto-unlock` can only say
+"no AudioContext was created … open audio in witness mode too", and `web.audio.state` stays `"none"`. Open it
+the way normal play does (SDL turns it into a WebAudio `AudioContext`, which the page's Witness init script
+wraps: state, `resume()` and the iPhone gesture policy), but give it **silence**, not your synth: SDL's device
+pulls on the browser's real clock, so pulling from the synth would advance game audio with wall time (not
+deterministic), and Witness doesn't capture that context's samples in an Emscripten page anyway. What `listen`
+hears still comes from `witness_audio_write()` in `step` (section 7).
+```c
+#ifdef __EMSCRIPTEN__
+if (witness_mode) {   /* the page's AudioContext exists, so the unlock path can be tested; no samples go in */
+    SDL_AudioStream *dev = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+    SDL_ResumeAudioStreamDevice(dev);   /* the same call normal play makes; never SDL_PutAudioStreamData here */
+}
+#endif
+```
+Then `witness doctor --no-auto-unlock` says which gesture resumed it (or ⚠ that it stayed suspended), and a
+test can expect `web.audio.state == 'running'` after `dom:tap:x,y@t`. (Playwright's WebKit for Windows has no Web
+Audio at all: run this check with Chromium.)
+
 **5. witness.json:**
 ```json
 { "launch": { "url": "http://127.0.0.1:8080/game.html", "server": "python -m http.server 8080 -d build-web",
               "device": "iphone-15" } }
 ```
-`witness doctor --device iphone-15` then also prints how the canvas lands on the phone's screen (DPR, fractional
-scaling, blur). Engines and profiles: adapters/js/GUIDE.md, "Phones and tablets".
+With a desktop build too, keep this as `witness.web.json` beside the desktop `witness.json` and pass
+`--config witness.web.json` (any command; `play brief` passes it on). `witness doctor --device iphone-15` then also
+prints how the canvas lands on the phone's screen (DPR, fractional scaling, blur) and the WebGL renderer. Engines and
+profiles: adapters/js/GUIDE.md, "Phones and tablets".
 
 **Limits (honest):** Witness's tests have no `emcc`. The bridge's C side is compiled natively against a stand-in
 `emscripten.h` (C and C++, warnings as errors) and driven end to end through the real shim and CLI (doctor, the shared

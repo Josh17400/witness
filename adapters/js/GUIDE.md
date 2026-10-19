@@ -344,6 +344,10 @@ looks fine in every screenshot, while on the phone it sits under the Dynamic Isl
 * WebKit: install it once with `npx playwright install webkit` (no admin; ~60 MB download). Playwright's WebKit is
   close to Safari, not Safari: on Windows it has **no Web Audio and no TouchEvent** (Witness puts in a silent
   AudioContext so pages load, and doctor says so; touches arrive as pointer events). Check audio with Chromium.
+  WebGL 1 and 2 work in it (checked on Windows with WebKit 27.2: a shader draws, `readPixels` and element
+  screenshots are right and repeat exactly); it names its renderer "Apple GPU" whatever draws underneath. Headless
+  Chromium renders WebGL in software (SwiftShader through ANGLE). `witness doctor` prints both: whether WebGL 1/2
+  exist, the renderer, and what the game's canvas draws with (✖ when it needs a WebGL the engine lacks).
 
 ## 11. Engine notes
 

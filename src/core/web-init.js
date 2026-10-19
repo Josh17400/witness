@@ -11,7 +11,8 @@
 //     Native AudioContexts are wrapped here; the JS adapter's captured contexts register themselves (track()).
 //     The state Witness reports is the emulated one (the engine's own may differ: headless pages play nothing).
 //   * info(): device pixel ratio, viewport, user agent, touch points, standalone, every canvas with its backing size,
-//     CSS box and image-rendering, and the audio contexts.
+//     CSS box, image-rendering and context type (getContext is watched), and the audio contexts.
+//   * webgl(): WebGL 1 / 2 availability, version and (unmasked) renderer, probed on a scratch canvas.
 //   * standalone emulation (navigator.standalone, display-mode: standalone) for Home Screen web app profiles, and the
 //     device's navigator.platform / maxTouchPoints ("iPhone" or "MacIntel", 5) for device profiles.
 export function webInit(opts) {
@@ -51,7 +52,7 @@ export function webInit(opts) {
           const r = c.getBoundingClientRect();
           let ir = "";
           try { ir = G.getComputedStyle(c).imageRendering; } catch { /* detached */ }
-          canvases.push({ id: c.id || null, w: c.width, h: c.height, rect: [r.left, r.top, r.width, r.height], imageRendering: ir });
+          canvases.push({ id: c.id || null, w: c.width, h: c.height, rect: [r.left, r.top, r.width, r.height], imageRendering: ir, context: ctxKind.get(c) || null });
         }
       }
       const nav = G.navigator || {};
@@ -63,6 +64,34 @@ export function webInit(opts) {
     },
   };
   G.__witnessWeb = W;
+
+  // which context each canvas drew with (the first getContext that returned one), and what WebGL this engine offers
+  const ctxKind = new WeakMap();
+  const HCE = G.HTMLCanvasElement, realGetContext = HCE && HCE.prototype.getContext;
+  if (realGetContext) {
+    HCE.prototype.getContext = function (type, ...rest) {
+      const c = realGetContext.call(this, type, ...rest);
+      const k = String(type) === "experimental-webgl" ? "webgl" : String(type);
+      if (c && !ctxKind.has(this)) ctxKind.set(this, k);
+      else if (!c && !ctxKind.has(this) && /^webgl/.test(k)) ctxKind.set(this, `${k} (failed)`);   // asked, got none
+      else if (c && String(ctxKind.get(this)).endsWith(" (failed)")) ctxKind.set(this, k);
+      return c;
+    };
+  }
+  W.webgl = () => {
+    const probe = (kind) => {
+      try {
+        const c = G.document.createElement("canvas"), gl = realGetContext.call(c, kind);
+        if (!gl) return { available: false };
+        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+        const r = { available: true, version: gl.getParameter(gl.VERSION), vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR), renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER), maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE) };
+        const lose = gl.getExtension("WEBGL_lose_context");
+        if (lose) lose.loseContext();
+        return r;
+      } catch (e) { return { available: false, error: String((e && e.message) || e) }; }
+    };
+    return realGetContext && G.document ? { webgl: probe("webgl"), webgl2: probe("webgl2") } : null;
+  };
 
   // trusted gestures (Playwright input, or a person on a watched page): activation lasts until the next task
   const activating = (e) => {

@@ -19,7 +19,7 @@ import { effectCommand } from "../src/cli/effect.js";
 import { listenCommand } from "../src/cli/listen.js";
 import { windowCommand } from "../src/cli/window.js";
 import { abCommand } from "../src/cli/ab.js";
-import { describeWeb, displayReport, unlockProbe, audioReport } from "../src/cli/web.js";
+import { describeWeb, displayReport, unlockProbe, audioReport, webglReport } from "../src/cli/web.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -321,9 +321,11 @@ const CMD_HELP = {
   touch profile reporting < 2 touch points); safe areas (not emulated: the measure ui --safe preset to check); how
   the main canvas lands on the screen (backing size → CSS box → device px: an exact ×k, a fractional scale with
   uneven pixels and the exact share drawn wider, or smoothing blur, from the layout; the capture at device pixels
-  confirms it, or says it couldn't be read); the AudioContexts and the audio policy. With
+  confirms it, or says it couldn't be read); WebGL 1/2 in the engine, its renderer (SwiftShader = software) and the
+  context the game's canvas draws with; the AudioContexts and the audio policy. With
   --no-auto-unlock it first checks the iPhone unlock: audio suspended at start, then a tap at the canvas centre, a
-  click, space and enter, and which one resumed it (or ⚠ it stayed suspended: silent on iPhone).`,
+  click, space and enter, and which one resumed it (or ⚠ it stayed suspended: silent on iPhone; or ⚠ no AudioContext
+  was created: open audio in witness mode too, adapters/cpp/GUIDE.md §13).`,
 };
 
 // ------------------------------------------------------------------ args & output
@@ -363,7 +365,7 @@ const commands = {
       if (s.web) {
         report.push(`  ${describeWeb(s.web)}`);
         webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy };
-        if (s.web.policy === "gesture") { const p = await unlockProbe(s); p.forEach(mark); webSummary.unlock = p[0] ? p[0][1] : null; webSummary.audioLocked = p.some(([, t]) => /stayed SUSPENDED/.test(t)); }
+        if (s.web.policy === "gesture") { const p = await unlockProbe(s); p.forEach(mark); webSummary.unlock = p[0] ? p[0][1] : null; const none = p.some(([, t]) => /no AudioContext was created/.test(t)); webSummary.audioLocked = none ? null : p.some(([, t]) => /stayed SUSPENDED/.test(t)); if (none) webSummary.noAudioContext = true; }
       }
       // step + snapshot
       const st = await begin(s, { seed: 1 });
@@ -426,6 +428,9 @@ const commands = {
         const m = await media();
         const d = await displayReport(s.web, m);
         d.lines.forEach(mark);
+        const wg = await webglReport(s.web, d.info);
+        wg.lines.forEach(mark);
+        if (wg.summary) webSummary.webgl = wg.summary;
         if (d.display) webSummary.display = { scale: d.display.scale, problem: d.display.problem, pixels: d.display.pixels };
         if (s.web.policy === "auto") (await audioReport(s.web)).forEach(mark);
         const au = await s.web.audio();

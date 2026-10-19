@@ -239,6 +239,15 @@ else {
   r = witness(ex, ["test", "--device", "iphone-se"], env);
   ok("coins on iphone-se (DPR 2): shared test passes", r.status === 0 && /5 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
 
+  // a WebGL2 game that opens no audio in witness mode: doctor names the renderer and says there is nothing to unlock
+  r = witness(P("gl"), ["doctor", "--no-auto-unlock", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("webgl: doctor reports the game's webgl2 canvas and Chromium's SwiftShader renderer (software)", j && j.ok && j.summary.web.webgl && j.summary.web.webgl.webgl2 === true && j.summary.web.webgl.canvasContext === "webgl2" && /SwiftShader/.test(j.summary.web.webgl.renderer) && j.summary.web.webgl.software === true && /✔ WebGL: the game's canvas draws with webgl2 · WebGL 2 · renderer ANGLE/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
+  ok("no AudioContext in witness mode: --no-auto-unlock says so and how to fix it (audioLocked null, not false)", j && j.summary.web.audioLocked === null && j.summary.web.noAudioContext === true && /no AudioContext was created .* open audio in witness mode too/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  r = witness(P("unlock"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("a 2d canvas: the WebGL line is information only, naming the canvas's 2d context", j && j.summary.web.webgl && j.summary.web.webgl.canvasContext === "2d" && /^ {2}WebGL: WebGL 2 · renderer .* · the game's canvas uses 2d$/m.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+
   // WebKit (iPhone Safari's engine) when Playwright's build is installed
   r = witness(ex, ["doctor", "--engine", "webkit", "--device", "iphone-15", "--json"], env);
   j = json(r);
@@ -246,11 +255,14 @@ else {
   else {
     ok("coins in webkit on iphone-15: doctor deterministic", j && j.summary.deterministic === true && j.summary.web.engine === "webkit", r.stdout + r.stderr);
     ok("coins in webkit on iphone-15: maxTouchPoints 5 and platform iPhone (it said 0 and Win32)", j && /maxTouchPoints 5/.test(j.data.lines.join("\n")) && /platform iPhone/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+    r = witness(P("gl"), ["doctor", "--engine", "webkit", "--time", "1", "--json"], env);
+    j = json(r);
+    ok("webgl in webkit (Windows build): WebGL 2 renders; the renderer is WebKit's generic \"Apple GPU\"", j && j.ok && j.summary.web.webgl.webgl2 === true && j.summary.web.webgl.renderer === "Apple GPU" && j.summary.web.webgl.canvasContext === "webgl2" && /WebKit's generic name/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
     r = witness(P("bridge"), ["test", "--engine", "webkit", "--device", "iphone-15", "--no-auto-unlock"], env);
     ok("shim page in webkit: test passes", r.status === 0 && /2 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
   }
   for (const d of shots) fs.rmSync(d, { recursive: true, force: true });
-  for (const n of ["bridge", "unlock", "unlock-bug"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
+  for (const n of ["bridge", "unlock", "unlock-bug", "gl"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);
