@@ -11,6 +11,7 @@ import { inputSpans, errorLines } from "./ask.js";
 import { parseRect } from "./see.js";
 import { WitnessError } from "../core/session.js";
 import { lookMeasure } from "./measure-look.js";
+import { formatAnim } from "./anim.js";
 import {
   die, withGame, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
@@ -22,6 +23,8 @@ export const STATE_MEASURES = ["curve", "jump", "move", "hitstop"];
 
 export async function measureCommand(pos, opt) {
   const what = pos[0], files = pos.slice(1);
+  if (what === "anim") { const { animMeasure } = await import("./anim.js"); return animMeasure(files, opt); }
+  if (what === "perf") { const { perfMeasure } = await import("./perf.js"); return perfMeasure(opt); }
   if (STATE_MEASURES.includes(what)) {
     let res;
     await withGame(opt, async (s, cfg) => {
@@ -74,10 +77,10 @@ async function pixelMeasure(what, files, opt) {
     return registrationMeasure(m, opt);
   } else if (["ui", "colorblind", "cvd", "palette"].includes(what)) {
     return lookMeasure(what, files, opt);
-  } else die("usage: witness measure scale|box|contrast|motion|align|registration|ui|colorblind|palette|curve|jump|move|hitstop ...  (witness help measure)");
+  } else die("usage: witness measure scale|box|contrast|motion|anim|align|registration|ui|colorblind|palette|perf|curve|jump|move|hitstop ...  (witness help measure)");
 }
 
-async function motionMeasure(m, fileFrames, opt, region) {
+export async function motionMeasure(m, fileFrames, opt, region) {
   const bgOpt = opt.background && opt.background !== true ? String(opt.background) : "auto";
   const named = ["auto", "first", "median"].includes(bgOpt);
   const bgImage = named ? null : (() => { const p = path.resolve(bgOpt); if (!fs.existsSync(p)) die(`no such image: ${bgOpt}`); return fs.readFileSync(p); })();
@@ -101,8 +104,8 @@ async function motionMeasure(m, fileFrames, opt, region) {
     camera = camOpt === "static" ? null : m.cameraPath(imgs, { region });
     const mode = plan(imgs.length, camera);
     const st = mode === "mosaic"
-      ? m.motionStream({ region, threshold, objects: true, minObject, mosaic: m.mosaicPlate(imgs, camera.positions), offsets: camera.positions })
-      : m.motionStream({ region, threshold, objects: true, minObject, plate: mode === "image" ? m.decodePNG(bgImage) : mode === "median" ? m.medianPlate(imgs, region) : "first" });
+      ? m.motionStream({ region, threshold, objects: true, minObject, crops: !!opt.anim, mosaic: m.mosaicPlate(imgs, camera.positions), offsets: camera.positions })
+      : m.motionStream({ region, threshold, objects: true, minObject, crops: !!opt.anim, plate: mode === "image" ? m.decodePNG(bgImage) : mode === "median" ? m.medianPlate(imgs, region) : "first" });
     for (const im of imgs) st.push(im);
     r = st.finish(mode === "image" ? "image" : mode);
     choice = describe(mode, imgs.length);
@@ -133,7 +136,7 @@ async function motionMeasure(m, fileFrames, opt, region) {
           const p = [-(h.ox - stateCam0.ox), -(h.oy - stateCam0.oy)];
           if (f > f0) { const q = positions[positions.length - 1]; steps.push({ i: f - f0, dx: p[0] - q[0], dy: p[1] - q[1], score: 0 }); positions.push(p); }
         } else if (prev && camOpt !== "static") {
-          const sh = m.estimateShift(prev, im, { region });
+          const sh = m.estimateShift(prev, im, { region, stillShare: 0.02 });
           steps.push({ i: f - f0, dx: -sh.dx, dy: -sh.dy, score: sh.score });
           const p = positions[positions.length - 1];
           positions.push([p[0] - sh.dx, p[1] - sh.dy]);
@@ -149,7 +152,7 @@ async function motionMeasure(m, fileFrames, opt, region) {
       const plate = mode === "mosaic" ? null : mode === "image" ? m.decodePNG(bgImage) : mode === "median" ? m.medianPlate(picks, region) : "first";
       const mosaic = mode === "mosaic" ? m.mosaicPlate(picks, pickIdx.map((i) => positions[i])) : null;
       // pass 2: stream every frame against the plate
-      const tracker = m.motionStream({ region, threshold, objects: true, minObject, plate, mosaic, offsets: mode === "mosaic" ? positions : null });
+      const tracker = m.motionStream({ region, threshold, objects: true, minObject, crops: !!opt.anim, plate, mosaic, offsets: mode === "mosaic" ? positions : null });
       st = await begin(s, runOpts(opt, cfg));
       for (let f = f0; f <= f1; f++) { await stepTo(s, st, f); tracker.push(await grab()); }
       r = tracker.finish(mode);
@@ -158,12 +161,39 @@ async function motionMeasure(m, fileFrames, opt, region) {
     });
   }
   r.backgroundChoice = choice;
+  if (opt.anim) { const { animForObjects } = await import("./anim.js"); animForObjects(m, r, f0, fps || (opt.fps && opt.fps !== true ? +opt.fps : 60), opt.tolerance && opt.tolerance !== true ? +opt.tolerance : 0.05); }
   r.camera = camera ? { moving: camera.moving, perFrame: camera.perFrame, total: camera.total, jitter: camera.jitter, uneven: camera.uneven, steps: camera.steps.map(({ i, dx, dy }) => ({ i, dx, dy })) } : null;
   const out = reportMotion(r, opt, f0, fps);
   emit(out.env, out.text, opt);
 }
 
+/** measure anim on tracked objects: pose timing per moving object (the motion pipeline found and followed them). */
+function reportAnim(r, opt, f0, fps) {
+  const objs = (r.objects || []).filter((o) => o.anim);
+  let pick = objs[0] || null;
+  if (opt.track && opt.track !== true) pick = objs.find((o) => o.rank === +opt.track) || die(`--track ${opt.track}: animation is measured for the ${objs.length} biggest objects`);
+  const rate = fps || (opt.fps && opt.fps !== true ? +opt.fps : 60);
+  const lines = [];
+  const res = [];
+  for (const o of objs) {
+    const vis = o.frames.filter((q) => !q.missing);
+    const f = formatAnim(o.anim, { fps: rate, what: `object #${o.rank} (~${o.size} px, ${o.meanStep} px/f)`, name: (l) => `#${l}`, first: (f0 ?? 0) + vis[0].i, last: (f0 ?? 0) + vis[vis.length - 1].i });
+    lines.push(...f.lines);
+    res.push({ rank: o.rank, ...f.summary });
+  }
+  if (!objs.length) lines.push("anim: no moving object found (for a sprite that animates in place, use --region x,y,w,h or --follow \"state.player.pos\")");
+  lines.push("  poses come from each object's own pixels (its mask inside its box), matched with a 1 px shift allowed; a new pose = over 5% of them differ (--tolerance)");
+  const main = pick ? res.find((x) => x.rank === pick.rank) : null;
+  const env = envelope("measure anim", {
+    verdict: lines[0],
+    summary: { ...(main || { poses: 0, animated: false }), objects: objs.length, source: "pixels" },
+    data: { objects: objs.map((o) => ({ rank: o.rank, size: o.size, first: o.first, last: o.last, anim: o.anim })), firstFrame: f0, fps: rate },
+  });
+  return { env, text: lines.join("\n") };
+}
+
 function reportMotion(r, opt, f0, fps) {
+  if (opt.anim) return reportAnim(r, opt, f0, fps);
   const sm = r.summary;
   const objs = r.objects || [];
   const fl = (i) => (f0 != null ? `f${f0 + i}` : `#${i}`);

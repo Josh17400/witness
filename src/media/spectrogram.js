@@ -1,7 +1,8 @@
 // Witness media: the pictures `witness listen` writes, ported from Lumen's audio-listen.js.
 //
 //   timelinePNG(pcm, { events, markers, title, analysis })  -> PNG Buffer
-//       the whole run: a loudness lane (mix curve, music stretches, each sound's level), a
+//       the whole run: a level lane (with music: the 400 ms loudness curve, music stretches, each sound's level;
+//       sound effects only: a 10 ms peak envelope in dBFS, so each sound's attack, length and tail show), a
 //       log-frequency spectrogram labelled with notes C2..C8, a dB color scale, a time axis,
 //       marker lines, and an event lane (music with tempo/key/chords, each sound by name)
 //   soundSheetPNG(segments, { title })                     -> PNG Buffer
@@ -35,6 +36,30 @@ const fmtT = (s) => (s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(2)} s`)
 const r1 = (x) => Math.round(x * 10) / 10;
 const fmax = (sr) => Math.min(16000, sr * 0.45);
 const FMIN = 55;
+
+/**
+ * The sample peak of every `win`-second window, in dBFS (a full-scale sine = 0 dB, amplitude 0.5 = -6.02 dB;
+ * silence = -Infinity). channels: Float32Array per channel. Returns { win, times: window starts, db }.
+ */
+export function peakEnvelope(channels, sr, win = 0.01) {
+  const n = Math.max(1, Math.round(sr * win)), len = channels && channels[0] ? channels[0].length : 0;
+  const k = Math.ceil(len / n), times = new Array(k), db = new Array(k);
+  for (let w = 0; w < k; w++) {
+    let p = 0;
+    for (const ch of channels) for (let i = w * n, e = Math.min(len, (w + 1) * n); i < e; i++) { const a = Math.abs(ch[i]); if (a > p) p = a; }
+    times[w] = (w * n) / sr;
+    db[w] = p > 0 ? 20 * Math.log10(p) : -Infinity;
+  }
+  return { win: n / sr, times, db };
+}
+
+/** Which level lane the timeline draws: the loudness curve when there's music, else the 10 ms SFX envelope. */
+export function levelLane(analysis) {
+  const rep = analysis.report;
+  if (rep.music.length) return { kind: "loudness", label: "LUFS", lo: -60, times: rep.mix.loudness ? rep.mix.loudness.times : [], values: rep.mix.loudness ? rep.mix.loudness.lufs : [] };
+  const env = peakEnvelope(analysis.channels || [], analysis.sampleRate, 0.01);
+  return { kind: "envelope", label: "dBFS", lo: -60, win: env.win, times: env.times, values: env.db };
+}
 
 /** Paint a log-frequency spectrogram of x over [t0, t1) into box (row 0 at the bottom). */
 function paintSpectrogram(g, x, sr, box, t0, t1, { nfft } = {}) {
@@ -145,7 +170,8 @@ export function timelinePNG(pcm, { events = null, markers = [], title, analysis 
   const stats = `peak ${m.peakDb === null ? "-inf" : r1(m.peakDb)} dBFS · ${m.integrated === null ? "silent" : r1(m.integrated) + " LUFS integrated"} · ${m.clipped ? m.clipped + " clipped samples" : "no clipping"} · ${rep.sounds.length} sound${rep.sounds.length === 1 ? "" : "s"} · ${rep.problems.length} problem${rep.problems.length === 1 ? "" : "s"}`;
   g.text(stats, L, 60, { color: m.clipped ? COL.warn : COL.dim, baseline: "middle" });
 
-  // ---- loudness lane ----
+  // ---- level lane: loudness with music, a 10 ms peak envelope for sound effects ----
+  const lvl = levelLane(res);
   g.fillRect(lane.x, lane.y, lane.w, lane.h, COL.panel);
   const LY = (v) => lane.y + lane.h - ((Math.max(-60, Math.min(0, v)) + 60) / 60) * lane.h;
   for (const mu of rep.music) g.fillRect(X(mu.t0), lane.y, X(mu.t1) - X(mu.t0), lane.h, "rgba(77,214,200,0.10)");
@@ -154,21 +180,35 @@ export function timelinePNG(pcm, { events = null, markers = [], title, analysis 
     g.fillRect(lane.x, Math.min(y, lane.y + lane.h - 1), lane.w, 1, COL.grid);
     g.text(`${v}`, lane.x - 8, Math.min(Math.max(y, lane.y + 6), lane.y + lane.h - 6), { color: COL.dim, align: "right", baseline: "middle" });
   }
-  g.textUp("LUFS", 16, lane.y + lane.h / 2, { color: COL.dim });
-  const lc = m.loudness || { times: [], lufs: [] };
+  g.textUp(lvl.label, 16, lane.y + lane.h / 2, { color: COL.dim });
   g.save().clip(lane.x, lane.y, lane.w, lane.h);
-  g.polyline(lc.times.map((t, i) => [X(t), LY(lc.lufs[i] ?? -120)]), COL.mix, 1.75);
-  for (const s of rep.sounds) {
-    const lv = s.ownLoudness ?? (s.analysis && !s.analysis.silent ? s.analysis.loudness : null);
-    if (lv === null) continue;
-    for (const t of s.times) triangle(g, X(t), LY(lv), COL.sfx);
+  if (lvl.kind === "envelope") {
+    // one column per pixel: the loudest window that falls in it, filled down to the floor
+    const cols = new Float64Array(lane.w).fill(-Infinity);
+    lvl.times.forEach((t, i) => {
+      const a = Math.floor(X(t) - lane.x), b = Math.max(a, Math.floor(X(t + lvl.win) - lane.x) - 1);
+      for (let c = Math.max(0, a); c <= Math.min(lane.w - 1, b); c++) if (lvl.values[i] > cols[c]) cols[c] = lvl.values[i];
+    });
+    for (let c = 0; c < lane.w; c++) if (cols[c] > -60) { const y = Math.round(LY(cols[c])); g.fillRect(lane.x + c, y, 1, lane.y + lane.h - y, "rgba(255,179,71,0.55)"); g.fillRect(lane.x + c, y, 1, 1, COL.sfx); }
+  } else {
+    g.polyline(lvl.times.map((t, i) => [X(t), LY(lvl.values[i] ?? -120)]), COL.mix, 1.75);
+    for (const s of rep.sounds) {
+      const lv = s.ownLoudness ?? (s.analysis && !s.analysis.silent ? s.analysis.loudness : null);
+      if (lv === null) continue;
+      for (const t of s.times) triangle(g, X(t), LY(lv), COL.sfx);
+    }
   }
   g.restore();
   g.strokeRect(lane.x, lane.y, lane.w, lane.h, "rgba(255,255,255,0.12)");
   const lx = lane.x + lane.w + 12;
-  g.fillRect(lx, lane.y + 10, 14, 2, COL.mix); g.text("mix", lx + 20, lane.y + 11, { color: COL.mix, baseline: "middle" });
-  triangle(g, lx + 7, lane.y + 31, COL.sfx); g.text("sound", lx + 20, lane.y + 31, { color: COL.sfx, baseline: "middle" });
-  if (rep.music.length) { g.fillRect(lx, lane.y + 45, 14, 12, "rgba(77,214,200,0.45)"); g.text("music", lx + 20, lane.y + 51, { color: COL.music, baseline: "middle" }); }
+  if (lvl.kind === "envelope") {
+    g.fillRect(lx, lane.y + 6, 14, 10, "rgba(255,179,71,0.55)"); g.text("peak", lx + 20, lane.y + 11, { color: COL.sfx, baseline: "middle" });
+    g.text("per 10 ms", lx, lane.y + 31, { color: COL.dim, baseline: "middle" });
+  } else {
+    g.fillRect(lx, lane.y + 10, 14, 2, COL.mix); g.text("mix", lx + 20, lane.y + 11, { color: COL.mix, baseline: "middle" });
+    triangle(g, lx + 7, lane.y + 31, COL.sfx); g.text("sound", lx + 20, lane.y + 31, { color: COL.sfx, baseline: "middle" });
+    if (rep.music.length) { g.fillRect(lx, lane.y + 45, 14, 12, "rgba(77,214,200,0.45)"); g.text("music", lx + 20, lane.y + 51, { color: COL.music, baseline: "middle" }); }
+  }
 
   // ---- spectrogram ----
   paintSpectrogram(g, mono(res.channels), sr, box, 0, t1);

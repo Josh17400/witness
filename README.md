@@ -28,6 +28,9 @@ witness listen --time 8 --input "space@1"        # every sound tied to its cause
 witness replay last --shot                       # what the human saw when they pressed F8
 witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
 witness measure ui --at 2                        # readability: HUD layout, text size/contrast; also colorblind, palette
+witness measure anim --of "state.player.anim"    # frames per pose, loop length, doubled or dropped frames
+witness measure perf --time 5                    # frame cost p50/p95/max, spikes and what caused them, memory growth
+witness shot --clip --from 1 --to 3              # an animated PNG to watch in a browser
 witness play start --goal "Escape the arena"     # agent playtests: a cheap model PLAYS the game, Witness reports
 witness clean                                    # prune old playtests, recordings, screenshots (also automatic)
 ```

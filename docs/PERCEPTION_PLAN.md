@@ -3,10 +3,12 @@
 Status: plan (2026-10-18), written against Witness 0.5.0 (`dc8a70c`). **Phase 1 is implemented** (B1–B13, the state
 schema, `effect`, `measure curve|jump|move|hitstop`, filmstrips, temporal ask, sound↔event matching with the optional
 `event: sound` line in the js, python, cpp, java and rust adapters, and the chart quick wins). Most of phase 2
-shipped in 0.6.0 (not yet: `measure perf`, APNG; UI layout, colour-blind and palette checks (§3.14, §3.15) are in
+shipped in 0.6.0 (`measure perf` and APNG clips are in 0.7.0; UI layout, colour-blind and palette checks (§3.14, §3.15) are in
 0.7.0 as `measure ui | colorblind | palette`), and chart v2 (§3.12: `trace --compare` / `--save` / `--against` overlays, `--xy` paths, `--hist`, plus
 `witness heatmap` over replays and playtests, pulled forward from "not doing") is in 0.7.0.
-Not done from phase 1's text: the `snapshot.paths` filter for per-frame sampling (§1.4/§3.4, a speed item).
+Also in 0.7.0: the `snapshot.paths` filter for per-frame sampling (§1.4/§3.4), motion v2's animation timing
+(§3.7.5, as `measure anim`) and the SFX envelope lane on the listen timeline (§3.11). Phase 2 is complete apart from
+chart `--panel` grouping.
 
 Witness lets Claude check its own game work. The owner can't read code, so every "it works" Claude
 gives him should rest on evidence Witness produced. This plan audits the five perception tools

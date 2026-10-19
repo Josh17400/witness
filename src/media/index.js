@@ -1,6 +1,6 @@
 // Witness media: everything Witness draws or hears, with no dependencies beyond Node.
 //
-//   PNG       encodePNG, decodePNG, isPNG
+//   PNG       encodePNG, decodePNG, isPNG; APNG clips encodeAPNG, decodeAPNG  (witness shot --clip)
 //   drawing   Raster (Canvas-like RGBA rasterizer with an embedded 8x16 bitmap font), parseColor
 //   charts    lineChart, renderChart                         (witness trace)
 //   plots     histogram, sharedHistograms, heatGrid, pathStats, renderWorld/worldPNG, renderHist/histPNG
@@ -35,5 +35,7 @@ export {
 export {
   components, trackObjects, trackReport, estimateShift, cameraPath, summarizeCamera, mosaicPlate, maskAgainstMosaic,
 } from "./track.js";
-export { cropImage, zoomImage, frameDiffScore, pickKeyFrames, contactSheet } from "./sheet.js";
+export { cropImage, zoomImage, scaleImage, frameDiffScore, pickKeyFrames, contactSheet } from "./sheet.js";
+export { encodeAPNG, decodeAPNG, changedBox } from "./apng.js";
+export { poseLabels, poseDistance, maskedCrop } from "./anim.js";
 export { findBlobs, fitProjection, hitboxes, annotate } from "./align.js";

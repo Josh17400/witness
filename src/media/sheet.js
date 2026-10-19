@@ -43,6 +43,28 @@ export function zoomImage(img, k) {
   return { width: W, height: H, data: out };
 }
 
+/**
+ * Resize by a factor: below 1 each output pixel averages the source pixels it covers (no aliasing shimmer in
+ * clips); 1 and above is nearest-neighbour (crisp pixel art).
+ */
+export function scaleImage(img, s) {
+  if (!(s > 0) || s === 1) return img;
+  const W = Math.max(1, Math.round(img.width * s)), H = Math.max(1, Math.round(img.height * s)), out = new Uint8Array(W * H * 4);
+  const fx = img.width / W, fy = img.height / H;
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.floor(y * fy), y1 = Math.max(y0 + 1, Math.min(img.height, Math.floor((y + 1) * fy)));
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.floor(x * fx), x1 = Math.max(x0 + 1, Math.min(img.width, Math.floor((x + 1) * fx)));
+      const o = (y * W + x) * 4;
+      if (s >= 1) { const q = (y0 * img.width + x0) * 4; for (let k = 0; k < 4; k++) out[o + k] = img.data[q + k]; continue; }
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) { const q = (yy * img.width + xx) * 4; r += img.data[q]; g += img.data[q + 1]; b += img.data[q + 2]; a += img.data[q + 3]; n++; }
+      out[o] = Math.round(r / n); out[o + 1] = Math.round(g / n); out[o + 2] = Math.round(b / n); out[o + 3] = Math.round(a / n);
+    }
+  }
+  return { width: W, height: H, data: out };
+}
+
 /** Pixels whose RGB differs by more than `threshold` on any channel (same-size images). */
 export function frameDiffScore(a, b, threshold = 16) {
   if (!a || !b || a.width !== b.width || a.height !== b.height) return Infinity;

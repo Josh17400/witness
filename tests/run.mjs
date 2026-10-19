@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { evaluate, check, splitComparison, keyPaths, rewriteTemporal, usesPrev, TimeContext } from "../src/core/expr.js";
+import { evaluate, check, splitComparison, keyPaths, rewriteTemporal, usesPrev, TimeContext, statePaths } from "../src/core/expr.js";
+import { frameStats, findSpikes, linearTrend, memoryOf, entityCounts, rankPercentile } from "../src/core/perf.js";
+import { gameSeries } from "../src/cli/perf.js";
+import { analyzeAnim } from "../src/core/anim.js";
+import { everyFrames } from "../src/cli/see.js";
+import { decodeAPNG } from "../src/media/apng.js";
+import { decodePNG } from "../src/media/png.js";
 import { describeState } from "../src/core/schema.js";
 import { diffStates } from "../src/core/compare.js";
 import { analyzeJump, analyzeMove, frozenSpans, response, lag, stutters, summarize } from "../src/core/signal.js";
@@ -67,6 +73,55 @@ ok("keyPaths", keyPaths(snap.state).some((k) => k.startsWith("state.player.hp"))
   ok("autoDeathExpr: state.dead, then state.player.dead", autoDeathExpr({ dead: false }) === "state.dead" && autoDeathExpr({ player: { dead: false } }) === "state.player.dead" && autoDeathExpr({ dead: 0 }) === null && autoDeathExpr(null) === null);
   ok("mapOf: rows + cell + origin, defaults cell 1", mapOf({ map: { rows: ["#.#"], origin: [8, 4] } }).cell === 1 && mapOf({ map: { rows: ["#.#"], cell: 16 } }).origin.join() === "0,0" && mapOf({ map: { rows: [1, 2] } }) === null);
   ok("parseVariant: replay= is its own key, not an env var", (() => { const v = parseVariant("replay=b.jsonl; seed=2", "compare"); return v.replay === "b.jsonl" && v.seed === 2 && !Object.keys(v.env).length; })());
+}
+
+// ---- snapshot paths filter: the top-level keys expressions read
+{
+  const sp = (...e) => JSON.stringify(statePaths(e));
+  ok("statePaths: state.x.y and prev.x → top-level keys", sp("state.player.pos[0] - prev.player.pos[0]", "state.score") === '["player","score"]');
+  ok("statePaths: entity helpers need entities", sp("count('Coin') + all('Wolf').length") === '["entities"]' && sp("first(\"Boss\")?.hp") === '["entities"]');
+  ok("statePaths: bracket literals, optional chaining, strings ignored", sp('state["my key"].x', "state?.cam.pos", "'state.fake' == state.mode") === '["cam","mode","my key"]', sp('state["my key"].x', "state?.cam.pos", "'state.fake' == state.mode"));
+  ok("statePaths: bare state, computed keys, snap → no filter", statePaths(["Object.keys(state).length"]) === null && statePaths(["state[k]"]) === null && statePaths(["snap.state.x"]) === null && statePaths(["frame > 3"]) === null);
+}
+
+// ---- perf statistics on known inputs
+{
+  const v = [1, 1, 1, 1, 25, 1, 1, 1, 1, 1], f = v.map((_, i) => 100 + i);
+  const st = frameStats(v, f, { budget: 1000 / 60 });
+  ok("frameStats: nearest-rank p50/p95, max with its frame, over budget", st.p50 === 1 && st.p95 === 25 && st.max === 25 && st.maxFrame === 104 && st.mean === 3.4 && st.overBudget === 1, st);
+  ok("rankPercentile: 20 values, p95 = the 19th", rankPercentile(Array.from({ length: 20 }, (_, i) => i + 1), 0.95) === 19 && rankPercentile([5], 0.5) === 5 && rankPercentile([], 0.5) === null);
+  const sp = findSpikes(v, f, { factor: 2, minMs: 2, warmup: 0 });
+  ok("findSpikes: the one frame over 2× median and +2 ms", sp.length === 1 && sp[0].frame === 104 && sp[0].ratio === 25);
+  ok("findSpikes: small absolute jumps are not spikes (+2 ms floor)", findSpikes([0.05, 0.05, 0.3, 0.05], [0, 1, 2, 3]).length === 0);
+  ok("findSpikes: early frames are marked warm-up", findSpikes([30, 1, 1, 1], [0, 1, 2, 3], { warmup: 2 })[0].warmup === true);
+  const tr = linearTrend([1, 2, 3, 4], [40, 43, 46, 49]);
+  ok("linearTrend: exact slope and r² 1", tr.slope === 3 && tr.r2 === 1 && tr.first === 40 && tr.last === 49, tr);
+  ok("linearTrend: flat line, slope 0", linearTrend([0, 1, 2], [5, 5, 5]).slope === 0);
+  ok("memoryOf: MB keys and bytes", memoryOf({ memory_mb: 12 }).mb === 12 && memoryOf({ heap_bytes: 1048576 * 3 }).mb === 3 && memoryOf({ frame_ms: 1 }) === null);
+  ok("entityCounts: by type", JSON.stringify(entityCounts({ entities: [{ type: "A" }, { type: "A" }, { kind: "B" }] })) === '{"A":2,"B":1}');
+  ok("gameSeries: update_ms first, constant flagged", gameSeries([{ update_ms: 1, frame_ms: 2 }, { update_ms: 3 }]).key === "update_ms" && gameSeries([{ frame_ms: 0.01 }, { frame_ms: 0.01 }]).constant === true && gameSeries([null, {}]) === null);
+}
+
+// ---- animation timing from a pose sequence
+{
+  // the mock's planted cycle: 4 poses × 6f, the 7th hold (pose 2) lasts 12f
+  const holds = [6, 6, 6, 6, 6, 6, 12, 6, 6, 6, 6, 6, 6, 6, 6, 6, 3];
+  const labels = holds.flatMap((n, k) => Array(n).fill(k % 4)), frames = labels.map((_, i) => i);
+  const a = analyzeAnim(labels, frames);
+  ok("analyzeAnim: 4 poses, 6f per pose, loop 4 poses = 24f", a.poses === 4 && a.framesPerPose === 6 && a.period === 4 && a.loopFrames === 24 && a.confidence === "sure", a);
+  ok("analyzeAnim: the doubled hold is flagged with its frame", a.irregular.length === 1 && a.irregular[0].label === 2 && a.irregular[0].start === 36 && a.irregular[0].len === 12 && a.irregular[0].usual === 6, a.irregular);
+  ok("analyzeAnim: the loop with it took 30f", a.loops.filter((l) => l.frames !== 24).map((l) => `${l.start}:${l.frames}`).join() === "30:30", a.loops);
+  const skip = [0, 1, 2, 3, 0, 1, 2, 3, 0, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3].flatMap((p) => Array(4).fill(p));
+  const b = analyzeAnim(skip, skip.map((_, i) => i));
+  ok("analyzeAnim: a skipped pose breaks the order (pose 2 where 1 was due)", b.period === 4 && b.breaks.length >= 1 && b.breaks[0].start === 36 && b.breaks[0].label === 2 && b.breaks[0].expected === 1, b.breaks);
+  const pp = [0, 1, 2, 1, 0, 1, 2, 1, 0, 1, 2, 1, 0].flatMap((p) => Array(5).fill(p));
+  const c = analyzeAnim(pp, pp.map((_, i) => i));
+  ok("analyzeAnim: ping-pong cycle 0 1 2 1 = 4 poses, 20f", c.period === 4 && c.loopFrames === 20 && c.poses === 3, c);
+  const gap = [0, 0, 0, 0, 1, 1, null, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0];
+  const g = analyzeAnim(gap, gap.map((_, i) => i));
+  ok("analyzeAnim: an unknown frame inside a hold is bridged", g.irregular.length === 0 && g.framesPerPose === 4 && g.runs[1].len === 5, g.runs);
+  ok("analyzeAnim: one pose = not animated", analyzeAnim([3, 3, 3], [0, 1, 2]).animated === false);
+  ok("everyFrames: 1/30 s at 60 fps = 2 frames; 3f; default 1", everyFrames("1/30", 60) === 2 && everyFrames("3f", 60) === 3 && everyFrames(undefined, 60) === 1);
 }
 
 // ---- times: seconds or frames
@@ -534,6 +589,45 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   ok("window: jump buffer = 4 frames before the landing step", /passes at t = f91\.\.f100/.test(r.stdout) && /happened in step f95/.test(r.stdout) && /4 values before it \(from -4f/.test(r.stdout) && /fails at f80\.\.f90/.test(r.stdout), r.stdout + r.stderr);
   r = cli(["listen", "--time", "4", "--input", "j@1, j@2, j@2.5", "--out", work], { MOCK_SOUNDS: "1" });
   ok("listen text: ✔/✖ lines and the cooldown hint", /✔ j pressed f60 +→ swing at \+1f/.test(r.stdout) && /✖ j pressed f120 +→ no sound within 6f \(the j press at f60 played swing/.test(r.stdout), r.stdout + r.stderr);
+  // ---- measure perf (MOCK_PERF: update 1 ms, a 25 ms particle burst at f90, memory +0.05 MB/frame)
+  r = cli(["measure", "perf", "--time", "3", "--input", "right@0-3", "--json"], { MOCK_PERF: "1" });
+  ok("measure perf: game update_ms p50 1, p95 1, max 25 at f90, one spike", (() => { const s = J(r)?.summary; return s && s.source === "game" && s.key === "update_ms" && s.frames === 180 && s.p50 === 1 && s.p95 === 1 && s.max === 25 && s.maxFrame === 90 && s.spikes === 1 && s.spikeFrames.join() === "90" && s.overBudget === 1 && s.deterministic === false; })(), r.stdout.slice(0, 1200) + r.stderr);
+  ok("measure perf: memory 40.05 → 49 MB, +3 MB/s, flagged as growing", (() => { const s = J(r)?.summary; return s && s.memoryStartMB === 40.05 && s.memoryEndMB === 49 && s.memoryGrowthMBps === 3 && s.memoryGrows === true; })(), r.stdout.slice(0, 1200));
+  ok("measure perf: the spike's state change (particles 0 → 200) and counts", (() => { const sp = J(r)?.data.spikes.find((x) => x.frame === 90); return sp && sp.wall >= 35 && sp.counts.includes("counts.particles 0 → 200") && sp.change.changes.some((c) => c.path === "state.particles" && c.a === 0 && c.b === 200); })(), r.stdout.slice(0, 2500));
+  r = cli(["measure", "perf", "--time", "3", "--input", "right@0-3"], { MOCK_PERF: "1" });
+  ok("measure perf text: spike line, leak warning, the determinism note", /f90 +25\.0 ms game \/ \d+(\.\d+)? ms wall · changed: state\.particles 0 → 200; counts\.particles 0 → 200/.test(r.stdout) && /grows steadily: a leak\?/.test(r.stdout) && /timing is not deterministic/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["measure", "perf", "--time", "1", "--json"]);
+  ok("measure perf: a constant perf value falls back to wall time", (() => { const s = J(r)?.summary; return s && s.source === "wall" && s.frames === 60; })(), r.stdout.slice(0, 600) + r.stderr);
+  r = cli(["measure", "perf", "--time", "3", "--expect", "max < 16.7"], { MOCK_PERF: "1" });
+  ok("measure perf --expect: max < 16.7 fails on the 25 ms spike", r.status === 1 && /✖ expect max < 16\.7: got 25 < 16\.7/.test(r.stdout), r.stdout + r.stderr);
+
+  // ---- shot --clip: an APNG of the motion; frame 1 is the plain screenshot, delays add up
+  r = cli(["shot", "--clip", path.join(work, "clip.png"), "--from", "0", "--to", "0.5", "--every", "1/30", "--input", "down@0-1", "--json"]);
+  const plain = cli(["shot", "--at", "0", "--out", path.join(work, "clip0.png")]);
+  ok("shot --clip: 16 frames every 2f, decoded frame 1 = the plain shot, 32 frames of delay", (() => {
+    const j = J(r); if (!j || plain.status !== 0) return false;
+    const d = decodeAPNG(fs.readFileSync(path.join(work, "clip.png"))), p0 = decodePNG(fs.readFileSync(path.join(work, "clip0.png")));
+    return j.summary.frames === 16 && j.summary.every === 2 && d.numFrames === j.summary.stored && d.frames.reduce((a, f) => a + f.delay[0], 0) === 32 && d.frames[0].delay[1] === 60 && Buffer.from(d.frames[0].image).equals(Buffer.from(p0.data)) && j.files[0].endsWith("clip.png");
+  })(), r.stdout.slice(0, 600) + r.stderr);
+  r = cli(["shot", "--clip", path.join(work, "clip.png"), "--from", "0", "--to", "0.5", "--speed", "0.5"]);
+  ok("shot --clip text: playback time, and the hint to use --sheet", r.status === 0 && /plays 1\.03 s \(×0\.5 speed\)/.test(r.stdout) && /use --sheet/.test(r.stdout), r.stdout + r.stderr);
+
+  // ---- measure anim (MOCK_ANIM: 4 poses × 6f, pose 2 held 12f at f36..f47)
+  r = cli(["measure", "anim", "--of", "state.player.anim", "--time", "2", "--json"], { MOCK_ANIM: "1" });
+  ok("measure anim --of: 4 poses, 6f, loop 24f, the 12f hold at f36", (() => { const j = J(r); return j && j.summary.poses === 4 && j.summary.framesPerPose === 6 && j.summary.period === 4 && j.summary.loopFrames === 24 && j.summary.irregular === 1 && j.data.irregular[0].start === 36 && j.data.irregular[0].len === 12 && j.data.irregular[0].label === 2; })(), r.stdout.slice(0, 800) + r.stderr);
+  r = cli(["measure", "anim", "--time", "2", "--input", "right@0-3", "--params", '{"nocoins":true}', "--json"], { MOCK_ANIM: "1" });
+  ok("measure anim from pixels (tracked sprite): the same timing", (() => { const j = J(r); const a = j && j.data.objects[0] && j.data.objects[0].anim; return a && j.summary.poses === 4 && j.summary.framesPerPose === 6 && j.summary.loopFrames === 24 && a.irregular.length === 1 && a.irregular[0].start === 36 && a.irregular[0].len === 12; })(), r.stdout.slice(0, 800) + r.stderr);
+  r = cli(["measure", "anim", "--follow", "state.player.pos", "--size", "20", "--time", "2", "--json"], { MOCK_ANIM: "1" });
+  ok("measure anim --follow (sprite animating in place): the same timing", (() => { const j = J(r); return j && j.summary.poses === 4 && j.summary.framesPerPose === 6 && j.summary.loopFrames === 24 && j.data.irregular.length === 1 && j.data.irregular[0].start === 36; })(), r.stdout.slice(0, 800) + r.stderr);
+  r = cli(["measure", "motion", "--at", "0", "--time", "0.5", "--input", "right@0-1", "--params", '{"nocoins":true}', "--json"]);
+  ok("motion: a lone sprite on a plain background is not a camera scroll", (() => { const j = J(r); return j && j.data.camera && j.data.camera.moving === false && j.data.objects.length === 1 && j.data.objects[0].meanStep === 2; })(), r.stdout.slice(0, 600) + r.stderr);
+
+  // ---- snapshot paths: trace asks only for the keys it reads; a broken filter is caught
+  r = cli(["trace", "--watch", "state.player.pos[0], count('Coin')", "--input", "right@0-1", "--time", "1", "--no-chart"], { MOCK_PATHS: "log" });
+  ok("paths: trace sends the filter (entities, player)", r.status === 0 && /snapshot paths: entities,player/.test(r.stdout) && /pos\[0\]: 40 → 160/.test(r.stdout), r.stdout + r.stderr);
+  const good = cli(["trace", "--watch", "state.player.pos[0], count('Coin'), state.score", "--input", "right@0-1", "--time", "1", "--json"], { MOCK_PATHS: "ignore" });
+  const broken = cli(["trace", "--watch", "state.player.pos[0], count('Coin'), state.score", "--input", "right@0-1", "--time", "1", "--json"], { MOCK_PATHS: "bad" });
+  ok("paths: an adapter that drops filtered keys gives the same answers (filter turned off)", (() => { const a = J(good), b = J(broken); return a && b && JSON.stringify(a.data.series) === JSON.stringify(b.data.series); })(), broken.stdout.slice(0, 400) + broken.stderr);
 }
 
 // ---- replays checked against the recorded end state

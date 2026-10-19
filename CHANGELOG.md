@@ -50,6 +50,37 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
   checks) and `src/media/ui.js` (`layoutChecks`, `textContrast`, `findTextRows`); `measure.js` exports `labOf`,
   `luminanceOf`, `LINEAR`.
 
+**Performance, animation timing, clips**
+- `witness measure perf [--time 3] [--input ...]`: steps one frame at a time and reads the adapter's `perf` after each:
+  the game's `update_ms` (else `frame_ms`; else wall time) p50 / p95 / p99 / max with its frame, frames over the 1/fps
+  budget, wall time per step next to it, spikes (over 2× the median and +2 ms) with what changed in that frame (a
+  deterministic second run: entities added by type, new state changes, `perf.counts` deltas), memory growth from
+  `perf.memory_mb` (MB/s, flagged when it climbs steadily), entities piling up, frames getting slower. The report says
+  plainly that timing is not deterministic. Gate it: `--expect "p95 < 8"`, `"spikes == 0"`, `"!memoryGrows"`.
+- `witness measure anim`: frames per pose, poses per second, loop length (poses and frames; ping-pong cycles too),
+  holds longer or shorter than usual with their frame ("pose 2 held 12f at f36–f47 (usual 6f)"), loops that ran long,
+  the order breaking (a skipped or extra pose). From a state field (`--of "state.player.anim"`, exact), a fixed or
+  followed box (`--region`, `--follow`: sprites animating in place), or the moving objects `measure motion` tracks
+  (each object's own pixels; frames where it merged with something are left out). Shape changes in step with a
+  fractional speed are reported as sub-pixel shimmer, not animation (seen on `examples/arena`: 1.33 px/f repeats every 3f).
+- `witness shot --clip [clip.png] --from 1 --to 2 [--every 1/30] [--scale 0.5] [--speed 0.25]`: an animated PNG (own
+  APNG encoder: acTL/fcTL/fdAT, only changed rectangles stored, repeated frames merged) for the owner to watch in a
+  browser, at game speed; capped at 600 frames and `--max-mb 8` (frames are dropped until it fits, and the output says
+  so). The CLI reminds the AI reader that image tools show only frame 1 (use `--sheet`).
+- `listen` timeline: with no music, the level lane is a 10 ms peak envelope in dBFS instead of the 400 ms loudness
+  curve, so each sound's attack, length and tail are visible.
+- Speed: `trace`, `eval --when`, `measure jump|move|hitstop|curve`, `listen --events`, `window` and `heatmap` now send the
+  protocol's snapshot `paths` filter (the top-level keys the expressions read, e.g. `["player", "entities"]`). It is
+  checked against one full snapshot (an adapter that drops a key turns it off), a sample that fails is re-checked in
+  full, and `WITNESS_PATHS=0` disables it. A trace of 600 frames with a 200 KB world: 0.81 s → 0.28 s.
+- Media: `src/media/apng.js` (`encodeAPNG`, `decodeAPNG`), `src/media/anim.js` (`poseLabels`, `poseDistance`),
+  `peakEnvelope` / `levelLane` in `spectrogram.js`, `scaleImage` in `sheet.js`; `src/core/perf.js`, `src/core/anim.js`.
+
+**Fixed**
+- `measure motion` (and `measure anim`) took a lone sprite moving over a plain background for a scrolling camera
+  (the picture shift matched the sprite); camera tracking now keeps the camera still when under 2% of the picture
+  changed between frames.
+
 **Behaviour changes**
 - `trace --json` `summary`: vector series are summarized per axis (`"state.player.pos.x": {start, end, min, ...}`)
   instead of `{"error": null}`. `trace` now accepts `--expect` (over the summary).
@@ -62,6 +93,10 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 4. *Optional:* list the HUD and menus in `state.ui` (see [PLAYTEST.md](docs/PLAYTEST.md#snapshot-conventions)) so
    `measure ui` checks exact rects instead of guessing text rows from pixels; games that honour the reserved reset
    param `window` can be swept with `measure ui --window`.
+5. *Optional:* add `memory_mb` (and `counts` such as particles or bodies) to your adapter's `perf` reply, so
+   `measure perf` can show leaks and what a spike spawned; adapters that answer `perf` already give frame times.
+6. *Optional:* if your adapter implements the snapshot `paths` filter, check it returns the asked-for top-level keys
+   unchanged (Witness turns a wrong filter off by itself, but then gets no speed-up); `WITNESS_PATHS=0` turns it off.
 
 ## 0.6.0 (2026-10-19)
 

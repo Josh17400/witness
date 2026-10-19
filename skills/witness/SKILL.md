@@ -75,6 +75,9 @@ witness measure scale|box|contrast ...         # pixel facts: integer scale/blur
 witness measure ui --at 2 --out ui.png         # HUD/menus: clipped, off-screen, overlaps, tiny or low-contrast text, safe area (state.ui; else a pixel guess)
 witness measure colorblind --at 2              # protan/deutan/tritan pictures + which sprite colours become confusable (ΔE)
 witness measure palette shot.png --palette pal.hex   # pixel art: off-palette pixels and where; --max 16 colour budget
+witness measure anim --of "state.player.anim" --input "right@0-2"   # frames per pose, loop length, doubled/dropped frames (or from pixels: no --of)
+witness measure perf --time 5 --input "..."    # frame cost p50/p95/max, spikes + what changed then, memory leaks (timing varies run to run)
+witness shot --clip --from 1 --to 3            # an animated PNG for the USER to watch (you see only frame 1: use --sheet)
 ```
 
 * **A/B anything** (a flag, a rig, a mask, a param, an input): `witness ab` (pictures) or `trace --compare` (values over
@@ -82,7 +85,7 @@ witness measure palette shot.png --palette pal.hex   # pixel art: off-palette pi
   `--hold-camera` asks games that support it (reset param `"camera": "hold"`) to keep the camera still for pixel work.
 * **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Timing that should "feel fair" (coyote time, buffer,
   parry, i-frames, combo windows) → `window`. Animation or juice → `shot --sheet` (and look). "When does X happen?" → `eval --when`. "What did that do?" → `eval --diff` or
-  `effect`. A rule that must always hold → a test range (section 3). Sound wiring → `listen --events`. HUD or menu work → `measure ui` (expose `state.ui`); colours that mean something (enemy vs ally, danger) → `measure colorblind`. The numbers
+  `effect`. A rule that must always hold → a test range (section 3). Sound wiring → `listen --events`. HUD or menu work → `measure ui` (expose `state.ui`); colours that mean something (enemy vs ally, danger) → `measure colorblind`. Sprite animation → `measure anim`. "Is it slow / does it leak?" → `measure perf`. Show the user motion → `shot --clip`. The numbers
   come from the game's own state, pixels and audio: quote them to the user instead of "feels fine".
 * **Frames.** Offsets read `+Nf`: N frames after the input's frame; `+1f` is the next frame (immediate). Any time can
   be given in frames: `--at 90f`, `--every 1f`, `space@60f`.

@@ -35,10 +35,11 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness effect --input "space@1"    what an input causes and how many frames later (state, pixels, audio)
   witness window --input "space@{t}"  sweep an input's timing: where it still works (coyote, buffer, parry windows)
   witness ab --a ENV=0 --b ENV=1      the same scenario twice with one difference, compared (pixels in a rect, state)
-  witness shot --at 1,4               screenshots; --sheet/--auto filmstrips, --crop/--follow/--zoom, --diff ref.png
+  witness shot --at 1,4               screenshots; --sheet/--auto filmstrips, --crop/--follow/--zoom, --diff ref.png;
+                                      --clip: an animated PNG for a person to watch
   witness listen --time 8             hear the game: sounds tied to their causes, audio report + PNGs
-  witness measure <what> ...          numbers: jump, move, hitstop, curve (state) · scale, box, contrast, motion (pixels)
-                                      · ui, colorblind, palette (readability: layout, colour vision, pixel-art palette)
+  witness measure <what> ...          numbers: jump, move, hitstop, curve (state) · scale, box, contrast, motion, anim
+                                      (pixels) · ui, colorblind, palette (readability) · perf (frame cost, memory)
   witness replay [file|last]          play back a recorded human session (WITNESS_RECORD)
   witness call <name> [args] --at 1   run a game-specific command, then show the state
   witness raw '<json command>'        send one raw protocol command (for adapter authors)
@@ -136,7 +137,12 @@ const CMD_HELP = {
   Filmstrips (one picture, read it with your image tool):
   --from 1 --to 1.5 [--every 3f] --sheet [--cols 6]    a labelled grid of frames (max 48; with --crop/--follow/--zoom)
   --from 0 --to 4 --auto 9                             the 9 frames where the picture changes most (key moments)
-  --sheet --at 1,1.4,2.2                               a sheet of chosen moments`,
+  --sheet --at 1,1.4,2.2                               a sheet of chosen moments
+  Clips (for a PERSON to watch in a browser; image tools show only frame 1, so read motion yourself with --sheet):
+  --clip [clip.png] --from 1 --to 2 [--every 1/30] [--scale 0.5] [--speed 0.25] [--max-mb 8]
+                               an animated PNG (APNG) at game speed (× --speed), looping; with --crop/--follow/--zoom.
+                               Only changed rectangles are stored and repeated frames merged; at most 600 frames, and
+                               over --max-mb every other frame is dropped until it fits (said in the output)`,
   listen: `witness listen [--time 8] [--input ...] [--events "name: expr, ..."] [--within 6f] [--out dir] [--wav]
   Captures the game's audio (adapter 'audio' capability), then:
   * events vs sounds: each input press (unless --no-input-events) and each --events state change gets the sound it
@@ -227,6 +233,20 @@ const CMD_HELP = {
       least used colours and the closest colour to merge each into; --palette: every off-palette pixel counted,
       grouped by colour (count, first pixel, box, nearest palette colour + ΔE), the first --list coordinates, unused
       palette colours; --out draws the off-palette pixels in magenta.
+  anim --of "state.player.anim" [--input ...] [--time 2]   |   anim --follow "state.player.pos" [--size 32] | --region x,y,w,h
+     |   anim [--at 1 --time 2 --input ...] [--track N] [--tolerance 0.05]
+      animation timing: poses, frames per pose (ms, poses/s), loop length (poses and frames, ping-pong cycles too),
+      ⚠ holds longer or shorter than that pose's usual (a doubled or dropped frame, with its frame), loops that ran
+      long, and the order breaking (a skipped or extra pose). --of: from a state field (exact). From pixels: a fixed or
+      followed box (sprites animating in place), or with neither the moving objects measure motion tracks (their own
+      pixels each frame; a new pose = over 5% of them differ, 1 px shift allowed). Shapes that change in step with a
+      fractional speed are flagged as sub-pixel shimmer, not animation.
+  perf [--time 3] [--input ...] [--from 0] [--spike 2] [--spike-ms 2] [--warmup 5] [--no-state]
+      what each simulated frame costs: the game's perf update_ms (else frame_ms; else wall time) p50/p95/p99/max with
+      its frame, frames over the 1/fps budget, wall time per step (incl. the protocol round trip), spikes (over 2× the
+      median and +2 ms) with what changed in that frame (re-run deterministically: entities added by type, new state
+      changes, perf counts), memory growth (perf memory_mb) and entities piling up, frames getting slower. Timing is
+      NOT deterministic: re-run before trusting a small change. --expect "p95 < 8", "spikes == 0", "!memoryGrows".
   motion [frame.png ...]  |  motion --at 1 --time 0.5 [--input ...] [--region x,y,w,h]
       every moving object, tracked frame to frame: its speed, net move, jitter (px off a smooth path: steady motion
       and smooth acceleration give 0), stutters (a repeated frame, a double step), flicker (gone for a few frames),

@@ -94,6 +94,7 @@ export async function annotationItems(m, img, snap, opt) {
 }
 
 export async function shotCommand(pos, opt) {
+  if (opt.clip) return clipShots(opt);
   const ranged = opt.from !== undefined || opt.to !== undefined || opt.auto !== undefined || opt.sheet;
   return ranged ? sheetShots(opt) : singleShots(opt);
 }
@@ -254,4 +255,92 @@ async function compose(m, fr, caps, frames, { s, cfg, root, opt, f0, f1, fps, sc
     files: [file],
   });
   return { text: `${text}  (view it with your image tool)`, json };
+}
+
+const MAX_CLIP_FRAMES = 600;
+const CLIP_MEMORY = 400e6;   // bytes of decoded frames held before encoding
+
+/** "--every 1/30" (seconds as a fraction), "2f", "0.05" -> frames (at least 1). */
+export function everyFrames(v, fps) {
+  if (v === undefined || v === true) return 1;
+  const m = /^\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*$/.exec(String(v));
+  if (m) return Math.max(1, Math.round((+m[1] / +m[2]) * fps));
+  return Math.max(1, framesOf(String(v), fps));
+}
+
+/** witness shot --clip [clip.png] --from 1 --to 2 [--every 1/30] [--scale 0.5] [--speed 0.25] [--max-mb 8] */
+async function clipShots(opt) {
+  const fr = framing(opt);
+  let out;
+  await withGame(opt, async (s, cfg, root) => {
+    if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    const fps = s.fps;
+    const f0 = framesOf(opt.from !== undefined && opt.from !== true ? String(opt.from) : "0", fps);
+    const f1 = framesOf(opt.to !== undefined && opt.to !== true ? String(opt.to) : `${f0 + 2 * fps}f`, fps);
+    if (f1 <= f0) die("--to must be after --from");
+    let every = everyFrames(opt.every, fps);
+    const scale = opt.scale && opt.scale !== true ? +opt.scale : 1;
+    if (!(scale > 0 && scale <= 8)) die("--scale is a factor from 0.05 to 8, e.g. 0.5");
+    const speed = opt.speed && opt.speed !== true ? +opt.speed : 1;
+    if (!(speed > 0 && speed <= 8)) die("--speed is a playback factor, e.g. 0.25 for quarter speed");
+    const maxBytes = (opt["max-mb"] && opt["max-mb"] !== true ? +opt["max-mb"] : 8) * 1024 * 1024;
+    const notes = [];
+    if (Math.floor((f1 - f0) / every) + 1 > MAX_CLIP_FRAMES) {
+      const e2 = Math.ceil((f1 - f0) / (MAX_CLIP_FRAMES - 1));
+      notes.push(`every ${every}f would be ${Math.floor((f1 - f0) / every) + 1} frames (max ${MAX_CLIP_FRAMES}): using every ${e2}f`);
+      every = e2;
+    }
+    const m = await media();
+    const st = await begin(s, runOpts(opt, cfg));
+    const frames = [], imgs = [];
+    for (let f = f0; f <= f1; f += every) {
+      await stepTo(s, st, f);
+      const shot = await s.screenshot();
+      const snap = fr.follow ? await s.snapshot() : null;
+      let { img } = await frameImage(m, shot, snap, fr);
+      if (scale !== 1) img = m.scaleImage(img, scale);
+      if (!imgs.length) {
+        // the frames are held in memory until encoding: thin them out if the whole clip would not fit
+        const n = Math.floor((f1 - f0) / every) + 1, per = img.width * img.height * 4;
+        if (n * per > CLIP_MEMORY) {
+          const e2 = Math.ceil((f1 - f0) / Math.max(1, Math.floor(CLIP_MEMORY / per) - 1));
+          notes.push(`${n} frames of ${img.width}×${img.height} won't fit in memory: using every ${e2}f (or add --scale 0.5 / --crop)`);
+          every = e2;
+        }
+      }
+      frames.push(f); imgs.push({ width: img.width, height: img.height, data: Uint8Array.from(img.data) });
+    }
+    // playback at game speed (× --speed): each frame lasts `every` game frames
+    let den = fps * speed, num = every;
+    if (Math.abs(den - Math.round(den)) > 1e-9) { num = Math.round((every * 1000) / (fps * speed)); den = 1000; }
+    let pick = imgs.map((_, i) => i), stride = 1, enc;
+    for (;;) {
+      const delays = pick.map((i, k) => (k + 1 < pick.length ? pick[k + 1] - i : stride) * num);
+      enc = m.encodeAPNG(pick.map((i) => imgs[i]), { fps: Math.round(den), delays });
+      if (enc.bytes <= maxBytes || pick.length <= 2) break;
+      stride *= 2;
+      pick = imgs.map((_, i) => i).filter((i) => i % stride === 0);
+    }
+    if (stride > 1) notes.push(`over ${Math.round(maxBytes / 1048576)} MB: kept every ${stride}th frame (every ${every * stride}f; raise --max-mb, or use --scale/--crop)`);
+    const clipFile = path.resolve(typeof opt.clip === "string" ? opt.clip : opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, "clip.png"));
+    fs.mkdirSync(path.dirname(clipFile), { recursive: true });
+    fs.writeFileSync(clipFile, enc.png);
+    const kept = pick.map((i) => frames[i]);
+    const seconds = ((f1 - f0 + every * stride) / fps) / speed;
+    const w = imgs[0].width, h = imgs[0].height;
+    const kb = enc.bytes < 1048576 ? `${Math.round(enc.bytes / 1024)} KB` : `${(enc.bytes / 1048576).toFixed(1)} MB`;
+    const text = [
+      `✔ clip f${f0}..f${kept[kept.length - 1]} every ${every * stride}f: ${kept.length} frames (${enc.stored} stored, repeats merged), ${w}×${h}${describeFraming(fr) ? ` (${describeFraming(fr)})` : ""}${scale !== 1 ? ` at ×${scale}` : ""}, plays ${+seconds.toFixed(2)} s${speed !== 1 ? ` (×${speed} speed)` : " (real time)"}, loops · ${kb} → ${clipFile}`,
+      ...notes.map((n) => `  ⚠ ${n}`),
+      "  an animated PNG for a person to watch (open it in a browser); image tools show only its first frame, so to see the motion yourself use --sheet",
+    ].join("\n");
+    out = { text, env: envelope("shot --clip", {
+      verdict: `${kept.length} frames, ${+seconds.toFixed(2)} s, ${kb}`,
+      summary: { frames: kept.length, stored: enc.stored, every: every * stride, from: f0, to: kept[kept.length - 1], width: w, height: h, seconds: +seconds.toFixed(3), bytes: enc.bytes },
+      data: { frames: kept, fps, speed, scale, delay: [num, Math.round(den)], notes, framing: { crop: fr.crop, follow: fr.follow, size: fr.size, zoom: fr.zoom } },
+      files: [clipFile],
+    }) };
+    printLogs(await s.drainLogs());
+  });
+  emit(out.env, out.text, opt);
 }

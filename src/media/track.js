@@ -267,12 +267,24 @@ function sad(a, b, R, dx, dy) {
   return n ? s / n : Infinity;
 }
 
+/** The share of pixels (every 2nd px) of R that differ by more than 16 on some channel between a and b, unshifted. */
+function changedShare(a, b, R) {
+  let c = 0, n = 0;
+  const da = a.data, db = b.data, W = a.width;
+  for (let y = R.y; y < R.y + R.h; y += 2) for (let x = R.x; x < R.x + R.w; x += 2) {
+    const o = (y * W + x) * 4;
+    if (Math.abs(da[o] - db[o]) > 16 || Math.abs(da[o + 1] - db[o + 1]) > 16 || Math.abs(da[o + 2] - db[o + 2]) > 16) c++;
+    n++;
+  }
+  return n ? c / n : 0;
+}
+
 /**
  * How far the picture moved from a to b: b(x) ≈ a(x - [dx, dy]) (integer px, from phase correlation at half
  * resolution refined by a full-resolution search), with a sub-pixel estimate (parabola through the match errors)
  * and score = the remaining mean difference (0 = a perfect match).
  */
-export function estimateShift(a, b, { region = null, maxShift = 32 } = {}) {
+export function estimateShift(a, b, { region = null, maxShift = 32, stillShare = 0 } = {}) {
   const R = region || { x: 0, y: 0, w: a.width, h: a.height };
   const k = R.w >= 160 && R.h >= 120 ? 2 : 1;
   const pc = phaseCorrelate(luma(a, R, k), luma(b, R, k), Math.ceil(maxShift / k));
@@ -284,9 +296,11 @@ export function estimateShift(a, b, { region = null, maxShift = 32 } = {}) {
     const e = sad(a, b, R, dx, dy);
     if (e < best.e) best = { dx, dy, e };
   }
-  // zero motion is the common case: prefer it when it matches as well
+  // zero motion is the common case: prefer it when it matches as well, or when almost all of the picture stayed
+  // put (under stillShare of it changed; cameraPath and measure motion use 2%): then what moved is a sprite on a
+  // plain background, not the camera
   const e0 = sad(a, b, R, 0, 0);
-  if (e0 <= best.e + 1e-9) best = { dx: 0, dy: 0, e: e0 };
+  if (e0 <= best.e + 1e-9 || (stillShare > 0 && changedShare(a, b, R) < stillShare)) best = { dx: 0, dy: 0, e: e0 };
   const para = (em, e0_, ep) => { const den = em - 2 * e0_ + ep; return den > 1e-9 ? Math.max(-0.5, Math.min(0.5, (em - ep) / (2 * den))) : 0; };
   const sx = para(sad(a, b, R, best.dx - 1, best.dy), best.e, sad(a, b, R, best.dx + 1, best.dy));
   const sy = para(sad(a, b, R, best.dx, best.dy - 1), best.e, sad(a, b, R, best.dx, best.dy + 1));
@@ -303,7 +317,7 @@ export function estimateShift(a, b, { region = null, maxShift = 32 } = {}) {
 export function cameraPath(frames, { region = null, maxShift = 32 } = {}) {
   const steps = [], positions = [[0, 0]];
   for (let i = 1; i < frames.length; i++) {
-    const s = estimateShift(frames[i - 1], frames[i], { region, maxShift });
+    const s = estimateShift(frames[i - 1], frames[i], { region, maxShift, stillShare: 0.02 });
     const st = { i, dx: -s.dx, dy: -s.dy, score: s.score };
     steps.push(st);
     positions.push([positions[i - 1][0] + st.dx, positions[i - 1][1] + st.dy]);

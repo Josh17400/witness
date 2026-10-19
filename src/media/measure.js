@@ -28,6 +28,7 @@
 // RGBA channel differs by more than the threshold. Colour maths (luminance, Lab) ignores alpha.
 // Fractional outputs are rounded (coordinates/lengths to 0.001, percents to 0.0001).
 
+import { maskedCrop } from "./anim.js";
 import { decodePNG } from "./png.js";
 import { parseColor } from "./raster.js";
 import { components, trackObjects, trackReport, maskAgainstMosaic } from "./track.js";
@@ -548,7 +549,7 @@ export function pathJitter(points) {
  * Streaming version of motion(): push frames one at a time (only the plate is kept), then finish().
  * plate: a clean background image, or "first" (the first pushed frame becomes the plate).
  */
-export function motionStream({ region, threshold = 16, plate = "first", minPixels = 1, objects = false, minObject = 6, mosaic = null, offsets = null } = {}) {
+export function motionStream({ region, threshold = 16, plate = "first", minPixels = 1, objects = false, minObject = 6, mosaic = null, offsets = null, crops = false } = {}) {
   const thr = clampThreshold(threshold, "motion");
   const minPx = Math.max(1, Math.floor(Number(minPixels) || 1));
   let P = mosaic ? null : plate === "first" || plate == null ? null : toImage(plate, "motion", "background");
@@ -568,6 +569,8 @@ export function motionStream({ region, threshold = 16, plate = "first", minPixel
       }
       const s = maskSums(mask, w, h);
       const comps = objects ? components(mask, w, h, { region: R, minPixels: minObject }) : null;
+      // crops: each object's own pixels (the mask inside its box), for pose detection (measure anim)
+      if (crops && comps) for (const c of comps) if (c.bbox.w * c.bbox.h <= 65536) c.crop = maskedCrop(im, c.bbox, mask);
       if (s.count < minPx) { raw.push({ count: s.count, bbox: null, cx: null, cy: null, low: null, comps }); return; }
       const y = s.bbox.y + s.bbox.h - 1;
       let x0 = -1, x1 = -1;
@@ -585,6 +588,8 @@ export function motionStream({ region, threshold = 16, plate = "first", minPixel
         // things that never move (a prop that appears or vanishes, a stale patch of the plate) are listed apart
         r.static = reps.filter((o) => o.static).map(({ id, first, last, size, frames }) => ({ id, first, last, size, bbox: frames.find((f) => !f.missing).bbox }));
         r.objects = reps.filter((o) => !o.static).sort((a, b) => b.seen * b.size - a.seen * a.size).map((o, k) => ({ ...o, rank: k + 1 }));
+        // the object's crop in each of its frames (null when missing); a function, so it never reaches --json
+        if (crops) r.cropsOf = (o) => o.frames.map((f) => (f.missing ? null : ((raw[f.i].comps || []).find((c) => c.bbox === f.bbox) || {}).crop || null));
       }
       return r;
     },

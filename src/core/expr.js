@@ -69,6 +69,51 @@ function compileExpr(src) {
   return entry;
 }
 
+const ENTITY_HELPERS = new Set(["entities", "all", "count", "first", "byId", "near"]);
+
+/**
+ * The top-level state keys a set of expressions reads, for the protocol's snapshot "paths" filter: state.player.pos
+ * and prev.player → "player"; count()/first()/all()/near()/byId()/entities → "entities". Returns null when that
+ * can't be known statically (bare `state`, `snap`, computed keys like state[k]): then no filter is used.
+ */
+export function statePaths(exprs) {
+  const keys = new Set();
+  for (const raw of exprs) {
+    const src = String(raw);
+    // split into code and string literals; strings become "" in the code (their text is kept for state["key"])
+    let code = "";
+    const lits = [];
+    for (let i = 0; i < src.length;) {
+      const c = src[i];
+      if (c === '"' || c === "'" || c === "`") {
+        let j = i + 1, text = "";
+        while (j < src.length && src[j] !== c) { if (src[j] === "\\") { text += src[j + 1] ?? ""; j += 2; } else text += src[j++]; }
+        if (c === "`" && /\$\{/.test(text)) return null;   // template with code inside
+        lits.push(text);
+        code += `${c}${lits.length - 1}${c}`;
+        i = j + 1;
+        continue;
+      }
+      code += c; i++;
+    }
+    const re = /(^|[^\w$.])([A-Za-z_$][\w$]*)/g;
+    let m;
+    while ((m = re.exec(code))) {
+      const id = m[2], at = m.index + m[0].length;
+      if (id === "snap") return null;
+      if (ENTITY_HELPERS.has(id)) { keys.add("entities"); continue; }
+      if (id !== "state" && id !== "prev") continue;
+      const rest = code.slice(at);
+      const dot = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(rest);
+      if (dot) { keys.add(dot[1]); continue; }
+      const br = /^\s*(?:\?\.)?\[\s*(["'`])(\d+)\1\s*\]/.exec(rest);
+      if (br) { keys.add(lits[+br[2]]); continue; }
+      return null;   // bare state/prev, or a computed key: everything may be needed
+    }
+  }
+  return keys.size ? [...keys].sort() : null;
+}
+
 /** Does an expression look at the previous frame (prev, rose, fell, changed, since)? */
 export const usesPrev = (src) => /(^|[^\w$.])(prev|rose|fell|changed|since)\b/.test(String(src));
 

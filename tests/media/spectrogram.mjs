@@ -2,7 +2,7 @@
 // A synthetic game run: sound effects, then music with a beat, an explosion over the music,
 // and a coin after it — the pictures must place each one where it happened.
 import { analyzePCM, midiToHz } from "../../src/media/audio-analysis.js";
-import { timelinePNG, soundSheetPNG } from "../../src/media/spectrogram.js";
+import { timelinePNG, soundSheetPNG, peakEnvelope, levelLane } from "../../src/media/spectrogram.js";
 import { decodePNG } from "../../src/media/png.js";
 import { ok, show, save, done } from "./harness.mjs";
 import { SR, buf, addTone, addNoise, saw, chordTrack, kicks, toPCM, fades } from "./signals.mjs";
@@ -60,6 +60,33 @@ ok("run: explosion over music found at 7.0 s", res.report.sounds.some((s) => Mat
   ok("50 ms run: timeline renders", decodePNG(timelinePNG(null, { analysis: short })).width === 1280);
   const lowSr = toPCM([addTone(new Float32Array(22050), 0.1, 0.5, () => 440, fades(0.5))], "s16", 22050);
   ok("22.05 kHz audio renders", decodePNG(timelinePNG(lowSr, { title: "low rate" })).width === 1280);
+}
+
+// ---- the SFX level lane: a 10 ms peak envelope when there's no music
+{
+  // silence, then a 0.5-amplitude 1 kHz tone from 1.00 s to 1.10 s (exactly 10 windows of 10 ms), then silence
+  const sx = buf(3);
+  for (let i = Math.round(1.0 * SR); i < Math.round(1.1 * SR); i++) sx[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * (i / SR));
+  const env = peakEnvelope([sx], SR, 0.01);
+  const w = (t) => Math.round(t / env.win);
+  show("envelope at 0.5 / 1.05 / 1.5 s", [env.db[w(0.5)], env.db[w(1.05)].toFixed(2), env.db[w(1.5)]].join(" / "));
+  ok("peakEnvelope: 10 ms windows", Math.abs(env.win - 0.01) < 1e-9 && env.times.length === 300, env.times.length);
+  ok("peakEnvelope: amplitude 0.5 = -6.02 dBFS inside the sound", Math.abs(env.db[w(1.05)] + 6.0206) < 0.01, env.db[w(1.05)]);
+  ok("peakEnvelope: silence is -Infinity around it", env.db[w(0.5)] === -Infinity && env.db[w(1.5)] === -Infinity);
+  const loud = env.db.map((d, i) => (d > -60 ? i : -1)).filter((i) => i >= 0);
+  ok("peakEnvelope: exactly the 10 windows of the sound are loud", loud.length === 10 && loud[0] === 100 && loud[9] === 109, loud);
+  const sfx = analyzePCM(toPCM([sx]), { title: "sfx only" });
+  const lane = levelLane(sfx);
+  ok("levelLane: sound effects only → 10 ms envelope", lane.kind === "envelope" && lane.label === "dBFS");
+  ok("levelLane: with music → the loudness curve", levelLane(res).kind === "loudness");
+  const img = decodePNG(timelinePNG(null, { analysis: sfx }));
+  save("timeline-sfx.png", timelinePNG(null, { analysis: sfx }));
+  // lane geometry: x = 104 + t / duration × 1076, the lane spans y 84..196 for 0..-60 dB; -6 dB tops out near y 95
+  const px = (t, y) => { const x = Math.round(104 + (t / 3) * 1076), o = (y * img.width + x) * 4; return [img.data[o], img.data[o + 1], img.data[o + 2]]; };
+  const orange = (c) => c[0] > 120 && c[0] > c[2] + 40;
+  ok("timeline: the envelope fills the lane where the sound plays", orange(px(1.05, 150)) && orange(px(1.05, 100)), [px(1.05, 150), px(1.05, 100)]);
+  ok("timeline: the envelope tops out at -6 dB (nothing above y 94)", !orange(px(1.05, 92)), px(1.05, 92));
+  ok("timeline: no envelope in silence", !orange(px(0.5, 150)) && !orange(px(1.5, 150)), [px(0.5, 150), px(1.5, 150)]);
 }
 
 done("spectrogram");

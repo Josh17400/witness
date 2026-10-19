@@ -9,7 +9,7 @@
 
 import zlib from "node:zlib";
 
-const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+export const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_PIXELS = 16384 * 16384;
 
 const CRC_TABLE = (() => {
@@ -22,13 +22,13 @@ const CRC_TABLE = (() => {
   return t;
 })();
 
-function crc32(buf, start = 0, end = buf.length) {
+export function crc32(buf, start = 0, end = buf.length) {
   let c = 0xffffffff;
   for (let i = start; i < end; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function chunk(type, data) {
+export function pngChunk(type, data) {
   const out = Buffer.alloc(12 + data.length);
   out.writeUInt32BE(data.length, 0);
   out.write(type, 4, "latin1");
@@ -55,8 +55,29 @@ export function encodePNG(width, height, rgba, { level = 6 } = {}) {
   width = width | 0; height = height | 0;
   if (width < 1 || height < 1) throw new RangeError(`encodePNG: invalid size ${width}x${height}`);
   if (!rgba || rgba.length < width * height * 4) throw new RangeError(`encodePNG: expected ${width * height * 4} bytes of RGBA, got ${rgba ? rgba.length : 0}`);
-  let opaque = true;
-  for (let i = 3; i < width * height * 4; i += 4) if (rgba[i] !== 255) { opaque = false; break; }
+  const opaque = isOpaque(rgba, width * height);
+  return Buffer.concat([SIGNATURE, pngChunk("IHDR", ihdrData(width, height, opaque)), pngChunk("IDAT", zlib.deflateSync(filterRows(width, height, rgba, opaque), { level })), pngChunk("IEND", Buffer.alloc(0))]);
+}
+
+/** Is every pixel of the first `n` RGBA pixels fully opaque? */
+export function isOpaque(rgba, n) {
+  for (let i = 3; i < n * 4; i += 4) if (rgba[i] !== 255) return false;
+  return true;
+}
+
+/** The 13-byte IHDR payload for 8-bit RGB (opaque) or RGBA. */
+export function ihdrData(width, height, opaque) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = opaque ? 2 : 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  return ihdr;
+}
+
+/**
+ * Filtered scanlines (before deflate) of 8-bit RGBA pixels written as RGB (opaque) or RGBA. Each row gets the
+ * filter with the smallest sum of absolute residuals (the libpng heuristic).
+ */
+export function filterRows(width, height, rgba, opaque) {
   const bpp = opaque ? 3 : 4, stride = width * bpp;
   const raw = Buffer.alloc((stride + 1) * height);
   let prev = new Uint8Array(stride), cur = new Uint8Array(stride);
@@ -84,10 +105,7 @@ export function encodePNG(width, height, rgba, { level = 6 } = {}) {
     raw.set(cand[best], o + 1);
     [prev, cur] = [cur, prev];
   }
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8; ihdr[9] = opaque ? 2 : 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
-  return Buffer.concat([SIGNATURE, chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw, { level })), chunk("IEND", Buffer.alloc(0))]);
+  return raw;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +169,7 @@ export function decodePNG(buffer) {
   return { width, height, data: out };
 }
 
-function unfilter(f, src, cur, prev, bpp) {
+export function unfilter(f, src, cur, prev, bpp) {
   const n = src.length;
   switch (f) {
     case 0: cur.set(src); break;
@@ -163,7 +181,7 @@ function unfilter(f, src, cur, prev, bpp) {
   }
 }
 
-function writeRow({ width, depth, color, channels, palette, trns, out }, row, pw, y, x0, dx) {
+export function writeRow({ width, depth, color, channels, palette, trns, out }, row, pw, y, x0, dx) {
   const sample = (i) => {   // i-th sample of the row, scaled to 0..255
     if (depth === 8) return row[i];
     if (depth === 16) return row[i * 2];

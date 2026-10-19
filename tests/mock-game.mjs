@@ -21,11 +21,21 @@
 //   MOCK_SOUNDS=1  j plays an 80 ms noise burst, but only on odd presses (a planted cooldown bug); landing plays a
 //                  120 ms 660 Hz tone; coins ding. Each sound is announced with an {"event": "sound"} line;
 //                  MOCK_SOUNDS=quiet plays the same sounds without the lines (an adapter without sound events).
-//   reset params: {"big": true} draws the player with radius 9 instead of 7 (an A/B difference);
+//   reset params: {"nocoins": true} starts with no coins; {"big": true} draws the player with radius 9 instead of 7 (an A/B difference);
 //                  {"camera": "hold"} (the reserved camera-hold param) keeps MOCK_CAMERA's camera still
 //   MOCK_HAZARD=1  (top-down only) lava from x = 150: the player dies the frame it reaches x >= 150 (snapped to exactly
 //                  x = 150), stays dead and still for 10 frames, then respawns at [40, 90]. state.dead / state.deaths.
 //                  Holding right from f0: deaths at f55 and f120 (respawns at f65 and f130), both at [150, 90].
+//   MOCK_PERF=1    perf replies with planted timings: update_ms 1.0 every frame, except the step that simulates frame 90,
+//                  which spawns 200 particles (state.particles, counts.particles; they live 30 frames) and reports
+//                  update_ms 25 (and really busy-waits 40 ms, so wall timing sees it too). memory_mb = 40 + 0.05 × frame
+//                  (a steady leak: +3 MB/s at 60 fps).
+//   MOCK_ANIM=1    the player has a 4-pose cycle: a dark 4×4 mark in one quadrant of its disc (pose 0 top-left, 1 top-right,
+//                  2 bottom-right, 3 bottom-left), state.player.anim = the pose. Each pose holds 6 frames (loop 24f),
+//                  except the 7th hold (pose 2 at f36..f47), which lasts 12 frames: a planted doubled hold.
+//   snapshot paths: the filter is honoured (top-level keys); MOCK_PATHS=bad drops every key (a broken adapter),
+//                  MOCK_PATHS=ignore sends the whole state, MOCK_PATHS=log logs the first filtered request.
+//                  MOCK_BIG=<kB> adds a big state.world nobody reads (the filter's speed case).
 //   MOCK_PNG=1     screenshots come back as format "png" (like Unity, or the JS adapter's screenshotFormat "png")
 //   MOCK_UI=1      a HUD drawn over the game and listed in state.ui (MOCK_UI=pixels draws it without state.ui), with
 //                  planted layout bugs (320×180, safe margins 16×9 px): minimap clipped 10 px past the right edge,
@@ -59,6 +69,15 @@ const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; ret
 let bigPlayer = false, holdCamera = false;
 const HAZARD = !!process.env.MOCK_HAZARD;
 let dead = false, deaths = 0, deadAt = -1;
+const PERF = !!process.env.MOCK_PERF;
+const PATHS = process.env.MOCK_PATHS || "";
+const ANIM = !!process.env.MOCK_ANIM;
+// MOCK_ANIM: the pose shown at frame F (hold k lasts 6 frames, hold 6 lasts 12)
+const poseAt = (F) => { let k = 0, t = 0; for (;;) { const len = k === 6 ? 12 : 6; if (F < t + len) return k % 4; t += len; k++; } };
+let pathsLogged = false;
+// MOCK_BIG=<kB>: a big state.world (a level's worth of tiles) that most expressions never read
+const BIG = process.env.MOCK_BIG ? Array.from({ length: Math.round(+process.env.MOCK_BIG * 1024 / 64) }, (_, i) => `${String(i).padStart(8, "0")}${"#".repeat(52)}`) : null;
+let particles = 0, particleLife = 0, stepMs = [];
 function reset(seed = 1, params = {}) {
   bigPlayer = !!params.big; holdCamera = params.camera === "hold";
   [W, H] = UI && Array.isArray(params.window) ? params.window : [320, 180];
@@ -66,10 +85,12 @@ function reset(seed = 1, params = {}) {
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
   if (JUMP) Object.assign(player, { vx: 0, vy: 0, grounded: true, jumps: 0 });
-  if (ALIGN) player.box = [15, 15];   // matches the 15 px disc it's drawn as
+  if (ALIGN) player.box = [15, 15];
+  if (ANIM) player.anim = 0;   // matches the 15 px disc it's drawn as
   dead = false; deaths = 0; deadAt = -1;
+  particles = 0; particleLife = 0; stepMs = [];
   edges = []; freeze = 0; xAt = null; lagged = false; jPresses = 0; coyote = 0; buffer = 0;
-  coins = Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)], ...(ALIGN ? { box: [16, 16] } : {}) }));   // MOCK_ALIGN: a hitbox bigger than the 11 px art
+  coins = params.nocoins ? [] : Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)], ...(ALIGN ? { box: [16, 16] } : {}) }));   // MOCK_ALIGN: a hitbox bigger than the 11 px art
 }
 
 function stepOnce(dt) {
@@ -134,10 +155,18 @@ function stepOnce(dt) {
       addSound(Float32Array.from({ length: SR * 0.15 }, (_, i) => Math.sin(2 * Math.PI * 880 * i / SR) * 0.5 * Math.exp(-i / (SR * 0.04))), SOUNDS ? "ding" : null);
     }
   }
+  if (PERF) {
+    // MOCK_PERF: the frame-90 particle burst costs 25 ms (reported) and really takes 40 ms
+    let ms = 1.0;
+    if (particleLife > 0 && --particleLife === 0) particles = 0;
+    if (frame === 90) { particles = 200; particleLife = 30; ms = 25; const t = Date.now(); while (Date.now() - t < 40) { /* busy */ } }
+    stepMs.push(ms);
+  }
   // audio advances with simulated time
   const want = Math.round((time + dt) * SR);
   while (audioBuf.length < want) audioBuf.push(0);
   frame++; time += dt; leakT++;
+  if (ANIM) player.anim = poseAt(frame);
   if (process.env.MOCK_CRASH_AT && frame === +process.env.MOCK_CRASH_AT) logs.push({ frame, level: "error", message: "boom: something broke" });
 }
 
@@ -194,6 +223,11 @@ function screenshot() {
   const blob = (p, r, c, dx = 0) => { const R = r * ZOOM, sx = Math.round((p[0] - cam) * ZOOM) + dx, sy = Math.round((p[1] - (CAMERA ? camY : 0)) * ZOOM); for (let y = -R; y <= R; y++) for (let x = -R; x <= R; x++) if (x * x + y * y <= R * R) put(sx + x, sy + y, ...c); };
   coins.forEach((c) => blob(c.pos, 5, [255, 210, 60], ALIGN && c.id === 12 ? -6 : 0));
   blob(player.pos, bigPlayer ? 9 : 7, [80, 200, 255]);
+  if (ANIM) {
+    const [ox, oy] = [[-4, -4], [0, -4], [0, 0], [-4, 0]][poseAt(frame)];
+    const sx = Math.round((player.pos[0] - cam) * ZOOM), sy = Math.round((player.pos[1] - (CAMERA ? camY : 0)) * ZOOM);
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) put(sx + ox + x, sy + oy + y, 10, 10, 10);
+  }
   if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
   if (LAG && xAt != null && frame - xAt >= 5) for (let y = 10; y < 20; y++) for (let x = 300; x < 310; x++) put(x, y, 255, 255, 255);
   if (UI) drawUI(put);
@@ -228,8 +262,19 @@ sock.on("data", (d) => {
     switch (m.cmd) {
       case "reset": reset(m.seed, m.params || {}); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
-      case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
-      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) } }); break;
+      case "step": { const n = m.frames || 1; stepMs = []; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
+      case "snapshot": {
+        let state = { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(PERF ? { particles } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) };
+        if (BIG) state.world = BIG;
+        // the protocol's paths filter: only the asked-for top-level keys (MOCK_PATHS=bad drops them all, a broken
+        // adapter; MOCK_PATHS=ignore sends everything; MOCK_PATHS=log logs the first filtered request)
+        if (Array.isArray(m.paths) && m.paths.length && PATHS !== "ignore") {
+          if (PATHS === "log" && !pathsLogged) { pathsLogged = true; logs.push({ frame, level: "info", message: `snapshot paths: ${m.paths.join(",")}` }); }
+          state = PATHS === "bad" ? {} : Object.fromEntries(m.paths.filter((k) => k in state).map((k) => [k, state[k]]));
+        }
+        reply({ frame, time, state });
+        break;
+      }
       case "screenshot": reply(screenshot()); break;
       case "audio": reply(audio()); break;
       case "call":
@@ -239,7 +284,10 @@ sock.on("data", (d) => {
         break;
       case "eval": try { reply({ value: eval(m.expr) }); } catch (e) { fail(String(e)); } break; // eslint-disable-line no-eval
       case "logs": reply({ logs: logs.splice(0) }); break;
-      case "perf": reply({ frame_ms: 0.01, counts: { coins: coins.length } }); break;
+      case "perf":
+        if (PERF) { const ms = stepMs.length ? stepMs.reduce((a, b) => a + b, 0) / stepMs.length : 0; reply({ frame_ms: ms, update_ms: ms, memory_mb: 40 + 0.05 * frame, counts: { coins: coins.length, particles } }); }
+        else reply({ frame_ms: 0.01, counts: { coins: coins.length } });
+        break;
       case "quit": reply({}); setTimeout(() => process.exit(0), 10); break;
       default: fail(`unknown command '${m.cmd}'`);
     }
