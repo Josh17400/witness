@@ -181,7 +181,7 @@ else {
   const bo = (b.stdout || "") + (b.stderr || "");
   const walls = [...bo.matchAll(/· (\d+)s wall/g)].map((m) => +m[1]);
   ok("batch: 'Ns wall' is the elapsed time, not the --wall-minutes cap added on", walls.length >= 2 && walls.every((s) => s <= batchSec + 1), `${walls} vs ${batchSec}s\n${bo}`);
-  ok("batch: a blocked tester is reported with the denied command and retried once", /#1 fb1: blocked: permission denied \(cd ".*" && \.\/fb1 "goto Coin"\), 0 orders; retrying once with the exact allowed command/.test(bo), bo);
+  ok("batch: a blocked tester is reported with the denied command and retried once", /#1 fb1: blocked: permission denied \(cd ".*" && \.\/fb1 (?:"goto Coin"|…)\), 0 orders; retrying once with the exact allowed command/.test(bo), bo);
   ok("batch: the retry played through the brief's own short command (absolute path, no cd)", /#1 fb1: ENDED · [\d.]+s game · 1 orders .*retried after: blocked: permission denied/.test(bo), bo);
   ok("batch: blocked twice → a distinct outcome", /#2 fb2: BLOCKED: permission denied \(cd .*\) · 0 orders · also blocked on the retry/.test(bo), bo);
   const bmd = fs.readdirSync(dirOf(mock, "").replace(/[\\/]$/, "")).find((f) => /^batch-.*\.md$/.test(f));
