@@ -21,6 +21,11 @@ function thingDetails(th, w, cfg) {
   if (th.locked === true) bits.push("locked");
   if (th.locked === false) bits.push("open");
   if (cfg.profile === "fps" && th.rel === "hostile") bits.push(th.los === false ? "no line of sight" : th.los === true ? "in sight" : "");
+  // fps: distances are flat (map cells), so say when something is a floor up or down
+  if (cfg.profile === "fps" && th.pos && th.pos.length >= 3 && w.player && w.player.pos && w.player.pos.length >= 3) {
+    const up = 3 - cfg.plane[0] - cfg.plane[1], dz = th.pos[up] - w.player.pos[up];
+    if (Math.abs(dz) > (cfg.fps.floorHeight ?? 2.2)) bits.push(`${r1(Math.abs(dz))} m ${dz > 0 ? "above" : "below"} you`);
+  }
   if (th.name && !/^\d+$/.test(th.name) && th.name.toLowerCase() !== th.type.toLowerCase()) bits.push(`"${clip(th.name, 24)}"`);
   if (cfg.profile === "platformer" && th.p2 && w.player) {
     const dy = (th.p2[1] - w.player.p2[1]) / w.cell;

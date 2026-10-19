@@ -421,7 +421,7 @@ class Fight extends Behaviour {
       // pocket under them), not for long without seeing them, and not across the map (the leash)
       const other = ap.visibleFoe(w, (x) => x.id !== th.id);
       const swap = (why) => { if (other) { this.target = other.id; this.targetKey = other.key; return null; } return this.done(why); };
-      if (ap.otherFloor(w, th)) return swap(`${th.key} is on another floor: not chasing it`);
+      if (ap.otherFloor(w, th)) { const [a, b] = cfg.plane, dz = th.pos[3 - a - b] - w.player.pos[3 - a - b]; return swap(`${th.key} is on another floor (${r1(Math.abs(dz))} m ${dz > 0 ? "above" : "below"} you): not chasing it; take the stairs or wait for it`); }
       if (th.los === false) { this.noLosSince ??= ap.t; if (ap.t - this.noLosSince > 4) return swap(`lost ${th.key} behind walls (4s out of sight)`); }
       else this.noLosSince = null;
       if (this.start && cfg.leash > 0 && dist2(p, this.start) > cfg.leash * w.cell && th.los === false) return swap(`stopped chasing ${th.key}: ${r1(dist2(p, this.start) / w.cell)} cells from where the fight started`);
