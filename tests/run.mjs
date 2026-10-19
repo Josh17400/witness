@@ -156,6 +156,26 @@ try {
   const r2 = cli(["replay", path.join(tmp, "s.jsonl"), "--ignore", "view, player.pos"]);
   ok("e2e replay --ignore leaves paths out of the end-state check", r.status === 1 && /state\.view/.test(r.stdout) && r2.status === 0 && /ignoring view, player\.pos/.test(r2.stdout), r.stdout + r2.stdout + r2.stderr);
 } catch (e) { ok("e2e replay end state match", false, `${e.message}\n${r.stdout}${r.stderr}`); }
+// ---- clean: old playtests, recordings and screenshots are pruned; recent ones stay
+{
+  const proj = path.join(tmp, "cleanproj"), old = (p, days) => { const t = new Date(Date.now() - days * 864e5); fs.utimesSync(p, t, t); };
+  fs.mkdirSync(path.join(proj, "witness", "shots"), { recursive: true });
+  fs.mkdirSync(path.join(proj, "witness", "replays"), { recursive: true });
+  fs.writeFileSync(path.join(proj, "witness.json"), JSON.stringify({ name: "c", launch: { command: "node", args: ["x.mjs"] }, retention: { playtests: { keep: 3 } } }));
+  for (let i = 0; i < 6; i++) { const d = path.join(proj, "witness", "playtests", `p${i}`); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, "replay.jsonl"), "x".repeat(100)); old(d, i * 0.1); }
+  const stale = path.join(proj, "witness", "playtests", "stale"); fs.mkdirSync(stale); old(stale, 30);
+  fs.writeFileSync(path.join(proj, "witness", "shots", "old.png"), "x"); old(path.join(proj, "witness", "shots", "old.png"), 5);
+  fs.writeFileSync(path.join(proj, "witness", "shots", "new.png"), "x");
+  fs.writeFileSync(path.join(proj, "witness", "replays", "a.jsonl"), "{}"); fs.writeFileSync(path.join(proj, "witness", "replays", "a.jsonl.state.json"), "{}");
+  old(path.join(proj, "witness", "replays", "a.jsonl"), 20);
+  const c1 = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "clean"], { cwd: proj, encoding: "utf8", timeout: 30000 });
+  const left = fs.readdirSync(path.join(proj, "witness", "playtests")).sort().join(",");
+  ok("e2e clean prunes to retention (keep 3, drop stale, old shots and recordings with their end state)",
+    c1.status === 0 && left === "p0,p1,p2" && !fs.existsSync(path.join(proj, "witness", "shots", "old.png")) && fs.existsSync(path.join(proj, "witness", "shots", "new.png")) &&
+    !fs.existsSync(path.join(proj, "witness", "replays", "a.jsonl")) && !fs.existsSync(path.join(proj, "witness", "replays", "a.jsonl.state.json")), left + "\n" + c1.stdout + c1.stderr);
+  const c2 = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "clean", "--all"], { cwd: proj, encoding: "utf8", timeout: 30000 });
+  ok("e2e clean --all removes every generated file", c2.status === 0 && fs.readdirSync(path.join(proj, "witness", "playtests")).length === 0 && fs.readdirSync(path.join(proj, "witness", "shots")).length === 0, c2.stdout + c2.stderr);
+}
 // ---- witness.json with a single-backslash Windows path
 fs.mkdirSync(path.join(tmp, "cc"));
 fs.writeFileSync(path.join(tmp, "cc", "witness.json"), '{ "build": "tools\\build.bat", "launch": { "command": "x" } }');

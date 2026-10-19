@@ -247,6 +247,16 @@ export class Perceiver {
         if (typeof v === "number" || (typeof v === "boolean" && /^(has|key)/i.test(k)) || (typeof v === "string" && /^(weapon|form|class)$/i.test(k))) add(k, `state.player && state.player[${JSON.stringify(k)}]`);
       }
     }
+    // team/match scores ({blue: 12, red: 9}, at state.score / scores / match.score) with a limit if the game has one
+    for (const base of ["state", "state.match"]) {
+      const obj = base === "state" ? state : state && state.match;
+      if (!obj || typeof obj !== "object") continue;
+      const key = ["score", "scores", "teamScore", "team_score"].find((k) => obj[k] && typeof obj[k] === "object" && !Array.isArray(obj[k]) && Object.values(obj[k]).some((v) => typeof v === "number"));
+      if (!key) continue;
+      const lim = ["scoreLimit", "score_limit", "limit", "target", "toWin", "to_win"].find((k) => typeof obj[k] === "number");
+      add("score", `(() => { const o = ${base}[${JSON.stringify(key)}] || {}; return Object.entries(o).filter(([, v]) => typeof v === "number").map(([k, v]) => k + " " + v).join(" - ")${lim ? ` + " (to " + ${base}[${JSON.stringify(lim)}] + ")"` : ""}; })()`);
+      break;
+    }
     for (const k of ["score", "lives", "coins", "gold", "level", "wave", "kills", "deaths", "ammo"]) {
       if (out.length >= 6) break;
       if (state && typeof state[k] === "number" && !out.some((o) => o.label === k)) add(k, `state[${JSON.stringify(k)}]`);

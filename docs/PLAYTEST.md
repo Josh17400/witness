@@ -201,6 +201,12 @@ player, stats, near[], farther, remembered[], dialogue, goal, notice, dead, won,
 
 ## Live mode and watching
 
+**Recommendation: keep the default (turn-based, headless) for testing.** Measured on a 4v4 shooter with Sonnet 5.5 at
+low effort: turn-based gave 24–25 kills and 5–6 deaths whether watched or headless (headless took 1 min 10 s instead of
+3 min 55 s), while live mode gave 23 kills and 14 deaths, because the tester's ~1.3 s decision lag lands in the fight.
+For a person watching, **`--watch --turns`** shows the window, plays each order at real speed and waits for the tester
+in between; `--watch` alone is live.
+
 By default a session is **turn-based**: game time passes only inside `do`, and the game is frozen while the tester
 thinks. That's ideal for puzzles and RPG dialogue, and it gives the slowest model all the time it wants. In a shooter
 it feels stop-start: in four watched 4v4 runs the game sat frozen for 30–40% of the wall time, about one freeze per
@@ -559,3 +565,17 @@ the whole session and checks the final state against `replay.jsonl.state.json`; 
 * **Calls are disabled by default** so testers can't cheat; enable them only for setup you'd also accept from a
   player.
 * Only the main agent should spawn testers, and at most 2 at once.
+
+## Cleaning up
+
+Playtests (replay, screenshots, report), human recordings and screenshots are only useful while a bug is being looked
+at, so Witness keeps them from piling up:
+- `witness play clean t1` deletes one playtest once you've acted on its report; `witness play clean` applies the
+  limits below to playtests; `witness play clean --all` deletes every finished playtest.
+- `witness clean` applies the limits to playtests, recordings (`witness/replays`, with their `.state.json`) and
+  screenshots (`witness/shots`); `witness clean --all` deletes all of them. Running playtests are never touched.
+- The same pruning runs automatically on every `play start` (playtests) and `witness test` (everything), and finished
+  session entries and their short commands leave the machine-wide registry after a day.
+- Limits come from witness.json `"retention"`; defaults:
+  `{"playtests": {"keep": 5, "days": 7}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3}}`
+  (the newest `keep` stay unless older than `days`).

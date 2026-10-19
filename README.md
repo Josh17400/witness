@@ -20,6 +20,7 @@ witness listen --time 8                          # audio report + spectrogram PN
 witness replay last --shot                       # what the human saw when they pressed F8
 witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
 witness play start --goal "Escape the arena"     # agent playtests: a cheap model PLAYS the game, Witness reports
+witness clean                                    # prune old playtests, recordings, screenshots (also automatic)
 ```
 
 ## Install

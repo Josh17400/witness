@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, MAX_SESSIONS, removeEntry, writeShim } from "./registry.js";
 import { makeBrief, PERSONAS } from "./brief.js";
+import { prune, pruneRegistry, fmtBytes } from "../core/clean.js";
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
 
@@ -28,6 +29,7 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
   witness play note "<text>" [--bug|--confusing|--fun|--idea] [--shot] [-s t1]
   witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback "…"]   → report.md/json + replay, stops everything
   witness play status|stop [-s t1|--all]|list [--clean]|report [t1|dir] [--json]
+  witness play clean [t1] [--all]                 delete a playtest you've acted on (t1), old ones (no name), or all of them
   witness play brief [--goal …] [--persona …] [--minutes 4] [--name t1] [--extra "…"] [--live|--watch]  → the prompt for a tester subagent
   witness play suggest [--write]                  probe the game and propose a "play" config for witness.json
   witness play orders                             the order language
@@ -115,6 +117,8 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       let params;
       if (opt.params && opt.params !== true) { try { params = JSON.parse(String(opt.params)); } catch (e) { fail(`--params isn't valid JSON: ${e.message}`); } }
       if (opt.persona && opt.persona !== true && !PERSONAS[opt.persona]) fail(`unknown persona "${opt.persona}" (${Object.keys(PERSONAS).join(", ")})`);
+      // old playtests and finished registry entries go before a new one starts (witness.json "retention")
+      try { prune(cfg, root, { only: "playtests" }); pruneRegistry(); } catch { /* best effort */ }
       const base = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(root, "witness", "playtests"));
       let dir = path.join(base, name);
       for (let i = 2; fs.existsSync(dir); i++) dir = path.join(base, `${name}-${i}`);
@@ -208,6 +212,26 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       const rows = listEntries();
       if (!rows.length) { console.log("no playtest sessions"); return; }
       for (const e of rows.slice(0, 30)) console.log(`  ${e.live ? "●" : "○"} ${e.name.padEnd(16)} ${String(e.state || "?").padEnd(8)} ${e.started ? e.started.slice(0, 16).replace("T", " ") : ""}  ${e.summary || ""}${e.dir ? `\n      ${e.dir}` : ""}`);
+      return;
+    }
+    case "clean": {
+      // a finished playtest you've acted on (`play clean t1`), the retention limits (no name), or every one (--all)
+      const { cfg, root } = loadConfig(opt);
+      const name = pos[0];
+      if (name) {
+        const e = readEntry(name);
+        if (e && e.live) fail(`session ${name} is still running: end it first (witness play end -s ${name})`);
+        const dir = e && e.dir ? e.dir : path.join(root, "witness", "playtests", name);
+        if (!fs.existsSync(dir)) fail(`no playtest folder for "${name}" (${dir})`);
+        const r = { removed: [], bytes: 0 };
+        const n = (() => { let b = 0; const walk = (p) => { const st = fs.statSync(p); if (st.isDirectory()) for (const x of fs.readdirSync(p)) walk(path.join(p, x)); else b += st.size; }; try { walk(dir); } catch { /* gone */ } return b; })();
+        fs.rmSync(dir, { recursive: true, force: true }); removeEntry(name); r.removed.push(dir); r.bytes = n;
+        console.log(`removed playtest ${name} (${fmtBytes(r.bytes)})`);
+        return;
+      }
+      const r = prune(cfg, root, { all: !!opt.all, only: "playtests" });
+      const k = pruneRegistry();
+      console.log(r.removed.length ? `removed ${r.removed.length} playtest folder(s), ${fmtBytes(r.bytes)}${k ? `; ${k} finished session entr${k === 1 ? "y" : "ies"}` : ""}` : `nothing to remove${k ? ` (${k} finished session entr${k === 1 ? "y" : "ies"} dropped)` : ""}`);
       return;
     }
     case "report": {

@@ -127,9 +127,12 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 2. **Sanity-check it yourself:** `witness play start --name check --goal "smoke"`, `witness play do "explore for 3s"
    -s check`, `witness play end -s check`. Fix the config until orders work and things are classified right.
 3. **Brief:** `witness play brief --goal "<what to achieve>" --persona newbie --minutes 4 --name t1` prints the
-   complete tester prompt (commands with the absolute CLI path, the order card, the rules). For real-time games
-   (shooters, action) add `--live`: the game keeps running while the tester thinks instead of freezing after every
-   order. `--watch` also shows the game window (only when the user wants to watch; one visible game at a time).
+   complete tester prompt (commands with the absolute CLI path, the order card, the rules). **Default: turn-based and
+   headless** (no flag): the game waits while the tester thinks and runs as fast as the machine allows during orders.
+   That gives the best test (a 4v4 shooter: 25 kills / 5 deaths, the same as a watched run, at ~3.4× the speed).
+   When the user wants to watch: `--watch --turns` (window shown, orders at real speed, the game waits for the
+   tester). `--watch` alone or `--live` keep the game running while the tester thinks: no freezes, but the model's
+   ~1.3 s lag shows (23 kills / 14 deaths in the same shooter). One visible game at a time.
 4. **Spawn the tester** with the Agent tool: `model: "sonnet"`, `effort: "low"` and the brief as the prompt (the
    best play at nearly Haiku's speed; `model: "haiku"` is cheaper but plays shallowly, so keep it for simple games).
    The tester runs the commands itself; don't play for it.
@@ -138,6 +141,10 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 6. **Reproduce** what it flagged: report.md lists `witness replay witness/playtests/t1/replay.jsonl --at <t> --shot`
    for every note and death. Every playtest is a frame-exact replay.
 7. **Fix**, then **turn each bug into a test** (section 3), and playtest again if the change affects feel.
+8. **Clean up**: once you've acted on a report, `witness play clean t1` deletes that playtest (replay, shots,
+   report). Old playtests, recordings and screenshots are also pruned automatically on `play start` and `test`
+   (witness.json `"retention"`; `witness clean` applies it now, `--all` removes everything generated). Don't leave
+   piles of PNGs and replays on the user's disk.
 
 * Several testers give a broader picture: different `--persona`s (`newbie`, `explorer`, `speedrunner`, `breaker`,
   `fighter`) and different `--name`s. **Run at most 2 at once** (each is a game process; `WITNESS_PLAY_MAX`).

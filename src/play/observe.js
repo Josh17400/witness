@@ -109,7 +109,7 @@ export function observeText(w, ctx) {
   const head = [`[t ${fmtT(w.t)}${ctx.live ? ` · ${ctx.live}` : ""}]`];
   if (d.player) {
     if (d.player.hp != null) head.push(`hp ${r1(d.player.hp)}${d.player.maxHp ? `/${r1(d.player.maxHp)}` : ""}`);
-    for (const [k, v] of Object.entries(d.stats)) head.push(`${k} ${typeof v === "number" ? r1(v) : typeof v === "boolean" ? (v ? "yes" : "no") : clip(String(v), 20)}`);
+    for (const [k, v] of Object.entries(d.stats)) head.push(`${k} ${typeof v === "number" ? r1(v) : typeof v === "boolean" ? (v ? "yes" : "no") : clip(String(v), k === "score" ? 40 : 20)}`);
     if (d.player.ammo != null && !("ammo" in d.stats)) head.push(`ammo ${d.player.ammo}`);
     const where = [`cell (${d.player.cell[0]},${d.player.cell[1]})`];
     if (d.player.facing) where.push(`facing ${d.player.facing}`);

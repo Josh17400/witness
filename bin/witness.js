@@ -8,6 +8,7 @@ import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay }
 import { evaluate, check, fmt, keyPaths, ExprError } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
 import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
+import { prune, pruneRegistry, fmtBytes } from "../src/core/clean.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -27,6 +28,7 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness raw '<json command>'        send one raw protocol command (for adapter authors)
   witness adapters                    list the bundled adapters
   witness play start|do|look|end ...  agent playtests: a cheap model PLAYS the game, Witness reports (help play)
+  witness clean [--all]               delete old playtests, recordings and screenshots (see help clean)
 
 Common options:
   --input "right@0-2, space@1, click:640,360@1.5, action:jump@2"   scripted input (times in s)
@@ -38,6 +40,12 @@ Common options:
 Run 'witness help <command>' for details. Protocol: docs/PROTOCOL.md`;
 
 const CMD_HELP = {
+  clean: `witness clean [--all] [--playtests|--replays|--shots]
+  Generated files are pruned automatically (on play start and test) to witness.json "retention", default
+  {"playtests": {"keep": 5, "days": 7}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3}}: the newest
+  N stay unless older than the days limit. Plain 'witness clean' applies those limits now; --all deletes every
+  playtest, recording and screenshot (running playtests are never touched). 'witness play clean t1' deletes one
+  playtest once you've acted on it.`,
   test: `witness test [files...] [--name <substring>] [--json]
   Test files (default folder: "tests" in ${CONFIG_NAME}, usually witness/) are *.witness.json or *.witness.mjs:
     [{ "name": "coin pickup", "seed": 1, "input": "right@0-1.5",
@@ -274,8 +282,20 @@ const commands = {
     process.exit(failed ? 1 : 0);
   },
 
+  async clean(pos, opt) {
+    const { cfg, root } = loadConfig(opt);
+    const only = opt.playtests ? "playtests" : opt.replays ? "replays" : opt.shots ? "shots" : null;
+    const r = prune(cfg, root, { all: !!opt.all, only });
+    const k = only && only !== "playtests" ? 0 : pruneRegistry();
+    if (opt.json) { console.log(JSON.stringify({ removed: r.removed, bytes: r.bytes, registry: k })); return; }
+    console.log(r.removed.length ? `removed ${r.removed.length} item(s), ${fmtBytes(r.bytes)}:` : "nothing to remove");
+    for (const p of r.removed.slice(0, 20)) console.log(`  ${path.relative(root, p) || p}`);
+    if (r.removed.length > 20) console.log(`  … and ${r.removed.length - 20} more`);
+  },
+
   async test(pos, opt) {
     const { cfg, root } = loadConfig(opt);
+    try { prune(cfg, root); } catch { /* best effort: old playtests, recordings and screenshots */ }
     const files = findTestFiles(root, cfg, pos);
     if (!files.length) die(`no test files found (looked for *.witness.json / *.witness.mjs in ${path.resolve(root, cfg.tests)})`);
     let tests = [];

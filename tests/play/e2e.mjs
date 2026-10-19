@@ -142,6 +142,6 @@ ok("no session daemons left running", live.length === 0, JSON.stringify(live));
 r = witness(["play", "list"], { cwd: tmp, env });
 ok("play list shows ended sessions", /○ fake\s+ended/.test(r.out) && /○ m\s+ended/.test(r.out), r.out);
 
-fs.rmSync(tmp, { recursive: true, force: true });
+fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });   // Windows: a just-exited daemon can hold its log for a moment
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -1,6 +1,6 @@
 {
   "name": "witness-kit",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Witness: let Claude see, hear and prove any game. A universal headless test/inspect/record toolkit with adapters for every major language and engine.",
   "main": "index.js",
   "directories": {

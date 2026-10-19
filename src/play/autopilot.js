@@ -443,8 +443,11 @@ class Flee extends Behaviour {
   constructor(o, ap, w) { super(o, ap, w); this.nav = new Navigator(ap); this.goal = null; this.pickT = -1e9; this.maxT = o.forS ?? 6; }
   tick(w, want) {
     const ap = this.ap, t = ap.t, grid = ap.grid;
-    const threats = w.things.filter((th) => th.rel === "hostile" && !th.dead && th.dist <= ap.cfg.alert * 1.6);
-    if (!threats.length) return this.done(`got away`);
+    // threats: enemies near you, plus (fps) anyone who can shoot you from range
+    const fpsRange = (ap.cfg.fps?.range ?? 12) * 2.2;
+    const threats = w.things.filter((th) => th.rel === "hostile" && !th.dead && (th.dist <= ap.cfg.alert * 1.6 || (ap.cfg.profile === "fps" && th.los === true && th.dist <= fpsRange)));
+    const pct = hpPct(w);
+    if (!threats.length) return this.done(`got away${pct != null ? ` (hp ${Math.round(pct)}%)` : ""}`);
     if (this.age > this.maxT) return this.done(`fled for ${r1(this.age)}s; ${threats.length} still near`);
     if (ap.platform) { const away = Math.sign(w.player.p2[0] - threats[0].p2[0]) || -1; ap.platform.tick(w, want, { targetX: w.player.p2[0] + away * w.cell * 20, reachX: 1 }); return this.run(); }
     if (!this.goal || t - this.pickT > 1.0) { this.goal = ap.safeSpot(w, threats); this.pickT = t; this.nav.reset(); }
@@ -900,7 +903,9 @@ export class Autopilot {
     while (q.length) {
       const [c, d] = q.shift();
       const cp = g.center(c);
-      const s = Math.min(...threats.map((th) => dist2(cp, th.p2))) / w.cell - 0.35 * d;
+      // far from threats, close to you, and (when the map knows walls) out of their line of fire
+      const covered = g.mapSolid.size > 0 && threats.every((th) => !g.clearLine(cp, th.p2, 0, this.t));
+      const s = Math.min(...threats.map((th) => dist2(cp, th.p2))) / w.cell - 0.35 * d + (covered ? 6 : 0);
       if (s > bestS) { bestS = s; best = cp; }
       if (d >= 10) continue;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {

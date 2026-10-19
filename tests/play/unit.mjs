@@ -403,5 +403,12 @@ function platWorld() {
   ok("fps: calibrated yaw sensitivity ≈ the game's", ap.profile.sens && Math.abs(ap.profile.sens.x - 0.0011) < 0.0002, JSON.stringify(ap.profile.sens));
 }
 
+{
+  // team scores and the score limit reach the observation header
+  const cfgS = resolvePlayConfig({ profile: "fps", plane: [0, 2], controls: { move: "wasd" } }, { keys: ["w", "a", "s", "d"] });
+  const wS = new Perceiver(cfgS, { fps: 60 }).perceive({ frame: 0, time: 0, state: { player: { pos: [0, 0, 0], hp: 50 }, match: { score: { blue: 12, red: 9 }, scoreLimit: 40 }, entities: [] } }, 0);
+  ok("team score with its limit is a stat", wS.stats.some((s) => s.label === "score" && s.value === "blue 12 - red 9 (to 40)"), JSON.stringify(wS.stats));
+}
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
