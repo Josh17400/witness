@@ -111,7 +111,9 @@ const CMD_HELP = {
   * events vs sounds: each input press (unless --no-input-events) and each --events state change gets the sound it
     caused within the window: ✔ "+1f" (an input's sound can come +1f at the earliest; a state change's +0f),
     ✖ no sound (with a hint when the same input played one before), ⚠ played twice; then sounds with no event;
-  * sounds found (pitch, length, brightness, loudness), music tempo/key/chords, mix problems;
+  * sounds found (pitch, length, brightness, loudness), music tempo/key/chords, mix problems (clipping, true peak,
+    loudness, sounds that start/stop abruptly and click, pops, sounds played twice a frame apart, the same sample
+    repeated identically); --loop a..b checks a music loop's seam (level step, jump at the joint, brightness);
   * timeline.png + sounds.png (+ mix.wav).
   Games that announce sounds ({"event": "sound"}, e.g. witness.sound("jump")) get them named and checked against the
   audio (announced but silent, audible but unannounced).`,

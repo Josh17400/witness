@@ -53,6 +53,15 @@ export async function listenCommand(pos, opt) {
       ...(sample ? eventFrames(named, sample).map((e) => ({ label: e.name, f: e.f, kind: "state" })) : []),
     ].filter((a) => a.f <= endF);
     const within = opt.within && opt.within !== true ? framesOf(String(opt.within), fps) : 6;
+    // --loop a..b: how the end of a music loop meets its start
+    let seam = null;
+    if (opt.loop && opt.loop !== true) {
+      const mm = /^\s*([^.]+?)\s*\.\.\s*(.+?)\s*$/.exec(String(opt.loop));
+      if (!mm) die("--loop wants a..b (seconds or frames), e.g. --loop 0..4");
+      const la = framesOf(mm[1], fps) / fps, lb = framesOf(mm[2], fps) / fps;
+      const { loopSeam } = await import("../media/hygiene.js");
+      try { seam = { a: la, b: lb, ...loopSeam(m.mono(dec.channels), dec.sampleRate, la, lb) }; } catch (e) { die(`--loop: ${e.message}`); }
+    }
     const match = actions.length ? matchSounds(actions, sounds, { within }) : null;
     const outDir = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, "listen"));
     const files = [];
@@ -62,7 +71,7 @@ export async function listenCommand(pos, opt) {
       if (rep.segments && rep.segments.length) { fs.writeFileSync(path.join(outDir, "sounds.png"), m.soundSheetPNG(rep.segments, { title: s.hello.name })); files.push(path.join(outDir, "sounds.png")); }
       if (opt.wav) { fs.writeFileSync(path.join(outDir, "mix.wav"), m.pcmToWav(pcm)); files.push(path.join(outDir, "mix.wav")); }
     } catch (e) { if (!opt.json) console.log(`(no pictures: ${e.message})`); }
-    res = { fps, endF, rep, aligned, soundEvents, sounds, actions, match, within, files };
+    res = { fps, endF, rep, aligned, soundEvents, sounds, actions, match, within, files, seam };
   });
   const out = report(res, opt);
   emit(out.env, out.text, opt);
@@ -105,13 +114,17 @@ function report(r, opt) {
     if (aligned.unreported.length) lines.push(`  ⚠ audible onsets the game didn't announce: ${aligned.unreported.slice(0, 6).map((o) => `${fmtT(o.t)} (${fr(o.f)})`).join(", ")}${aligned.unreported.length > 6 ? ", …" : ""}`);
     lines.push("");
   }
+  if (r.seam) {
+    const q = r.seam;
+    lines.push(`Loop ${q.a}–${q.b} s seam: ${q.ok ? "✔ clean" : "✖"} · level step ${q.levelStep} dB · jump at the joint ${q.joint} (the slope around it ${q.slope})${q.click ? " → it clicks" : ""} · brightness jump ${q.brightnessJump} Hz${q.ok ? "" : " → cut the loop on a zero crossing at the same phase, or crossfade 10–50 ms"}`, "");
+  }
   const text = [...lines, rep.text].join("\n").replace(/pass event times for exact labels\./, "games can name them with {\"event\": \"sound\"} lines (docs/PROTOCOL.md).");
   {
     const ma = match ? match.matches.map((x) => ({ event: x.action.label, frame: x.action.f, kind: x.action.kind, sound: x.sound ? x.sound.label : null, soundFrame: x.sound ? x.sound.f : null, offset: x.offset, doubles: x.doubles.map((d) => d.offset), early: x.early ? x.early.offset : null })) : [];
     // a report, not a test: missing sounds don't fail it (movement keys have none); gate with --expect "missing == 0"
     const env = envelope("listen", {
       verdict: rep.text.split("\n")[0] + (counts ? ` · events: ${counts.matched}/${counts.events} have their sound, ${counts.missing} missing, ${counts.doubled} doubled` : ""),
-      summary: { sounds: rep.report.sounds.length, occurrences: rep.report.sounds.reduce((a, x) => a + x.count, 0), problems: rep.report.problems.length, ...(counts || {}), unexplained: match ? match.unexplained.length : null, announced: aligned ? aligned.sounds.length : 0 },
+      summary: { ...(r.seam ? { loopOk: r.seam.ok, loopJoint: r.seam.joint, loopLevelStep: r.seam.levelStep } : {}), truePeakDb: rep.report.mix.truePeakDb, sounds: rep.report.sounds.length, occurrences: rep.report.sounds.reduce((a, x) => a + x.count, 0), problems: rep.report.problems.length, ...(counts || {}), unexplained: match ? match.unexplained.length : null, announced: aligned ? aligned.sounds.length : 0 },
       data: { report: rep.report, matches: ma, unexplained: match ? match.unexplained.map((x) => ({ sound: x.label, frame: x.f, t: x.t })) : [], soundEvents: aligned ? aligned.sounds : [], unreported: aligned ? aligned.unreported : [], fps },
       files: r.files,
     });

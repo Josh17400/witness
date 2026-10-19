@@ -1158,6 +1158,8 @@ export function pcmToWav(pcm, { format } = {}) {
   return Buffer.concat([head, body]);
 }
 
+import { truePeak, shortTerm, edges, pops, secondAttack, similarity } from "./hygiene.js";
+
 // ---------------------------------------------------------------------------
 // onsets: where distinct sounds start
 // ---------------------------------------------------------------------------
@@ -1618,6 +1620,60 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
     }
   }
   if (nonFinite) problems.push(NAN_PROBLEM(nonFinite));
+  // ---- hygiene: true peak, clicks at sound edges, pops, double triggers, repetition ---------------------
+  const tp = truePeak(chs);
+  const st = shortTerm(chs, sr);
+  if (tp.truePeak > Math.pow(10, -1 / 20) && !mix.clipped) {
+    problems.push({ severity: tp.truePeak >= 1 ? 1 : 2, text: `true peak ${r1(tp.true)} dBTP (sample peak ${r1(tp.sample)} dBFS): the waveform between samples ${tp.truePeak >= 1 ? "goes over full scale and clips" : "comes within 1 dB of clipping"} on playback → lower the master by about ${r1(tp.true + 1)} dB` });
+  }
+  const labelAt = (t) => { let best = null; for (const o of occurrences) if (Math.abs(o.t - t) <= 0.03 && (!best || Math.abs(o.t - t) < Math.abs(best.t - t))) best = o; return best ? best.label : null; };
+  const ed = edges(x, sr);
+  const cuts = new Map();
+  for (const e of ed) {
+    if (!e.clicksIn && !e.clicksOut) continue;
+    const label = labelAt(e.t0) || `the sound at ${e.t0.toFixed(2)} s`;
+    const c = cuts.get(label) || { label, ins: [], outs: [] };
+    if (e.clicksIn) c.ins.push(e);
+    if (e.clicksOut) c.outs.push(e);
+    cuts.set(label, c);
+  }
+  const hygiene = { truePeakDb: tp.true, shortTermMax: st.max, loudnessRange: st.lra, abruptStarts: 0, abruptEnds: 0, pops: [], doubles: [], repeated: [] };
+  for (const c of cuts.values()) {
+    if (c.outs.length) {
+      const e = c.outs[0];
+      hygiene.abruptEnds += c.outs.length;
+      problems.push({ severity: 3, text: `${c.label} ends abruptly at ${e.t1.toFixed(3)} s (cut at amplitude ${r3(e.lastAmp)}, ${Math.round((100 * e.lastAmp) / e.peak)}% of its peak)${c.outs.length > 1 ? ` (${c.outs.length} times)` : ""}: it clicks → add a 5 ms fade-out` });
+    }
+    if (c.ins.length) {
+      const e = c.ins[0];
+      hygiene.abruptStarts += c.ins.length;
+      problems.push({ severity: 3, text: `${c.label} starts abruptly at ${e.t0.toFixed(3)} s (first sample at amplitude ${r3(e.first)}, ${Math.round((100 * e.first) / e.peak)}% of its peak)${c.ins.length > 1 ? ` (${c.ins.length} times)` : ""}: it clicks → add a 2 ms fade-in` });
+    }
+  }
+  const pp = pops(x, sr);
+  hygiene.pops = pp;
+  if (pp.length) problems.push({ severity: 2, text: `${pp.length} pop${pp.length === 1 ? "" : "s"} inside the audio at ${pp.slice(0, 5).map((q) => `${q.t.toFixed(3)} s`).join(", ")}${pp.length > 5 ? ", …" : ""} (a jump of ${pp[0].jump} where the waveform is otherwise smooth) → a buffer cut short, or a sound stopped mid-waveform` });
+  const env2 = envelope([x], sr, 0.002);
+  const doubles = new Map();
+  for (const o of occurrences) {
+    const sa = secondAttack(env2, o.t, 0.002);
+    // only a restart 1-2 frames later (14-36 ms) counts: shorter gaps are a sound's own texture
+    if (sa && sa.dt >= 14 && sa.dt <= 36) { const d = doubles.get(o.label) || { label: o.label, hits: [] }; d.hits.push({ t: o.t, ...sa }); doubles.set(o.label, d); }
+  }
+  for (const d of doubles.values()) {
+    hygiene.doubles.push({ label: d.label, times: d.hits.map((h) => r3(h.t)), dt: d.hits[0].dt });
+    problems.push({ severity: 2, text: `${d.label} at ${d.hits.map((h) => `${h.t.toFixed(2)} s`).slice(0, 4).join(", ")} has a second attack ${d.hits[0].dt} ms after the first (+${d.hits[0].rise} dB): played twice${d.hits[0].dt <= 20 ? ", a frame apart" : ""} (double-triggered?)` });
+  }
+  for (const g of groups) {
+    if (g.times.length < 6 || g.analysis.silent) continue;
+    const n = Math.min(Math.round(0.4 * sr), Math.round((g.t1 - g.t0) * sr));
+    const clip = (t) => x.subarray(Math.max(0, Math.round(t * sr)), Math.max(0, Math.round(t * sr)) + n);
+    const sims = g.times.slice(1, 6).map((t) => similarity(clip(g.times[0]), clip(t)));
+    if (sims.every((v) => v >= 0.99)) {
+      hygiene.repeated.push({ label: g.label, count: g.times.length });
+      problems.push({ severity: 3, text: `${g.label} plays ${g.times.length} times with the same waveform each time → vary its pitch by ±1–2 semitones or alternate 2–3 takes, so it doesn't grate` });
+    }
+  }
   let dc = 0;
   for (let i = 0; i < len; i++) dc += x[i];
   dc /= len;
@@ -1642,7 +1698,9 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
     mix: {
       peakDb: mix.peakDb, clipped: mix.clipped, integrated: mix.integrated, dcOffset: Math.round(dc * 10000) / 10000, balance: r1(balance),
       silences: mix.silences, loudness: { times: mix.loudness.times.map(r3), lufs: mix.loudness.lufs.map(r1) },
+      truePeakDb: hygiene.truePeakDb, shortTermMax: hygiene.shortTermMax, loudnessRange: hygiene.loudnessRange,
     },
+    hygiene: { abruptStarts: hygiene.abruptStarts, abruptEnds: hygiene.abruptEnds, pops: hygiene.pops, doubles: hygiene.doubles, repeated: hygiene.repeated },
     onsets: onsets.length, music, sounds, problems, notes,
   });
   const segments = groups.map((g, i) => ({ ...report.sounds[i], channels: g.channels, sampleRate: sr, offset: g.t0 }));
@@ -1656,7 +1714,7 @@ export function formatPCMReport(rep) {
   const layout = rep.channels === 1 ? "mono" : rep.channels === 2 ? "stereo" : `${rep.channels} channels`;
   const musicSpan = rep.music.length ? `, music ${rep.music.map((mu) => `${mu.t0.toFixed(2)}–${mu.t1.toFixed(2)} s`).join(", ")}` : ", no music";
   L.push(`♪ ${rep.title} — ${rep.duration.toFixed(2)} s of audio (${rep.sampleRate / 1000} kHz ${layout}): ${n} distinct sound${n === 1 ? "" : "s"}${total > n ? ` (${total} in all)` : ""}${musicSpan}`);
-  L.push(`Mix: peak ${m.peakDb === null ? "-inf" : r1(m.peakDb)} dBFS · integrated ${m.integrated === null ? "silent" : r1(m.integrated) + " LUFS"} · ${m.clipped ? `CLIPS (${m.clipped} samples)` : "no clipping"}`);
+  L.push(`Mix: peak ${m.peakDb === null ? "-inf" : r1(m.peakDb)} dBFS${m.truePeakDb != null ? ` (true peak ${r1(m.truePeakDb)} dBTP)` : ""} · integrated ${m.integrated === null ? "silent" : r1(m.integrated) + " LUFS"}${m.shortTermMax != null ? ` · short-term max ${r1(m.shortTermMax)} LUFS, range ${r1(m.loudnessRange)} LU` : ""} · ${m.clipped ? `CLIPS (${m.clipped} samples)` : "no clipping"}`);
   L.push(rep.segmentation === "events"
     ? "Sounds are cut at the event times the game reported."
     : `Sounds were found by onset detection (${rep.onsets} onset${rep.onsets === 1 ? "" : "s"}); pass event times for exact labels.`);

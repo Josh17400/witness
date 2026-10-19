@@ -411,4 +411,57 @@ console.log("\naudio analysis — raw game audio (analyzePCM)");
   ok("labelled: overlapping sounds keep their names and counts", report.segmentation === "events" && by.beep?.count === 2 && by.hit?.count === 1 && by.beep.times.join() === "0.5,1.5", report.sounds.map((q) => [q.label, q.times]));
 }
 
+// ---- hygiene: clicks at sound edges, pops, true peak, double triggers, repetition, loop seams ----------------
+{
+  const { edges, pops, truePeak, secondAttack, loopSeam } = await import("../../src/media/hygiene.js");
+  // a 440 Hz tone cut at 0.1 s + a quarter period (amplitude 0.4 there) vs the same tone with a 5 ms fade-out
+  const cut = buf(0.5), faded = buf(0.5);
+  addTone(cut, 0.1, 0.1 + 1 / 1760, () => 440, () => 0.4);   // 0.1 s + a quarter period: it stops at the crest
+  addTone(faded, 0.1, 0.1, () => 440, (t) => 0.4 * Math.min(1, t / 0.002, (0.1 - t) / 0.005));
+  const ec = edges(cut, SR), ef = edges(faded, SR);
+  show("edges: cut vs faded tone", `cut ends at ${ec[0].lastAmp.toFixed(3)} (clicks ${ec[0].clicksOut}) · faded ends at ${ef[0].lastAmp.toFixed(4)} (clicks ${ef[0].clicksOut})`);
+  ok("hygiene: a tone cut mid-cycle clicks at its end", ec.length === 1 && ec[0].clicksOut && Math.abs(ec[0].lastAmp - 0.4) < 0.01, ec);
+  ok("hygiene: the same tone with a 5 ms fade doesn't", ef.length === 1 && !ef[0].clicksOut && !ef[0].clicksIn, ef);
+  const { report } = analyzePCM(toPCM([cut]));
+  ok("hygiene: the report says where it was cut and suggests a fade", report.problems.some((q) => /ends abruptly at 0\.20\d s \(cut at amplitude 0\.4/.test(q.text) && /fade-out/.test(q.text)), report.problems.map((q) => q.text));
+  // a pop: a 0.3 jump inside a quiet sustained tone
+  const pp = buf(0.5);
+  addTone(pp, 0, 0.5, () => 220, () => 0.2);
+  for (let i = Math.round(0.25 * SR); i < Math.round(0.25 * SR) + 40; i++) pp[i] += 0.3;   // (0.25 s is a zero crossing)
+  const pq = pops(pp, SR);
+  ok("hygiene: a jump inside a smooth tone is a pop, at its time", pq.length >= 1 && Math.abs(pq[0].t - 0.25) < 0.001, pq);
+  ok("hygiene: a tone starting at zero phase doesn't click", !report.problems.some((q) => /starts abruptly/.test(q.text)), report.problems.map((q) => q.text));
+  ok("hygiene: a clean tone has no pops", pops(faded, SR).length === 0);
+  // true peak: fs/4 at 45° — every sample is ±0.7071 (-3 dBFS) while the waveform reaches 1.0 (0 dBTP)
+  const tq = new Float32Array(4800);
+  for (let i = 0; i < tq.length; i++) tq[i] = Math.sin((Math.PI / 2) * i + Math.PI / 4);
+  const t = truePeak([tq]);
+  show("true peak of fs/4 at 45°", `sample ${t.sample.toFixed(2)} dBFS · true ${t.true.toFixed(2)} dBTP`);
+  ok("hygiene: true peak sees the inter-sample over (sample -3.01 dBFS, true ≈ 0 dBTP)", Math.abs(t.sample + 3.01) < 0.01 && Math.abs(t.true) < 0.2, t);
+  const tr = analyzePCM(toPCM([tq.map((v) => v * 0.99)]));
+  ok("hygiene: the report flags it", tr.report.problems.some((q) => /true peak/.test(q.text)), tr.report.problems.map((q) => q.text));
+  // a burst restarted one frame (16.7 ms) later: a second attack
+  const burst = new Float32Array(Math.round(0.08 * SR));
+  for (let i = 0; i < burst.length; i++) burst[i] = rnd() * 0.3 * Math.min(1, i / (SR * 0.002)) * Math.exp(-i / (SR * 0.03));
+  const dbl = buf(1);
+  for (const st of [0.3, 0.3 + 1 / 60]) for (let i = 0; i < burst.length; i++) dbl[Math.round(st * SR) + i] += burst[i];
+  const dr = analyzePCM(toPCM([dbl]));
+  ok("hygiene: a sound played twice a frame apart is reported", dr.report.problems.some((q) => /second attack 1[68] ms after the first/.test(q.text) && /a frame apart/.test(q.text)), dr.report.problems.map((q) => q.text));
+  const single = buf(1);
+  for (let i = 0; i < burst.length; i++) single[Math.round(0.3 * SR) + i] += burst[i];
+  ok("hygiene: played once it isn't", !analyzePCM(toPCM([single])).report.problems.some((q) => /second attack/.test(q.text)));
+  // the same blip 6 times, identical
+  const rep6 = buf(3.5);
+  for (let k = 0; k < 6; k++) addTone(rep6, 0.2 + k * 0.5, 0.1, () => 660, (u) => 0.3 * Math.min(1, u / 0.002, (0.1 - u) / 0.01));
+  ok("hygiene: 6 identical plays suggest variation", analyzePCM(toPCM([rep6])).report.problems.some((q) => /plays 6 times with the same waveform/.test(q.text)));
+  // loop seams: a whole number of cycles loops cleanly; a 0.3 step at the joint clicks
+  const loop = buf(1);
+  addTone(loop, 0, 1, () => 100, () => 0.3);
+  const clean = loopSeam(loop, SR, 0, 0.5), bad = loopSeam(loop, SR, 0, 0.5025);
+  show("loop seams", `clean: joint ${clean.joint} step ${clean.levelStep} dB ok ${clean.ok} · off by a quarter cycle: joint ${bad.joint} click ${bad.click}`);
+  ok("loop seam: 50 whole cycles join cleanly", clean.ok && clean.joint < 0.01, clean);
+  ok("loop seam: a quarter cycle off leaves a 0.3 jump at the joint (a click)", bad.click && Math.abs(bad.joint - 0.3) < 0.01 && !bad.ok, bad);
+  void secondAttack;
+}
+
 done("audio");
