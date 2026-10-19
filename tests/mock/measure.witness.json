@@ -1,0 +1,11 @@
+[
+  { "name": "the jump keeps its feel", "seed": 1,
+    "steps": [
+      { "measure": { "jump": { "y": "state.player.pos[1]", "input": "space@1" }, "expect": ["apexPx between 64 and 66", "airtimeFrames == 36f", "gravityFall == gravityRise"] } },
+      { "measure": { "move": { "x": "state.player.pos[0]", "input": "right@1-2" }, "expect": "topSpeed == 180 && stopAfter <= 2" } },
+      { "measure": { "effect": { "input": "space@1", "time": "10f" }, "expect": "pixelAfter <= 3" } },
+      { "measure": { "window": { "input": "space@1, space@{t}", "t": "85f..100f", "expect": "state.player.jumps == 2", "at": "120f" }, "expect": "first == 91" } }
+    ] },
+  { "name": "a measure that regressed", "seed": 1,
+    "steps": [ { "measure": { "jump": { "y": "state.player.pos[1]", "input": "space@1" }, "expect": "apexPx >= 80" } } ] }
+]

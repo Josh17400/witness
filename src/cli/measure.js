@@ -3,22 +3,32 @@
 //   state:   curve, jump, move, hitstop  (an expression sampled every frame of a scripted run)
 import fs from "node:fs";
 import path from "node:path";
-import { begin, stepTo } from "../core/runner.js";
+import { begin, stepTo, frameAt } from "../core/runner.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { summarize, frozenSpans, response, lag, stutters, analyzeJump, analyzeMove, numeric } from "../core/signal.js";
 import { parseWitnessInput } from "../core/input-spec.js";
 import { inputSpans, errorLines } from "./ask.js";
 import { parseRect } from "./see.js";
+import { WitnessError } from "../core/session.js";
 import {
-  die, say, withGame, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, printJSON,
+  die, withGame, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
 
 const r3 = (x) => (x == null ? x : Math.round(x * 1000) / 1000);
 const ms = (frames, fps) => `${Math.round((frames * 1000) / fps)} ms`;
 
+export const STATE_MEASURES = ["curve", "jump", "move", "hitstop"];
+
 export async function measureCommand(pos, opt) {
   const what = pos[0], files = pos.slice(1);
-  if (["curve", "jump", "move", "hitstop"].includes(what)) return stateMeasure(what, opt);
+  if (STATE_MEASURES.includes(what)) {
+    let res;
+    await withGame(opt, async (s, cfg) => {
+      res = await measureState(s, what, opt, runOpts(opt, cfg));
+      printLogs(await s.drainLogs());
+    });
+    return emit(res.env, res.text, opt);
+  }
   return pixelMeasure(what, files, opt);
 }
 
@@ -28,20 +38,20 @@ async function pixelMeasure(what, files, opt) {
   const m = await media();
   const read = (f) => { const p = path.resolve(String(f)); if (!fs.existsSync(p)) die(`no such image: ${f}`); return fs.readFileSync(p); };
   const region = opt.region && opt.region !== true ? parseRect(opt.region) : undefined;
-  const out = (obj, lines) => { if (opt.json) printJSON(obj); else console.log(lines.filter(Boolean).join("\n")); };
+  const out = (env, lines) => emit(env, lines.filter(Boolean).join("\n"), opt);
   const box = (b) => (b ? `x=${b.x} y=${b.y} ${b.w}×${b.h}` : "none");
   if (what === "scale") {
     if (!files[0]) die("usage: witness measure scale <shot.png> [--k 3]");
     const img = m.decodePNG(read(files[0]));
     const k = opt.k && opt.k !== true ? +opt.k : m.detectScale(img, { region, tolerance: +(opt.tolerance || 0) });
     const r = m.blockScale(img, k, { region, tolerance: +(opt.tolerance || 0) });
-    out(r, [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
+    out(envelope("measure scale", { ok: !r.blurry, verdict: r.blurry ? "blurry or fractionally scaled" : r.k > 1 ? `exact ×${r.k} integer scaling` : "no pixel grid larger than 1", summary: { k: r.k, offset: r.offset, nonUniformPercent: r.nonUniformPercent, blurry: r.blurry }, data: r }), [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
       `  ${r.cells} cells, ${r.nonUniform} not one colour (${r.nonUniformPercent}%) → ${r.blurry ? "✖ BLURRY or fractionally scaled" : r.k > 1 ? "✔ exact integer scaling" : "no pixel grid larger than 1"}`,
       ...r.worst.slice(0, 5).map((c) => `  worst cell ${box(c)}: ${c.colors} colours, spread ${c.spread}`)]);
   } else if (what === "box") {
     if (files.length < 2) die("usage: witness measure box <with.png> <without.png>");
     const r = m.maskDiff(read(files[0]), read(files[1]), { threshold: +(opt.threshold || 16), region });
-    out({ count: r.count, bbox: r.bbox, centroid: r.centroid }, [r.count ? `✔ ${r.count} px differ: box ${box(r.bbox)} (height ${r.bbox.h} px, width ${r.bbox.w} px), centroid [${r.centroid}]` : "the two images are the same (nothing to measure)"]);
+    out(envelope("measure box", { verdict: r.count ? `${r.count} px differ` : "identical", summary: { count: r.count, width: r.bbox ? r.bbox.w : 0, height: r.bbox ? r.bbox.h : 0, bbox: r.bbox, centroid: r.centroid }, data: { count: r.count, bbox: r.bbox, centroid: r.centroid } }), [r.count ? `✔ ${r.count} px differ: box ${box(r.bbox)} (height ${r.bbox.h} px, width ${r.bbox.w} px), centroid [${r.centroid}]` : "the two images are the same (nothing to measure)"]);
   } else if (what === "contrast") {
     if (!files[0] || !opt.a || !opt.b) die("usage: witness measure contrast <shot.png> --a <mask> --b <mask|ring[:r]>");
     const img = m.decodePNG(read(files[0]));
@@ -54,7 +64,7 @@ async function pixelMeasure(what, files, opt) {
     const A = mask(opt.a);
     const B = /^ring(:\d+)?$/.test(String(opt.b)) ? m.ringMask(A, img.width, img.height, +(String(opt.b).split(":")[1] || 2)) : mask(opt.b);
     const r = m.contrast(img, A, B);
-    out(r, [`contrast ${r.ratio.toFixed(2)}:1 (WCAG: 3 for large shapes, 4.5 for text) · ΔE ${r.deltaE.toFixed(1)} · luminance ${r.lumA.toFixed(3)} vs ${r.lumB.toFixed(3)} · ${r.countA} vs ${r.countB} px`]);
+    out(envelope("measure contrast", { verdict: `contrast ${r.ratio.toFixed(2)}:1, ΔE ${r.deltaE.toFixed(1)}`, summary: { ratio: r.ratio, deltaE: r.deltaE, lumA: r.lumA, lumB: r.lumB }, data: r }), [`contrast ${r.ratio.toFixed(2)}:1 (WCAG: 3 for large shapes, 4.5 for text) · ΔE ${r.deltaE.toFixed(1)} · luminance ${r.lumA.toFixed(3)} vs ${r.lumB.toFixed(3)} · ${r.countA} vs ${r.countB} px`]);
   } else if (what === "motion") {
     return motionMeasure(m, files.map(read), opt, region);
   } else die("usage: witness measure scale|box|contrast|motion|curve|jump|move|hitstop ...  (witness help measure)");
@@ -135,7 +145,8 @@ async function motionMeasure(m, fileFrames, opt, region) {
   }
   r.backgroundChoice = choice;
   r.camera = camera ? { moving: camera.moving, perFrame: camera.perFrame, total: camera.total, jitter: camera.jitter, uneven: camera.uneven, steps: camera.steps.map(({ i, dx, dy }) => ({ i, dx, dy })) } : null;
-  reportMotion(r, opt, f0, fps);
+  const out = reportMotion(r, opt, f0, fps);
+  emit(out.env, out.text, opt);
 }
 
 function reportMotion(r, opt, f0, fps) {
@@ -152,8 +163,7 @@ function reportMotion(r, opt, f0, fps) {
     pick = [...objs].sort((a, b) => Math.hypot(firstPos(a)[0] - nx, firstPos(a)[1] - ny) - Math.hypot(firstPos(b)[0] - nx, firstPos(b)[1] - ny))[0] || pick;
   }
   const world = r.camera && r.camera.moving ? " (world px, camera removed)" : "";
-  if (opt.json) {
-    printJSON(envelope("measure motion", {
+  const env = envelope("measure motion", {
       verdict: `${objs.length} moving object${objs.length === 1 ? "" : "s"}${pick ? `; #${pick.rank}: ${pick.meanStep} px/f, jitter ${pick.jitter}` : ""}; camera ${r.camera ? (r.camera.moving ? `moves ${r.camera.perFrame} px/f` : "static") : "not checked"}`,
       summary: {
         objects: objs.length, framesWithObject: sm.framesWithObject, pathLength: sm.pathLength, netDistance: sm.netDistance, meanStep: sm.meanStep, maxStep: sm.maxStep, jitter: sm.jitter,
@@ -161,9 +171,8 @@ function reportMotion(r, opt, f0, fps) {
         camera: r.camera ? { moving: r.camera.moving, perFrame: r.camera.perFrame, jitter: r.camera.jitter, uneven: r.camera.uneven.length } : null,
       },
       data: { ...r, firstFrame: f0, fps },
-    }));
-    return;
-  }
+  });
+  if (opt.json) return { env, text: "" };
   const N = r.frames.length;
   const lines = [`motion ${f0 != null ? `f${f0}..f${f0 + N - 1}` : `${N} images`} (${N} frames, background ${r.backgroundChoice || r.background}): ${objs.length} moving object${objs.length === 1 ? "" : "s"}${r.camera ? ` · camera ${r.camera.moving ? `moves [${r.camera.perFrame}] px/f` : "static"}` : ""}`];
   for (const o of objs.slice(0, 8)) {
@@ -196,53 +205,54 @@ function reportMotion(r, opt, f0, fps) {
     const rows = r.frames.map((f, i) => `  ${fl(i)}  box ${box(f.bbox)}  centroid ${f.centroid ? `[${f.centroid}]` : "-"}  lowest row ${f.lowestRowSpan ? `y=${f.lowestRowSpan.y} x=${f.lowestRowSpan.x0}..${f.lowestRowSpan.x1}` : "-"}${r.steps[i - 1] ? `  step [${r.steps[i - 1]}]` : ""}`);
     lines.push(...(rows.length > 60 ? [...rows.slice(0, 30), `  … ${rows.length - 60} frames (--json) …`, ...rows.slice(-30)] : rows));
   }
-  console.log(lines.join("\n"));
+  return { env, text: lines.join("\n") };
 }
 
 // ------------------------------------------------------------------ state measures (sampled every frame)
 
 const JUMPY = /^(space|up|w|z|x|k|c|j|jump|action:jump|pad:a)$/i;
+const fail = (msg) => { throw new WitnessError(msg); };
 
-/** Sample the expressions every frame from `from` to the end of the scenario. */
-async function sampleScenario(opt, exprs, { defaultTail = 2 } = {}) {
-  let res;
-  await withGame(opt, async (s, cfg) => {
-    const fps = s.fps;
-    const ro = runOpts(opt, cfg);
-    let evs = [];
-    try { evs = parseWitnessInput(ro.input, fps); } catch (e) { die(e.message); }
-    const lastInput = evs.length ? Math.max(...evs.map((e) => e.frame)) : 0;
-    const from = framesOf(opt.from && opt.from !== true ? String(opt.from) : "0", fps);
-    const to = opt.to && opt.to !== true ? framesOf(String(opt.to), fps)
-      : opt.time && opt.time !== true ? from + framesOf(String(opt.time), fps)
-      : Math.max(from + fps, lastInput + Math.round(defaultTail * fps));
-    if (to - from > 36000) die("that is more than 10 minutes of frames: shorten --time");
-    const st = await begin(s, ro);
-    const sample = await sampleExprs(s, st, exprs, frameGrid(from, to, 1));
-    printLogs(await s.drainLogs());
-    const errs = errorLines(exprs, sample);
-    if (errs.length) die(errs.join("\n"));
-    res = { fps, sample, spans: inputSpans(ro.input, fps), from, to, name: s.hello.name };
-  });
-  return res;
+/** Sample the expressions every frame from `from` to the end of the scenario (on an open session). */
+async function sampleOn(s, ro, opt, exprs, { defaultTail = 2 } = {}) {
+  const fps = s.fps;
+  let evs = [];
+  try { evs = parseWitnessInput(ro.input, fps); } catch (e) { fail(e.message); }
+  const lastInput = evs.length ? Math.max(...evs.map((e) => e.frame)) : 0;
+  const F = (t) => { try { return frameAt(t, fps); } catch (e) { return fail(e.message); } };
+  const from = F(opt.from != null && opt.from !== true ? String(opt.from) : "0");
+  const to = opt.to != null && opt.to !== true ? F(String(opt.to))
+    : opt.time != null && opt.time !== true ? from + F(String(opt.time))
+    : Math.max(from + fps, lastInput + Math.round(defaultTail * fps));
+  if (to - from > 36000) fail("that is more than 10 minutes of frames: shorten --time");
+  const st = await begin(s, ro);
+  const sample = await sampleExprs(s, st, exprs, frameGrid(from, to, 1));
+  const errs = errorLines(exprs, sample);
+  if (errs.length) fail(errs.join("\n"));
+  return { fps, sample, spans: inputSpans(ro.input, fps), from, to, name: s.hello.name };
 }
 
 const series = (sample, i) => sample.frames.map((f, k) => ({ f, v: sample.values[i][k] }));
 function oneAxis(sample, i, expr) {
   const pts = series(sample, i);
   const first = pts.find((p) => p.v != null)?.v;
-  if (Array.isArray(first)) die(`"${expr}" is a vector (${JSON.stringify(first)}): pick one axis, e.g. ${expr}[0] or ${expr}[1]`);
-  if (first != null && typeof first !== "number" && typeof first !== "boolean") die(`"${expr}" is not a number (got ${JSON.stringify(first)})`);
+  if (Array.isArray(first)) fail(`"${expr}" is a vector (${JSON.stringify(first)}): pick one axis, e.g. ${expr}[0] or ${expr}[1]`);
+  if (first != null && typeof first !== "number" && typeof first !== "boolean") fail(`"${expr}" is not a number (got ${JSON.stringify(first)})`);
   return pts;
 }
 
-async function stateMeasure(what, opt) {
-  const get = (k) => (opt[k] && opt[k] !== true ? String(opt[k]) : null);
+/**
+ * Run a state measure (jump | move | hitstop | curve) on an open session: its own scripted run from reset (ro =
+ * { seed, scene, params, input }), the expressions from opt (y, x, of, vs, paths, key, up, from, to, time).
+ * Returns { env, text }. Errors throw WitnessError (the CLI prints them; tests record them).
+ */
+export async function measureState(s, what, opt, ro) {
+  const get = (k) => (opt[k] != null && opt[k] !== true ? String(opt[k]) : null);
   if (what === "jump") {
     const y = get("y") || get("of");
-    if (!y) die('usage: witness measure jump --y "state.player.pos[1]" --input "space@1" [--x "state.player.pos[0]"] [--up -1]');
+    if (!y) fail('usage: witness measure jump --y "state.player.pos[1]" --input "space@1" [--x "state.player.pos[0]"] [--up -1]');
     const x = get("x");
-    const { fps, sample, spans, from, to } = await sampleScenario(opt, x ? [y, x] : [y], { defaultTail: 3 });
+    const { fps, sample, spans, from, to } = await sampleOn(s, ro, opt, x ? [y, x] : [y], { defaultTail: 3 });
     const ys = oneAxis(sample, 0, y), xs = x ? oneAxis(sample, 1, x) : null;
     // the press: --key, else the press that comes last before the height first changes
     const key = get("key");
@@ -256,35 +266,32 @@ async function stateMeasure(what, opt) {
   }
   if (what === "move") {
     const x = get("x") || get("of");
-    if (!x) die('usage: witness measure move --x "state.player.pos[0]" --input "right@1-2"');
-    const { fps, sample, spans, from, to } = await sampleScenario(opt, [x], { defaultTail: 2 });
+    if (!x) fail('usage: witness measure move --x "state.player.pos[0]" --input "right@1-2"');
+    const { fps, sample, spans, from, to } = await sampleOn(s, ro, opt, [x], { defaultTail: 2 });
     const key = get("key");
     const span = spans.find((sp) => sp.f0 >= from && (!key || sp.label === key));
-    if (!span) die(key ? `no "${key}" press in --input` : "measure move needs a held input, e.g. --input \"right@1-2\"");
+    if (!span) fail(key ? `no "${key}" press in --input` : "measure move needs a held input, e.g. --input \"right@1-2\"");
     const mv = analyzeMove(oneAxis(sample, 0, x), { press: span.f0, release: span.f1, fps });
     return reportMove(mv, { x, span, fps, from, to, opt });
   }
   if (what === "hitstop") {
     const paths = splitTop(get("paths") || get("of") || "");
-    if (!paths.length) die('usage: witness measure hitstop --paths "state.player.pos, state.enemy.pos" --input "right@0-2, j@1"');
-    const { fps, sample, spans, from, to } = await sampleScenario(opt, paths, { defaultTail: 1.5 });
+    if (!paths.length) fail('usage: witness measure hitstop --paths "state.player.pos, state.enemy.pos" --input "right@0-2, j@1"');
+    const { fps, sample, spans, from, to } = await sampleOn(s, ro, opt, paths, { defaultTail: 1.5 });
     const fr = frozenSpans(paths.map((_, i) => series(sample, i)));
     return reportHitstop(fr, { paths, spans, fps, from, to, opt });
   }
   // curve
   const of = get("of");
-  if (!of) die('usage: witness measure curve --of "state.camera.pos[0]" [--vs "state.player.pos[0]"] --input "right@1-3"');
+  if (!of) fail('usage: witness measure curve --of "state.camera.pos[0]" [--vs "state.player.pos[0]"] --input "right@1-3"');
   const vs = get("vs");
-  const { fps, sample, spans, from, to } = await sampleScenario(opt, vs ? [of, vs] : [of], { defaultTail: 2 });
+  const { fps, sample, spans, from, to } = await sampleOn(s, ro, opt, vs ? [of, vs] : [of], { defaultTail: 2 });
   const a = oneAxis(sample, 0, of), b = vs ? oneAxis(sample, 1, vs) : null;
   return reportCurve({ of, vs, a, b, fps, from, to, spans, opt });
 }
 
 function reportJump(j, { y, x, press, fps, from, to, opt }) {
-  if (!j.ok) {
-    if (opt.json) { printJSON(envelope("measure jump", { ok: false, verdict: j.reason, data: j })); process.exitCode = 1; return; }
-    die(`no jump found in ${y} over f${from}..f${to}: ${j.reason}`);
-  }
+  if (!j.ok) return { env: envelope("measure jump", { ok: false, verdict: `no jump found in ${y} over f${from}..f${to}: ${j.reason}`, data: j }), text: `✖ no jump found in ${y} over f${from}..f${to}: ${j.reason}` };
   const P = j.press;
   const lines = [];
   lines.push(`jump ${press ? `(${press.label} pressed at f${P})` : `(from f${P}, no press in --input)`}: takeoff +${j.takeoff.after}f · apex ${j.apex.height} px at +${j.apex.after}f (f${j.apex.f}, ${fmtT(j.apex.after / fps)})${j.apex.holds > 1 ? `, held ${j.apex.holds}f` : ""} · hang ${j.hang.frames}f within 10% of the apex`);
@@ -297,37 +304,28 @@ function reportJump(j, { y, x, press, fps, from, to, opt }) {
   }
   if (x) lines.push(`  horizontal distance ${j.distance ?? "-"} px (${x})`);
   lines.push(`  up = ${j.up < 0 ? "-y" : "+y"}${j.upAuto ? " (from the takeoff direction; --up to force)" : ""} · sampled every frame f${from}..f${to} of ${y}`);
-  if (opt.json) {
-    printJSON(envelope("measure jump", {
-      verdict: lines[0],
-      summary: { apexPx: j.apex.height, apexAfter: j.apex.after, takeoffAfter: j.takeoff.after, airtimeFrames: j.airtime?.frames ?? null, airtimeSeconds: j.airtime?.seconds ?? null, hangFrames: j.hang.frames, riseFrames: j.rise.frames, fallFrames: j.fall?.frames ?? null, gravityRise: g.rise, gravityFall: g.fall, distance: j.distance ?? null },
-      data: { ...j, expr: y, x, fps, from, to },
-    }));
-    return;
-  }
-  console.log(lines.join("\n"));
+  const env = envelope("measure jump", {
+    verdict: lines[0],
+    summary: { apexPx: j.apex.height, apexAfter: j.apex.after, takeoffAfter: j.takeoff.after, airtimeFrames: j.airtime?.frames ?? null, airtimeSeconds: j.airtime?.seconds ?? null, hangFrames: j.hang.frames, riseFrames: j.rise.frames, fallFrames: j.fall?.frames ?? null, gravityRise: g.rise, gravityFall: g.fall, distance: j.distance ?? null },
+    data: { ...j, expr: y, x, fps, from, to },
+  });
+  return { env, text: lines.join("\n") };
 }
 
 function reportMove(mv, { x, span, fps, from, to, opt }) {
-  if (!mv.ok) {
-    if (opt.json) { printJSON(envelope("measure move", { ok: false, verdict: mv.reason, data: mv })); process.exitCode = 1; return; }
-    die(`no movement found in ${x}: ${mv.reason}`);
-  }
+  if (!mv.ok) return { env: envelope("measure move", { ok: false, verdict: `no movement found in ${x}: ${mv.reason}`, data: mv }), text: `✖ no movement found in ${x}: ${mv.reason}` };
   const dirWord = mv.dir > 0 ? "+" : "-";
   const lines = [`move (${span.label} held f${span.f0}..f${span.f1 ?? "end"}): top speed ${mv.top.perSecond} px/s (${mv.top.perFrame} px/f, ${dirWord}${x.replace(/^state\./, "")}) reached at +${mv.top.after}f — first moves +${mv.firstMove.after}f, accelerates over ${mv.top.accelFrames}f (${ms(mv.top.accelFrames, fps)})`];
   if (span.f1 != null) {
     if (mv.stop) lines.push(`  after release (f${span.f1}): ${mv.stop.after <= 0 && Math.abs(mv.stop.slide) < 1e-9 ? `stops at once (the release frame f${span.f1} doesn't move)` : `stops at +${mv.stop.after}f (f${mv.stop.f}, ${ms(mv.stop.after, fps)}) · slides ${mv.stop.slide} px`}${mv.stop.overshoot ? ` · overshoots and comes back ${mv.stop.overshoot} px` : " · no overshoot"}`);
     else lines.push(`  after release (f${span.f1}): still moving at the end of the run (f${to}) — add --time`);
   }
-  if (opt.json) {
-    printJSON(envelope("measure move", {
-      verdict: lines[0],
-      summary: { topSpeed: mv.top.perSecond, topSpeedPerFrame: mv.top.perFrame, reachedAfter: mv.top.after, accelFrames: mv.top.accelFrames, firstMoveAfter: mv.firstMove.after, stopAfter: mv.stop?.after ?? null, slide: mv.stop?.slide ?? null, overshoot: mv.stop?.overshoot ?? null },
-      data: { ...mv, expr: x, fps, from, to, input: span },
-    }));
-    return;
-  }
-  console.log(lines.join("\n"));
+  const env = envelope("measure move", {
+    verdict: lines[0],
+    summary: { topSpeed: mv.top.perSecond, topSpeedPerFrame: mv.top.perFrame, reachedAfter: mv.top.after, accelFrames: mv.top.accelFrames, firstMoveAfter: mv.firstMove.after, stopAfter: mv.stop?.after ?? null, slide: mv.stop?.slide ?? null, overshoot: mv.stop?.overshoot ?? null },
+    data: { ...mv, expr: x, fps, from, to, input: span },
+  });
+  return { env, text: lines.join("\n") };
 }
 
 function reportHitstop(fr, { paths, spans, fps, from, to, opt }) {
@@ -338,20 +336,17 @@ function reportHitstop(fr, { paths, spans, fps, from, to, opt }) {
     : `hitstop: no freeze between motion in f${from}..f${to} (${paths.join(", ")} never stop and resume together)`];
   const other = fr.filter((s) => !s.bounded && s.frames >= 2);
   if (other.length) lines.push(`  other still spans (not between motion): ${other.slice(0, 6).map((s) => `f${s.from}–f${s.to}${!s.afterMotion ? " (before moving)" : !s.resumed ? " (never resumed)" : ""}`).join(", ")}`);
-  if (opt.json) {
-    printJSON(envelope("measure hitstop", {
-      verdict: lines[0],
-      summary: { freezes: pauses.length, frames: pauses.map((s) => s.frames), first: pauses[0] ? { from: pauses[0].from, to: pauses[0].to, frames: pauses[0].frames } : null },
-      data: { paths, spans: fr, fps, from, to },
-    }));
-    return;
-  }
-  console.log(lines.join("\n"));
+  const env = envelope("measure hitstop", {
+    verdict: lines[0],
+    summary: { freezes: pauses.length, frames: pauses.map((s) => s.frames), first: pauses[0] ? { from: pauses[0].from, to: pauses[0].to, frames: pauses[0].frames } : null },
+    data: { paths, spans: fr, fps, from, to },
+  });
+  return { env, text: lines.join("\n") };
 }
 
 function reportCurve({ of, vs, a, b, fps, from, to, spans, opt }) {
   const s = summarize(a);
-  if (!s) die(`"${of}" gave no numbers over f${from}..f${to}`);
+  if (!s) fail(`"${of}" gave no numbers over f${from}..f${to}`);
   const fz = frozenSpans([a]).filter((q) => q.frames >= 2);
   const resp = response(a);
   const st = stutters(a);
@@ -370,13 +365,10 @@ function reportCurve({ of, vs, a, b, fps, from, to, spans, opt }) {
     lines.push(`  vs ${vs}: ${lg ? `${lg.lag > 0 ? `lags behind by ${lg.lag}f (${ms(lg.lag, fps)})` : lg.lag < 0 ? `leads by ${-lg.lag}f` : "moves on the same frame"} (step correlation ${lg.r})` : "no lag measurable (one of them barely moves)"}${settleAfter != null ? ` · settles ${settleAfter}f (${ms(Math.max(0, settleAfter), fps)}) after ${vs} stops` : ""}`);
   }
   if (spans.length) lines.push(`  input: ${spans.slice(0, 6).map((sp) => `${sp.label} f${sp.f0}–${sp.f1 ?? "end"}`).join(", ")}`);
-  if (opt.json) {
-    printJSON(envelope("measure curve", {
-      verdict: lines[0],
-      summary: { start: s.start.v, end: s.end.v, min: s.min.v, max: s.max.v, stepMin: s.step?.min.d ?? null, stepMax: s.step?.max.d ?? null, riseFrames: resp?.rise?.frames ?? null, settleFrame: resp?.settle.f ?? null, overshoot: resp?.overshoot.value ?? null, stutters: st.length, lag: lg ? lg.lag : null },
-      data: { expr: of, vs, fps, from, to, summary: s, response: resp, holds: fz, stutters: st, lag: lg, settleAfter },
-    }));
-    return;
-  }
-  console.log(lines.join("\n"));
+  const env = envelope("measure curve", {
+    verdict: lines[0],
+    summary: { start: s.start.v, end: s.end.v, min: s.min.v, max: s.max.v, stepMin: s.step?.min.d ?? null, stepMax: s.step?.max.d ?? null, riseFrames: resp?.rise?.frames ?? null, settleFrame: resp?.settle.f ?? null, overshoot: resp?.overshoot.value ?? null, stutters: st.length, lag: lg ? lg.lag : null },
+    data: { expr: of, vs, fps, from, to, summary: s, response: resp, holds: fz, stutters: st, lag: lg, settleAfter },
+  });
+  return { env, text: lines.join("\n") };
 }

@@ -131,10 +131,12 @@ export async function loadTests(file) {
  *  { name, seed?, scene?, params?, input?: "spec" | [events],
  *    steps: [ { at: seconds | "90f", call?: [name, ...args] | [[...], ...], input?: "spec", expect?: "expr" | [...],
  *               probe?: "expr" | [...], shot?: "file.png", match?: "label" | [...] },
- *             { from, to?, within?, always?: "expr" | [...], never?: ..., eventually?: ... } ] }
+ *             { from, to?, within?, always?: "expr" | [...], never?: ..., eventually?: ... },
+ *             { measure: { jump | move | hitstop | curve | effect | window: { ...CLI options }, expect: "summary expr" } } ] }
  * Within a point step: call → input → expect → probe → shot → match. `prev` there is the previous step's snapshot.
  * Range steps are checked on every frame from `from` to `to` (inclusive), with `prev` = the previous frame:
  * `always` must hold on every frame, `never` on none, `eventually` on at least one (by `from + within` when given).
+ * Measure steps run after the timeline, each from its own reset, and check "expect" against the measure's summary.
  * `match`: the first capture of a label (state, digest, and screenshot/audio when the adapter has them) is the
  * reference; every later capture of that label in the same `witness test` run must equal it exactly.
  * `matcher` + `matchAll`: `witness test --repeat N` matches every step against the same step of pass 1.
@@ -146,7 +148,8 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
   const F = (t) => frameAt(t, fps, state.dts);
   const isRange = (st) => st.always != null || st.never != null || st.eventually != null;
   const all = (test.steps || []).map((st, i) => ({ ...st, _i: i }));
-  const steps = all.filter((st) => !isRange(st)).map((st) => ({ ...st, _f: F(st.at ?? 0) })).sort((a, b) => a._f - b._f);
+  const measures = all.filter((st) => st.measure != null);
+  const steps = all.filter((st) => !isRange(st) && st.measure == null).map((st) => ({ ...st, _f: F(st.at ?? 0) })).sort((a, b) => a._f - b._f);
   const ranges = [];
   for (const st of all.filter(isRange)) {
     const fromF = F(st.from ?? st.at ?? 0);
@@ -158,7 +161,7 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
     for (const kind of ["always", "never", "eventually"]) for (const expr of [].concat(st[kind] ?? [])) asserts.push({ kind, expr, done: false, failed: false, met: null, last: null });
     ranges.push({ st, fromF, toF, deadline: within != null ? Math.min(toF, fromF + within) : toF, ctx: new TimeContext(), asserts, label: `${st.from ?? st.at ?? 0}..${st.to ?? `+${st.within}`}` });
   }
-  if (!steps.length && !ranges.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
+  if (!steps.length && !ranges.length && !measures.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
   const matching = matcher && (matchAll || steps.some((st) => st.match));
   // hello "audio_exact": false — the adapter can only capture audio in real time, so it isn't compared
   const useAudio = matching && matchMedia.audio && session.has("audio") && session.hello?.audio_exact !== false;
@@ -286,6 +289,23 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
     }
   } catch (e) {
     res.failures.push({ kind: "error", message: `at frame ${state.frame}: ${e.message}` });
+  }
+  // measure steps: each runs its own scenario from reset, after the timeline above
+  for (const st of measures) {
+    if (session.closed) break;
+    try {
+      const { runMeasureStep } = await import("../cli/measure-steps.js");
+      const m = await runMeasureStep(session, st.measure, test, shotDir);
+      (res.measures = res.measures || []).push({ kind: m.kind, verdict: m.env.verdict, summary: m.env.summary });
+      if (!m.checks.length) res.failures.push({ kind: "warn", message: `measure ${m.kind}: no "expect", so it checks nothing (${m.env.verdict})` });
+      for (const c of m.checks) {
+        if (c.ok) res.expects.passed++;
+        else { res.expects.failed++; res.failures.push({ kind: "expect", at: `measure ${m.kind}`, expr: c.expr, message: `${c.expr} — ${c.detail}  (${m.env.verdict})` }); }
+      }
+      if (m.env.ok === false && m.checks.every((c) => c.ok)) { res.expects.failed++; res.failures.push({ kind: "expect", at: `measure ${m.kind}`, message: m.env.verdict }); }
+    } catch (e) {
+      res.failures.push({ kind: "error", at: "measure", message: `measure step ${st._i + 1}: ${e.message}` });
+    }
   }
   for (const r of ranges) {
     for (const a of r.asserts) {

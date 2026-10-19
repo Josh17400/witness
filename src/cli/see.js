@@ -4,7 +4,7 @@ import path from "node:path";
 import { begin, stepTo } from "../core/runner.js";
 import { evaluate } from "../core/expr.js";
 import {
-  die, say, withGame, runOpts, media, printLogs, timeList, framesOf, fmtT, shotImage, envelope, printJSON,
+  die, say, withGame, runOpts, media, printLogs, timeList, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
 
 const MAX_CELLS = 48;
@@ -98,13 +98,13 @@ async function singleShots(opt) {
     }
     printLogs(await s.drainLogs());
   });
-  if (opt.json) {
-    printJSON(envelope("shot", {
+  {
+    emit(envelope("shot", {
       verdict: `${results.length} shot${results.length === 1 ? "" : "s"}${results.some((r) => r.diff) ? `; diff ${results.map((r) => r.diff ? `${r.diff.changedPercent}%` : "-").join(", ")}` : ""}`,
       summary: { shots: results.length, frames: results.map((r) => r.frame), ...(results.length === 1 && results[0].diff ? { changedPercent: results[0].diff.changedPercent, regions: results[0].diff.regions.length } : {}) },
       data: { shots: results },
       files: results.flatMap((r) => [r.file, ...(r.diff ? [r.diff.file] : [])]),
-    }));
+    }), null, opt);
   }
 }
 
@@ -161,8 +161,7 @@ async function sheetShots(opt) {
     out = await compose(m, fr, caps, frames, { s, cfg, root, opt, f0, f1, fps, scores, auto });
     printLogs(await s.drainLogs());
   });
-  if (opt.json) { printJSON(out.json); return; }
-  console.log(out.text);
+  emit(out.json, out.text, opt);
 }
 
 async function compose(m, fr, caps, frames, { s, cfg, root, opt, f0, f1, fps, scores, auto }) {

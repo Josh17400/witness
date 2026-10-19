@@ -78,7 +78,7 @@ witness measure scale|box|contrast ...         # pixel facts: integer scale/blur
   holds, `touch2:` = second finger), `swipe:x1,y1->x2,y2@a-b`. Keys are lowercase
   names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `left`, `right`, `up`, `down`, `shift` ….
 * Runs are deterministic: the same command gives the same result, so a failing test is a
-  real bug, not flakiness. `--json` prints `{ok, command, verdict, summary, data, files}` on the new commands.
+  real bug, not flakiness. Every `--json` prints `{ok, command, verdict, summary, data, files}`.
 * **Look at screenshots, sheets and charts** with your image viewer. Judge composition, readability
   and whether the action is framed. For audio, read the `listen` report: which events got their sound
   (✔/✖/⚠ double), pitch movement, length, loudness vs music, and the Problems list.
@@ -99,7 +99,8 @@ witness measure scale|box|contrast ...         # pixel facts: integer scale/blur
         "probe": "state.player.hp", "shot": "after-teleport.png" },
       { "from": 0, "to": 3, "always": "state.player.hp >= 0", "never": "state.player.pos[1] > 400",
         "eventually": "state.score == 1" },
-      { "from": 0.6, "within": "20f", "eventually": "rose(state.player.grounded)" }
+      { "from": 0.6, "within": "20f", "eventually": "rose(state.player.grounded)" },
+      { "measure": { "jump": { "y": "state.player.pos[1]", "input": "space@1" }, "expect": "apexPx between 60 and 70" } }
     ] }
 ]
 ```
@@ -116,6 +117,9 @@ witness measure scale|box|contrast ...         # pixel facts: integer scale/blur
   `approx(a, b, eps)`, `sum(list)`, `frame`, `time`, `prev` (the previous step; the previous frame in ranges, trace
   and eval), `rose(x)`/`fell(x)` (became true/false this frame), `changed(x)`, `since(x)` (frames since x became true).
 * A failure prints both sides: `state.score == 1 — got 0 == 1`. Game error logs fail the test.
+* **Measure steps** keep a number you tuned (jump, move, hitstop, curve, effect, window, with the CLI's option
+  names) as a regression test: each runs its own scenario from reset and `expect` checks its summary. On the CLI the
+  same check is `--expect "apexPx between 60 and 70"` (exit 1 when it fails; field names are in `--json`'s summary).
 * Write a test for **every mechanic you build or fix**, and turn every reproduced bug into a
   test.
 

@@ -4,24 +4,29 @@ import { begin, stepTo } from "../core/runner.js";
 import { check, ExprError, fmt } from "../core/expr.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { splitItems, parseWitnessInput } from "../core/input-spec.js";
-import { die, withGame, runOpts, printLogs, splitTop, framesOf, fmtT, envelope, printJSON } from "./common.js";
+import { WitnessError } from "../core/session.js";
+import { frameAt } from "../core/runner.js";
+import { withGame, runOpts, printLogs, splitTop, fmtT, envelope, emit } from "./common.js";
+
+const fail = (msg) => { throw new WitnessError(msg); };
+const framesAt = (t, fps) => { try { return frameAt(t, fps); } catch (e) { return fail(e.message); } };
 
 const MAX_RUNS = 600;
 
 /** "a..b" -> [a, b] as frames. */
 function parseRange(s, fps) {
   const m = /^\s*([^.]+?)\s*\.\.\s*([^.]+?)\s*$/.exec(String(s));
-  if (!m) die(`--t wants a range like 0.9..1.3 or 50f..80f (got ${s})`);
-  return [framesOf(m[1], fps), framesOf(m[2], fps)];
+  if (!m) fail(`--t wants a range like 0.9..1.3 or 50f..80f (got ${s})`);
+  return [framesAt(m[1], fps), framesAt(m[2], fps)];
 }
 
 /** "{t}+0.4" / "{t}-5f" / "2.5" -> a function of the swept frame. */
 function parseAt(s, fps) {
   const str = String(s).replace(/\s+/g, "");
   const m = /^\{t\}(?:([+-])(.+))?$/.exec(str);
-  if (m) { const off = m[2] ? framesOf(m[2], fps) * (m[1] === "-" ? -1 : 1) : 0; return { rel: true, off, of: (v) => v + off }; }
-  if (str.includes("{t}")) die(`--at is "{t}+offset", "{t}-offset" or a plain time (got ${s})`);
-  const f = framesOf(str, fps);
+  if (m) { const off = m[2] ? framesAt(m[2], fps) * (m[1] === "-" ? -1 : 1) : 0; return { rel: true, off, of: (v) => v + off }; }
+  if (str.includes("{t}")) fail(`--at is "{t}+offset", "{t}-offset" or a plain time (got ${s})`);
+  const f = framesAt(str, fps);
   return { rel: false, off: f, of: () => f };
 }
 
@@ -41,29 +46,42 @@ const sgn = (n) => (n >= 0 ? `+${n}` : `${n}`);
 
 export async function windowCommand(pos, opt) {
   const tpl = opt.input && opt.input !== true ? String(opt.input) : "";
-  if (!tpl.includes("{t}")) die('usage: witness window --input "right@0-2, space@{t}" --t 0.9..1.3 [--step 1f] --expect "expr" --at "{t}+0.4" [--ref "fell(state.player.grounded)"]');
-  if (!opt.expect || opt.expect === true) die('window needs --expect "expr" (what must be true when the input works)');
-  if (!opt.t || opt.t === true) die("window needs --t a..b (the range to sweep, seconds or frames)");
-  const expects = splitTop(String(opt.expect));
+  if (!tpl.includes("{t}")) fail('usage: witness window --input "right@0-2, space@{t}" --t 0.9..1.3 [--step 1f] --expect "expr" --at "{t}+0.4" [--ref "fell(state.player.grounded)"]');
+  if (!opt.expect || opt.expect === true) fail('window needs --expect "expr" (what must be true when the input works)');
+  if (!opt.t || opt.t === true) fail("window needs --t a..b (the range to sweep, seconds or frames)");
   let res;
   await withGame(opt, async (s, cfg) => {
-    if (!s.has("reset")) die("window needs the adapter's 'reset' (one deterministic run per value)");
+    res = await computeWindow(s, opt, runOpts(opt, cfg));
+  });
+  for (const e of res.errorRuns.slice(0, 3)) { console.error(`(run t=f${e.v})`); printLogs(e.logs); }
+  const out = report(res, opt);
+  emit(out.env, out.text, opt, { expectable: false });
+}
+
+/** One run per swept value on an open session (ro: seed/scene/params). Returns the raw result. */
+export async function computeWindow(s, opt, ro) {
+  const tpl = opt.input && opt.input !== true ? String(opt.input) : "";
+  if (!tpl.includes("{t}")) fail("window needs an --input with {t} in it");
+  if (!opt.expect || opt.expect === true) fail("window needs --expect");
+  if (!opt.t || opt.t === true) fail("window needs --t a..b");
+  const expects = splitTop(String(opt.expect));
+  {
+    if (!s.has("reset")) fail("window needs the adapter's 'reset' (one deterministic run per value)");
     const fps = s.fps;
     const [a, b] = parseRange(opt.t, fps);
-    if (b < a) die("--t: the range ends before it starts");
-    const step = Math.max(1, framesOf(opt.step && opt.step !== true ? String(opt.step) : "1f", fps));
+    if (b < a) fail("--t: the range ends before it starts");
+    const step = Math.max(1, framesAt(opt.step && opt.step !== true ? String(opt.step) : "1f", fps));
     const at = parseAt(opt.at && opt.at !== true ? String(opt.at) : "{t}+0.5", fps);
     const values = [];
     for (let v = a; v <= b; v += step) values.push(v);
-    if (values.length > MAX_RUNS) die(`${values.length} runs is too many (max ${MAX_RUNS}): raise --step or narrow --t`);
-    const ro = runOpts(opt, cfg);
+    if (values.length > MAX_RUNS) fail(`${values.length} runs is too many (max ${MAX_RUNS}): raise --step or narrow --t`);
     const inputFor = (v) => tpl.split("{t}").join(`${v}f`);
-    try { parseWitnessInput(inputFor(values[0]), fps); } catch (e) { die(`--input: ${e.message}`); }
+    try { parseWitnessInput(inputFor(values[0]), fps); } catch (e) { fail(`--input: ${e.message}`); }
     const t0 = Date.now();
     const results = [], errorRuns = [];
     for (const v of values) {
       const f = at.of(v);
-      if (f < 0) die(`--at gives frame ${f} for t=f${v}`);
+      if (f < 0) fail(`--at gives frame ${f} for t=f${v}`);
       const st = await begin(s, { ...ro, input: inputFor(v) });
       await stepTo(s, st, f);
       const snap = await s.snapshot();
@@ -85,16 +103,14 @@ export async function windowCommand(pos, opt) {
       const endF = Math.max(b, ...results.map((r) => r.at)) + fps;
       const st = await begin(s, { ...ro, input: base || undefined });
       const sample = await sampleExprs(s, st, [String(opt.ref)], frameGrid(0, endF, 1));
-      if (sample.errors[0]) die(`--ref: ${sample.errors[0].message}`);
+      if (sample.errors[0]) fail(`--ref: ${sample.errors[0].message}`);
       const vals = sample.values[0];
       const k = vals.findIndex((v, i) => i > 0 && !!v && !vals[i - 1]);   // the first frame it becomes true
       ref = { expr: String(opt.ref), base, seen: k < 0 ? null : sample.frames[k], step: k < 0 ? null : sample.frames[k] - 1 };
     }
     await s.drainLogs();
-    for (const e of errorRuns.slice(0, 3)) { console.error(`(run t=f${e.v})`); printLogs(e.logs); }
-    res = { fps, a, b, step, at, values, results, elapsed, ref, tpl, expects };
-  });
-  report(res, opt);
+    return { fps, a, b, step, at, values, results, elapsed, ref, tpl, expects, errorRuns };
+  }
 }
 
 function report(r, opt) {
@@ -130,13 +146,11 @@ function report(r, opt) {
   if (firstFail) lines.push(`  ${firstFail === results[0] ? "first" : "first failing"} run (t=f${firstFail.v}): ${firstFail.detail}`);
   const wobble = wins.length > 1 ? `  ⚠ ${wins.length} separate windows: the input works, stops working, then works again` : "";
   if (wobble) lines.push(wobble);
-  if (opt.json) {
-    printJSON(envelope("window", {
+  const env = envelope("window", {
       verdict: lines[1].trim(),
       summary: { runs: results.length, windows: wins.map((w) => [w.from, w.to]), passing: results.filter((x) => x.ok).length, first: wins[0]?.from ?? null, last: wins.length ? wins[wins.length - 1].to : null, ref: ref ? ref.step : null, relative: rel ? rel.map((q) => [q.from, q.to]) : null },
       data: { input: r.tpl, expect: r.expects, at: atText, fps, step: r.step, results: results.map(({ v, at, ok, detail }) => ({ t: v, at, ok, detail })), ref },
-    }));
-    return;
-  }
-  console.log(lines.join("\n"));
+  });
+  return { env, text: lines.join("\n") };
 }
+export { report as reportWindow };

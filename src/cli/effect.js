@@ -7,7 +7,11 @@ import { begin, stepTo } from "../core/runner.js";
 import { diffStates, pathFilter } from "../core/compare.js";
 import { fmt } from "../core/expr.js";
 import { parseWitnessInput } from "../core/input-spec.js";
-import { die, withGame, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, printJSON } from "./common.js";
+import { WitnessError } from "../core/session.js";
+import { frameAt } from "../core/runner.js";
+import { die, withGame, runOpts, media, printLogs, splitTop, fmtT, shotImage, envelope, emit } from "./common.js";
+
+const fail = (msg) => { throw new WitnessError(msg); };
 
 const MAX_PIXEL_FRAMES = 120;
 const msOf = (f, fps) => Math.round((f * 1000) / fps);
@@ -24,89 +28,97 @@ export async function effectCommand(pos, opt) {
   if (!opt.input || opt.input === true) die('usage: witness effect --input "space@1" [--base "right@0-3"] [--time 0.5] [--paths "player"] [--shot]');
   let res;
   await withGame(opt, async (s, cfg, root) => {
-    const fps = s.fps;
-    const ro = runOpts(opt, cfg);
-    const cause = String(opt.input), base = opt.base && opt.base !== true ? String(opt.base) : "";
-    let causeEvents;
-    try { causeEvents = parseWitnessInput(cause, fps); parseWitnessInput(base, fps); } catch (e) { die(e.message); }
-    if (!causeEvents.length) die("--input has no events");
-    if (!s.has("reset")) die("effect needs the adapter's 'reset' (it runs the same seed twice in one process)");
-    const fIn = Math.min(...causeEvents.map((e) => e.frame));
-    const W = Math.max(1, framesOf(opt.time && opt.time !== true ? String(opt.time) : "0.5", fps));
-    const fEnd = fIn + W;
-    const usePixels = !opt["no-pixels"] && s.has("screenshot");
-    const useAudio = !opt["no-audio"] && s.has("audio") && s.hello?.audio_exact !== false;
-    const pixelEnd = fIn + Math.min(W, MAX_PIXEL_FRAMES);
-    // --paths "player, camera.pos": only state paths at or under these count
-    const keep = opt.paths && opt.paths !== true ? pathFilter(splitTop(String(opt.paths))) : null;
-    const skip = keep ? (p) => !keep(p) : null;
-    const m = usePixels || useAudio ? await media() : null;
-    const firstLabel = causeEvents[0].type === "key" ? causeEvents[0].key : causeEvents[0].type === "action" ? `action ${causeEvents[0].action}` : causeEvents[0].type;
-
-    // one run: snapshots f_in..f_end, screenshots f_in..pixelEnd, audio since reset
-    const run = async (input) => {
-      const st = await begin(s, { ...ro, input: input || undefined });
-      if (useAudio) await s.audio();
-      const snaps = new Map(), shots = new Map();
-      for (let f = fIn; f <= fEnd; f++) {
-        await stepTo(s, st, f);
-        snaps.set(f, await s.snapshot());
-        if (usePixels && f <= pixelEnd) { const im = await shotImage(await s.screenshot()); shots.set(f, { width: im.width, height: im.height, data: Uint8Array.from(im.data) }); }
-      }
-      let audio = null;
-      if (useAudio) { const a = await s.audio(); if (a && a.data) audio = m.decodePCM(a); }
-      return { snaps, shots, audio };
-    };
-    const twin = await run(base);
-    const withIn = await run([base, cause].filter(Boolean).join(", "));
-    const logs = await s.drainLogs();
-
-    // state
-    const stateDiffAt = (f) => diffStates(twin.snaps.get(f)?.state ?? null, withIn.snaps.get(f)?.state ?? null).filter((d) => !skip || !skip(d.path));
-    const pre = stateDiffAt(fIn);
-    let stateF = null, stateChanges = [];
-    for (let f = fIn + 1; f <= fEnd; f++) { const d = stateDiffAt(f); if (d.length) { stateF = f; stateChanges = d; break; } }
-    const endState = stateDiffAt(fEnd);
-    // pixels
-    let pixF = null, pixDiff = null, prePix = false, endPix = null;
-    if (usePixels) {
-      const same = (a, b) => a.width === b.width && a.height === b.height && Buffer.compare(Buffer.from(a.data.buffer, a.data.byteOffset, a.data.length), Buffer.from(b.data.buffer, b.data.byteOffset, b.data.length)) === 0;
-      prePix = !same(twin.shots.get(fIn), withIn.shots.get(fIn));
-      for (let f = fIn + 1; f <= pixelEnd; f++) if (!same(twin.shots.get(f), withIn.shots.get(f))) { pixF = f; break; }
-      if (pixF != null) pixDiff = m.diffImages(twin.shots.get(pixF), withIn.shots.get(pixF), { threshold: 0 });
-      endPix = m.diffImages(twin.shots.get(pixelEnd), withIn.shots.get(pixelEnd), { threshold: 0 });
-    }
-    // audio: the first sample that differs, and what the difference sounds like
-    let audioF = null, audioT = null, audioDesc = null, extraSounds = 0, preAudio = false;
-    if (useAudio && twin.audio && withIn.audio) {
-      const sr = twin.audio.sampleRate, spf = sr / fps;
-      const A = m.mono(withIn.audio.channels), B = m.mono(twin.audio.channels);
-      const i = firstAudioDiff(A, B);
-      if (i >= 0) {
-        audioF = Math.floor(i / spf + 1e-9) + 1;
-        audioT = i / sr;
-        if (audioF <= fIn) preAudio = true;
-        const n = Math.max(A.length, B.length), d = new Float32Array(n);
-        for (let k = 0; k < n; k++) d[k] = (A[k] || 0) - (B[k] || 0);
-        const seg = d.subarray(i, Math.min(n, i + Math.round(sr * 1.0)));
-        try { const a = m.analyzeEvent([seg], sr); if (!a.silent) audioDesc = m.describeEvent(a); } catch { /* best effort */ }
-        try { extraSounds = m.detectOnsets(d.subarray(Math.round(fIn * spf)), sr).length; } catch { extraSounds = 0; }
-      }
-    }
-    // a filmstrip: with the input over the twin, around the first visible change
-    let sheetFile = null;
-    if (opt.shot && usePixels) {
-      const start = Math.max(fIn, (pixF ?? fIn + 1) - 2), frames = [];
-      for (let f = start; f <= Math.min(pixelEnd, start + 7); f++) frames.push(f);
-      const cells = [...frames.map((f) => ({ img: withIn.shots.get(f), label: `with f${f} +${f - fIn}f` })), ...frames.map((f) => ({ img: twin.shots.get(f), label: `without f${f}`, color: "#8b93b8" }))];
-      const sheet = m.contactSheet(cells, { cols: frames.length, title: `${s.hello.name}: ${cause} (top) vs the same run without it (bottom)`, subtitle: `frames f${frames[0]}..f${frames[frames.length - 1]}; the input is at f${fIn}` });
-      sheetFile = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, "effect.png"));
-      fs.mkdirSync(path.dirname(sheetFile), { recursive: true });
-      fs.writeFileSync(sheetFile, sheet.png);
-    }
-    res = { fps, fIn, fEnd, W, pixelEnd, cause, base, firstLabel, usePixels, useAudio, pre, prePix, preAudio, stateF, stateChanges, endState, pixF, pixDiff, endPix, audioF, audioT, audioDesc, extraSounds, sheetFile, logs };
+    res = await computeEffect(s, opt, runOpts(opt, cfg), path.join(root, cfg.shots));
   });
-  report(res, opt);
+  if (res.logs.some((l) => l.level === "error")) printLogs(res.logs.filter((l) => l.level === "error"));
+  const out = report(res, opt);
+  emit(out.env, out.text, opt);
+}
+
+/** The effect of opt.input on an open session (twin runs from reset with ro's seed/scene/params). Returns the raw result. */
+export async function computeEffect(s, opt, ro, shotDir) {
+  const F = (t) => { try { return frameAt(t, s.fps); } catch (e) { return fail(e.message); } };
+  if (!opt.input || opt.input === true) fail("effect needs --input (the cause)");
+  const fps = s.fps;
+  const cause = String(opt.input), base = opt.base && opt.base !== true ? String(opt.base) : "";
+  let causeEvents;
+  try { causeEvents = parseWitnessInput(cause, fps); parseWitnessInput(base, fps); } catch (e) { fail(e.message); }
+  if (!causeEvents.length) fail("--input has no events");
+  if (!s.has("reset")) fail("effect needs the adapter's 'reset' (it runs the same seed twice in one process)");
+  const fIn = Math.min(...causeEvents.map((e) => e.frame));
+  const W = Math.max(1, F(opt.time && opt.time !== true ? String(opt.time) : "0.5", fps));
+  const fEnd = fIn + W;
+  const usePixels = !opt["no-pixels"] && s.has("screenshot");
+  const useAudio = !opt["no-audio"] && s.has("audio") && s.hello?.audio_exact !== false;
+  const pixelEnd = fIn + Math.min(W, MAX_PIXEL_FRAMES);
+  // --paths "player, camera.pos": only state paths at or under these count
+  const keep = opt.paths && opt.paths !== true ? pathFilter(splitTop(String(opt.paths))) : null;
+  const skip = keep ? (p) => !keep(p) : null;
+  const m = usePixels || useAudio ? await media() : null;
+  const firstLabel = causeEvents[0].type === "key" ? causeEvents[0].key : causeEvents[0].type === "action" ? `action ${causeEvents[0].action}` : causeEvents[0].type;
+
+  // one run: snapshots f_in..f_end, screenshots f_in..pixelEnd, audio since reset
+  const run = async (input) => {
+    const st = await begin(s, { ...ro, input: input || undefined });
+    if (useAudio) await s.audio();
+    const snaps = new Map(), shots = new Map();
+    for (let f = fIn; f <= fEnd; f++) {
+      await stepTo(s, st, f);
+      snaps.set(f, await s.snapshot());
+      if (usePixels && f <= pixelEnd) { const im = await shotImage(await s.screenshot()); shots.set(f, { width: im.width, height: im.height, data: Uint8Array.from(im.data) }); }
+    }
+    let audio = null;
+    if (useAudio) { const a = await s.audio(); if (a && a.data) audio = m.decodePCM(a); }
+    return { snaps, shots, audio };
+  };
+  const twin = await run(base);
+  const withIn = await run([base, cause].filter(Boolean).join(", "));
+  const logs = await s.drainLogs();
+
+  // state
+  const stateDiffAt = (f) => diffStates(twin.snaps.get(f)?.state ?? null, withIn.snaps.get(f)?.state ?? null).filter((d) => !skip || !skip(d.path));
+  const pre = stateDiffAt(fIn);
+  let stateF = null, stateChanges = [];
+  for (let f = fIn + 1; f <= fEnd; f++) { const d = stateDiffAt(f); if (d.length) { stateF = f; stateChanges = d; break; } }
+  const endState = stateDiffAt(fEnd);
+  // pixels
+  let pixF = null, pixDiff = null, prePix = false, endPix = null;
+  if (usePixels) {
+    const same = (a, b) => a.width === b.width && a.height === b.height && Buffer.compare(Buffer.from(a.data.buffer, a.data.byteOffset, a.data.length), Buffer.from(b.data.buffer, b.data.byteOffset, b.data.length)) === 0;
+    prePix = !same(twin.shots.get(fIn), withIn.shots.get(fIn));
+    for (let f = fIn + 1; f <= pixelEnd; f++) if (!same(twin.shots.get(f), withIn.shots.get(f))) { pixF = f; break; }
+    if (pixF != null) pixDiff = m.diffImages(twin.shots.get(pixF), withIn.shots.get(pixF), { threshold: 0 });
+    endPix = m.diffImages(twin.shots.get(pixelEnd), withIn.shots.get(pixelEnd), { threshold: 0 });
+  }
+  // audio: the first sample that differs, and what the difference sounds like
+  let audioF = null, audioT = null, audioDesc = null, extraSounds = 0, preAudio = false;
+  if (useAudio && twin.audio && withIn.audio) {
+    const sr = twin.audio.sampleRate, spf = sr / fps;
+    const A = m.mono(withIn.audio.channels), B = m.mono(twin.audio.channels);
+    const i = firstAudioDiff(A, B);
+    if (i >= 0) {
+      audioF = Math.floor(i / spf + 1e-9) + 1;
+      audioT = i / sr;
+      if (audioF <= fIn) preAudio = true;
+      const n = Math.max(A.length, B.length), d = new Float32Array(n);
+      for (let k = 0; k < n; k++) d[k] = (A[k] || 0) - (B[k] || 0);
+      const seg = d.subarray(i, Math.min(n, i + Math.round(sr * 1.0)));
+      try { const a = m.analyzeEvent([seg], sr); if (!a.silent) audioDesc = m.describeEvent(a); } catch { /* best effort */ }
+      try { extraSounds = m.detectOnsets(d.subarray(Math.round(fIn * spf)), sr).length; } catch { extraSounds = 0; }
+    }
+  }
+  // a filmstrip: with the input over the twin, around the first visible change
+  let sheetFile = null;
+  if (opt.shot && usePixels) {
+    const start = Math.max(fIn, (pixF ?? fIn + 1) - 2), frames = [];
+    for (let f = start; f <= Math.min(pixelEnd, start + 7); f++) frames.push(f);
+    const cells = [...frames.map((f) => ({ img: withIn.shots.get(f), label: `with f${f} +${f - fIn}f` })), ...frames.map((f) => ({ img: twin.shots.get(f), label: `without f${f}`, color: "#8b93b8" }))];
+    const sheet = m.contactSheet(cells, { cols: frames.length, title: `${s.hello.name}: ${cause} (top) vs the same run without it (bottom)`, subtitle: `frames f${frames[0]}..f${frames[frames.length - 1]}; the input is at f${fIn}` });
+    sheetFile = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(shotDir, "effect.png"));
+    fs.mkdirSync(path.dirname(sheetFile), { recursive: true });
+    fs.writeFileSync(sheetFile, sheet.png);
+  }
+  return { fps, fIn, fEnd, W, pixelEnd, cause, base, firstLabel, usePixels, useAudio, pre, prePix, preAudio, stateF, stateChanges, endState, pixF, pixDiff, endPix, audioF, audioT, audioDesc, extraSounds, sheetFile, logs };
 }
 
 function report(r, opt) {
@@ -156,8 +168,7 @@ function report(r, opt) {
   }
   lines.push(`  verdict: ${verdict}`);
   if (r.sheetFile) lines.push(`  filmstrip → ${r.sheetFile} (top: with the input, bottom: without; view it with your image tool)`);
-  if (opt.json) {
-    printJSON(envelope("effect", {
+  const env = envelope("effect", {
       verdict,
       summary: {
         inputFrame: fIn, stateFrame: r.stateF, stateAfter: r.stateF == null ? null : r.stateF - fIn,
@@ -169,10 +180,7 @@ function report(r, opt) {
         pixelRegions: r.pixDiff ? r.pixDiff.boxes.map(({ x, y, w, h, pixels }) => ({ x, y, w, h, pixels })) : [], audio: r.audioF == null ? null : { frame: r.audioF, t: r.audioT, description: r.audioDesc, onsets: r.extraSounds },
       },
       files: r.sheetFile ? [r.sheetFile] : [],
-    }));
-    if (r.logs.length) printLogs(r.logs);
-    return;
-  }
-  if (r.logs.some((l) => l.level === "error")) printLogs(r.logs.filter((l) => l.level === "error"));
-  console.log(lines.join("\n"));
+  });
+  return { env, text: lines.join("\n") };
 }
+export { report as reportEffect };

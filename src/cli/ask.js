@@ -10,7 +10,7 @@ import { summarize, changes, spans, steps as perFrame } from "../core/signal.js"
 import { parseWitnessInput } from "../core/input-spec.js";
 import {
   CLI, die, say, withGame, runOpts, media, printLogs, summarizeState, splitTop, timeList, framesOf, fmtT, fmtF,
-  envelope, printJSON, compactSeriesJSON, resolveReplay,
+  envelope, printJSON, compactSeriesJSON, resolveReplay, emit,
 } from "./common.js";
 
 // ------------------------------------------------------------------ helpers shared with listen/measure
@@ -152,7 +152,14 @@ export async function evalCommand(pos, opt) {
     const errs = printLogs(await s.drainLogs());
     if (errs && !opt.json) console.log("(the game logged errors — values may be affected)");
   });
-  if (opt.json) console.log(JSON.stringify(out, null, 1));
+  if (opt.json) {
+    const last = out[out.length - 1];
+    printJSON(envelope("eval", {
+      verdict: last ? Object.entries(last.values).map(([k, v]) => `${k} = ${fmt(v, 40)}`).join(" · ") : "",
+      summary: last ? last.values : {},
+      data: { rows: out },
+    }));
+  }
 }
 
 /** eval --when "cond, cond2" [--time 5]: the frames where each condition holds (sampled every frame). */
@@ -182,15 +189,11 @@ async function evalWhen(pos, opt) {
     }
     result = { items, lines, endF, fps, every };
   });
-  if (opt.json) {
-    printJSON(envelope("eval --when", {
-      verdict: result.lines.filter((l) => !l.startsWith("✖")).join(" | "),
-      summary: Object.fromEntries(result.items.map((it) => [it.expr, { first: it.first, firstT: it.firstT, spans: it.spans.length }])),
-      data: { frames: [0, result.endF], every: result.every, fps: result.fps, conditions: result.items },
-    }));
-    return;
-  }
-  console.log(result.lines.join("\n"));
+  emit(envelope("eval --when", {
+    verdict: result.lines.filter((l) => !l.startsWith("✖")).join(" | "),
+    summary: Object.fromEntries(result.items.map((it) => [it.expr, { first: it.first, firstT: it.firstT, spans: it.spans.length }])),
+    data: { frames: [0, result.endF], every: result.every, fps: result.fps, conditions: result.items },
+  }), result.lines.join("\n"), opt, { expectable: false });
 }
 
 /** eval --diff 1,3: what changed in the state between two moments (entities matched by id). */
@@ -215,11 +218,11 @@ async function evalDiff(pos, opt) {
   const short = (v) => (v === undefined ? "(none)" : fmt(v, 50));
   const label = (x) => (x.kind === "added" ? `${x.path}: added ${short(x.b)}` : x.kind === "removed" ? `${x.path}: removed (was ${short(x.a)})` : `${x.path}: ${short(x.a)} → ${short(x.b)}`);
   if (opt.json) {
-    printJSON(envelope("eval --diff", {
+    emit(envelope("eval --diff", {
       verdict: `${d.length} path${d.length === 1 ? "" : "s"} changed between frames ${fa} and ${fb}`,
       summary: { changed: d.length, added: d.filter((x) => x.kind === "added").length, removed: d.filter((x) => x.kind === "removed").length },
       data: { from: { frame: fa, t: tr(fa / fps) }, to: { frame: fb, t: tr(fb / fps) }, changes: d },
-    }));
+    }), null, opt, { expectable: false });
     return;
   }
   console.log(`between t=${fmtT(fa / fps)} and t=${fmtT(fb / fps)} (frames ${fa}→${fb}), ${d.length >= 500 ? "500+" : d.length} path${d.length === 1 ? "" : "s"} changed${d.length ? ":" : " (identical state)"}`);
@@ -263,8 +266,15 @@ export async function traceCommand(pos, opt) {
   });
   const { fps, endF, every, sample, evs, chart } = res;
   if (opt.json) {
-    // compact: one [t, value, frame] sample per line
-    console.log(compactSeriesJSON(Object.fromEntries(exprs.map((x, i) => [x, sample.frames.map((f, k) => [tr(sample.times[k]), sample.values[i][k], f])]))));
+    // the envelope, with each series compact: one [t, value, frame] sample per line
+    const seriesObj = Object.fromEntries(exprs.map((x, i) => [x, sample.frames.map((f, k) => [tr(sample.times[k]), sample.values[i][k], f])]));
+    const summary = Object.fromEntries(exprs.map((x, i) => {
+      const sm = summarize(sample.frames.map((f, k) => ({ f, v: sample.values[i][k] })));
+      return [x, sm ? { start: sm.start.v, end: sm.end.v, min: sm.min.v, minFrame: sm.min.f, max: sm.max.v, maxFrame: sm.max.f } : { error: sample.errors[i] ? sample.errors[i].message : null }];
+    }));
+    const env = envelope("trace", { verdict: `${sample.frames.length} samples, f0..f${endF}`, summary, data: { fps, every, events: evs, errors: errorLines(exprs, sample), series: "__SERIES__" }, files: chart ? [chart] : [] });
+    const text = JSON.stringify(env, null, 1).replace('"__SERIES__"', compactSeriesJSON(seriesObj).split("\n").map((l, j) => (j ? `  ${l}` : l)).join("\n"));
+    console.log(text);
     for (const l of errorLines(exprs, sample)) console.error(l);
     return;
   }

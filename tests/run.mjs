@@ -236,16 +236,16 @@ ok("e2e failing test fails with both sides", r.status === 1 && /got 0 == 99/.tes
 r = cli(["test", path.join(here, "mock", "prev.witness.json")]);
 ok("e2e prev is the previous step's snapshot", r.status === 0 && /1 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
 r = cli(["eval", "--at", "0.6", "--input", "right@0-0.5", "state.score", "--json"]);
-ok("e2e eval json", r.status === 0 && JSON.parse(r.stdout)[0].values["state.score"] === 1, r.stdout + r.stderr);
+ok("e2e eval json", r.status === 0 && JSON.parse(r.stdout).data.rows[0].values["state.score"] === 1 && JSON.parse(r.stdout).command === "eval", r.stdout + r.stderr);
 r = cli(["call", "teleport", "50", "60"]);
 ok("e2e call", r.status === 0 && /\[50,60\]/.test(r.stdout), r.stdout + r.stderr);
 r = cli(["replay", path.join(here, "mock", "session.jsonl"), "--watch", "state.player.pos[0]"]);
 ok("e2e replay", r.status === 0 && /pos\[0\] = 120\.4/.test(r.stdout), r.stdout + r.stderr);
 // touch: finger 0 drives the mock's pointer like the mouse (drag-to-move), other fingers are counted
 r = cli(["eval", "--at", "0.6", "--input", "swipe:40,90->100,90@0-0.5", "state.player.pos[0]", "state.score", "state.pointer.down", "--json"]);
-ok("e2e swipe drags the player", r.status === 0 && (() => { const v = JSON.parse(r.stdout)[0].values; return Math.abs(v["state.player.pos[0]"] - 100) < 1e-6 && v["state.score"] === 1 && v["state.pointer.down"] === false; })(), r.stdout + r.stderr);
+ok("e2e swipe drags the player", r.status === 0 && (() => { const v = JSON.parse(r.stdout).data.rows[0].values; return Math.abs(v["state.player.pos[0]"] - 100) < 1e-6 && v["state.score"] === 1 && v["state.pointer.down"] === false; })(), r.stdout + r.stderr);
 r = cli(["eval", "--at", "0.3,0.6", "--input", "touch:10,10@0-1, touch2:20,20@0.2-0.5", "state.touches", "--json"]);
-ok("e2e multi-touch fingers", r.status === 0 && (() => { const j = JSON.parse(r.stdout); return j[0].values["state.touches"] === 2 && j[1].values["state.touches"] === 1; })(), r.stdout + r.stderr);
+ok("e2e multi-touch fingers", r.status === 0 && (() => { const j = JSON.parse(r.stdout).data.rows; return j[0].values["state.touches"] === 2 && j[1].values["state.touches"] === 1; })(), r.stdout + r.stderr);
 r = cli(["replay", path.join(here, "mock", "touch-session.jsonl"), "--watch", "state.player.pos[0], state.player.pos[1], state.touches"]);
 ok("e2e replay with touch events", r.status === 0 && /pos\[0\] = 100\b/.test(r.stdout) && /pos\[1\] = 60\b/.test(r.stdout) && /state\.touches = 0/.test(r.stdout), r.stdout + r.stderr);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "witness-e2e-"));
@@ -289,14 +289,14 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   ok("trace B2: prev is the previous frame (velocity 2 px/f from f1)", /prev\.player\.pos\[0\]: 2 \(constant over f1\.\.f60\)/.test(r.stdout), r.stdout);
   ok("trace B9: every frame by default", /61 samples, f0\.\.f60 \(1s\), every frame/.test(r.stdout), r.stdout);
   r = cli(["trace", "--watch", "state.player.pos[0]", "--time", "0.5", "--every", "3f", "--input", "right@0-1", "--json"]);
-  const tj = J(r), series = tj && tj["state.player.pos[0]"];
-  ok("trace --every 3f: frame-aligned samples, [t, value, frame] one per line", series && series.length === 11 && series.every((p, i) => p[2] === i * 3 && p[1] === 40 + 6 * i && Math.abs(p[0] - (i * 3) / 60) < 1e-9) && r.stdout.split("\n").filter((l) => /^ {2}\[/.test(l)).length === 11, r.stdout.slice(0, 300));
+  const tj = J(r), series = tj && tj.data.series["state.player.pos[0]"];
+  ok("trace --every 3f: frame-aligned samples, [t, value, frame] one per line", series && series.length === 11 && series.every((p, i) => p[2] === i * 3 && p[1] === 40 + 6 * i && Math.abs(p[0] - (i * 3) / 60) < 1e-9) && r.stdout.split("\n").filter((l) => /^\s+\[[\d.]+,/.test(l)).length === 11, r.stdout.slice(0, 300));
   r = cli(["trace", "--watch", "state.player.pos, state.score", "--time", "1", "--input", "right@0-1", "--events", "coin: changed(state.score)", "--out", path.join(work, "tr.png")]);
   ok("trace: vectors per axis, state events listed, chart written", r.status === 0 && /pos\.x: 40 → 160/.test(r.stdout) && /pos\.y: 90 \(constant/.test(r.stdout) && /events: coin @f15, coin @f37, coin @f55/.test(r.stdout) && fs.existsSync(path.join(work, "tr.png")), r.stdout + r.stderr);
 
   // eval: frames, prev, --keys, --summary, --when, --diff
   r = cli(["eval", "--at", "30f", "--input", "right@0-30f", "state.player.pos[0]", "state.player.pos[0] - prev.player.pos[0]", "--json"]);
-  ok("eval: --at 30f with a frame-timed input, and prev", (() => { const j = J(r); return j && j[0].frame === 30 && j[0].values["state.player.pos[0]"] === 100 && j[0].values["state.player.pos[0] - prev.player.pos[0]"] === 2; })(), r.stdout + r.stderr);
+  ok("eval: --at 30f with a frame-timed input, and prev", (() => { const j = J(r)?.data.rows; return j && j[0].frame === 30 && j[0].values["state.player.pos[0]"] === 100 && j[0].values["state.player.pos[0] - prev.player.pos[0]"] === 2; })(), r.stdout + r.stderr);
   r = cli(["eval", "--keys", "--input", "right@0-1"]);
   ok("eval --keys: inline vectors, live marks, entity groups", r.status === 0 && /~state\.player\.pos = \[160,90\]/.test(r.stdout) && / state\.player\.hp = 3/.test(r.stdout) && /state\.entities {2}\[3\]: Player ×1, Coin ×2/.test(r.stdout) && /Coin ×2: id ∈ 13\.\.14, pos \[2\]/.test(r.stdout), r.stdout + r.stderr);
   r = cli(["eval", "--summary", "--at", "1", "--input", "right@0-1"]);
@@ -383,9 +383,23 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
     r = cli(["listen", "--time", "4", "--input", "j@1, j@2, j@2.5, space@3", "--events", "land: rose(state.player.grounded)", "--out", work, "--json"], { MOCK_JUMP: "1", MOCK_SOUNDS: mode });
     const j = J(r);
     const m = j ? Object.fromEntries(j.data.matches.map((x) => [`${x.event}@${x.frame}`, x])) : {};
-    ok(`listen (${mode === "1" ? "with" : "without"} sound events): press → +1f, the eaten press, land → +0f`, j && m["j pressed@60"]?.offset === 1 && m["j pressed@120"]?.sound === null && m["j pressed@150"]?.offset === 1 && m["land@216"]?.offset === 0 && m["space pressed@180"]?.sound === null && j.summary.missing === 2 && j.ok === false, r.stdout.slice(0, 600) + r.stderr);
+    ok(`listen (${mode === "1" ? "with" : "without"} sound events): press → +1f, the eaten press, land → +0f`, j && m["j pressed@60"]?.offset === 1 && m["j pressed@120"]?.sound === null && m["j pressed@150"]?.offset === 1 && m["land@216"]?.offset === 0 && m["space pressed@180"]?.sound === null && j.summary.missing === 2 && j.ok === true, r.stdout.slice(0, 600) + r.stderr);
     if (mode === "1") ok("listen: sounds named by the game", j && j.data.matches.find((x) => x.frame === 60)?.sound === "swing" && j.data.soundEvents.length === 3 && j.data.soundEvents.every((x) => x.heard));
   }
+  // measurements as regression tests: measure steps in a test file, and --expect on the command line
+  r = cli(["test", path.join(here, "mock", "measure.witness.json")], { MOCK_JUMP: "1" });
+  ok("test measure steps: jump/move/effect/window checks pass; a regressed apex fails with its value", r.status === 1 && /✔ pass {2}the jump keeps its feel {2}\(6 expects passed\)/.test(r.stdout) && /expect failed at measure jump: apexPx >= 80 — got 64\.8 >= 80/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["measure", "jump", "--y", "state.player.pos[1]", "--input", "space@1", "--expect", "airtimeFrames between 34f and 38f"], { MOCK_JUMP: "1" });
+  ok("--expect passes: exit 0 and the value", r.status === 0 && /✔ expect airtimeFrames between 34f and 38f: got 36 \(want 34\.\.38\)/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["measure", "jump", "--y", "state.player.pos[1]", "--input", "space@1", "--expect", "apexPx >= 80", "--json"], { MOCK_JUMP: "1" });
+  ok("--expect fails: exit 1, ok false, the value in the envelope", r.status === 1 && (() => { const j = J(r); return j && j.ok === false && j.expect.ok === false && j.expect.detail === "got 64.8 >= 80"; })(), r.stdout + r.stderr);
+  r = cli(["measure", "jump", "--y", "state.player.pos[1]", "--input", "space@1", "--expect", "hangtime > 3"], { MOCK_JUMP: "1" });
+  ok("--expect with a wrong field name lists the fields", r.status === 1 && /"hangtime" is not in this result \(fields: apexPx,/.test(r.stdout), r.stdout);
+  r = cli(["test", path.join(root, "examples", "coins.witness.json"), "--json"]);
+  ok("one envelope: test --json", (() => { const j = J(r); return j && j.command === "test" && j.ok === true && j.summary.passed === 5 && Array.isArray(j.data.results); })(), r.stdout.slice(0, 300));
+  r = cli(["doctor", "--json"]);
+  ok("one envelope: doctor --json", (() => { const j = J(r); return j && j.command === "doctor" && j.ok === true && j.summary.deterministic === true; })(), r.stdout.slice(0, 300));
+
   // window: timing sweeps find the planted coyote time (5 frames) and jump buffer (4 frames) exactly
   r = cli(["window", "--input", "right@0-3, space@{t}", "--t", "40f..70f", "--expect", "state.player.jumps == 1", "--at", "{t}+2f", "--ref", "fell(state.player.grounded)", "--json"], { MOCK_JUMP: "1", MOCK_LEDGE: "1" });
   ok("window: coyote time = 5 frames after the ledge (+0f..+4f), one run per value", (() => { const j = J(r); return j && j.summary.runs === 31 && j.summary.windows.length === 1 && j.summary.ref === 55 && j.summary.relative[0][1] === 4 && j.summary.windows[0][0] === 40; })(), r.stdout.slice(0, 400) + r.stderr);
@@ -402,7 +416,7 @@ r = cli(["replay", path.join(tmp, "s.jsonl")]);
 ok("e2e replay end state mismatch reported", r.status === 1 && /end state differs/.test(r.stdout) && /state\.player\.pos\[0\]/.test(r.stdout), r.stdout + r.stderr);
 r = cli(["trace", "--replay", path.join(tmp, "s.jsonl"), "--watch", "state", "--time", String(rp.duration), "--every", String(rp.duration), "--json"]);
 try {
-  const series = JSON.parse(r.stdout).state;
+  const series = JSON.parse(r.stdout).data.series.state;
   fs.writeFileSync(path.join(tmp, "s.jsonl.state.json"), JSON.stringify(series[series.length - 1][1]));
   r = cli(["replay", path.join(tmp, "s.jsonl")]);
   ok("e2e replay end state match", r.status === 0 && /ended in exactly the recorded end state/.test(r.stdout), r.stdout + r.stderr);

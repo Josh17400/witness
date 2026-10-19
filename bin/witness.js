@@ -9,7 +9,7 @@ import { evaluate, fmt, keyPaths, ExprError, usesPrev } from "../src/core/expr.j
 import { WitnessError } from "../src/core/session.js";
 import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
 import { prune, pruneRegistry, fmtBytes } from "../src/core/clean.js";
-import { CLI, die, nums, fmtT, timeList, framesOf, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay } from "../src/cli/common.js";
+import { CLI, die, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay } from "../src/cli/common.js";
 import { evalCommand, traceCommand } from "../src/cli/ask.js";
 import { shotCommand } from "../src/cli/see.js";
 import { measureCommand } from "../src/cli/measure.js";
@@ -44,7 +44,8 @@ Common options:
   --seed 7  --scene <name>  --params '{"level":2}'  --build (run witness.json "build" first)
   --window 1920x1080  --dpi 2   (sent as reset params "window"/"dpi" for games that support them)
   --attach (wait for an already-running game)  --cmd "<launch command>" (no witness.json needed)
-  --json (machine-readable)   --timeout 60
+  --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
+  --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
 Times are seconds, or frames with an "f": --at 90f, --every 1f, space@60f. "+2f" = 2 frames after the input's frame.
 
 Run 'witness help <command>' for details. Protocol: docs/PROTOCOL.md`;
@@ -69,6 +70,9 @@ const CMD_HELP = {
     { "from": 0, "to": 3, "always": "state.player.hp >= 0", "never": "count('Coin') > 5", "eventually": "state.score == 1" }
     { "from": 1, "within": "30f", "eventually": "rose(state.player.grounded)" }
   A failure names the first bad frame: always state.player.hp >= 0 — failed at frame 212 (t=3.533s): got -1 >= 0
+  Measure steps keep a measurement as a regression test (jump, move, hitstop, curve, effect, window; the CLI's option
+  names; each runs its own scenario from reset after the timeline; "expect" is checked against its summary):
+    { "measure": { "jump": { "y": "state.player.pos[1]", "input": "space@1" }, "expect": "apexPx between 60 and 70" } }
   "match": "label" — the first capture of a label (state, digest, screenshot, audio) is the reference; every later
   capture of that label in this run must be identical (e.g. the same fight run twice, or a plain start after other tests).
   --repeat N   run the whole selection N times in one game process; every step must equal the same step of pass 1
@@ -249,9 +253,12 @@ const commands = {
       const logs = await s.drainLogs();
       if (logs.some((l) => l.level === "error")) warn(`the game logged ${logs.filter((l) => l.level === "error").length} error(s) during the checks`);
     });
-    console.log(report.join("\n"));
     const failed = report.some((l) => l.startsWith("✖"));
-    console.log(failed ? "doctor found problems" : "all good — Witness can drive this game");
+    if (opt.json) printJSON(envelope("doctor", { ok: !failed, verdict: failed ? "doctor found problems" : "all good", summary: { problems: report.filter((l) => l.startsWith("✖")).length, warnings: report.filter((l) => l.startsWith("⚠")).length, deterministic: report.some((l) => /^✔ deterministic/.test(l)) ? true : report.some((l) => /NOT deterministic/.test(l)) ? false : null }, data: { lines: report } }));
+    else {
+      console.log(report.join("\n"));
+      console.log(failed ? "doctor found problems" : "all good — Witness can drive this game");
+    }
     process.exit(failed ? 1 : 0);
   },
 
@@ -260,7 +267,7 @@ const commands = {
     const only = opt.playtests ? "playtests" : opt.replays ? "replays" : opt.shots ? "shots" : null;
     const r = prune(cfg, root, { all: !!opt.all, only });
     const k = only && only !== "playtests" ? 0 : pruneRegistry();
-    if (opt.json) { console.log(JSON.stringify({ removed: r.removed, bytes: r.bytes, registry: k })); return; }
+    if (opt.json) { printJSON(envelope("clean", { verdict: `removed ${r.removed.length} item(s)`, summary: { removed: r.removed.length, bytes: r.bytes }, data: { removed: r.removed, bytes: r.bytes, registry: k } })); return; }
     console.log(r.removed.length ? `removed ${r.removed.length} item(s), ${fmtBytes(r.bytes)}:` : "nothing to remove");
     for (const p of r.removed.slice(0, 20)) console.log(`  ${path.relative(root, p) || p}`);
     if (r.removed.length > 20) console.log(`  … and ${r.removed.length - 20} more`);
@@ -298,7 +305,7 @@ const commands = {
       }
     });
     const failed = results.filter((r) => !r.ok).length;
-    if (opt.json) console.log(JSON.stringify({ ok: !failed, results }, null, 1));
+    if (opt.json) printJSON(envelope("test", { ok: !failed, verdict: `${results.length - failed} passed, ${failed} failed`, summary: { passed: results.length - failed, failed, expects: results.reduce((a, x) => a + (x.expects ? x.expects.passed + x.expects.failed : 0), 0) }, data: { results } }));
     else {
       if (repeat > 1) {
         const diverged = results.some((x) => (x.failures || []).some((f) => f.kind === "match" && f.message.startsWith("repeat:")));

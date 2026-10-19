@@ -174,3 +174,60 @@ export function resolveReplay(spec, cfg, root) {
   if (!files.length) die(`no replays in ${dir} — record one by playing with WITNESS_RECORD=<file.jsonl>`);
   return files[0];
 }
+
+/**
+ * Check an --expect over a command's result: an expression over the envelope's summary fields (also `summary`,
+ * `data`, `verdict`). Sugar: "airtimeFrames between 36 and 44", and frame counts written "36f" mean 36.
+ * Returns { expr, ok, detail }.
+ */
+export function checkExpect(src, env) {
+  const expr = String(src).trim();
+  const frames = (s) => s.replace(/(^|[^\w.$"'])(\d+(?:\.\d+)?)f\b/g, "$1$2");
+  const scope = { ...(env.data && typeof env.data === "object" ? env.data : {}), ...(env.summary || {}), summary: env.summary, data: env.data, verdict: env.verdict };
+  const names = Object.keys(env.summary || {});
+  const run = (code) => {
+    try {
+      // eslint-disable-next-line no-new-func
+      return { v: new Function("S", `with (S) { return (${code}\n); }`)(scope) };
+    } catch (e) {
+      const m = /^(\w+) is not defined/.exec(e.message);
+      return { err: m ? `"${m[1]}" is not in this result (fields: ${names.join(", ")})` : e.message };
+    }
+  };
+  const b = /^(.+?)\s+between\s+(.+?)\s+and\s+(.+)$/i.exec(expr);
+  if (b) {
+    const L = run(frames(b[1])), A = run(frames(b[2])), B = run(frames(b[3]));
+    const err = L.err || A.err || B.err;
+    if (err) return { expr, ok: false, detail: err };
+    const ok = typeof L.v === "number" && L.v >= A.v && L.v <= B.v;
+    return { expr, ok, detail: `got ${fmtV(L.v)} (want ${fmtV(A.v)}..${fmtV(B.v)})` };
+  }
+  const code = frames(expr);
+  const all = run(code);
+  if (all.err) return { expr, ok: false, detail: all.err };
+  const ok = !!all.v;
+  const cmp = /^(.+?)\s*(===|!==|==|!=|<=|>=|<|>)\s*(.+)$/.exec(code);
+  if (cmp && !/&&|\|\|/.test(code)) { const l = run(cmp[1]), r = run(cmp[3]); if (!l.err && !r.err) return { expr, ok, detail: `got ${fmtV(l.v)} ${cmp[2]} ${fmtV(r.v)}` }; }
+  return { expr, ok, detail: `got ${fmtV(all.v)}` };
+}
+const fmtV = (v) => fmt(v, 60);
+
+/**
+ * Print a command's result: the text, or with --json the envelope. --expect (unless the command uses it for
+ * something else) is checked against the result: a failure is printed and the exit code becomes 1.
+ * env.ok === false also sets exit code 1.
+ */
+export function emit(env, text, opt, { expectable = true, json = null } = {}) {
+  let exp = null;
+  if (expectable && opt.expect && opt.expect !== true) {
+    exp = checkExpect(String(opt.expect), env);
+    env.expect = exp;
+    if (!exp.ok) env.ok = false;
+  }
+  if (opt.json) (json || printJSON)(env);
+  else {
+    if (text) console.log(text);
+    if (exp) console.log(`${exp.ok ? "✔" : "✖"} expect ${exp.expr}: ${exp.detail}`);
+  }
+  if (env.ok === false) process.exitCode = 1;
+}

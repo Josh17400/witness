@@ -6,7 +6,7 @@ import { begin, stepTo } from "../core/runner.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { alignSoundEvents, matchSounds, soundFrame } from "../core/soundmatch.js";
 import { parseNamedEvents, eventFrames, inputPresses, errorLines } from "./ask.js";
-import { die, withGame, runOpts, media, printLogs, framesOf, fmtT, envelope, printJSON } from "./common.js";
+import { die, withGame, runOpts, media, printLogs, framesOf, fmtT, envelope, emit } from "./common.js";
 
 export async function listenCommand(pos, opt) {
   const named = parseNamedEvents(opt.events);
@@ -64,7 +64,8 @@ export async function listenCommand(pos, opt) {
     } catch (e) { if (!opt.json) console.log(`(no pictures: ${e.message})`); }
     res = { fps, endF, rep, aligned, soundEvents, sounds, actions, match, within, files };
   });
-  report(res, opt);
+  const out = report(res, opt);
+  emit(out.env, out.text, opt);
 }
 
 function report(r, opt) {
@@ -105,17 +106,15 @@ function report(r, opt) {
     lines.push("");
   }
   const text = [...lines, rep.text].join("\n").replace(/pass event times for exact labels\./, "games can name them with {\"event\": \"sound\"} lines (docs/PROTOCOL.md).");
-  if (opt.json) {
+  {
     const ma = match ? match.matches.map((x) => ({ event: x.action.label, frame: x.action.f, kind: x.action.kind, sound: x.sound ? x.sound.label : null, soundFrame: x.sound ? x.sound.f : null, offset: x.offset, doubles: x.doubles.map((d) => d.offset), early: x.early ? x.early.offset : null })) : [];
-    printJSON(envelope("listen", {
-      ok: !counts || (counts.missing === 0 && counts.doubled === 0),
+    // a report, not a test: missing sounds don't fail it (movement keys have none); gate with --expect "missing == 0"
+    const env = envelope("listen", {
       verdict: rep.text.split("\n")[0] + (counts ? ` · events: ${counts.matched}/${counts.events} have their sound, ${counts.missing} missing, ${counts.doubled} doubled` : ""),
       summary: { sounds: rep.report.sounds.length, occurrences: rep.report.sounds.reduce((a, x) => a + x.count, 0), problems: rep.report.problems.length, ...(counts || {}), unexplained: match ? match.unexplained.length : null, announced: aligned ? aligned.sounds.length : 0 },
       data: { report: rep.report, matches: ma, unexplained: match ? match.unexplained.map((x) => ({ sound: x.label, frame: x.f, t: x.t })) : [], soundEvents: aligned ? aligned.sounds : [], unreported: aligned ? aligned.unreported : [], fps },
       files: r.files,
-    }));
-    return;
-  }
-  console.log(text);
-  if (r.files.length) console.log(`wrote ${r.files.join(", ")}  (view the PNGs with your image tool)`);
+    });
+    return { env, text: `${text}${r.files.length ? `\nwrote ${r.files.join(", ")}  (view the PNGs with your image tool)` : ""}` };
+}
 }
