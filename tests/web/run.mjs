@@ -110,6 +110,7 @@ const json = (r) => { try { return JSON.parse(r.stdout); } catch { return null; 
   const out = fs.mkdtempSync(path.join(os.tmpdir(), "witness-bridge-"));
   const b = spawnSync(process.execPath, [path.join(here, "build-bridge.mjs"), out], { encoding: "utf8", timeout: 300000 });
   if (b.status === 2) console.log("  web bridge (native): skipped (no C compiler)");
+  else if (typeof globalThis.WebSocket === "undefined") console.log(`  web bridge (native): built, run skipped (Node ${process.versions.node} has no global WebSocket for the shim; Node 22+)`);
   else {
     ok("web bridge compiles clean (C and C++, warnings as errors)", b.status === 0, b.stdout + b.stderr);
     const exes = (b.stdout || "").trim().split(/\r?\n/).filter((l) => fs.existsSync(l.trim())).map((l) => l.trim());
