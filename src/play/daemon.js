@@ -75,7 +75,7 @@ export async function runDaemon(dir) {
   // ---- live mode: one loop owns the game and steps it continuously, paced to real time; commands steer it
   const liveCfg = cfg.live || {};
   const live = {
-    on: !!(opts.live || opts.watch), paused: false, stop: false, waiter: null, lastCmd: Date.now(),
+    on: !!(opts.live || (opts.watch && !opts.turns)), paused: false, stop: false, waiter: null, lastCmd: Date.now(),
     speed: Math.max(0.05, +(opts.speed ?? liveCfg.speed ?? 1)), horizon: +(opts.horizon ?? liveCfg.horizon ?? 4),
     pauseAfter: Math.max(2, +(opts.pauseAfter ?? liveCfg.pauseAfter ?? 15)), baseWall: 0, baseFrame: 0,
     resume: null, exited: null, order: null, pauseReason: null,
@@ -160,9 +160,12 @@ export async function runDaemon(dir) {
     }
     return null;
   };
+  // watched turn-taking (--watch --turns): an order plays at real-time speed, the game waits while the tester thinks
+  const turnPace = { wall: 0, frame: 0 };
   async function stepWorld(k) {
     await S.step(k, null, dts(k));
     frame += k;
+    if (opts.watch && !live.on) { const ahead = turnPace.wall + ((frame - turnPace.frame) / fps) * 1000 - Date.now(); if (ahead > 1) await new Promise((r) => setTimeout(r, ahead)); }
     const snap = await S.snapshot();
     let logs = [];
     if (frame - lastLogFrame >= Math.max(1, Math.round(fps / 4))) { logs = await S.drainLogs(); lastLogFrame = frame; }
@@ -192,6 +195,7 @@ export async function runDaemon(dir) {
     try { list = parseOrders(text, { named: cfg.named, combos: cfg.combos }); }
     catch (e) { if (!(e instanceof OrderError)) throw e; parseErrors++; return { code: 2, text: `✖ ${e.message}${e.hint ? `\n  ${e.hint.split("\n").join("\n  ")}` : ""}` }; }
     thaw();
+    turnPace.wall = Date.now(); turnPace.frame = frame;
     const t0 = world.t;
     const cap = forS != null ? +forS : list.every((o) => OPEN_ENDED.has(o.verb) || o.forS) ? Math.max(...list.map((o) => o.forS || 6)) + 0.5 : Math.max(25, ...list.map((o) => (o.forS || 0) + 1));
     ap.setOrders(list);

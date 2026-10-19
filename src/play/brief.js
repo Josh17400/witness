@@ -12,11 +12,11 @@ export const PERSONAS = {
 
 const q = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
 
-export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie", minutes = 4, game = "the game", profile = "topdown", controls = "", seed, scene, params, extra, model, live = false, watch = false }) {
+export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie", minutes = 4, game = "the game", profile = "topdown", controls = "", seed, scene, params, extra, model, live = false, watch = false, turns = false }) {
   const P = PERSONAS[persona] ? persona : "newbie";
   const W = `${cli} play`;
   const S = name.replace(/[^\w.-]+/g, "_");   // the session's short command (registry.writeShim)
-  const start = [`${W} start --name ${name}`, `--config ${q(configDir)}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, watch ? "--watch" : live ? "--live" : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
+  const start = [`${W} start --name ${name}`, `--config ${q(configDir)}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, watch ? (live ? "--watch" : "--watch --turns") : live ? "--live" : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
   const card = profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
     : profile === "fps" ? `goto <thing|x,y> · go forward|back|left|right [cells] · go <n|s|e|w…> [cells] · explore [dir] · follow <thing>
 fight [thing] [retreat 30%] [kite N] [hold] · flee · look <dir|thing> · reload · weapon <n>
@@ -38,7 +38,7 @@ press <key> [xN] · hold <key> <s> · wait [s] · stop · respawn · modifiers: 
 
 GOAL: ${goal || "play the game and see how far you get"}
 PERSONA: ${PERSONAS[P].text}.
-${live || watch ? `BUDGET: about ${minutes} minutes of game time (the session shows it as [t …s]): keep playing until the header shows [t ${Math.round(minutes * 60)}s] or more.
+${live ? `BUDGET: about ${minutes} minutes of game time (the session shows it as [t …s]): keep playing until the header shows [t ${Math.round(minutes * 60)}s] or more.
 THE GAME IS LIVE: it keeps running in real time while you think${watch ? " (and a person is watching it)" : ""}. Decide quickly. Your last order keeps running until it's done or you give a new one; with nothing ordered the autopilot stands by (holds position, guards, shoots back). A \`do\` replaces the plan at once and comes back after about 4 s of game time, or sooner if the order finishes or something important happens; the game doesn't stop when it comes back. Prefer longer orders that keep you busy ("explore north", "goto <far thing>", "fight nearest enemy") over many tiny ones, and don't resend an order that's still running (use NEXT). To keep your order running and just hear what happens next, run the NEXT command (it gives no new order). Enemies met on the way are fought automatically and your order then carries on.` : `BUDGET: about ${minutes} minutes of GAME time (the session shows it as [t …s]): keep playing until the header shows [t ${Math.round(minutes * 60)}s] or more. Game time only passes inside \`do\` orders; the game is paused while you think, so take your time.`}
 
 HOW IT WORKS: you give plain-word orders; an autopilot carries them out frame by frame (${does}). You decide WHAT to do and WHY. After every order you get a short text observation: your hp and stats, why the order stopped, what is near (distance in map cells and compass direction, north = up), a small map, dialogue, recent events.
@@ -47,20 +47,20 @@ COMMANDS (run with your Bash tool, one at a time, exactly like this; each return
   start:  ${start}
   then, once: cd "${REG_DIR.replace(/\\/g, "/")}"      (the short commands below live there)
   order:  ./${S} "<orders>"
-  look:   ./${S} look${live || watch ? `
+  look:   ./${S} look${live ? `
   next:   ./${S} next          (keep your order running; returns at the next important moment or after ~4 s)` : ""}
   screen: ./${S} shot          (prints a PNG path: open it with your Read tool to SEE the game)
   note:   ./${S} note "<what you noticed>" --bug|--confusing|--fun|--idea
   end:    ./${S} end --fun <1-5> --difficulty <1-5> --feedback "<3-6 sentences>"
   (if ./${S} isn't found, the long form works the same: ${W} do "<orders>" -s ${name}, ${W} next -s ${name}, …)
-SPEED: every turn, send ONLY the next command. No text before or after it, no plans written out: typing costs you time${live || watch ? " while the game plays on" : ""}. Think briefly, act.
+${live ? "SPEED: every turn, send ONLY the next command. No text before or after it, no plans written out: typing costs you time while the game plays on. Think briefly, act." : `TURNS: send only the next command each turn (no commentary), but think it through first: the game waits for you${watch ? " (a person is watching, and each order plays at real speed)" : ""}, so use that time to pick the best move: weapon for the range, cover, when to back off.`}
 
 ORDERS (chain several with ";"):
 ${card.split("\n").map((l) => `  ${l}`).join("\n")}
 Name things exactly as the observation lists them (a type like Wolf, an exact one like Wolf#5, a name, or "nearest enemy", "item").${controls ? `\nThe game's controls (for press/hold): ${controls}.` : ""}
 
 PLAY WELL:
-- Read each observation fully: the result line (${live || watch ? "✔ done / ✖ failed / ⚠ something important / ⏩ still running" : "✔ done / ✖ failed / ⚠ interrupted / ⏱ time"}) tells you what happened and why.
+- Read each observation fully: the result line (${live ? "✔ done / ✖ failed / ⚠ something important / ⏩ still running" : "✔ done / ✖ failed / ⚠ interrupted / ⏱ time"}) tells you what happened and why.
 - Follow the game's own goal and hints ("goal:" and "game says:" lines)${profile === "topdown" ? " and talk to characters" : ""}.
 ${tips}
 - If an order fails, read the message and try something different (another route, explore, another target). Don't repeat the same failing order more than twice.

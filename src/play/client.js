@@ -20,6 +20,7 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
                      → launches the game + a background session daemon, prints the first observation
                      --live: the game keeps running (paced to real time) while the tester thinks; orders steer it
                      --watch: live, and the game shows its window for a human to watch (WITNESS_WATCH=1)
+                     --watch --turns: watched, but the game waits while the tester thinks (orders play at real speed)
   witness play do "<orders>" [-s t1] [--for S]  run orders ("fight wolf block; then talk guard") until done/interrupted
                      (live: replaces the plan now, answers at done / an important event / the horizon; play goes on)
   witness play look [-s t1] [--shot] [--json] [--wait]   the observation now (live --wait: at the next event or horizon)
@@ -123,7 +124,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         goal: opt.goal && opt.goal !== true ? String(opt.goal) : null, persona: opt.persona && opt.persona !== true ? String(opt.persona) : null,
         seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : cfg.seed ?? 1, scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params: params ?? null,
         minutes: opt.minutes ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], model: opt.model && opt.model !== true ? String(opt.model) : null,
-        live: !!(opt.live || opt.watch), watch: !!opt.watch, speed: opt.speed && opt.speed !== true ? +opt.speed : undefined,
+        live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, speed: opt.speed && opt.speed !== true ? +opt.speed : undefined,
         horizon: opt.horizon && opt.horizon !== true ? +opt.horizon : undefined, pauseAfter: opt["pause-after"] && opt["pause-after"] !== true ? +opt["pause-after"] : undefined,
       };
       const spec = { name, token, root, cfg, opts, state: "starting", created: new Date().toISOString() };
@@ -229,7 +230,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         cli, configDir: root.replace(/\\/g, "/"), name: opt.name && opt.name !== true ? String(opt.name) : "t1", goal: opt.goal && opt.goal !== true ? String(opt.goal) : null,
         persona: opt.persona && opt.persona !== true ? String(opt.persona) : "newbie", minutes: opt.minutes ? +opt.minutes : 4, game: `"${cfg.name || "the game"}"`,
         profile: pc.profile, controls: cfg.play && cfg.play.controls ? describeControls(pc) : "", seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : null,
-        scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params, model: opt.model && opt.model !== true ? String(opt.model) : null, live: !!opt.live, watch: !!opt.watch, extra: opt.extra && opt.extra !== true ? String(opt.extra) : (cfg.play && cfg.play.brief) || null,
+        scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params, model: opt.model && opt.model !== true ? String(opt.model) : null, live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, extra: opt.extra && opt.extra !== true ? String(opt.extra) : (cfg.play && cfg.play.brief) || null,
       }));
       return;
     }
