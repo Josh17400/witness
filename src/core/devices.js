@@ -1,7 +1,11 @@
 // Device profiles for browser launches (witness.json launch.device / --device): viewport in CSS px, device pixel
 // ratio, touch, mobile viewport handling, user agent, and whether the page runs as a Home Screen web app.
 // Sizes are Apple's published point sizes; the iPhone profiles are full screen (a web app added to the Home Screen),
-// the "-safari" one is a Safari tab (toolbars take the rest, the same viewport Playwright uses for "iPhone 15").
+// the "-safari" one is a Safari tab (toolbars take the rest: the viewports Playwright uses for "iPhone 15" and
+// "iPhone 15 landscape", 393×659 and 734×343). screen is the device's portrait point size in every orientation, as
+// iOS reports it. navigator.platform and maxTouchPoints match the user agent ("iPhone" / "MacIntel", 5 touch points:
+// the usual iPad check is platform === "MacIntel" && maxTouchPoints > 1). Safe areas (notch, Dynamic Island, home
+// indicator) are NOT emulated: env(safe-area-inset-*) is 0 in the page; use measure ui --safe <preset>.
 import { WitnessError } from "./session.js";
 
 const IOS_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
@@ -9,11 +13,11 @@ const IOS_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebK
 const IPADOS_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
 
 export const DEVICES = {
-  "iphone-15": { title: "iPhone 15, Home Screen web app", width: 393, height: 852, dpr: 3, touch: true, mobile: true, standalone: true, userAgent: IOS_UA },
-  "iphone-15-safari": { title: "iPhone 15, Safari tab", width: 393, height: 659, dpr: 3, touch: true, mobile: true, standalone: false, userAgent: IOS_UA },
-  "iphone-15-pro-max": { title: "iPhone 15 Pro Max, Home Screen web app", width: 430, height: 932, dpr: 3, touch: true, mobile: true, standalone: true, userAgent: IOS_UA },
-  "iphone-se": { title: "iPhone SE (2nd/3rd gen), Home Screen web app", width: 375, height: 667, dpr: 2, touch: true, mobile: true, standalone: true, userAgent: IOS_UA },
-  "ipad": { title: "iPad (10th gen), Home Screen web app", width: 820, height: 1180, dpr: 2, touch: true, mobile: true, standalone: true, userAgent: IPADOS_UA },
+  "iphone-15": { title: "iPhone 15, Home Screen web app", width: 393, height: 852, dpr: 3, touch: true, mobile: true, standalone: true, userAgent: IOS_UA, screen: [393, 852], platform: "iPhone", safe: "iphone" },
+  "iphone-15-safari": { title: "iPhone 15, Safari tab", width: 393, height: 659, landscapeSize: [734, 343], dpr: 3, touch: true, mobile: true, standalone: false, userAgent: IOS_UA, screen: [393, 852], platform: "iPhone", safe: "safari" },
+  "iphone-15-pro-max": { title: "iPhone 15 Pro Max, Home Screen web app", width: 430, height: 932, dpr: 3, touch: true, mobile: true, standalone: true, userAgent: IOS_UA, screen: [430, 932], platform: "iPhone", safe: "iphone-max" },
+  "iphone-se": { title: "iPhone SE (2nd/3rd gen), Home Screen web app", width: 375, height: 667, dpr: 2, touch: true, mobile: true, standalone: true, userAgent: IOS_UA, screen: [375, 667], platform: "iPhone", safe: "iphone-se" },
+  "ipad": { title: "iPad (10th gen), Home Screen web app", width: 820, height: 1180, dpr: 2, touch: true, mobile: true, standalone: true, userAgent: IPADOS_UA, screen: [820, 1180], platform: "MacIntel", safe: "ipad" },
 };
 
 const num = (v) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
@@ -21,7 +25,8 @@ const num = (v) => (typeof v === "number" ? v : typeof v === "string" && v.trim(
 /**
  * A device spec → a profile {name, title, width, height, dpr, touch, mobile, standalone, userAgent, landscape}.
  * spec: "iphone-15", "iphone-15-landscape" (or ":landscape"), or a custom object {width, height, dpr?, touch?, mobile?,
- * userAgent?, standalone?, landscape?, name?}. null/undefined → null (desktop, no emulation).
+ * userAgent?, standalone?, landscape?, name?, screen?: [w, h], platform?, maxTouchPoints?}. null/undefined → null
+ * (desktop, no emulation). The profile also carries screen, platform, maxTouchPoints and safe (its safe-area family).
  */
 export function resolveDevice(spec) {
   if (spec == null || spec === false || spec === "" || spec === "desktop") return null;
@@ -38,11 +43,17 @@ export function resolveDevice(spec) {
     if (!(Number.isInteger(w) && w > 0 && w <= 10000) || !(Number.isInteger(h) && h > 0 && h <= 10000)) throw new WitnessError(`custom device: "width" and "height" must be whole CSS pixels (got ${JSON.stringify(spec.width)} × ${JSON.stringify(spec.height)})`);
     if (!(dpr >= 0.5 && dpr <= 8)) throw new WitnessError(`custom device: "dpr" must be between 0.5 and 8 (got ${JSON.stringify(spec.dpr)})`);
     landscape = !!spec.landscape;
-    base = { title: spec.title || spec.name || "custom device", width: w, height: h, dpr, touch: !!spec.touch, mobile: !!spec.mobile, standalone: !!spec.standalone, userAgent: spec.userAgent ? String(spec.userAgent) : null };
+    const sc = Array.isArray(spec.screen) && spec.screen.length === 2 && spec.screen.every((v) => Number.isInteger(num(v)) && num(v) > 0) ? spec.screen.map(num) : null;
+    base = { title: spec.title || spec.name || "custom device", width: w, height: h, dpr, touch: !!spec.touch, mobile: !!spec.mobile, standalone: !!spec.standalone, userAgent: spec.userAgent ? String(spec.userAgent) : null,
+      screen: sc || [Math.min(w, h), Math.max(w, h)], platform: spec.platform ? String(spec.platform) : null, maxTouchPoints: spec.maxTouchPoints != null ? num(spec.maxTouchPoints) : null };
     name = spec.name ? String(spec.name) : `custom ${w}×${h}@${dpr}`;
   } else throw new WitnessError(`launch.device must be a device name or an object (got ${JSON.stringify(spec)})`);
-  const [width, height] = landscape ? [Math.max(base.width, base.height), Math.min(base.width, base.height)] : [base.width, base.height];
-  return { name, title: base.title + (landscape ? ", landscape" : ""), width, height, dpr: base.dpr, touch: base.touch, mobile: base.mobile, standalone: base.standalone, userAgent: base.userAgent, landscape };
+  // landscape: the Home Screen profiles are full screen (the axes swap); a Safari tab has its own landscape viewport
+  // (the toolbars aren't the same height); screen stays the portrait size, as on iOS
+  const [width, height] = landscape ? base.landscapeSize || [Math.max(base.width, base.height), Math.min(base.width, base.height)] : [base.width, base.height];
+  const maxTouchPoints = base.maxTouchPoints != null ? base.maxTouchPoints : base.platform ? 5 : null;
+  return { name, title: base.title + (landscape ? ", landscape" : ""), width, height, dpr: base.dpr, touch: base.touch, mobile: base.mobile, standalone: base.standalone, userAgent: base.userAgent,
+    screen: base.screen || [Math.min(width, height), Math.max(width, height)], platform: base.platform || null, maxTouchPoints, safe: base.safe || null, landscape };
 }
 
 /** One line: "iphone-15 (iPhone 15, Home Screen web app): 393×852 CSS px, DPR 3 = 1179×2556 device px, touch, mobile". */
@@ -55,7 +66,8 @@ export function describeDevice(d) {
 /** Playwright browser-context options for a profile. */
 export function contextOptions(d, size) {
   if (!d) return { viewport: { width: size[0], height: size[1] } };
-  const o = { viewport: { width: d.width, height: d.height }, screen: { width: d.width, height: d.height }, deviceScaleFactor: d.dpr, hasTouch: d.touch, isMobile: d.mobile };
+  const sc = d.screen || [d.width, d.height];
+  const o = { viewport: { width: d.width, height: d.height }, screen: { width: sc[0], height: sc[1] }, deviceScaleFactor: d.dpr, hasTouch: d.touch, isMobile: d.mobile };
   if (d.userAgent) o.userAgent = d.userAgent;
   return o;
 }

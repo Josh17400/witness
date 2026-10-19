@@ -493,7 +493,10 @@ emcc ... --pre-js witness/witness_emscripten.js
 ```
 (or load it with a `<script>` before the Emscripten loader). It does nothing unless the page URL has
 `?witness=host:port`, which the CLI adds. `witness_emscripten_inbuf/recv/closed` are exported by `witness.h` itself
-(`EMSCRIPTEN_KEEPALIVE`); no `EXPORTED_FUNCTIONS` changes are needed.
+(`EMSCRIPTEN_KEEPALIVE`); no `EXPORTED_FUNCTIONS` changes are needed. Release builds with `-O2 --closure 1` are
+fine: the shim and the `EM_JS` bodies use quoted `['names']` for everything that crosses the bundle's edge
+(protocol JSON, `WITNESS_CONFIG`, the page's `__witnessWeb`, `Module`), so Closure's renaming can't break them
+(checked statically by the tests; no real emcc/Closure run here, see Limits).
 
 **2. Don't start the main loop in witness mode.** The browser can't block, so `witness_run()` returns control to
 the browser and keeps the runtime alive (`emscripten_exit_with_live_runtime()`; the lines after it in `main`, such
@@ -542,7 +545,8 @@ scaling, blur). Engines and profiles: adapters/js/GUIDE.md, "Phones and tablets"
 coins test, gesture marking); the shim also runs in Chromium and WebKit pages against a JavaScript stand-in for the
 compiled module on a growing `WebAssembly.Memory`. **Not run here: an actual emcc build** — the `EM_JS` bodies
 (`HEAPU8`, calling `_witness_emscripten_*`), the `--pre-js` placement and `emscripten_exit_with_live_runtime()` in a
-real wasm runtime. Recording replays (`WITNESS_RECORD`) is not wired for web builds (it would write to MEMFS).
+real wasm runtime, and `--closure 1` (the quoting is checked by a test that scans the files, not by running Closure).
+Recording replays (`WITNESS_RECORD`) is not wired for web builds (it would write to MEMFS).
 `WITNESS_EMSCRIPTEN_SOCKETS` keeps the socket code for builds that proxy POSIX sockets. Threads: without
 `-pthread` the adapter's lock is a no-op; with it, a mutex.
 

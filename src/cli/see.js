@@ -4,7 +4,7 @@ import path from "node:path";
 import { begin, stepTo } from "../core/runner.js";
 import { evaluate } from "../core/expr.js";
 import {
-  die, say, withGame, runOpts, media, printLogs, timeList, framesOf, fmtT, shotImage, envelope, emit,
+  die, say, withGame, gamePixels, runOpts, media, printLogs, timeList, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
 
 const MAX_CELLS = 48;
@@ -105,6 +105,7 @@ async function singleShots(opt) {
   const results = [];
   await withGame(opt, async (s, cfg, root) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    if (fr.crop || fr.follow || opt.annotate || (opt.scale && opt.scale !== true)) gamePixels(s, "shot --crop / --follow / --annotate / --scale");
     const fps = s.fps;
     const tokens = timeList(opt.at, [opt.time && opt.time !== true ? String(opt.time) : "1"]);
     const items = tokens.map((t) => ({ t, f: framesOf(t, fps) })).sort((a, b) => a.f - b.f);
@@ -132,7 +133,8 @@ async function singleShots(opt) {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, m.encodePNG(img.width, img.height, img.data));
       const r = { frame: it.f, t: +(it.f / fps).toFixed(3), file, width: img.width, height: img.height, source: rect };
-      if (!opt.json) say(`✔ f${it.f} (${fmtT(it.f / fps)}) → ${file}${rect || fr.zoom > 1 ? `  (${img.width}×${img.height}: ${describeFraming(fr)})` : ""}`);
+      const dev = s.web && s.web.captureMode && s.web.captureMode !== "canvas" ? `  (${img.width}×${img.height} device px: ${s.web.captureMode} capture at DPR ${s.web.device ? s.web.device.dpr : 1}, not game pixels)` : "";
+      if (!opt.json) say(`✔ f${it.f} (${fmtT(it.f / fps)}) → ${file}${rect || fr.zoom > 1 ? `  (${img.width}×${img.height}: ${describeFraming(fr)})` : ""}${dev}`);
       if (opt.diff) {
         // regions never compared: --ignore "x,y,w,h; ..." plus witness.json "diff": { "ignore": ["x,y,w,h", ...] }
         const cfgIgnore = cfg.diff && Array.isArray(cfg.diff.ignore) ? cfg.diff.ignore.map((q) => parseRect(q, "witness.json diff.ignore")) : [];
@@ -178,6 +180,7 @@ async function sheetShots(opt) {
   let out;
   await withGame(opt, async (s, cfg, root) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    if (fr.crop || fr.follow || (opt.scale && opt.scale !== true)) gamePixels(s, "shot --sheet --crop / --follow / --scale");
     const fps = s.fps;
     // --sheet --at 1,1.4,2: a sheet of chosen moments
     const moments = opt.at !== undefined && opt.at !== true && opt.from === undefined && opt.auto === undefined ? [...new Set(timeList(opt.at, []).map((t) => framesOf(t, fps)))].sort((a, b) => a - b) : null;
@@ -274,6 +277,7 @@ async function clipShots(opt) {
   let out;
   await withGame(opt, async (s, cfg, root) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    if (fr.crop || fr.follow) gamePixels(s, "shot --clip --crop / --follow");
     const fps = s.fps;
     const f0 = framesOf(opt.from !== undefined && opt.from !== true ? String(opt.from) : "0", fps);
     const f1 = framesOf(opt.to !== undefined && opt.to !== true ? String(opt.to) : `${f0 + 2 * fps}f`, fps);

@@ -55,8 +55,9 @@ Common options:
   --hold-camera   reset param "camera": "hold": games that support it keep the camera still (pixel measures)
   --attach (wait for an already-running game)  --cmd "<launch command>" (no witness.json needed)
   Browser games (launch.url): --device iphone-15|iphone-15-safari|iphone-15-pro-max|iphone-se|ipad[-landscape]
-  (viewport, DPR, touch, mobile, user agent) · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio
-  policy: suspended until a tap) · --capture canvas|element|screen (element/screen: device pixels) · input
+  (viewport, DPR, touch, mobile, user agent, platform, 5 touch points, portrait screen size; safe areas are NOT
+  emulated) · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a
+  tap) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
   dom:tap:x,y@t / dom:click / dom:key:space (real browser input) · expressions web.audio.state, web.dpr
   --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
   --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
@@ -133,7 +134,8 @@ const CMD_HELP = {
   seconds per cell), deaths as red X. --expect "deaths == 0", "unvisitedOpen < 20", "hottest.share < 0.5".`,
   shot: `witness shot [--at 1,4,90f] [--out shots/s.png] [--scale 0.5] [--json]
   --capture element|screen     browser games: what the screen shows at device pixels (with --device iphone-15: the
-                               canvas after CSS scaling, or the whole viewport) instead of the game's own buffer
+                               canvas after CSS scaling, or the whole viewport) instead of the game's own buffer;
+                               --crop/--follow/--annotate/--scale (game pixels) are refused with it
   --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)
   --zoom 3                     crisp nearest-neighbour enlargement (small sprites)
   --diff ref.png [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16] [--resize] [--no-align]
@@ -216,15 +218,17 @@ const CMD_HELP = {
       camera comes from state.camera when the game exposes it, else it's estimated and removed.
   scale <shot.png> [--k 3] [--region x,y,w,h] [--tolerance 0]
       integer-scale test: is every k×k cell one colour? Finds k and the grid offset. Otherwise the scale from runs of
-      one colour (any factor, ≈2 decimals): ✖ FRACTIONAL (a source pixel drawn 3 or 4 px: uneven pixels, e.g. a
-      canvas stretched to a phone screen) or ✖ BLURRY (soft one-pixel ramps: smoothing). Take the picture at device
-      pixels: shot --device iphone-15 --capture element.
+      one colour, refined to the pixel grid that holds the colour changes (any factor; read a few % in from the
+      edges unless --region): ✖ FRACTIONAL (a source pixel drawn 2 or 3 px: uneven pixels, e.g. a canvas stretched to
+      a phone screen; the share drawn wider is the scale's fraction) or ✖ BLURRY (hard edges smeared over 2+ pixels:
+      smoothing / filtered upscaling). Soft ramps alone (gradients, anti-aliasing at 1:1) are not blur. Take the
+      picture at device pixels: shot --device iphone-15 --capture element.
   box <with.png> <without.png> [--threshold 16]
       the pixels that differ between a shot with something and one without it: its exact box, height, centroid.
   contrast <shot.png> --a <mask> --b <mask>
       WCAG ratio and ΔE between two pixel sets. A mask is x,y,w,h | #rrggbb[~tolerance] | diff:<without.png>,
       and --b may be ring[:radius] (the pixels just outside --a, e.g. outline vs the ground around it).
-  ui [shot.png] [--at 1] [--ui ui.json] [--safe 5%|iphone-portrait|iphone-landscape|iphone-se|ipad] [--min-text 2%|12]
+  ui [shot.png] [--at 1] [--ui ui.json] [--safe 5%|<preset>] [--fit contain|cover|stretch] [--min-text 2%|12]
      [--min-contrast 4.5] [--align 3] [--window 1280x720,1920x1080] [--pixels] [--out ui.png]
       UI layout from the game's state.ui = [{id, kind: text|button|panel|icon, rect: [x,y,w,h], text?, fontPx?,
       layer?}] (or --ui file): ✖ clipped by / entirely off the screen, ✖ overlapping (same layer; panels and buttons
@@ -237,16 +241,26 @@ const CMD_HELP = {
      [--a <mask> --b <mask>] [--min-de 20] [--out dir] [--no-images]
       colour-vision deficiency (Machado 2009, linear RGB): writes <name>-cvd.png (normal + each type side by side)
       and one picture per type, and reports which key colours stop being distinguishable (ΔE under --min-de that
-      ✖ the same text shown twice at once (both rects; from pixels: rows with the same ink, a ⚠). ✖ text not held by a
-      panel/button over a busy background (no plate): judged by its WORST glyph edge (text pixel vs the background
-      pixel next to it, anti-aliased pixels skipped), not the average, with where and the two colours.
-      --safe <device>: env(safe-area-inset-*) in points scaled to the screenshot (each axis: px per pt), ✖ text, buttons
-      and icons in an unsafe zone (⚠ panels). iphone-portrait = iPhone 14 Pro/15/16: top 59 pt (status bar + Dynamic
-      Island), bottom 34 (home indicator); iphone-landscape: left/right 59, bottom 21 (16 Pro/Pro Max: 62; notched
-      12-14: 47); iphone-se: portrait top 20 (status bar), landscape none; ipad (10th gen/Air 11"): top 24, bottom 20.
+      ✖ the same text shown twice at once (both rects; from pixels: rows with the same ink, a ⚠; buttons, icons, text
+      in buttons, 3+ copies and copies on same-size cards are labels that repeat on purpose). ✖ text not held by a
+      panel/button over a busy background (no plate): over 10% of its glyph edges (text pixel vs the background pixel
+      next to it, anti-aliased pixels skipped) under the contrast bar (⚠ for 3+ weak edges), with p10, median and the
+      worst pixel and its two colours.
+      --safe <preset>: env(safe-area-inset-*) in points, ✖ text, buttons and icons in an unsafe zone (⚠ panels). The
+      screenshot is shown on the device by --fit: contain (default: one scale, fitted and centred; an inset that ends
+      in the letterbox bars costs nothing), cover, or stretch (each axis; with another aspect only ⚠). Home Screen web
+      app presets (viewport-fit=cover; a Safari tab has none of these insets): iphone-portrait / iphone-landscape =
+      iPhone 14 Pro/15/15 Pro/16 (393×852 pt): top 59 pt (status bar + Dynamic Island), bottom 34 (home indicator);
+      landscape left/right 59, bottom 21. iphone-max-portrait/-landscape: 14 Pro Max/15 Plus/15 Pro Max/16 Plus
+      (430×932 pt), the same insets. iphone-16-pro-* (402×874) and iphone-16-pro-max-* (440×956): 62 instead of 59.
+      iphone-safari-portrait/-landscape: an iPhone 15 Safari tab (393×659 / 734×343 pt): no insets. iphone-se: portrait
+      top 20 (status bar), landscape none. ipad (10th gen/Air 11"): top 24, bottom 20. A full-screen shot whose width
+      isn't a whole number of points for the preset is warned about, with the preset that fits.
   ui --from 0 --to 30 [--every 1f] [--within 10] [--input ...]
-      sweep state.ui: ✖ a text shown again within --within s of its last showing (a repeated toast: both times, how
-      long it was hidden, its rect) and ✖ the same text twice at once (first frame, how many sampled frames).
+      sweep state.ui: ⚠ an element (by id) that hid and came back with the same text within --within s (a repeated
+      toast or prompt: both times, how long it was hidden, its rect; values that change while it stays, like HP 10 →
+      9 → 10, are not repeats; gate with --expect "repeats == 0") and ✖ the same text twice at once (first frame, how
+      many sampled frames).
   figure --of <Type | id | state.path> [--scenes a,b] [--params '[{"hour":12},{"hour":22}]'] [--at 1,2] [--input ...]
      [--without "params={...}"] [--edge 1] [--min 3] [--merge 12] [--min-share 5%] [--surfaces sand=#c2b280,...] [--out dir]
   figure <shot.png> --mask diff:<without.png> | #rrggbb[~tol] | x,y,w,h
@@ -254,10 +268,13 @@ const CMD_HELP = {
       same run without it (reset param "hide": [its id], or --without), else its state box/rect minus the ground's
       colours, else the sprite found at its state position (both marked as guesses). Ground = the ring of pixels
       touching the silhouette, each compared with the figure pixels within --edge px (strongest edge there; --edge 2
-      reaches past an anti-aliased rim), clustered into surfaces (ΔE ≤ --merge; under --min-share of the ring: minor).
+      reaches past an anti-aliased rim), clustered into surfaces (ΔE ≤ --merge; under --min-share of the ring: minor;
+      --min-share 5 = 5%; minor surfaces covering 25%+ of the ring, or all of it, are judged together as one).
       Per surface: WCAG ratio and ΔE worst / p10 / median, % of its edge under --min, the worst pixel and colours;
-      surfaces are named by state.map tiles, --surfaces colours (ΔE < 15), or by position from an earlier shot of the
-      same scene and frame (day → night). ✖ when a surface's median < --min. --expect "worstMedianRatio >= 3".
+      surfaces are named by state.map tiles, --surfaces colours (ΔE < 15; used first when most surfaces match them, so
+      a param that moves the ground keeps true names), or by position from an earlier shot of the same scene and frame
+      (day → night: other colours, same places). An entity without an id is hidden by type: its diff is cut to the
+      part at its position. ✖ when a surface's median < --min; nothing judged is ✖ too. --expect "worstMedianRatio >= 3".
       --out: each figure and its ground ring, red where the edge is under --min.
       were distinct normally). Key colours: --colors, else (driving the game) each entity type's sprite colour
       (sprites fitted to state positions, like align) + the background, else the picture's most common colours.
@@ -296,9 +313,11 @@ const CMD_HELP = {
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
   For long game-specific scenarios (journeys, fights) use test steps with "match", or witness test --repeat 2.
-  Browser games also get: the engine and device; the page (CSS viewport, DPR, touch); how the main canvas lands on
-  the screen (backing size → CSS box → device px: an exact ×k, a fractional scale with uneven pixels, or smoothing
-  blur, from the layout and from a capture at device pixels); the AudioContexts and the audio policy. With
+  Browser games also get: the engine and device; the page (CSS viewport, DPR, screen, touch points, platform; ⚠ a
+  touch profile reporting < 2 touch points); safe areas (not emulated: the measure ui --safe preset to check); how
+  the main canvas lands on the screen (backing size → CSS box → device px: an exact ×k, a fractional scale with
+  uneven pixels and the exact share drawn wider, or smoothing blur, from the layout; the capture at device pixels
+  confirms it, or says it couldn't be read); the AudioContexts and the audio policy. With
   --no-auto-unlock it first checks the iPhone unlock: audio suspended at start, then a tap at the canvas centre, a
   click, space and enter, and which one resumed it (or ⚠ it stayed suspended: silent on iPhone).`,
 };

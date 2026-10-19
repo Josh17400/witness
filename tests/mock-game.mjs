@@ -49,7 +49,9 @@
 //   MOCK_FIGURE=1  the ground is four quadrants meeting at the player's start (40,90): sand (194,178,128) top-left,
 //                  snow (240,244,250) top-right, grass (60,140,60) bottom-left, road (70,70,75) bottom-right; no coins.
 //                  Reset params: "hide": [ids or types] (the reserved param) leaves those out of the picture;
-//                  "hour": h before 6 or from 20 is night (every colour × 0.3, rounded).
+//                  "hour": h before 6 or from 20 is night (every colour × 0.3, rounded); "swap": sand and grass trade
+//                  places (a layout change, not lighting). MOCK_FIGURE=npc adds two NPCs WITHOUT ids (type "NPC", names
+//                  "Bob" at 200,40 and "Ann" at 260,140, 6×6 red squares; hidden by type).
 import net from "node:net";
 import { encodePNG } from "../src/media/png.js";
 import { glyph } from "../src/media/font.js";
@@ -73,8 +75,9 @@ const camY = ZOOM > 1 ? 40 : 0;   // zoomed in, the camera looks a little lower 
 const groundY = (x) => (LEDGE && x >= 200 ? 150 : 90);
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
-let bigPlayer = false, holdCamera = false, hidden = new Set(), night = false;
+let bigPlayer = false, holdCamera = false, hidden = new Set(), night = false, swap = false;
 const FIGURE = !!process.env.MOCK_FIGURE, LOOK = UI === "look";
+const NPCS = process.env.MOCK_FIGURE === "npc" ? [{ type: "NPC", name: "Bob", pos: [200, 40] }, { type: "NPC", name: "Ann", pos: [260, 140] }] : null;
 const HAZARD = !!process.env.MOCK_HAZARD;
 let dead = false, deaths = 0, deadAt = -1;
 const PERF = !!process.env.MOCK_PERF;
@@ -90,6 +93,7 @@ function reset(seed = 1, params = {}) {
   bigPlayer = !!params.big; holdCamera = params.camera === "hold";
   hidden = new Set((Array.isArray(params.hide) ? params.hide : params.hide != null ? [params.hide] : []).map(String));
   night = params.hour != null && (+params.hour < 6 || +params.hour >= 20);
+  swap = !!params.swap;
   [W, H] = UI && Array.isArray(params.window) ? params.window : [320, 180];
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
@@ -235,7 +239,11 @@ function screenshot() {
   if (CAMERA && process.env.MOCK_CAMERA !== "flat") {
     // a textured world (4×4 blocks) seen through the camera, so scrolling is visible
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const h = (Math.imul((x + cam) >> 2, 73856093) ^ Math.imul(y >> 2, 19349663)) >>> 0; put(x, y, 20 + (h & 63), 24 + ((h >> 6) & 63), 40 + ((h >> 12) & 63)); }
-  } else if (FIGURE) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, ...(y < 90 ? (x < 40 ? [194, 178, 128] : [240, 244, 250]) : x < 40 ? [60, 140, 60] : [70, 70, 75]));
+  } else if (FIGURE) {
+    const sand = [194, 178, 128], grass = [60, 140, 60];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, ...(y < 90 ? (x < 40 ? (swap ? grass : sand) : [240, 244, 250]) : x < 40 ? (swap ? sand : grass) : [70, 70, 75]));
+    if (NPCS && !hidden.has("NPC")) for (const n of NPCS) for (let y = n.pos[1] - 3; y < n.pos[1] + 3; y++) for (let x = n.pos[0] - 3; x < n.pos[0] + 3; x++) put(x, y, 200, 40, 40);
+  }
   else for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 20, 24, 40);
   if (LOOK) for (let y = 100; y < 140; y++) for (let x = 170; x < 230; x++) put(x, y, 222, 205, 160);   // a sand patch in the world
   // screen = (world - camera) × zoom; MOCK_ALIGN draws coin 12 six screen pixels left of its state position
@@ -283,7 +291,7 @@ sock.on("data", (d) => {
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; stepMs = []; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
       case "snapshot": {
-        let state = { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(PERF ? { particles } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) };
+        let state = { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins, ...(NPCS || [])], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(PERF ? { particles } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) };
         if (BIG) state.world = BIG;
         // the protocol's paths filter: only the asked-for top-level keys (MOCK_PATHS=bad drops them all, a broken
         // adapter; MOCK_PATHS=ignore sends everything; MOCK_PATHS=log logs the first filtered request)

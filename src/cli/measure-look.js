@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { begin, stepTo } from "../core/runner.js";
 import { parseRect } from "./see.js";
-import { die, withGame, runOpts, media, printLogs, framesOf, fmtT, shotImage, envelope, emit } from "./common.js";
+import { die, withGame, gamePixels, runOpts, media, printLogs, framesOf, fmtT, shotImage, envelope, emit } from "./common.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { entitiesOf, cameraHint } from "./measure.js";
 import { backgroundPalette } from "../media/align.js";
@@ -30,7 +30,7 @@ export async function lookMeasure(what, files, opt) {
 }
 
 /** The frame(s) to look at: a PNG file, or the game's screenshot (+ snapshot) at --at, once per --window size. */
-async function getFrames(m, files, opt) {
+async function getFrames(m, files, opt, gameCoords = null) {
   if (files[0]) return { frames: [{ img: readImage(m, files[0]), snap: null, label: path.basename(String(files[0])) }], file: path.resolve(String(files[0])) };
   const wins = val(opt.window) ? val(opt.window).split(",").map((w) => w.trim()).filter(Boolean) : [null];
   const frames = [];
@@ -38,6 +38,7 @@ async function getFrames(m, files, opt) {
   await withGame(opt, async (s, cfg0, root0) => {
     cfg = cfg0; root = root0;
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    if (gameCoords) gamePixels(s, gameCoords);
     const f = framesOf(val(opt.at) || "1", s.fps);
     for (const w of wins) {
       const st = await begin(s, runOpts(w ? { ...opt, window: w } : { ...opt, window: undefined }, cfg));
@@ -108,13 +109,14 @@ async function uiSweep(ui, opt) {
   const t = (f) => `f${f} (${fmtT(f / fps)})`;
   const rect = (q) => `${q[0]},${q[1]} ${q[2]}×${q[3]}`;
   const lines = [`measure ui sweep ${t(f0)} → ${t(f1)}, every ${every}f (${res.samples} samples${res.missing ? `, ${res.missing} without state.ui` : ""}): ${tl.size} distinct texts · repeats within ${within} s`];
-  for (const r of repeats) lines.push(`  ✖ "${r.text}" shown again ${r.sinceStart} s after it last appeared: ${t(r.first.f0)}–${t(r.first.f1)} at ${rect(r.first.rect)}, then ${t(r.again.f0)} at ${rect(r.again.rect)} (hidden ${r.hidden} s between; ${r.shows} showings in the span)`);
+  for (const r of repeats) lines.push(`  ⚠ ${r.id ? `${r.id} ` : ""}"${r.text}" shown again ${r.sinceStart} s after it last appeared: ${t(r.first.f0)}–${t(r.first.f1)} at ${rect(r.first.rect)}, then ${t(r.again.f0)} at ${rect(r.again.rect)} (hidden ${r.hidden} s between; ${r.shows} showings in the span)`);
   for (const d of dups) lines.push(`  ✖ "${d.text}" shown twice at once from ${t(d.first)} (${d.frames} sampled frame${d.frames > 1 ? "s" : ""}, to ${t(d.last)}): ${d.ids.map((id, i) => `${id} at ${rect(d.rects[i])}`).join(" and ")}`);
   if (!repeats.length && !dups.length) lines.push(`  ✔ no text shown again within ${within} s, none shown twice at once`);
+  else if (repeats.length) lines.push(`  (a repeat is a warning: an element that hid and came back with the same text, a toast or a prompt shown again; gate it with --expect "repeats == 0")`);
   const shown = [...tl.values()].sort((a, b) => a.shows[0].f0 - b.shows[0].f0);
   lines.push(`  texts: ${shown.slice(0, 12).map((x) => `"${x.text.length > 30 ? x.text.slice(0, 29) + "…" : x.text}" ${x.shows.map((q) => (q.f0 === q.f1 ? `f${q.f0}` : `f${q.f0}–f${q.f1}`)).join(", ")}`).join(" · ")}${shown.length > 12 ? ` (+${shown.length - 12})` : ""}`);
   const env = envelope("measure ui", {
-    ok: !repeats.length && !dups.length,
+    ok: !dups.length,
     verdict: repeats.length || dups.length ? [repeats.length ? `${repeats.length} text${repeats.length > 1 ? "s" : ""} shown again within ${within} s` : "", dups.length ? `${dups.length} text${dups.length > 1 ? "s" : ""} shown twice at once` : ""].filter(Boolean).join(", ") : `no repeated or doubled text over ${fmtT((f1 - f0) / fps)}`,
     summary: { sweep: true, samples: res.samples, texts: tl.size, repeats: repeats.length, duplicates: dups.length, within },
     data: { from: f0, to: f1, every, fps, repeats, duplicates: dups, texts: shown.map((x) => ({ text: x.text, shows: x.shows })) },
@@ -125,7 +127,7 @@ async function uiSweep(ui, opt) {
 async function uiMeasure(m, files, opt) {
   const ui = await import("../media/ui.js");
   if (opt.from !== undefined || opt.to !== undefined) return uiSweep(ui, opt);
-  const got = await getFrames(m, files, opt);
+  const got = await getFrames(m, files, opt, "measure ui (state.ui rects)");
   let uiFile = null;
   if (val(opt.ui)) {
     const p = path.resolve(val(opt.ui));
@@ -141,7 +143,7 @@ async function uiMeasure(m, files, opt) {
     const { img } = fr, W = img.width, H = img.height;
     let safe, safeM, preset = null;
     if (safeName) {
-      try { preset = ui.safePreset(safeName, W, H); } catch (e) { die(`--safe: ${e.message}`); }
+      try { preset = ui.safePreset(safeName, W, H, { fit: val(opt.fit) || "contain" }); } catch (e) { die(`--safe: ${e.message}`); }
       safe = { px: null, pct: null }; safeM = preset.px;
     } else {
       safe = pctOrPx(opt.safe, 1, "5%");
@@ -174,7 +176,7 @@ async function uiMeasure(m, files, opt) {
       const tc = ui.textContrast(img, e);
       const need = minC ?? ((e.fontPx ?? e.h) >= 24 ? 3 : 4.5);
       const outlined = tc && tc.outline && tc.outline.textVsOutline >= need;
-      const plate = e.kind === "text" && !held(e) && !outlined ? ui.plateCheck(img, e) : null;
+      const plate = e.kind === "text" && !held(e) && !outlined ? ui.plateCheck(img, e, { need }) : null;
       contrasts.push({ id: e.id, need, ...(tc ? tc : { ratio: null }), ...(plate ? { plate } : {}) });
     }
     const dups = source === "pixels"
@@ -197,7 +199,11 @@ async function uiMeasure(m, files, opt) {
       if (c.plate && c.plate.busy) {
         // over a busy background the averaged ratio hides the weak spots: judge the worst glyph edge instead
         const p = c.plate, g = p.edge;
-        if (g.worst < c.need) add("fail", "no-plate", [c.id], `${name(c.id)} over the world without a plate: worst glyph-edge contrast ${g.worst.toFixed(2)}:1 < ${c.need} (${rgb(g.textAt)} on ${rgb(g.bgAt)} at ${g.at.join(",")}; median ${g.median.toFixed(2)}, best ${g.best.toFixed(2)}; background ${Math.round(p.bgShare * 100)}% one colour)`, { worst: g.worst, at: g.at });
+        // a stray pixel (a flower, a sparkle) touching one letter isn't unreadable text: ✖ when over 10% of the glyph
+        // edges are under the bar (p10 under it), ⚠ for a few (3+), the worst pixel as context
+        const detail = `${g.under} of ${g.n} glyph edges under ${c.need}:1 (${Math.round(g.underShare * 100)}%); p10 ${g.p10.toFixed(2)}, median ${g.median.toFixed(2)}, worst ${g.worst.toFixed(2)} (${rgb(g.textAt)} on ${rgb(g.bgAt)} at ${g.at.join(",")}); background ${Math.round(p.bgShare * 100)}% one colour`;
+        if (g.underShare > 0.1) add("fail", "no-plate", [c.id], `${name(c.id)} over the world without a plate: ${detail}`, { worst: g.worst, p10: g.p10, underShare: g.underShare, at: g.at });
+        else if (g.under >= 3) add("warn", "no-plate", [c.id], `${name(c.id)} over the world without a plate, a few weak spots: ${detail}`, { worst: g.worst, p10: g.p10, underShare: g.underShare, at: g.at });
         continue;
       }
       const ol = c.outline ? ` (outlined in ${rgb(c.outline.color)}: text/outline ${c.outline.textVsOutline.toFixed(2)}, outline/background ${c.outline.outlineVsBg.toFixed(2)}, without the outline ${c.outline.plainRatio.toFixed(2)})` : "";
@@ -211,7 +217,8 @@ async function uiMeasure(m, files, opt) {
       if (touching.includes(u.id)) continue;
       if (!preset) { add("warn", "safe", [u.id], `${name(u.id)} outside the safe area: ${Object.entries(u.into).map(([k, v]) => `${v} px into the ${k} margin`).join(", ")}`); continue; }
       const e = byId.get(u.id), zones = Object.keys(u.into).map((k) => preset.zones[k] || `${k} edge`);
-      add(e.kind === "panel" ? "warn" : "fail", "safe", [u.id], `${name(u.id)} in the ${safeName} unsafe zone: ${Object.entries(u.into).map(([k, v]) => `${preset.zones[k] || `${k} edge`} (${v} px into the ${preset.px[k]} px ${k} inset)`).join(", ")}${e.kind === "panel" ? " (a panel: a background may extend there, keep its content out)" : ""}`, { zones });
+      // stretched over another aspect the zones are a guess: warnings only
+      add(e.kind === "panel" || preset.demote ? "warn" : "fail", "safe", [u.id], `${name(u.id)} in the ${safeName} unsafe zone: ${Object.entries(u.into).map(([k, v]) => `${preset.zones[k] || `${k} edge`} (${v} px into the ${preset.px[k]} px ${k} inset)`).join(", ")}${e.kind === "panel" ? " (a panel: a background may extend there, keep its content out)" : ""}`, { zones });
     }
     for (const a of chk.aligned) add("warn", "align", [a.a, a.b], `${a.a} / ${a.b} almost aligned: ${a.edges.map((e) => `${e.edge} ${e.a} vs ${e.b}`).join(", ")} (${Math.max(...a.edges.map((e) => e.diff))} px off)`);
     const fails = F.filter((f) => f.level === "fail").length, warns = F.length - fails;
@@ -236,7 +243,13 @@ async function uiMeasure(m, files, opt) {
   for (const r of results) {
     const heur = r.source === "pixels";
     lines.push(`measure ui ${r.fr.label} (${r.W}×${r.H}): ${heur ? `no state.ui — ${r.els.filter((e) => e.kind === "text").length} text-like rows and ${r.els.filter((e) => e.kind === "panel").length} panels found from pixels (a heuristic: expose state.ui for exact checks)` : `${r.els.length} elements from ${r.source}`}`);
-    if (r.preset) { const p = r.preset; lines.push(`  safe area ${p.name}: ${p.device}, ${p.orientation} ${p.pt.join("×")} pt @${p.dpr}x · env(safe-area-inset-*) ${["top", "bottom", "left", "right"].filter((k) => p.insetsPt[k]).map((k) => `${k} ${p.insetsPt[k]} pt = ${p.px[k]} px (${p.zones[k] || k})`).join(" · ") || "none"}${p.mismatch ? "" : ` (${p.scale.x} px/pt across, ${p.scale.y} down)`}`); if (p.mismatch) lines.push(`  ⚠ ${p.mismatch}`); }
+    if (r.preset) {
+      const p = r.preset;
+      const side = (k) => `${k} ${p.insetsPt[k]} pt = ${p.px[k]} px${p.px[k] === 0 ? " (inside the bars)" : ` (${p.zones[k] || k})`}`;
+      lines.push(`  safe area ${p.name}: ${p.device}, ${p.orientation} ${p.pt.join("×")} pt @${p.dpr}x · env(safe-area-inset-*) ${["top", "bottom", "left", "right"].filter((k) => p.insetsPt[k]).map(side).join(" · ") || "none"}${p.mismatch ? "" : ` (${p.scale.x} px/pt${p.fit === "stretch" && p.scale.x !== p.scale.y ? ` across, ${p.scale.y} down` : ""})`}`);
+      if (p.mismatch) lines.push(`  ${p.demote ? "⚠" : "·"} ${p.mismatch}`);
+      if (p.sizeNote) lines.push(`  ⚠ ${p.sizeNote}`);
+    }
     lines.push(`  ${r.preset ? "" : `safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · `}min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? "4.5 (3 for 24 px+)"} · edges within ${alignTol} px`);
     lines.push(r.F.length ? `  ${r.fails ? "✖" : "⚠"} ${r.fails} problem${r.fails === 1 ? "" : "s"}, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : r.els.length ? `  ✔ no layout problems` : "  nothing to check: no UI elements found");
     for (const f of r.F) lines.push(`  ${f.level === "fail" ? "✖" : "⚠"} ${f.text}`);
@@ -562,6 +575,9 @@ async function figureMeasure(m, c, files, opt) {
   const merge = val(opt.merge) != null ? +opt.merge : 12;
   const min = val(opt.min) != null ? +opt.min : 3;
   const minShare = pctOrPx(opt["min-share"], 1, "5%");
+  // a bare number above 1 is a percentage (--min-share 5 = 5%), up to 1 a fraction (0.05)
+  if (minShare.pct == null && minShare.px > 1) { minShare.pct = minShare.px; minShare.px = minShare.px / 100; }
+  if (minShare.pct != null && minShare.pct > 100) die(`--min-share is a share of the ring: 5% (or 5, or 0.05), got ${val(opt["min-share"])}`);
   const minShareF = minShare.pct != null ? minShare.pct / 100 : minShare.px;
   const threshold = +(opt.threshold || 16);
   const named = val(opt.surfaces) ? parseColors(c, opt.surfaces) : [];
@@ -590,6 +606,7 @@ async function figureMeasure(m, c, files, opt) {
     if (scenes.length * sets.length * ats.length > 24) die(`${scenes.length * sets.length * ats.length} shots: keep scenes × params × times at 24 or fewer`);
     await withGame({ ...opt, params: undefined, scene: undefined }, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+      gamePixels(s, "measure figure");
       const base = runOpts({ ...opt, params: undefined, scene: undefined }, cfg);
       for (const scene of scenes) for (const params of sets) {
         const frames = [...new Set(ats.map((t) => framesOf(t, s.fps)))].sort((a, b) => a - b);
@@ -601,6 +618,9 @@ async function figureMeasure(m, c, files, opt) {
         const targets0 = figureTargets(caps[0].snap, of, evaluate);
         if (!targets0.length) die(`--of ${of}: nothing in state.entities has that id, type or name at f${caps[0].f}${scene ? ` (scene ${scene})` : ""}`);
         const hide = targets0.map((t) => t.id ?? t.type).filter((v) => v != null);
+        // a target without an id is hidden by its type: every entity of that type goes, so its diff is cut to the part
+        // at the target's position
+        const byType = !without && targets0.some((t) => t.id == null && t.type != null);
         const runB = without
           ? { seed: without.seed ?? run.seed, scene: without.scene ?? run.scene, params: { ...(run.params || {}), ...(without.params || {}) }, input: [run.input, without.input].filter(Boolean).join(", ") || undefined }
           : hide.length ? { ...run, params: { ...(run.params || {}), hide } } : null;
@@ -630,8 +650,8 @@ async function figureMeasure(m, c, files, opt) {
             const [sx, sy] = Number.isFinite(t.x) ? toScreen(t.x, t.y) : [NaN, NaN];
             let mask = null, method = null;
             if (diff && diff.count) {
-              mask = targets.length > 1 && Number.isFinite(sx) ? partNear(m, diff.mask, cap.img.width, cap.img.height, sx, sy) : diff.mask;
-              method = without ? `with/without diff (--without ${without.label})` : `with/without diff (reset param hide: ${JSON.stringify(hide)})`;
+              mask = (targets.length > 1 || byType) && Number.isFinite(sx) ? partNear(m, diff.mask, cap.img.width, cap.img.height, sx, sy) : diff.mask;
+              method = without ? `with/without diff (--without ${without.label})` : `with/without diff (reset param hide: ${JSON.stringify(hide)}${byType ? Number.isFinite(sx) ? `: no id, so every ${targets0.find((t) => t.id == null).type} was hidden; the part at its position kept` : `: no id, so every ${targets0.find((t) => t.id == null).type} was hidden and it has no position: the diff may hold the others` : ""})`;
             }
             const note = runB && !(diff && diff.count) ? (without ? "--without changed no pixels" : `the game ignored the hide param (${JSON.stringify(hide)})`) : null;
             if (!mask && (t.rect || (t.box && Number.isFinite(sx)))) {
@@ -653,9 +673,11 @@ async function figureMeasure(m, c, files, opt) {
     });
   }
   // measure every shot
-  // --surfaces names: a surface takes the name of the one that held the same ground pixels in an earlier shot of the
-  // same scene, frame and figure (day → night: same place, other colours), else the nearest given colour within ΔE 15
-  const nameOf = (col) => { let best = null, bd = 15; for (const n of named) { const dd = c.deltaE(col, n.color); if (dd < bd) { bd = dd; best = n.name; } } return best; };
+  // --surfaces names. A shot whose surfaces mostly match the given colours (ΔE < 15) is lit like them: each surface
+  // takes its colour's name (a param set that moves the ground around keeps true names). Otherwise (night: other
+  // colours at the same places) a surface takes the name of the one that held the same ground pixels in an earlier
+  // shot of the same scene, frame and figure, else the nearest given colour
+  const nameOf = (col) => { if (!col) return null; let best = null, bd = 15; for (const n of named) { const dd = c.deltaE(col, n.color); if (dd < bd) { bd = dd; best = n.name; } } return best; };
   const results = [], owners = [];   // owners: per named shot, Map(pixel index -> name)
   for (const sh of shots) {
     if (sh.error) { results.push(sh); continue; }
@@ -663,8 +685,11 @@ async function figureMeasure(m, c, files, opt) {
     if (!r) { results.push({ ...sh, error: `${sh.target}: its silhouette touches no ground (fills the screen?)` }); continue; }
     const pix = r.surfaces.map(() => []);
     for (let n = 0; n < r.ring.length; n += 3) pix[r.ring[n + 2]].push(r.ring[n]);
+    const real = r.surfaces.filter((s) => s.color && !s.minor);
+    const lit = real.length > 0 && real.filter((s) => nameOf(s.color)).length * 2 >= real.length;
     r.surfaces.forEach((s, j) => {
-      if (!named.length) return;
+      if (!named.length || !s.color) return;
+      if (lit && nameOf(s.color)) { s.name = nameOf(s.color); return; }
       for (const o of owners) {
         if (o.key !== `${sh.scene}|${sh.f}|${sh.target}` || o.w !== sh.img.width || o.h !== sh.img.height) continue;
         const votes = new Map();
@@ -710,7 +735,8 @@ async function figureMeasure(m, c, files, opt) {
     if (x.error) { lines.push(`  ✖ ${x.label ? `${x.label}: ` : ""}${x.error}`); continue; }
     const b = x.r.bbox;
     lines.push(`  ${x.label} · ${x.target}: ${b.w}×${b.h} px at ${b.x},${b.y}, ${x.r.figure} px, ring ${x.r.ground} px · silhouette: ${x.method}`);
-    for (const s of x.r.surfaces.slice(0, 8)) lines.push(`    ${fmtS(s)}`);
+    // the small surfaces judged together come first: they decide when nothing else is big enough
+    for (const s of [...x.r.surfaces.filter((q) => q.combined), ...x.r.surfaces.filter((q) => !q.combined)].slice(0, 8)) lines.push(`    ${fmtS(s)}`);
     if (x.r.surfaces.length > 8) lines.push(`    … ${x.r.surfaces.length - 8} more surfaces (--json)`);
   }
   // the same surface across shots (named or map-labelled surfaces)
@@ -722,9 +748,10 @@ async function figureMeasure(m, c, files, opt) {
   const lowest = (k, f) => judged.length ? Math.min(...judged.map((s) => s[k][f])) : null;
   const worstS = judged.length ? judged.reduce((a, s) => (s.ratio.median < a.ratio.median ? s : a)) : null;
   const errors = results.filter((x) => x.error).length;
+  if (!judged.length) lines.push(`  ✖ no surface judged (every surface under --min-share ${minShare.pct}%)`);
   const env = envelope("measure figure", {
-    ok: !failing.length && !errors,
-    verdict: failing.length ? `${failing.length} surface${failing.length > 1 ? "s" : ""} under ${min}:1 (median edge): ${failing.slice(0, 4).map((f) => `${f.surface} ${f.median}:1 at ${f.shot}`).join(", ")}` : errors ? `${errors} shot${errors > 1 ? "s" : ""} without a silhouette` : `edge contrast ≥ ${min}:1 (median) on every surface in ${good.length} shot${good.length > 1 ? "s" : ""}`,
+    ok: !failing.length && !errors && judged.length > 0,
+    verdict: !judged.length ? "no surface judged" : failing.length ? `${failing.length} surface${failing.length > 1 ? "s" : ""} under ${min}:1 (median edge): ${failing.slice(0, 4).map((f) => `${f.surface} ${f.median}:1 at ${f.shot}`).join(", ")}` : errors ? `${errors} shot${errors > 1 ? "s" : ""} without a silhouette` : `edge contrast ≥ ${min}:1 (median) on every surface in ${good.length} shot${good.length > 1 ? "s" : ""}`,
     summary: { shots: good.length, errors, surfaces: judged.length, failing: failing.length, min, worstRatio: lowest("ratio", "worst"), worstMedianRatio: lowest("ratio", "median"), worstDeltaE: lowest("deltaE", "worst"), worstMedianDeltaE: lowest("deltaE", "median"), worstSurface: worstS ? sName(worstS) : null },
     data: { edge, merge, minShare: minShareF, shots: results.map((x) => (x.error ? { shot: x.label, target: x.target, error: x.error } : { shot: x.label, target: x.target, scene: x.scene ?? null, params: x.params ?? null, frame: x.f ?? null, silhouette: x.method, bbox: x.r.bbox, figurePixels: x.r.figure, ringPixels: x.r.ground, surfaces: x.r.surfaces, all: x.r.all })), failing },
     files: written,

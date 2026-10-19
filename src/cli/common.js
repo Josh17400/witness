@@ -78,6 +78,15 @@ export async function withGame(opt, fn) {
   }
 }
 
+/**
+ * Commands that place game-pixel coordinates (crops, follows, entity boxes, state.ui rects, positions) on a
+ * screenshot: refuse when --capture element|screen made the screenshots device-pixel pictures of the page.
+ */
+export function gamePixels(s, what) {
+  const mode = s && s.web && s.web.captureMode;
+  if (mode && mode !== "canvas") die(`${what} works in game pixels, but --capture ${mode} makes screenshots of the page at device pixels (DPR ${s.web.device ? s.web.device.dpr : 1}, a different size and origin): run it without --capture (launch.capture "canvas", the game's own pixels), or use the device-pixel PNG from witness shot --capture ${mode} with measure scale`);
+}
+
 export function runOpts(opt, cfg) {
   let params = opt.params && opt.params !== true ? JSON.parse(opt.params) : undefined;
   // reserved params (docs/PROTOCOL.md): window size and pixel density for games that can vary them per run

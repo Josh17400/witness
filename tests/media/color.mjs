@@ -134,6 +134,21 @@ const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
   const r4 = figureGround(tx, m3, {});
   ok("textured grass is one surface; the 1 px white line is minor", r4.surfaces.length === 2 && !r4.surfaces[0].minor && r4.surfaces[1].minor && r4.surfaces[1].count === 2, r4.surfaces.map((s) => [s.hex, s.count, s.minor]));
   ok("figureGround: an empty mask is null", figureGround(tx, new Uint8Array(1600)) === null);
+  // noisy grass around a flat square of nearly the same green: the ring splits into many surfaces, each under 5%;
+  // they are judged together (the whole ring) instead of passing with nothing judged
+  const nz = img(96, 96, [0, 0, 0]);
+  let sd = 7;
+  const rnd = () => ((sd = (sd * 1103515245 + 12345) >>> 0) / 2 ** 32);
+  for (let y = 0; y < 96; y++) for (let x = 0; x < 96; x++) put(nz, x, y, [Math.round(40 + 120 * rnd()), Math.round(100 + 110 * rnd()), Math.round(20 + 80 * rnd())]);
+  const m4 = new Uint8Array(96 * 96);
+  rect(nz, 24, 24, 48, 48, [0x64, 0x96, 0x46]); for (let y = 24; y < 72; y++) for (let x = 24; x < 72; x++) m4[y * 96 + x] = 1;
+  const r5 = figureGround(nz, m4, { merge: 8 });
+  const whole = r5.surfaces.find((q) => q.combined);
+  show("noisy ring", `${r5.surfaces.length - 1} surfaces, all minor: ${r5.surfaces.filter((q) => !q.combined).every((q) => q.minor)}; whole ring median ${whole && whole.ratio.median}`);
+  ok("noisy ground: the 60 surfaces under 5% (94% of the ring) are judged together, median under 3:1", whole && whole.combined === 60 && whole.share > 0.9 && !whole.minor && whole.ratio.median < 3, r5.surfaces.map((q) => [q.hex, q.share, q.minor]));
+  const r6 = figureGround(nz, m4, { merge: 8, minShare: 0.5 });
+  const all6 = r6.surfaces.find((q) => q.combined);
+  ok("no surface reaches minShare: the whole ring is judged (median = r.all's)", all6 && all6.hex === "the whole ring" && all6.share === 1 && all6.ratio.median === r6.all.ratio.median && all6.ratio.median < 3, all6);
   const cc = clusterColors(new Map([[0x102030, 5], [0x112131, 3], [0xffffff, 1]]), 12);
   ok("clusterColors: near colours join the most common one's cluster", cc.clusters.length === 2 && cc.clusters[0].count === 8 && cc.of.get(0x112131) === 0);
 }

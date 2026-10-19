@@ -73,7 +73,7 @@ witness shot --at 2 --annotate                 # every entity boxed + labelled (
 witness measure align --at 2                   # are sprites drawn where the state says? art offsets, hitbox vs art
 witness measure scale|box|contrast ...         # pixel facts: integer scale/blur, sprite box, WCAG contrast
 witness measure ui --at 2 --out ui.png         # HUD/menus: clipped, off-screen, overlaps, tiny or low-contrast text, text without a plate, the same text twice (state.ui; else a pixel guess)
-witness measure ui --at 2 --safe iphone-landscape   # what sits under the Dynamic Island / home indicator (also iphone-portrait, iphone-se, ipad)
+witness measure ui --at 2 --safe iphone-landscape   # what sits under the Dynamic Island / home indicator (Home Screen app; a Safari tab: iphone-safari-portrait; also iphone-max-*, iphone-se, ipad)
 witness measure ui --from 0 --to 60 --within 10     # toasts shown again within 10 s, text doubled at any frame
 witness measure figure --of Player --params '[{"hour":12},{"hour":22}]'   # hero edge contrast vs each ground surface, day and night
 witness measure colorblind --at 2              # protan/deutan/tritan pictures + which sprite colours become confusable (ΔE)
@@ -105,10 +105,13 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
 * **Sound names**: games can announce sounds (`witness.sound("jump")` in the adapters), so `listen` names them
   and ties them to their cause. Without it, `listen` still matches sounds by onset.
 * **Web builds on phones** (JS, or C/C++ via Emscripten + `witness_emscripten.js`, see the cpp GUIDE §13): add
-  `--device iphone-15` (also `iphone-se`, `ipad`, `-landscape`) and `--engine webkit` to any command. `doctor` then
-  says how the canvas lands on the screen (exact ×k, fractional = uneven pixels, smoothing = blur); `shot --capture
-  element` + `measure scale` checks it from device pixels. `doctor --no-auto-unlock` tests the iPhone "no sound until
-  a tap" bug; tests assert `web.audio.state == 'running'` after `touch:x,y@t` (or a real `dom:tap:x,y@t`).
+  `--device iphone-15` (also `iphone-15-safari`, `iphone-se`, `ipad`, `-landscape`) and `--engine webkit` to any
+  command. `doctor` then says how the canvas lands on the screen (exact ×k, fractional = uneven pixels with the exact
+  share drawn wider, smoothing = blur); `shot --capture element` + `measure scale` checks it from device pixels (crop,
+  follow, annotate and state-rect measures refuse device-pixel captures). Safe areas are not emulated: run the
+  `measure ui --safe` preset doctor names. `doctor --no-auto-unlock` tests the iPhone "no sound until a tap" bug
+  (audio is frozen while suspended, as on the phone); tests assert `web.audio.state == 'running'` after
+  `touch:x,y@t` (or a real `dom:tap:x,y@t`).
 
 ## 3. Test files: prove gameplay, keep it proven
 

@@ -18,9 +18,11 @@ lines in any language.
   WebAssembly builds of C/C++ games (Emscripten) use the same WebSocket: `witness.h` hands its lines to
   `witness_emscripten.js`, which holds the socket and calls back into the module for each command.
 * Browser launches (`launch.url`) run the page in a headless Playwright browser, optionally with a device profile
-  (viewport, device pixel ratio, touch). The CLI installs a page script before the game's own (`__witnessWeb`): it
-  tracks AudioContexts and emulates the autoplay policy (`auto`, or `gesture` like iPhone Safari: `resume()` only
-  while a user gesture is handled). Adapters mark input that browsers count as a gesture (key down except Escape,
+  (viewport, device pixel ratio, touch, and `navigator.platform` / `maxTouchPoints` matching the user agent; safe
+  areas are not emulated). The CLI installs a page script before the game's own (`__witnessWeb`): it tracks
+  AudioContexts and emulates the autoplay policy (`auto`, or `gesture` like iPhone Safari: `resume()` only while a
+  user gesture is handled; a captured context that isn't running is frozen: no rendering, `currentTime` still).
+  Adapters access `__witnessWeb` and JSON with quoted names where a minifier may rename (Emscripten `--closure 1`). Adapters mark input that browsers count as a gesture (key down except Escape,
   mouse button, finger lifted, text) with `__witnessWeb.begin()` / `end()` around its delivery. Standalone pages
   (no CLI script) take the policy from `?witness_audio_unlock=0`.
 * Framing: **one JSON object per line** (UTF-8, `\n`-terminated; no newlines inside a

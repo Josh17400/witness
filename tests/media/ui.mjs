@@ -113,12 +113,33 @@ const LAYOUT = [
   ok("iphone-portrait at device pixels: top 59 pt = 177 px, bottom 34 pt = 102 px, sides 0", p.px.top === 177 && p.px.bottom === 102 && p.px.left === 0 && p.px.right === 0 && p.devicePx.top === 177 && !p.mismatch, p);
   const l = safePreset("iphone-landscape", 852, 393);   // a game rendering at 1 px per point
   ok("iphone-landscape at 852×393: left/right 59, bottom 21, top 0; zones named", l.px.left === 59 && l.px.right === 59 && l.px.bottom === 21 && l.px.top === 0 && l.zones.bottom === "home indicator" && /Dynamic Island/.test(l.zones.left) && !l.zones.top, l);
+  // a 16:9 game on a landscape iPhone is fitted to the height (contain): 393/720 pt per px, 1280 px = 698.67 pt wide,
+  // (852 − 698.67)/2 = 76.67 pt bars: the 59 pt side insets end inside the bars (0 px); bottom 21 pt = 38.47 px
   const g = safePreset("iphone-landscape", 1280, 720);
-  ok("a 16:9 game on a landscape iPhone: insets scaled per axis and the aspect flagged", g.px.left === Math.round(59 * 1280 / 852 * 100) / 100 && g.px.bottom === Math.round(21 * 720 / 393 * 100) / 100 && /aspect 1.78/.test(g.mismatch), g);
+  ok("a 16:9 game on a landscape iPhone (contain): sides inside the 76.67 pt bars = 0 px, bottom 21 pt = 38.47 px", g.px.left === 0 && g.px.right === 0 && g.px.bottom === Math.round((21 * 720) / 393 * 100) / 100 && g.bars.x === 76.67 && /aspect 1.78/.test(g.mismatch) && !g.demote, g);
+  const gs = safePreset("iphone-landscape", 1280, 720, { fit: "stretch" });
+  ok("--fit stretch: per axis (59 pt = 88.64 px across) and demoted to warnings", gs.px.left === Math.round((59 * 1280) / 852 * 100) / 100 && gs.demote && /warnings/.test(gs.mismatch), gs);
+  const gc = safePreset("iphone-landscape", 1280, 720, { fit: "cover" });
+  // cover: 852/1280 pt per px, 479.25 pt tall: 43.125 pt cut off top and bottom; the bottom inset plus the cut-off
+  // strip = 64.125 pt = 96.34 px of the picture lost at the bottom; sides 59 pt = 88.64 px
+  ok("--fit cover: sides 88.64 px, bottom 96.34 px (21 pt inset + 43.13 pt cut off)", gc.px.left === 88.64 && gc.px.bottom === 96.34 && gc.bars.y < -43.1 && gc.bars.y > -43.2, gc);
+  // examples/arena: 480×288 (5:3) on a landscape iPhone 15: 1.3646 pt per px, 98.5 pt bars: only the bottom applies
+  const ar = safePreset("iphone-landscape", 480, 288);
+  ok("arena 480×288 on iphone-landscape: left/right 0 (98.5 pt bars), bottom 21/1.3646 = 15.39 px", ar.px.left === 0 && ar.px.right === 0 && ar.px.bottom === 15.39 && ar.bars.x === 98.5, ar);
+  // a Safari tab (the team's setup): the toolbars are outside the page, no insets
+  const sf = safePreset("iphone-safari-portrait", 393, 659);
+  ok("iphone-safari-portrait at 393×659: no insets, no mismatch", Object.values(sf.px).every((v) => v === 0) && !sf.mismatch, sf);
+  // iPhone 15 Pro Max at @3x (1290×2796): the Max preset gives 177 px; the 393 pt preset says it doesn't fit
+  const mx = safePreset("iphone-max-portrait", 1290, 2796);
+  ok("iphone-max-portrait at 1290×2796: top 59 pt = 177 px, bottom 34 pt = 102 px", mx.px.top === 177 && mx.px.bottom === 102 && !mx.sizeNote, mx);
+  const mw = safePreset("iphone-portrait", 1290, 2796);
+  ok("iphone-portrait on a 1290 px wide shot: warned (3.28 px per pt) and pointed at iphone-max-portrait", /3\.28 px per pt/.test(mw.sizeNote) && /--safe iphone-max-portrait/.test(mw.sizeNote), mw);
+  const p16 = safePreset("iphone-16-pro-portrait", 1206, 2622);
+  ok("iphone-16-pro-portrait at @3x: top 62 pt = 186 px", p16.px.top === 186 && p16.px.bottom === 102, p16);
   ok("iphone-portrait on a landscape shot: flagged", /landscape \(1280×720\) but iphone-portrait is portrait/.test(safePreset("iphone-portrait", 1280, 720).mismatch));
   ok("iphone-se follows the shot: portrait top 20 pt (×2 = 40 px at 750×1334), landscape none", safePreset("iphone-se", 750, 1334).px.top === 40 && Object.values(safePreset("iphone-se", 1334, 750).px).every((v) => v === 0));
   ok("ipad landscape 2360×1640: top 24 pt = 48 px, bottom 20 pt = 40 px", (() => { const q = safePreset("ipad", 2360, 1640); return q.px.top === 48 && q.px.bottom === 40 && q.orientation === "landscape"; })());
-  ok("unknown preset: a clear error", (() => { try { safePreset("pixel-8", 1, 1); return false; } catch (e) { return /iphone-portrait, iphone-landscape, iphone-se, ipad/.test(e.message); } })());
+  ok("unknown preset: a clear error", (() => { try { safePreset("pixel-8", 1, 1); return false; } catch (e) { return /iphone-portrait, iphone-landscape, .*iphone-safari-portrait, .*iphone-se, ipad/.test(e.message); } })());
   const els = normalizeUI([{ id: "hp", kind: "text", text: "HP", rect: [10, 10, 40, 12] }, { id: "pause", kind: "button", rect: [790, 300, 50, 80] }, { id: "mid", kind: "text", text: "ok", rect: [300, 150, 40, 12] }]);
   const c = layoutChecks(els, { width: 852, height: 393, safe: l.px });
   ok("per-side margins: hp 49 px into the left inset; pause 47 px into the right one and 8 px into the bottom one", c.unsafe.length === 2 && c.unsafe[0].id === "hp" && c.unsafe[0].into.left === 49 && !c.unsafe[0].into.top && c.unsafe[1].id === "pause" && c.unsafe[1].into.right === 47 && c.unsafe[1].into.bottom === 8 && c.margins.right === 59 && c.margins.bottom === 21, c.unsafe);
@@ -135,15 +156,33 @@ const LAYOUT = [
   ]);
   const d = duplicateTexts(els, { width: 400, height: 200 });
   ok("duplicateTexts: the quest line twice (case/spaces ignored) with both rects; not a button's own label, not a digit, not off screen", d.length === 1 && d[0].ids.join() === "q1,q2" && d[0].rects[1].join() === "10,30,200,12", d);
+  // labels that repeat on purpose: two BUY buttons, BUY text inside buttons, three LOCKED tiles, two LOCKED cards
+  const shop = normalizeUI([
+    { id: "b1", kind: "button", rect: [10, 10, 40, 16], text: "BUY" }, { id: "b2", kind: "button", rect: [10, 40, 40, 16], text: "BUY" },
+    { id: "c1", kind: "button", rect: [60, 10, 40, 16] }, { id: "t1", kind: "text", rect: [62, 12, 30, 10], text: "SELL" },
+    { id: "c2", kind: "button", rect: [60, 40, 40, 16] }, { id: "t2", kind: "text", rect: [62, 42, 30, 10], text: "SELL" },
+    { id: "l1", kind: "text", rect: [120, 10, 40, 10], text: "LOCKED" }, { id: "l2", kind: "text", rect: [170, 10, 40, 10], text: "LOCKED" }, { id: "l3", kind: "text", rect: [220, 10, 40, 10], text: "LOCKED" },
+    { id: "card1", kind: "panel", rect: [120, 40, 50, 30] }, { id: "k1", kind: "text", rect: [125, 50, 40, 10], text: "SOLD OUT" },
+    { id: "card2", kind: "panel", rect: [180, 40, 50, 30] }, { id: "k2", kind: "text", rect: [185, 50, 40, 10], text: "SOLD OUT" },
+  ]);
+  ok("duplicateTexts: two BUY buttons, SELL labels in buttons, 3 LOCKED tiles, SOLD OUT on two same-size cards: none", duplicateTexts(shop).length === 0, duplicateTexts(shop));
   const mk = (f, list) => ({ f, els: normalizeUI(list) });
   const toast = { id: "toast", kind: "text", text: "Quest updated", rect: [100, 20, 90, 12] };
   const samples = [];
   for (let f = 0; f <= 600; f += 6) samples.push(mk(f, (f >= 60 && f <= 180) || (f >= 300 && f <= 360) || f >= 594 ? [toast] : []));
   const tl = textTimeline(samples);
-  ok("textTimeline: three showings f60-f180, f300-f360, f594-f600", tl.get("quest updated").shows.map((s) => `${s.f0}-${s.f1}`).join() === "60-180,300-360,594-600");
+  ok("textTimeline: three showings f60-f180, f300-f360, f594-f600", tl.get("id:toast").shows.map((s) => `${s.f0}-${s.f1}`).join() === "60-180,300-360,594-600");
   const rep = repeatedTexts(tl, { within: 5, fps: 60 });
   ok("repeatedTexts within 5 s: again at f300, 4 s after it first showed, hidden 2 s; f594 is 4.9 s after f300", rep.length === 2 && rep[0].again.f0 === 300 && rep[0].sinceStart === 4 && rep[0].hidden === 2 && rep[1].sinceStart === 4.9, rep);
   ok("repeatedTexts within 3 s: none", repeatedTexts(tl, { within: 3, fps: 60 }).length === 0);
+  // a HUD value that returns to an earlier value while the element stays on screen is not a repeated toast
+  const hp = [];
+  for (let f = 0; f < 180; f += 6) hp.push(mk(f, [{ id: "hp", kind: "text", text: f < 60 || f >= 120 ? "HP 10" : "HP 9", rect: [4, 4, 40, 10] }]));
+  ok("repeatedTexts: HP 10 → HP 9 → HP 10 on one element is no repeat", repeatedTexts(textTimeline(hp), { within: 10, fps: 60 }).length === 0, [...textTimeline(hp).values()]);
+  // the same element hiding and coming back with another text is no repeat either; with the same text it is
+  const sw = [];
+  for (let f = 0; f < 240; f += 6) sw.push(mk(f, f < 60 ? [{ ...toast, text: "SAVED" }] : f >= 120 && f < 180 ? [{ ...toast, text: "LEVEL UP" }] : []));
+  ok("repeatedTexts: a toast id showing SAVED then LEVEL UP is no repeat", repeatedTexts(textTimeline(sw), { within: 10, fps: 60 }).length === 0);
   // pixel mode: two identical rendered rows are duplicates, a different word is not
   const bg = [20, 24, 40], im = img(200, 80, bg);
   const a = text(im, "SAVED", 10, 5, [255, 255, 255]), b = text(im, "SAVED", 100, 40, [255, 255, 255]), c = text(im, "SAVES", 10, 40, [255, 255, 255]);
@@ -176,6 +215,19 @@ const LAYOUT = [
   for (const k of ink) { const x = k % 120, y = (k - x) / 120; for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const n = (y + dy) * 120 + x + dx; if (!ink.has(n) && !ink.has(n + dy * 120 + dx) && x + dx >= 62) put(aa, x + dx, y + dy, mid(white, sand)); } }
   const p3 = plateCheck(aa, box3);
   ok("anti-aliased edge pixels are skipped: worst is still white vs sand", p3 && p3.edge.worst === wantWorst, p3 && p3.edge);
+  ok("no plate over sand: most of the right half's glyph edges are under 4.5 (share > 10%: a real failure)", r.edge.underShare > 0.1 && r.edge.under > 3 && r.edge.need === 4.5, r.edge);
+  // white strokes over a busy navy / dark-grass world: fine. ONE pale pixel (a flower) touching a stroke makes the
+  // worst edge 1.27:1, but p10 and the share under 4.5 stay: one bad pixel isn't unreadable text
+  const navy = [20, 24, 60], dgrass = [30, 60, 30];
+  const busy = img(120, 30, navy); rect(busy, 60, 0, 60, 30, dgrass);
+  const bb = text(busy, "WEARY", 36, 7, white);
+  const clean = plateCheck(busy, bb);
+  let fx = -1, fy = -1;
+  for (let y = bb.y; y < bb.y + bb.h && fx < 0; y++) for (let x = bb.x + 1; x < bb.x + bb.w; x++) { const o = (y * 120 + x) * 4, q = o - 4; if (busy.data[o] === navy[0] && busy.data[o + 2] === navy[2] && busy.data[q] === 240) { fx = x; fy = y; break; } }
+  put(busy, fx, fy, [225, 215, 170]);
+  const one = plateCheck(busy, bb);
+  show("one pale pixel", `clean worst ${clean.edge.worst} p10 ${clean.edge.p10}; with it worst ${one.edge.worst} p10 ${one.edge.p10} under ${one.edge.under}/${one.edge.n}`);
+  ok("one pale pixel next to a stroke: worst drops, but 1 edge of " + one.edge.n + " is under 4.5 (share ≤ 10%), p10 unchanged", clean.busy && clean.edge.under === 0 && one.edge.worst < 1.5 && one.edge.under <= 2 && one.edge.underShare <= 0.1 && one.edge.p10 === clean.edge.p10, one.edge);
 }
 
 done("ui");

@@ -1187,32 +1187,33 @@ long long witness_seed(void) {
 }
 
 #ifdef WITNESS_WEB_BRIDGE
-/* The browser side (witness_emscripten.js). EM_JS bodies are stringified onto one line: no // comments in them. */
+/* The browser side (witness_emscripten.js). EM_JS bodies are stringified onto one line: no // comments in them.
+   Quoted ['names'] throughout: emcc --closure 1 renames dotted names, and these cross into the shim. */
 EM_JS(int, witness__js_active, (void), {
-    var W = globalThis.WitnessEmscripten;
-    return W && W.active() ? 1 : 0;
+    var W = globalThis["WitnessEmscripten"];
+    return W && W["active"]() ? 1 : 0;
 });
 EM_JS(int, witness__js_open, (void), {
-    var W = globalThis.WitnessEmscripten;
+    var W = globalThis["WitnessEmscripten"];
     if (!W) return 0;
-    return W.open({
-        heap: function () { return HEAPU8; },
-        inbuf: function (n) { return _witness_emscripten_inbuf(n); },
-        recv: function (n) { return _witness_emscripten_recv(n); },
-        closed: function () { _witness_emscripten_closed(); }
+    return W["open"]({
+        "heap": function () { return HEAPU8; },
+        "inbuf": function (n) { return _witness_emscripten_inbuf(n); },
+        "recv": function (n) { return _witness_emscripten_recv(n); },
+        "closed": function () { _witness_emscripten_closed(); }
     });
 });
 EM_JS(void, witness__js_send, (const char *data, int len), {
-    var W = globalThis.WitnessEmscripten;
-    if (W) W.send(HEAPU8, data, len);
+    var W = globalThis["WitnessEmscripten"];
+    if (W) W["send"](HEAPU8, data, len);
 });
 EM_JS(void, witness__js_close, (void), {
-    var W = globalThis.WitnessEmscripten;
-    if (W) W.close();
+    var W = globalThis["WitnessEmscripten"];
+    if (W) W["close"]();
 });
 EM_JS(void, witness__js_gesture, (int on), {
-    var W = globalThis.WitnessEmscripten;
-    if (W) W.gesture(on);
+    var W = globalThis["WitnessEmscripten"];
+    if (W) W["gesture"](on);
 });
 #endif
 

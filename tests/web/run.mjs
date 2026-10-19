@@ -15,6 +15,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveDevice, canvasDisplay, contextOptions } from "../../src/core/devices.js";
 import { parseWitnessInput } from "../../src/core/input-spec.js";
 import { browserOptions } from "../../src/core/browser.js";
+import { safePresetFor } from "../../src/cli/web.js";
+import { encodePNG } from "../../src/media/png.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..", "..");
@@ -32,6 +34,35 @@ const json = (r) => { try { return JSON.parse(r.stdout); } catch { return null; 
   ok("device landscape swaps the axes", l.width === 852 && l.height === 393 && l.landscape && l.name === "iphone-15-landscape", l);
   ok("device iphone-se is DPR 2", resolveDevice("iphone-se").dpr === 2 && resolveDevice("iphone-se").width === 375);
   ok("device ipad reports a Mac user agent (iPadOS desktop mode)", /Macintosh/.test(resolveDevice("ipad").userAgent) && resolveDevice("ipad").touch);
+  // the Safari tab's landscape viewport is its own (toolbars differ), not the portrait one swapped; screen stays portrait
+  const sl = resolveDevice("iphone-15-safari-landscape"), slo = contextOptions(sl);
+  ok("iphone-15-safari-landscape: 734×343 CSS px (Playwright's iPhone 15 landscape), screen 393×852", sl.width === 734 && sl.height === 343 && slo.screen.width === 393 && slo.screen.height === 852, slo);
+  ok("iphone-15-safari: screen 393×852, not the 659 px tall viewport", contextOptions(resolveDevice("iphone-15-safari")).screen.height === 852);
+  ok("landscape profiles keep the portrait screen (iOS doesn't swap screen.width/height)", ["iphone-15-landscape", "iphone-se-landscape", "ipad-landscape", "iphone-15-pro-max-landscape"].every((n) => { const o = contextOptions(resolveDevice(n)); return o.screen.width < o.screen.height; }));
+  ok("platform and touch points match the user agent: iPhone / MacIntel, 5", resolveDevice("iphone-15").platform === "iPhone" && resolveDevice("ipad").platform === "MacIntel" && resolveDevice("ipad").maxTouchPoints === 5 && resolveDevice("iphone-se").maxTouchPoints === 5);
+  ok("doctor's safe-area preset per profile", safePresetFor(resolveDevice("iphone-15")) === "iphone-portrait" && safePresetFor(resolveDevice("iphone-15-landscape")) === "iphone-landscape" && safePresetFor(resolveDevice("iphone-15-safari")) === "iphone-safari-portrait" && safePresetFor(resolveDevice("iphone-15-pro-max")) === "iphone-max-portrait" && safePresetFor(resolveDevice("ipad-landscape")) === "ipad" && safePresetFor(null) === null);
+  // witness_emscripten.js and witness.h's EM_JS bodies under emcc --closure 1: every name crossing the bundle's edge
+  // is quoted (Closure ADVANCED renames dotted names: the hello rewrite and gesture marking would silently stop)
+  {
+    const strip = (t) => t.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n").replace(/\/\*[\s\S]*?\*\//g, "").replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
+    const edge = /(?<!\b(?:S|ws))\.(hello|capabilities|adapter|cmd|id|scale|addr|begin|end|inbuf|recv|heap|closed|canvas|WitnessEmscripten|WITNESS_CONFIG|__witnessWeb|WITNESS_ADDR|version|active|open|send|close|gesture|willReadFrequently|preserveDrawingBuffer)\b/g;
+    const shim = strip(fs.readFileSync(path.join(root, "adapters", "cpp", "witness_emscripten.js"), "utf8"));
+    const hits = [...shim.matchAll(edge)].map((m) => shim.slice(Math.max(0, m.index - 20), m.index + 16).replace(/\s+/g, " "));
+    ok("closure-safe shim: no dotted access to names that cross the bundle's edge", hits.length === 0, hits);
+    const emjs = (fs.readFileSync(path.join(root, "adapters", "cpp", "witness.h"), "utf8").match(/EM_JS\([\s\S]*?\n\}\);/g) || []).map(strip);
+    ok("closure-safe EM_JS bodies in witness.h (5, all quoted)", emjs.length === 5 && emjs.every((b) => !edge.test(b) && /globalThis\[""\]/.test(b)), emjs);
+  }
+  // measure scale on a 1:1 gradient (nothing scaled): soft one-level steps are not blur, and not a ×3.2 grid
+  {
+    const tmpG = fs.mkdtempSync(path.join(os.tmpdir(), "witness-grad-"));
+    const W = 320, H = 180, px = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) px.set([20 + Math.round((x * 100) / 319), 40 + Math.round((y * 140) / 179), 200, 255], (y * W + x) * 4);
+    fs.writeFileSync(path.join(tmpG, "grad.png"), encodePNG(W, H, px));
+    const g = witness(tmpG, ["measure", "scale", "grad.png", "--json"]);
+    const gj = json(g);
+    ok("measure scale: a 1:1 gradient is 'no pixel grid larger than 1', ok (it said BLURRY 82.79%)", g.status === 0 && gj && gj.ok && gj.verdict === "no pixel grid larger than 1" && !gj.summary.blurry && !gj.summary.fractional, g.stdout + g.stderr);
+    fs.rmSync(tmpG, { recursive: true, force: true });
+  }
   const c = resolveDevice({ width: 400, height: 300, dpr: 2.5, touch: true });
   ok("custom device", c.width === 400 && c.dpr === 2.5 && c.touch && !c.mobile && c.userAgent === null, c);
   let msg = "";
@@ -152,12 +183,22 @@ else {
       const s = g.session;
       const st = await begin(s, { seed: 1, input: "touch:80,45@0.5" });
       await s.audio();
+      await stepTo(s, st, 15);
+      const snapA = await s.snapshot();
       await stepTo(s, st, 30);
+      const snapB = await s.snapshot();
       const before = new Float32Array(new Uint8Array(Buffer.from((await s.audio()).data, "base64")).buffer);
       await stepTo(s, st, 60);
+      const snapC = await s.snapshot();
       const after = new Float32Array(new Uint8Array(Buffer.from((await s.audio()).data, "base64")).buffer);
       const peak = (a) => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
       ok("unlock: 0.5 s before the tap is exactly silent, the 0.5 s after it beeps", before.length === 12000 && peak(before) === 0 && peak(after) > 0.3, [before.length, peak(before), peak(after)]);
+      // the suspended context is frozen, as in Safari: currentTime stays 0 and the 330 Hz jingle queued at the reset
+      // (while locked) plays after the tap, from its start: 0.25 s of it in the 0.5 s after the tap
+      const tone = (a, f, from, to) => { let re = 0, im = 0; for (let i = from; i < to; i++) { re += a[i] * Math.cos((2 * Math.PI * f * i) / 24000); im += a[i] * Math.sin((2 * Math.PI * f * i) / 24000); } return (2 * Math.hypot(re, im)) / (to - from); };
+      const j330 = tone(after, 330, 0, 6000), j330late = tone(after, 330, 7200, 12000);
+      ok("unlock: a jingle queued while suspended plays after the tap (330 Hz for 0.25 s), not used up silently", j330 > 0.3 && j330late < 0.02, [j330, j330late]);
+      ok("unlock: a suspended context's currentTime stays 0 (frozen, as in Safari) and runs from the tap: ≈0.5 s at 1 s", snapA.state.audio === "suspended" && snapA.state.ct === 0 && snapB.state.ct === 0 && snapC.state.audio === "running" && snapC.state.ct > 0.45 && snapC.state.ct < 0.56, [snapA.state, snapB.state, snapC.state]);
     } finally { await g.stop(); }
   }
 
@@ -166,8 +207,27 @@ else {
   r = witness(ex, ["doctor", "--device", "iphone-15", "--json"], env);
   j = json(r);
   ok("coins on iphone-15: doctor all good", j && j.ok && j.summary.deterministic === true, r.stdout + r.stderr);
-  ok("coins on iphone-15: display ×3.3844 fractional, measured from device pixels within 2%", j && j.summary.web.display.scale[0] === 3.3844 && j.summary.web.display.problem === "fractional"
-    && j.summary.web.display.pixels.fractional && Math.abs(j.summary.web.display.pixels.scale[0] - 3.384375) / 3.384375 < 0.02, j && j.summary.web);
+  ok("coins on iphone-15: display ×3.3844 fractional, measured from device pixels within 0.5%", j && j.summary.web.display.scale[0] === 3.3844 && j.summary.web.display.problem === "fractional"
+    && j.summary.web.display.pixels.fractional && j.summary.web.display.pixels.agrees && Math.abs(j.summary.web.display.pixels.scale[0] - 3.384375) / 3.384375 < 0.005, j && j.summary.web);
+  // the share of game pixels drawn 4 px wide is the layout's: 1083 = 3·320 + 123, 123/320 = 38.4%
+  ok("coins on iphone-15: 38.4% of game pixels are 4 device px wide (from the layout)", j && /38\.4% of game pixels are 4 device px wide/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  ok("coins on iphone-15: the page says platform iPhone, 5 touch points, screen 393×852; safe areas named", j && /screen 393×852, maxTouchPoints 5/.test(j.data.lines.join("\n")) && /platform iPhone/.test(j.data.lines.join("\n")) && /safe areas are not emulated.*--safe iphone-portrait/.test(j.data.lines.join("\n")) && !/a real one reports 5/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  // iPhone SE (DPR 2): 343 CSS px = 686 device px = ×2.14375: the rounded border's 1-px runs made it ×1.67 × 1.58
+  r = witness(ex, ["doctor", "--device", "iphone-se", "--json"], env);
+  j = json(r);
+  const sp = j && j.summary.web.display.pixels;
+  ok("coins on iphone-se: layout ×2.1437, the picture agrees within 0.5%, 14.4% of game pixels 3 px wide", sp && j.summary.web.display.scale[0] === 2.1437 && sp.agrees && sp.fractional && Math.abs(sp.scale[0] - 686 / 320) / (686 / 320) < 0.005 && /14\.4% of game pixels are 3 device px wide/.test(j.data.lines.join("\n")) && !/✔ pixels on screen/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  const seShot = path.join(os.tmpdir(), `witness-web-se-${process.pid}.png`);
+  r = witness(ex, ["shot", "--at", "1", "--device", "iphone-se", "--capture", "element", "--out", seShot], env);
+  const ms = witness(ex, ["measure", "scale", seShot, "--json"]);
+  j = json(ms);
+  ok("coins on iphone-se: measure scale (no --region) says FRACTIONAL ≈×2.14, 2/3 px, 14% long", r.status === 0 && /686×\d+ device px: element capture/.test(r.stdout) && j && !j.ok && j.summary.fractional && Math.abs(j.summary.scaleX - 686 / 320) / (686 / 320) < 0.005 && j.data.runs.x.single.join() === "2,3" && Math.abs(j.data.runs.x.longShare - 0.14375) < 0.01, ms.stdout + ms.stderr);
+  fs.rmSync(seShot, { force: true });
+  r = witness(ex, ["shot", "--at", "1", "--device", "iphone-se", "--capture", "element", "--crop", "0,0,160,90", "--out", seShot], env);
+  ok("--capture element with --crop: refused (game pixels vs device pixels)", r.status === 1 && /works in game pixels, but --capture element/.test(r.stderr) && !fs.existsSync(seShot), r.stdout + r.stderr);
+  r = witness(ex, ["doctor", "--device", "ipad", "--json"], env);
+  j = json(r);
+  ok("coins on ipad: the page reports platform MacIntel and 5 touch points (the iPad check passes)", j && /screen 820×1180, maxTouchPoints 5/.test(j.data.lines.join("\n")) && /platform MacIntel/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
   const shotFile = path.join(os.tmpdir(), `witness-web-shot-${process.pid}.png`);
   r = witness(ex, ["shot", "--at", "1", "--device", "iphone-15", "--capture", "element", "--out", shotFile], env);
   const m = witness(ex, ["measure", "scale", shotFile, "--region", "16,16,1051,577", "--json"]);
@@ -184,6 +244,7 @@ else {
   if (!j && /isn't installed/.test(r.stderr)) ok("webkit missing: the error says how to install it", /npx playwright install webkit/.test(r.stderr), r.stderr);
   else {
     ok("coins in webkit on iphone-15: doctor deterministic", j && j.summary.deterministic === true && j.summary.web.engine === "webkit", r.stdout + r.stderr);
+    ok("coins in webkit on iphone-15: maxTouchPoints 5 and platform iPhone (it said 0 and Win32)", j && /maxTouchPoints 5/.test(j.data.lines.join("\n")) && /platform iPhone/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
     r = witness(P("bridge"), ["test", "--engine", "webkit", "--device", "iphone-15", "--no-auto-unlock"], env);
     ok("shim page in webkit: test passes", r.status === 0 && /2 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
   }

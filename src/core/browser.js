@@ -91,7 +91,7 @@ export async function openBrowserGame(launch, root, addr, keep) {
     try { browser = await type.launch({ headless: launch.headless !== false, args }); }
     catch (e) { throw launchError(e, opts.engine, pwInfo, root); }
     const context = await browser.newContext(contextOptions(opts.device, launch.size || [1280, 720]));
-    await context.addInitScript(webInit, { policy: opts.policy, standalone: !!(opts.device && opts.device.standalone) });
+    await context.addInitScript(webInit, { policy: opts.policy, standalone: !!(opts.device && opts.device.standalone), platform: (opts.device && opts.device.platform) || null, maxTouchPoints: opts.device && opts.device.maxTouchPoints != null ? opts.device.maxTouchPoints : null });
     const page = await context.newPage();
     page.on("console", (m) => keep(`[page] ${m.text()}\n`));
     page.on("pageerror", (e) => keep(`[page error] ${e.message}\n`));

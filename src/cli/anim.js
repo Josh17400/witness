@@ -9,7 +9,7 @@ import { sampleExprs, frameGrid } from "../core/sample.js";
 import { analyzeAnim } from "../core/anim.js";
 import { evaluate } from "../core/expr.js";
 import { parseRect } from "./see.js";
-import { die, withGame, runOpts, media, printLogs, framesOf, shotImage, envelope, emit, fmtT } from "./common.js";
+import { die, withGame, gamePixels, runOpts, media, printLogs, framesOf, shotImage, envelope, emit, fmtT } from "./common.js";
 
 const r3 = (x) => (x == null ? x : Math.round(x * 1000) / 1000);
 const posOf = (p) => (Array.isArray(p) ? p : p && Array.isArray(p.pos) ? p.pos : p && typeof p === "object" && "x" in p ? [p.x, p.y] : null);
@@ -88,6 +88,7 @@ async function boxAnim(files, opt) {
   } else {
     await withGame(opt, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+      gamePixels(s, "measure anim --region / --follow");
       fps = s.fps;
       f0 = framesOf(opt.at !== undefined && opt.at !== true ? String(opt.at) : opt.from !== undefined && opt.from !== true ? String(opt.from) : "0", fps);
       const f1 = f0 + framesOf(opt.time && opt.time !== true ? String(opt.time) : "2", fps);

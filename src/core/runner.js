@@ -188,6 +188,7 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
   // hello "audio_exact": false — the adapter can only capture audio in real time, so it isn't compared
   const useAudio = matching && matchMedia.audio && session.has("audio") && session.hello?.audio_exact !== false;
   const useShot = matching && matchMedia.shot && session.has("screenshot");
+  if (useShot && session.web && session.web.captureMode && session.web.captureMode !== "canvas") res.failures.push({ kind: "warn", message: `match: screenshots are device pixels here (--capture ${session.web.captureMode}): goldens saved from the game's own pixels (and their regions) won't line up; record and match goldens with the same --capture` });
   // when a point step reads prev (or rose/changed...), every step keeps its snapshot so prev is the previous step
   const pointUsesPrev = steps.some((st) => [].concat(st.expect || [], st.probe || []).some(usesPrev));
   // expressions that read web.* (browser launches: web.audio.state, web.dpr, ...) get the page's facts with each snapshot

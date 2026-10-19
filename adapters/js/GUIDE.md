@@ -188,8 +188,10 @@ rendered in step with simulated time. An AudioWorklet tap behind `ctx.destinatio
 samples. `ctx.currentTime` advances with the steps (it reads half a sample after the rendered frame, so a sound
 started "now" lands on the same sample whatever ran before the reset), so sounds scheduled with
 `ctx.currentTime` land at the right simulated moment. The autoplay policy is emulated (see
-"Audio unlock" below): by default contexts are `"running"` from the start; `suspend()` makes the capture silent
-until `resume()`; `close()` silences it for good. This works
+"Audio unlock" below): by default contexts are `"running"` from the start; while a context is not running
+(`suspend()`, the iPhone policy, `close()`) it is **frozen** as in browsers: it doesn't render, `currentTime` stays
+put, sounds scheduled meanwhile wait, and the capture is silent; after `resume()` it carries on from where it
+stopped (music queued while locked plays from its start after the tap). This works
 for Phaser's WebAudio sound manager, Howler.js (WebAudio mode), three.js `AudioListener`, Tone.js
 and hand-written graphs. Limits:
 * `<audio>`/`HTMLAudioElement` playback and `createMediaElementSource` are **not** captured (a
@@ -203,7 +205,7 @@ touches the page, and iPhone Safari only accepts `resume()` while a touchend / c
 Witness emulates that policy the same way in every engine:
 * default (`auto`): Witness counts as the player's first gesture; contexts run from the start.
 * `--no-auto-unlock` (or witness.json `launch.audioUnlock: false`): like iPhone Safari. A context created outside a
-  gesture starts `"suspended"` and its capture is **silent**; `resume()` works only while Witness delivers input that
+  gesture starts `"suspended"`, frozen at `currentTime` 0 and **silent**; `resume()` works only while Witness delivers input that
   is a gesture (a key down other than Escape, a mouse button, a finger lifting: `touch:x,y@t` lifts one frame after it
   lands; text) or a real browser tap (`dom:tap:x,y@t`); called from the game loop or a timer it stays pending
   (counted as `blocked`). An unlock lasts for the page's life, as in a browser.
@@ -314,16 +316,26 @@ than the one you configured, fix `url`.
 ```
 Every command takes the same as flags: `--device iphone-15`, `--engine webkit`, `--no-auto-unlock`, `--capture
 element`. A profile sets the CSS viewport, `devicePixelRatio`, touch, the mobile viewport (meta viewport honoured),
-the user agent, and for Home Screen web apps `navigator.standalone` and `display-mode: standalone`. The iPhone
-profiles are full screen (a web app added to the Home Screen); `iphone-15-safari` is a Safari tab (393×659).
-`ipad` reports a Mac user agent, as iPadOS Safari does.
+the user agent, `navigator.platform` and `maxTouchPoints` to match it (`"iPhone"` / `"MacIntel"`, 5: the usual iPad
+check `platform === "MacIntel" && maxTouchPoints > 1` passes), `screen` at the device's portrait size in both
+orientations (as iOS), and for Home Screen web apps `navigator.standalone` and `display-mode: standalone`. The
+iPhone profiles are full screen (a web app added to the Home Screen); `iphone-15-safari` is a Safari tab (393×659,
+landscape 734×343). `ipad` reports a Mac user agent, as iPadOS Safari does.
+**Safe areas are not emulated**: headless engines have no notch, so `env(safe-area-inset-*)` is 0 and a HUD at y = 0
+looks fine in every screenshot, while on the phone it sits under the Dynamic Island (59 pt) and the home indicator
+(34 pt). Check it with `witness measure ui --safe <preset>` (doctor names the preset for the profile;
+`iphone-safari-portrait` for a Safari tab, which has none of these insets).
 
-* `witness doctor` with a browser prints the page (viewport, DPR, touch), how the main canvas lands on the screen,
-  from the layout (`canvas 320×180 shown at 361×203.06 CSS px = 1083×609.19 device px: ×3.3844, not a whole number:
-  pixels drawn unevenly`) and from a capture at device pixels (`≈×3.40, one game pixel is 3 or 4 device px`). A
-  canvas whose backing store is its CSS size on a DPR-3 phone is reported as upscaled with smoothing: blurry.
-* `capture`: `canvas` reads the game's own buffer (game pixels; what `align`, `--follow` and `annotate` expect);
-  `element` is the canvas as the screen shows it, at device pixels; `screen` is the whole viewport (HTML HUD too).
+* `witness doctor` with a browser prints the page (viewport, DPR, screen, touch points, platform), how the main
+  canvas lands on the screen, from the layout (`canvas 320×180 shown at 361×203.06 CSS px = 1083×609.19 device px:
+  ×3.3844, not a whole number: pixels drawn unevenly`) and from a capture at device pixels (`≈×3.384, uneven: one
+  game pixel is 3 or 4 device px; 38.4% of game pixels are 4 device px wide`: the share is the layout's exact
+  fraction; when the picture can't be read it says so instead of passing). A canvas whose backing store is its CSS
+  size on a DPR-3 phone is reported as upscaled with smoothing: blurry.
+* `capture`: `canvas` reads the game's own buffer (game pixels: what `--crop`, `--follow`, `--annotate`, `--scale`,
+  `measure ui` / `figure` / `align` / `registration` need; they refuse the other modes); `element` is the canvas as
+  the screen shows it, at device pixels; `screen` is the whole viewport (HTML HUD too). Goldens (`match`) compare
+  like with like: record and match them with the same capture.
   `witness shot --device iphone-15 --capture element` then `witness measure scale shot.png` measures fractional
   scaling and blur.
 * `dom:tap:x,y@t`, `dom:click:x,y@t`, `dom:key:space@t` in `--input` / tests: real (trusted) browser input at that

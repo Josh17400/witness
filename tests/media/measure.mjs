@@ -403,6 +403,42 @@ function framesOf(positions, { size = 8, y = 30, hud = false } = {}) {
   for (let y = 0; y < framed.height; y += 2) { put(framed, 0, y, [255, 255, 255]); put(framed, framed.width - 1, y, [255, 255, 255]); }
   const fr = pixelRuns(framed);
   ok("pixelRuns: a dotted frame doesn't pull the scale to 1", fr.fractional && Math.abs(fr.scale[0] - 3.384375) / 3.384375 < 0.01, fr.scale);
+
+  // iPhone SE: a 320×180 canvas 343 CSS px wide at DPR 2 = 686 device px = ×2.14375 (14.4% of game pixels 3 px wide).
+  // Sparse art: a dark field, anti-aliased discs (their edge pixels are the only one-pixel details), one 1-px dot,
+  // and the element capture's 1-px rounded border with anti-aliased corners around it
+  const game = image(320, 180, [20, 24, 40]);
+  for (const [cx, cy, r, c] of [[40, 90, 7, [80, 200, 250]], [80, 90, 5, [250, 210, 60]], [120, 80, 5, [250, 210, 60]], [160, 93, 5, [250, 210, 60]], [200, 106, 5, [250, 210, 60]], [240, 119, 5, [250, 210, 60]]])
+    for (let y = cy - r - 1; y <= cy + r + 1; y++) for (let x = cx - r - 1; x <= cx + r + 1; x++) {
+      const cov = Math.max(0, Math.min(1, r + 0.5 - Math.hypot(x + 0.5 - cx, y + 0.5 - cy)));
+      if (cov > 0) put(game, x, y, [0, 1, 2].map((k) => Math.round(20 * (1 - cov) + c[k] * cov)));
+    }
+  put(game, 300, 20, [255, 255, 255]);
+  const SE = 686 / 320, sw = 686, sh = Math.round(180 * SE), se = image(sw, sh);
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) put(se, x, y, get(game, Math.min(319, Math.floor(x / SE)), Math.min(179, Math.floor(y / SE))));
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+    const dx = Math.max(0, 10 - x, x - (sw - 11)), dy = Math.max(0, 10 - y, y - (sh - 11));
+    const dist = dx && dy ? Math.hypot(dx, dy) : Math.max(dx, dy) ? 10 + Math.max(dx, dy) - 10 : 0;
+    const edge = x === 0 || y === 0 || x === sw - 1 || y === sh - 1 || (dx && dy && dist > 9.5);
+    if (edge) { const a = dx && dy ? Math.min(1, Math.max(0.2, dist - 9.5)) : 1; put(se, x, y, [Math.round(60 * a + 20 * (1 - a)), Math.round(64 * a + 24 * (1 - a)), Math.round(90 * a + 40 * (1 - a))]); }
+  }
+  const mx = Math.floor(sw * 0.03), my = Math.floor(sh * 0.03);
+  const ser = pixelRuns(se, { region: { x: mx, y: my, w: sw - 2 * mx, h: sh - 2 * my } });
+  show("pixelRuns ×2.14375 sparse", `scale ${ser.scale.join(" × ")}, runs ${ser.x.single}, long ${ser.x.longShare}, grid ${ser.x.grid}`);
+  ok("pixelRuns: ×2.14375 with sparse detail reads ×2.14, not ×1.6 (within 0.5%)", Math.abs(ser.scale[0] - SE) / SE < 0.005 && Math.abs(ser.scale[1] - SE) / SE < 0.005, ser.scale);
+  ok("pixelRuns: ×2.14375 is fractional 2/3 px, 14.4% of source pixels 3 px wide (±1%)", ser.fractional && ser.x.single.join() === "2,3" && Math.abs(ser.x.longShare - 0.14375) < 0.01, ser.x);
+  // without a region it leaves the edges out by itself (the 1-px border runs made it ×1.67 × 1.58 before)
+  const sea = pixelRuns(se);
+  ok("pixelRuns: no region: the rounded border's 1-px runs don't anchor the scale at 1 px", Math.abs(sea.scale[0] - SE) / SE < 0.005 && sea.region.x === 16 && sea.fractional, sea);
+
+  // a 1:1 gradient (nothing scaled): soft one-pixel steps, but no hard edge smeared: not blurry, no scale read
+  const grad = image(320, 180);
+  for (let y = 0; y < 180; y++) for (let x = 0; x < 320; x++) put(grad, x, y, [20 + Math.round((x * 100) / 319), 40 + Math.round((y * 140) / 179), 200]);
+  const gr = pixelRuns(grad);
+  ok("pixelRuns: a 1:1 gradient is not blurry and not fractional (its 1-level steps every 3-4 px aren't pixel edges)", !gr.blurry && !gr.fractional && gr.scale[0] === null && gr.softPercent > 25, gr);
+  // 1:1 anti-aliased discs (the sample game drawn at 1:1): soft ramps, one in-between pixel per edge: not blurry
+  const aa = pixelRuns(game);
+  ok("pixelRuns: 1:1 anti-aliased art is not blurry, scale 1", !aa.blurry && !aa.fractional && aa.scale[0] === 1, aa);
 }
 
 done("measure");

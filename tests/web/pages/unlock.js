@@ -8,7 +8,19 @@ const ctx = canvas.getContext("2d");
 const audio = new AudioContext();
 let started, wantStart, t, beeps;
 
-function reset() { started = false; wantStart = false; t = 0; beeps = 0; }
+function reset() {
+  started = false; wantStart = false; t = 0; beeps = 0;
+  // a jingle queued while audio is still locked: on an iPhone the context is frozen, so it plays after the tap
+  if (audio.state !== "running") jingle();
+}
+function jingle() {
+  const now = audio.currentTime, osc = audio.createOscillator(), gain = audio.createGain();
+  osc.frequency.value = 330;
+  gain.gain.value = 0.4;
+  osc.connect(gain).connect(audio.destination);
+  osc.start(now);
+  osc.stop(now + 0.25);
+}
 function beep() {
   const now = audio.currentTime, osc = audio.createOscillator(), gain = audio.createGain();
   osc.frequency.value = 660;
@@ -47,5 +59,5 @@ requestAnimationFrame(frame);
 await witness.start({
   name: BUG ? "Tap to start (bug)" : "Tap to start", fps: 60, size: [160, 90], canvas,
   reset: () => reset(),
-  snapshot: () => ({ started, beeps, audio: audio.state, ui: started ? [] : [{ id: "tap", kind: "text", rect: [40, 40, 80, 10], text: "TAP TO START" }] }),
+  snapshot: () => ({ started, beeps, audio: audio.state, ct: audio.currentTime, ui: started ? [] : [{ id: "tap", kind: "text", rect: [40, 40, 80, 10], text: "TAP TO START" }] }),
 });

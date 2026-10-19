@@ -13,7 +13,7 @@ import { WitnessError } from "../core/session.js";
 import { lookMeasure } from "./measure-look.js";
 import { formatAnim } from "./anim.js";
 import {
-  die, withGame, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit,
+  die, withGame, gamePixels, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
 
 const r3 = (x) => (x == null ? x : Math.round(x * 1000) / 1000);
@@ -50,23 +50,32 @@ async function pixelMeasure(what, files, opt) {
     const k = opt.k && opt.k !== true ? +opt.k : m.detectScale(img, { region, tolerance: +(opt.tolerance || 0) });
     const r = m.blockScale(img, k, { region, tolerance: +(opt.tolerance || 0) });
     // any scale from runs of one colour: catches fractional scaling (uneven pixels) and smoothing, which the k×k
-    // cell test can only call "no grid" (a phone at DPR 3 showing a 320 px canvas 1083 device px wide is ×3.384)
-    const runs = m.pixelRuns(img, { region, tolerance: +(opt.tolerance || 0) });
+    // cell test can only call "no grid" (a phone at DPR 3 showing a 320 px canvas 1083 device px wide is ×3.384).
+    // Without --region, a few % in from the edges: an element capture's rounded corners and border aren't game pixels
+    const mx = Math.min(16, Math.floor(img.width * 0.03)), my = Math.min(16, Math.floor(img.height * 0.03));
+    const runRegion = region || (img.width >= 64 && img.height >= 64 ? { x: mx, y: my, w: img.width - 2 * mx, h: img.height - 2 * my } : undefined);
+    const runs = m.pixelRuns(img, { region: runRegion, tolerance: +(opt.tolerance || 0) });
     // a sparse scene (mostly flat colour) passes the k×k test at many k: uneven runs or a clearly different run scale overrule it
     const exact = r.k > 1 && !r.blurry && !runs.fractional && (runs.scale[0] == null || Math.abs(runs.scale[0] - r.k) / r.k < 0.05);
     const fx = (v) => (v == null ? "?" : `×${v.toFixed(2)}`);
     const sc = runs.scale[0] != null && runs.scale[1] != null && Math.abs(runs.scale[0] - runs.scale[1]) > 0.02 ? `${fx(runs.scale[0])} × ${runs.scale[1].toFixed(2)}` : fx(runs.scale[0]);
-    const unevenAxis = (a, name) => (a.uneven ? `${name}: one source pixel is ${a.single[0]} or ${a.single[1]} px (${Math.round(a.longShare * 100)}% are ${a.single[1]})` : null);
+    // the share of source pixels drawn one px wider is the fractional part of the fitted scale (nearest-neighbour)
+    const unevenAxis = (a, name) => (a.uneven ? `${name}: one source pixel is ${a.single[0]} or ${a.single[1]} px (${Math.round(a.longShare * 100)}% are ${a.single[1]}: the fraction of ×${a.scale.toFixed(3)})` : null);
+    const blurry = r.blurry || runs.blurry;
     let verdict, status;
     if (exact) { verdict = `exact ×${r.k} integer scaling`; status = "✔ exact integer scaling"; }
-    else if (r.blurry || runs.blurry) { verdict = "blurry or smoothed"; status = `✖ BLURRY: ${runs.softPercent}% of colour changes are soft one-pixel ramps (smoothing, or scaling with filtering)`; }
+    else if (blurry) { verdict = "blurry or smoothed"; status = `✖ BLURRY: ${runs.blurry ? `${runs.smearPercent}% of hard edges are smeared over 2+ pixels, ${runs.softPercent}% of colour changes are soft ramps (smoothing, or scaling with filtering)` : `${r.nonUniformPercent}% of ${r.k}×${r.k} cells mixed`}`; }
     else if (runs.fractional) { verdict = `fractional scaling ≈${sc} (uneven pixels)`; status = `✖ FRACTIONAL scaling ≈${sc}: pixels are drawn unevenly`; }
     else { verdict = "no pixel grid larger than 1"; status = "no pixel grid larger than 1"; }
-    const bad = !exact && (r.blurry || runs.blurry || runs.fractional);
-    out(envelope("measure scale", { ok: !bad, verdict, summary: { k: r.k, offset: r.offset, nonUniformPercent: r.nonUniformPercent, blurry: r.blurry || runs.blurry, fractional: !exact && runs.fractional, scaleX: runs.scale[0], scaleY: runs.scale[1], softPercent: runs.softPercent }, data: { ...r, runs } }), [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
+    const bad = !exact && (blurry || runs.fractional);
+    const where = runRegion && !region ? ` (${runRegion.w}×${runRegion.h} from ${runRegion.x},${runRegion.y}: edges left out)` : "";
+    // soft ramps with no smeared edges: anti-aliasing or a gradient at 1:1, not a picture blurred by upscaling
+    const softNote = !blurry && runs.softPercent > 25 ? `  soft ramps without smeared edges (${runs.smearPercent}% of ${runs.hardEdges} hard edges): anti-aliasing or gradients drawn at 1:1, not upscaling blur` : null;
+    out(envelope("measure scale", { ok: !bad, verdict, summary: { k: r.k, offset: r.offset, nonUniformPercent: r.nonUniformPercent, blurry, fractional: !exact && runs.fractional, scaleX: runs.scale[0], scaleY: runs.scale[1], softPercent: runs.softPercent, smearPercent: runs.smearPercent }, data: { ...r, runs } }), [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
       `  ${r.cells} cells, ${r.nonUniform} not one colour (${r.nonUniformPercent}%) → ${status}`,
-      exact ? null : `  runs of one colour: scale ${sc} (x ${fx(runs.scale[0])}, y ${fx(runs.scale[1])}), soft ramps ${runs.softPercent}% of ${runs.changes} colour changes`,
+      exact ? null : `  runs of one colour${where}: scale ${sc} (x ${fx(runs.scale[0])}, y ${fx(runs.scale[1])}), soft ramps ${runs.softPercent}% of ${runs.changes} colour changes`,
       ...(exact ? [] : [unevenAxis(runs.x, "  x"), unevenAxis(runs.y, "  y")]),
+      softNote,
       ...r.worst.slice(0, 5).map((c) => `  worst cell ${box(c)}: ${c.colors} colours, spread ${c.spread}`)]);
   } else if (what === "box") {
     if (files.length < 2) die("usage: witness measure box <with.png> <without.png>");
@@ -128,6 +137,7 @@ export async function motionMeasure(m, fileFrames, opt, region) {
   } else {
     await withGame(opt, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+      if (region) gamePixels(s, "measure motion --region");
       fps = s.fps;
       f0 = framesOf(opt.at && opt.at !== true ? String(opt.at) : "0", fps);
       const f1 = f0 + framesOf(opt.time && opt.time !== true ? String(opt.time) : "0.5", fps);
@@ -293,6 +303,7 @@ async function alignMeasure(m, opt) {
   let res;
   await withGame(opt, async (s, cfg) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    gamePixels(s, "measure align");
     const fps = s.fps;
     const f = framesOf(opt.at && opt.at !== true ? String(opt.at) : "1", fps);
     const st = await begin(s, runOpts(opt, cfg));
@@ -379,6 +390,7 @@ async function registrationMeasure(m, opt) {
   let res;
   await withGame(opt, async (s, cfg) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    gamePixels(s, "measure registration");
     if (!s.has("reset")) die("measure registration needs 'reset' (one pass builds the background, a second measures)");
     const fps = s.fps;
     const f0 = framesOf(opt.at && opt.at !== true ? String(opt.at) : "0", fps);

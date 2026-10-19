@@ -360,6 +360,15 @@ export function figureGround(img, mask, { edge = 1, merge = 12, minShare = 0.05,
   }).sort((a, b) => b.count - a.count);
   const sorted = new Map(surfaces.map((s, n) => [s.cluster, n]));
   for (const s of surfaces) delete s.cluster;
+  // textured ground splits the ring into many small surfaces, each under minShare: the small ones together are judged
+  // as one (all of the ring when none is big enough), so a figure is never passed with nothing judged
+  const small = surfaces.filter((s) => s.minor);
+  const smallN = small.reduce((a, s) => a + s.count, 0);
+  if (smallN && (smallN / ground.length >= 0.25 || small.length === surfaces.length)) {
+    const set = new Set(clusters.map((c, j) => j).filter((j) => per[j].length / ground.length < minShare));
+    const list = ground.filter((g) => set.has(of.get(g.k)));
+    surfaces.push({ combined: small.length, color: null, hex: small.length === surfaces.length ? "the whole ring" : `${small.length} small surfaces`, count: list.length, share: r4(list.length / ground.length), minor: false, ...stats(list) });
+  }
   // [pixel index, ratio, surface index] per ground pixel (for pictures and matching surfaces across shots; not JSON)
   const ring = new Float32Array(ground.length * 3);
   ground.forEach((g, n) => { ring[3 * n] = g.i; ring[3 * n + 1] = g.ratio; ring[3 * n + 2] = sorted.get(of.get(g.k)); });

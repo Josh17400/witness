@@ -9,8 +9,8 @@
 //     { k, offset: [ox, oy], region: { x, y, w, h }, cells, nonUniform, nonUniformPercent, blurry,
 //       worst: [{ x, y, w, h, colors, spread }] }                        up to 10, worst first
 //   detectScale(img, { tolerance = 0, region, maxK = 16, minUniform = 99.5 }) -> k   (1 if none)
-//   pixelRuns(img, { region, tolerance = 0 }) -> { x: {scale, uneven, single, longShare, runs, lengths}, y, scale: [sx, sy],
-//     fractional, softPercent, blurry, region }       any scale (also fractional) from runs of one colour
+//   pixelRuns(img, { region, tolerance = 0 }) -> { x: {scale, uneven, single, longShare, runs, lengths, grid}, y,
+//     scale: [sx, sy], fractional, softPercent, smearPercent, hardEdges, blurry, region }       any scale (also fractional) from runs of one colour
 //   maskDiff(a, b, { threshold = 16, region }) -> { mask, width, height, count, bbox, centroid }
 //   maskFromColor(img, color, tolerance = 0) -> mask
 //   maskFromRect(width, height, { x, y, w, h }) -> mask
@@ -304,21 +304,29 @@ export function detectScale(input, { tolerance = 0, region, maxK = 16, minUnifor
 // any scale, from run lengths (fractional scaling, soft edges)
 // ---------------------------------------------------------------------------
 
-/** Runs of one colour along one axis: lengths of runs that start and end inside the region, colour changes, and
- *  "in-between" pixels (different from both neighbours and between them in every channel: a soft ramp). */
+/** Runs of one colour along one axis: lengths of runs that start and end inside the region, colour changes, where
+ *  they are (profile[i]: changes between pixel i-1 and i, summed over the other axis), and "in-between" pixels
+ *  (different from both neighbours and between them in every channel: a soft ramp). */
 function axisRuns(img, R, tol, vertical) {
   const d = img.data, W = img.width;
   const outer = vertical ? R.w : R.h, inner = vertical ? R.h : R.w;
   const idx = (o, i) => (vertical ? (R.y + i) * W + (R.x + o) : (R.y + o) * W + (R.x + i));
-  const lengths = new Map();
+  const lengths = new Map(), profile = new Float64Array(inner + 1);
+  // run lengths count changes of 8+ levels only: a smooth gradient's 1-level steps aren't pixel edges (a 1:1 sky
+  // whose colour steps every 3 or 4 px would read as ×3.2 otherwise)
+  const hardTol = Math.max(tol, 7);
   let changes = 0, between = 0;
   for (let o = 0; o < outer; o++) {
-    let start = 0;
+    let start = 0, hs = 0;
     for (let i = 1; i <= inner; i++) {
-      const edge = i === inner || delta(d, idx(o, i - 1), d, idx(o, i)) > tol;
-      if (!edge) continue;
+      const dv = i === inner ? Infinity : delta(d, idx(o, i - 1), d, idx(o, i));
+      if (dv <= tol) continue;
+      if (dv > hardTol) {
+        if (i < inner) profile[i]++;
+        if (hs > 0 && i < inner) lengths.set(i - hs, (lengths.get(i - hs) || 0) + 1);   // whole runs only
+        hs = i;
+      }
       if (i < inner) changes++;
-      if (start > 0 && i < inner) lengths.set(i - start, (lengths.get(i - start) || 0) + 1);   // whole runs only
       if (i - start === 1 && start > 0 && i < inner) {
         const a = idx(o, start - 1) * 4, b = idx(o, start) * 4, c = idx(o, i) * 4;
         let inside = true;
@@ -328,22 +336,48 @@ function axisRuns(img, R, tol, vertical) {
       start = i;
     }
   }
-  return { lengths, changes, between };
+  return { lengths, changes, between, profile, inner };
 }
 
-/** Scale along one axis from its run lengths: the shortest common run is one source pixel (two lengths, L and L+1,
- *  when the scale isn't a whole number), then every run is fitted as a whole number of source pixels. */
-function scaleFromRuns(lengths) {
-  const all = [...lengths.entries()].sort((a, b) => a[0] - b[0]);
+/** Hard colour changes (a step of 8+ levels) and how many of them are smeared over 2+ in-between pixels (each
+ *  between its neighbours, each step 8+ levels): an edge blurred by upscaling with filtering. Anti-aliasing at 1:1
+ *  puts at most one pixel between two colours, and a gradient has no hard changes at all. */
+function smearedEdges(img, R) {
+  const d = img.data, W = img.width;
+  let hard = 0, smeared = 0;
+  const step = (a, b) => Math.max(Math.abs(d[a] - d[b]), Math.abs(d[a + 1] - d[b + 1]), Math.abs(d[a + 2] - d[b + 2]));
+  const between = (a, b, c) => { for (let k = 0; k < 3; k++) { const lo = Math.min(d[a + k], d[c + k]), hi = Math.max(d[a + k], d[c + k]); if (d[b + k] < lo || d[b + k] > hi) return false; } return true; };
+  for (const vertical of [false, true]) {
+    const outer = vertical ? R.w : R.h, inner = vertical ? R.h : R.w;
+    const at = (o, i) => (vertical ? ((R.y + i) * W + R.x + o) * 4 : ((R.y + o) * W + R.x + i) * 4);
+    for (let o = 0; o < outer; o++) {
+      let i = 1;
+      while (i < inner) {
+        if (step(at(o, i - 1), at(o, i)) < 8) { i++; continue; }
+        let j = i;
+        while (j + 1 < inner && step(at(o, j), at(o, j + 1)) >= 8 && between(at(o, j - 1), at(o, j), at(o, j + 1))) j++;
+        hard++;
+        if (j - i >= 2) smeared++;
+        i = j + 1;
+      }
+    }
+  }
+  return { hard, smeared };
+}
+
+/** A first scale from run lengths: the shortest common run (from minL up) is one source pixel (two lengths, L and
+ *  L+1, when the scale isn't a whole number), then every run is fitted as a whole number of source pixels. */
+function runEstimate(lengths, minL = 1) {
+  const all = [...lengths.entries()].filter(([d]) => d >= minL).sort((a, b) => a[0] - b[0]);
   const n = all.reduce((a, [, c]) => a + c, 0);
-  if (!n) return { scale: null, runs: 0, lengths: [], uneven: false, longShare: 0 };
+  if (!n) return null;
   const min = Math.max(2, 0.03 * n);
   // the anchor is the most common short run (a frame, rounded corners or text can add some 1-px runs of their own);
   // with a neighbour length that is also common, the pair (L, L+1) is one source pixel drawn unevenly
   let mode = null;
   for (const [d, c] of all) if (d <= 64 && c >= min && (!mode || c > mode[1])) mode = [d, c];
-  if (!mode) return { scale: null, runs: n, lengths: all.slice(0, 6), uneven: false, longShare: 0 };
-  const below = lengths.get(mode[0] - 1) || 0, above = lengths.get(mode[0] + 1) || 0;
+  if (!mode) return null;
+  const below = mode[0] - 1 >= minL ? lengths.get(mode[0] - 1) || 0 : 0, above = lengths.get(mode[0] + 1) || 0;
   const L = below >= min && below >= above ? mode[0] - 1 : mode[0];
   const cL = lengths.get(L) || 0, cL1 = lengths.get(L + 1) || 0;
   const pair = cL >= min && cL1 >= min;
@@ -353,32 +387,124 @@ function scaleFromRuns(lengths) {
     for (const [d, c] of all) { if (d < L) continue; if (d > 12 * s) break; const m = Math.max(1, Math.round(d / s)); sd += d * c; sm += m * c; }   // shorter runs aren't whole source pixels
     if (sm) s = sd / sm;
   }
-  const share = pair ? cL1 / (cL + cL1) : 0;
-  const top = all.filter(([d]) => d <= 3 * Math.max(1, s)).sort((a, b) => b[1] - a[1]).slice(0, 6);
-  // L = 1 is ambiguous (unscaled art has 1- and 2-px runs of its own): uneven pixels are only claimed from 2 px up
-  return { scale: s, runs: n, lengths: top, uneven: pair && L >= 2 && share >= 0.1 && share <= 0.9, longShare: share, single: pair ? [L, L + 1] : [L] };
+  return { s, L, pair, share: pair ? cL1 / (cL + cL1) : 0 };
+}
+
+/** The share of the colour changes that sit on a nearest-neighbour grid of pitch s (best phase): pixel x starts a
+ *  new source pixel when x is within half a pixel of o + j·s. 1 = every change on the grid. cols: [[x, count]]. */
+function combCoverage(cols, mass, s) {
+  const t = cols.map(([x, m]) => [x % s, m]).sort((a, b) => a[0] - b[0]);
+  const n = t.length;
+  let best = 0, sum = 0, j = 0;
+  for (let i = 0; i < n; i++) {
+    if (j < i) { j = i; sum = 0; }
+    while (j < i + n) { const k = j % n, ph = t[k][0] + (j >= n ? s : 0); if (ph - t[i][0] >= 1 - 1e-9) break; sum += t[k][1]; j++; }
+    if (sum > best) best = sum;
+    sum -= t[i][1];
+  }
+  return best / mass;
+}
+
+/** The pitch within ±span of s0 that puts the most colour changes on one grid: the middle of the best plateau. */
+function combFit(profile, inner, s0, span = 0.1) {
+  const cols = [];
+  for (let i = 1; i < profile.length; i++) if (profile[i]) cols.push([i, profile[i]]);
+  if (cols.length < 6) return null;
+  // a line or two holding most of the changes (a border or frame across the whole picture) shouldn't decide the grid
+  const med = cols.map((c) => c[1]).sort((a, b) => a - b)[cols.length >> 1];
+  let mass = 0;
+  for (const c of cols) { c[1] = Math.min(c[1], 3 * med); mass += c[1]; }
+  const lo = Math.max(1, s0 * (1 - span)), hi = s0 * (1 + span);
+  const step = Math.max(2e-5, (0.05 * s0) / Math.max(1, inner));   // the grid drifts 1/20 px over the axis per step
+  let best = -1, bs = [];
+  for (let s = lo; s <= hi + 1e-12; s += step) {
+    const c = combCoverage(cols, mass, s);
+    if (c > best + 1e-9) { best = c; bs = [s]; } else if (c > best - 1e-9) bs.push(s);
+  }
+  let b = 0;   // the plateau around the first best pitch
+  while (b + 1 < bs.length && bs[b + 1] - bs[b] < 1.5 * step) b++;
+  return { s: (bs[0] + bs[b]) / 2, lo: bs[0], hi: bs[b], coverage: best, lines: cols.length };
+}
+
+/** Scale along one axis. Run lengths give a first estimate (two of them when 1-px runs may be page chrome or
+ *  anti-aliasing rather than source pixels: a ×2.14 capture with a rounded border reads ×1.67 from runs alone);
+ *  the pitch whose grid holds the most colour changes picks one and refines it. longShare: the share of source
+ *  pixels drawn ⌈s⌉ px wide, which for nearest-neighbour scaling is the fractional part of the scale. */
+function scaleFromRuns(h) {
+  const { lengths, profile, inner } = h;
+  const all = [...lengths.entries()].sort((a, b) => a[0] - b[0]);
+  const n = all.reduce((a, [, c]) => a + c, 0);
+  const top = (s) => all.filter(([d]) => d <= 3 * Math.max(1, s)).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  if (!n) return { scale: null, runs: 0, lengths: [], uneven: false, longShare: 0 };
+  const est = runEstimate(lengths);
+  if (!est) return { scale: null, runs: n, lengths: all.slice(0, 6), uneven: false, longShare: 0 };
+  const min = Math.max(2, 0.03 * n);
+  const cands = [est];
+  if (est.L === 1 && (lengths.get(2) || 0) >= min && (lengths.get(3) || 0) >= min) { const e2 = runEstimate(lengths, 2); if (e2 && e2.L >= 2) cands.push(e2); }
+  let pick = null;
+  for (const c of cands) {
+    const fit = c.s > 1.05 ? combFit(profile, inner, c.s) : null;
+    // how much better than chance the grid holds the changes (a grid of pitch s catches 1/s of random lines);
+    // unscaled (s ≈ 1): every pixel is its own grid line
+    const lift = fit ? (fit.coverage - 1 / fit.s) / (1 - 1 / fit.s) : c.s <= 1.05 ? 1 : 0;
+    // the reading without 1-px runs wins a near tie: a finer grid absorbs stray lines more easily
+    if (!pick || lift > pick.lift - (c.L >= 2 ? 0.03 : -0.02)) pick = { c, fit, lift };
+  }
+  const { c, fit } = pick;
+  const onGrid = !!fit && pick.lift >= 0.75;
+  let s = onGrid ? fit.s : c.s;
+  // a whole number inside the best plateau (or drifting under half a pixel over the axis) is that whole number
+  const slack = (0.5 * s) / Math.max(1, inner);
+  const k = Math.round(s);
+  const nearInt = onGrid ? k >= fit.lo - slack - 1e-9 && k <= fit.hi + slack + 1e-9 || Math.abs(s - k) <= slack : Math.abs(s - k) <= slack;
+  if (onGrid && nearInt) s = k;
+  let uneven, single;
+  if (onGrid) {
+    uneven = !nearInt && s >= 2;
+    single = nearInt ? [Math.round(s)] : [Math.floor(s), Math.floor(s) + 1];
+  } else {
+    // L = 1 is ambiguous (unscaled art has 1- and 2-px runs of its own): uneven pixels are only claimed from 2 px up
+    uneven = c.pair && c.L >= 2 && c.share >= 0.1 && c.share <= 0.9;
+    single = c.pair ? [c.L, c.L + 1] : [c.L];
+  }
+  const longShare = uneven ? s - Math.floor(s) : 0;
+  return { scale: s, runs: n, lengths: top(s), uneven, longShare, single, grid: fit ? fit.coverage : null };
 }
 
 /**
  * The scale a picture was drawn at, from its runs of one colour (works for any scale, unlike blockScale):
- *   { x: {scale, uneven, single: [3, 4], longShare, runs, lengths}, y: {...}, scale: [sx, sy], fractional,
+ *   { x: {scale, uneven, single: [3, 4], longShare, runs, lengths, grid}, y: {...}, scale: [sx, sy], fractional,
  *     softPercent, blurry, region }
  * fractional: one source pixel is drawn L px in some places and L+1 px in others (nearest-neighbour scaling by a
- * non-whole factor: uneven pixels). softPercent: colour changes that are soft one-pixel ramps (smoothing / blur);
- * blurry above 25%. Assumes the source has some one-pixel features (outlines, anti-aliased edges, single pixels).
+ * non-whole factor: uneven pixels); longShare: the share of source pixels drawn L+1 px (the scale's fractional part).
+ * grid: the share of colour changes on the fitted pixel grid (null: no grid fitted). softPercent: colour changes that
+ * are soft one-pixel ramps; smearPercent: hard edges (8+ levels) spread over 2+ in-between pixels. blurry (smoothing,
+ * or scaling with filtering): soft ramps over 25% AND smeared edges at 50%+ of 20+ hard edges (a 1:1 gradient or
+ * anti-aliased art has soft ramps but no smeared edges). Needs some one-pixel features in the source (outlines,
+ * anti-aliased edges, single pixels). Without a region it reads the picture a few % in from the edges (min(16 px, 3%)).
  */
 export function pixelRuns(input, { region, tolerance = 0 } = {}) {
   const img = toImage(input, "pixelRuns");
   const tol = clampThreshold(tolerance, "pixelRuns", "tolerance");
+  // no region: a few % in from the edges (an element capture's rounded corners and border aren't source pixels)
+  if (!region && img.width >= 64 && img.height >= 64) {
+    const mx = Math.min(16, Math.floor(img.width * 0.03)), my = Math.min(16, Math.floor(img.height * 0.03));
+    region = { x: mx, y: my, w: img.width - 2 * mx, h: img.height - 2 * my };
+  }
   const R = clipRegion(region, img.width, img.height, "pixelRuns");
   const hx = axisRuns(img, R, tol, false), hy = axisRuns(img, R, tol, true);
-  const x = scaleFromRuns(hx.lengths), y = scaleFromRuns(hy.lengths);
   const changes = hx.changes + hy.changes, between = hx.between + hy.between;
   const softPercent = changes ? r2((between / changes) * 100) : 0;
-  const clean = (a) => ({ scale: a.scale == null ? null : r4(a.scale), uneven: a.uneven, single: a.single || null, longShare: r4(a.longShare), runs: a.runs, lengths: a.lengths });
-  const blurry = changes > 0 && softPercent > 25;
-  const X = clean(blurry ? { ...x, scale: null } : x), Y = clean(blurry ? { ...y, scale: null } : y);
-  return { region: R, x: X, y: Y, scale: [X.scale, Y.scale], fractional: !blurry && (X.uneven || Y.uneven), softPercent, blurry, changes };
+  const sm = smearedEdges(img, R);
+  const smearPercent = sm.hard ? r2((sm.smeared / sm.hard) * 100) : 0;
+  // soft ramps alone are also a 1:1 gradient or anti-aliased art: blurry needs hard edges smeared over 2+ pixels too
+  const blurry = changes > 0 && softPercent > 25 && sm.hard >= 20 && smearPercent >= 50;
+  const count = (h) => [...h.lengths.values()].reduce((a, c) => a + c, 0);
+  const x = blurry ? { scale: null, runs: count(hx), lengths: [], uneven: false, longShare: 0 } : scaleFromRuns(hx);
+  const y = blurry ? { scale: null, runs: count(hy), lengths: [], uneven: false, longShare: 0 } : scaleFromRuns(hy);
+  const clean = (a) => ({ scale: a.scale == null ? null : r4(a.scale), uneven: a.uneven, single: a.single || null, longShare: r4(a.longShare), runs: a.runs, lengths: a.lengths, grid: a.grid == null ? null : r4(a.grid) });
+  const X = clean(x), Y = clean(y);
+  return { region: R, x: X, y: Y, scale: [X.scale, Y.scale], fractional: !blurry && (X.uneven || Y.uneven), softPercent, smearPercent, hardEdges: sm.hard, blurry, changes };
 }
 
 // ---------------------------------------------------------------------------

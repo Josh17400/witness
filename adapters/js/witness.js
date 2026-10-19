@@ -457,20 +457,22 @@ function installWebAudioTap() {
     const bus = ctx.createGain();
     Object.defineProperty(bus, "maxChannelCount", { value: 2 });
     const silent = () => ctx.createGain();
-    // the autoplay policy: while the context isn't running its capture is silent. Muted spans are kept in rendered
-    // sample positions and zeroed when read (changing a gain's value mid-render would move later sounds by a sample)
-    const muted = [];   // [[from, to (Infinity while muted)]] in samples since the context started rendering
+    // the autoplay policy, suspend() and close(): while the context isn't running it is FROZEN, as in browsers: it
+    // doesn't render, currentTime stays put, and what was scheduled waits (music started while suspended plays from
+    // its start after the unlock, as on an iPhone). The capture is silent meanwhile. Two timelines: "output" samples
+    // follow simulated time; the context's own samples skip the gaps [[from, to (Infinity while frozen)]] (output).
+    const gaps = [];
     const held = !allowResume();   // created outside a gesture under the "gesture" policy: suspended, as in Safari
     const entry = { kind: "captured", resumes: 0, blocked: 0, st: held ? "suspended" : "running", policySuspended: held, waiting: [], sampleRate: rate };
     if (!held && audioGesturePolicy()) entry.unlockedBy = "created in a gesture";
-    if (held) muted.push([0, Infinity]);
+    if (held) gaps.push([0, Infinity]);
     const setState = (st) => {
       if (entry.st === st) return;
       const was = entry.st;
       entry.st = st;
-      const at = tap.rendered;
-      if (was === "running") muted.push([at, Infinity]);
-      else if (st === "running" && muted.length) muted[muted.length - 1][1] = at;
+      const at = Math.round(tap.outNow());
+      if (was === "running") gaps.push([at, Infinity]);
+      else if (st === "running" && gaps.length) gaps[gaps.length - 1][1] = Math.max(gaps[gaps.length - 1][0], at);
       try { ctx.dispatchEvent(new Event("statechange")); } catch { /* no events here */ }
     };
     entry.state = () => entry.st;
@@ -503,7 +505,11 @@ function installWebAudioTap() {
       createMediaStreamDestination: { value: () => Object.assign(silent(), { stream: null }) },
       setSinkId: { value: () => Promise.resolve() },
     });
-    const tap = { rate, born: audioClock.t, chunks: [], base: 0, received: 0, rendered: 0, started: false, dead: false, ready: null };
+    const tap = { rate, born: audioClock.t, chunks: [], base: 0, received: 0, rendered: 0, started: false, dead: false, ready: null, frozenBase: 0 };
+    // output position of the current simulated time, and output → context samples (the frozen gaps left out)
+    tap.outNow = () => (tap.anchor != null ? tap.anchor + audioClock.since * rate : (audioClock.t - tap.born) * rate);
+    tap.frozenAt = (o) => { let f = tap.frozenBase; for (const [g0, g1] of gaps) { if (g0 >= o) break; f += Math.min(o, g1) - g0; } return f; };
+    tap.ctxAt = (o) => o - tap.frozenAt(o);
     tap.read = Math.round(audioReadSince * rate);   // created mid-run: start reading where the capture is
     tap.prepare = () => {
       if (!tap.ready) {
@@ -525,13 +531,17 @@ function installWebAudioTap() {
     tap.anchor = null;
     tap.render = async (ceil) => {
       if (tap.dead) return;
-      const pos = (tap.anchor != null ? tap.anchor + audioClock.since * rate : (audioClock.t - tap.born) * rate) / 128;
+      const pos = tap.ctxAt(tap.outNow()) / 128;
       await tap.renderTo((ceil ? Math.ceil(pos) : Math.floor(pos)) * 128);
     };
     tap.realign = async () => {
       if (tap.dead) return;
-      await tap.renderTo(Math.ceil(((audioClock.t - tap.born) * rate) / 128) * 128);
-      tap.anchor = tap.rendered;
+      const o = (audioClock.t - tap.born) * rate;
+      const open = gaps.length && gaps[gaps.length - 1][1] === Infinity;
+      if (open) { tap.anchor = Math.round(o); return; }   // frozen: nothing renders, the output timeline just goes on
+      const target = Math.ceil(tap.ctxAt(o) / 128) * 128;
+      await tap.renderTo(target);
+      tap.anchor = target + tap.frozenAt(Infinity);
     };
     tap.renderTo = async (target) => {
       if (tap.dead) return;
@@ -548,19 +558,32 @@ function installWebAudioTap() {
         warnOnce("audio-tap", `WebAudio capture stopped: ${e && e.message}`);
       }
     };
+    // output samples [a, b): zeros inside a gap, else the context's samples shifted by the gaps before them
     tap.sample = (a, b) => {
       const out = new Float32Array(Math.max(0, b - a));
-      let off = tap.base;
-      for (const c of tap.chunks) {
-        const lo = Math.max(a, off), hi = Math.min(b, off + c.length);
-        for (let i = lo; i < hi; i++) out[i - a] = c[i - off];
-        off += c.length;
-        if (off >= b) break;
+      const copy = (c0, c1, dst) => {
+        let off = tap.base;
+        for (const c of tap.chunks) {
+          const lo = Math.max(c0, off), hi = Math.min(c1, off + c.length);
+          for (let i = lo; i < hi; i++) out[dst + i - c0] = c[i - off];
+          off += c.length;
+          if (off >= c1) break;
+        }
+      };
+      for (let i = a; i < b;) {
+        let f = tap.frozenBase, inGap = null, next = Infinity;
+        for (const [g0, g1] of gaps) { if (g1 <= i) f += g1 - g0; else if (g0 <= i) { inGap = g1; break; } else { next = g0; break; } }
+        const e = Math.min(b, inGap != null ? inGap : next);
+        if (inGap == null) copy(i - f, e - f, i - a);
+        i = e;
       }
-      for (const [m0, m1] of muted) for (let i = Math.max(a, m0); i < Math.min(b, m1); i++) out[i - a] = 0;
       return out;
     };
-    tap.drop = (a) => { while (muted.length > 1 && muted[0][1] <= a) muted.shift(); while (tap.chunks.length && tap.base + tap.chunks[0].length <= a) tap.base += tap.chunks.shift().length; };
+    tap.drop = (a) => {
+      const c = tap.ctxAt(a);
+      while (gaps.length && gaps[0][1] <= a) { const [g0, g1] = gaps.shift(); tap.frozenBase += g1 - g0; }
+      while (tap.chunks.length && tap.base + tap.chunks[0].length <= c) tap.base += tap.chunks.shift().length;
+    };
     tap.settle = async () => {   // worklet messages arrive asynchronously: wait until they caught up
       const end = real.now() + 2000;
       while (!tap.dead && tap.received < tap.rendered && real.now() < end) await new Promise((r) => real.setTimeout(r, 2));

@@ -20,10 +20,10 @@
 //   duplicateTexts(els, { width, height })     -> the same text shown twice at once: [{ text, ids, rects }]
 //   pixelDuplicates(img, rows)                 -> pixel text rows with near-identical ink: [{ a, b, iou }]
 //   textTimeline(samples) / repeatedTexts(timeline, { within, fps })
-//                                              -> when each text shows and hides over a sweep; texts that show
-//                                                 again within `within` seconds (a repeated toast)
-//   plateCheck(img, rect, { pad })             -> text over the world without a backing plate: is the background
-//                                                 around the glyphs busy, and the worst contrast over the glyph edge
+//                                              -> when each element (by id) shows and hides over a sweep; elements
+//                                                 that come back with the same text within `within` s (a toast)
+//   plateCheck(img, rect, { pad, need })       -> text over the world without a backing plate: is the background
+//                                                 around the glyphs busy, the glyph-edge contrasts, the share under need
 //
 // Rects are screen pixels, [x, y) to [x + w, y + h).
 
@@ -33,6 +33,7 @@ import { backgroundPalette } from "./align.js";
 import { clusterColors, contrastRatio, deltaE } from "./color.js";
 
 const r2 = (v) => Math.round(v * 100) / 100;
+const r4 = (v) => Math.round(v * 10000) / 10000;
 const KINDS = new Set(["text", "button", "panel", "icon"]);
 
 export function normalizeUI(list) {
@@ -42,7 +43,7 @@ export function normalizeUI(list) {
     if (!r || r.length !== 4 || r.some((v) => !Number.isFinite(+v))) throw new TypeError(`state.ui[${i}]${e?.id != null ? ` (${e.id})` : ""}: rect must be [x, y, w, h] numbers`);
     const kind = KINDS.has(e.kind) ? e.kind : e.text != null ? "text" : "panel";
     return {
-      id: String(e.id ?? `ui${i}`), kind, x: +r[0], y: +r[1], w: Math.max(0, +r[2]), h: Math.max(0, +r[3]),
+      id: String(e.id ?? `ui${i}`), autoId: e.id == null, kind, x: +r[0], y: +r[1], w: Math.max(0, +r[2]), h: Math.max(0, +r[3]),
       text: e.text != null ? String(e.text) : null, fontPx: Number.isFinite(+e.fontPx) && e.fontPx != null ? +e.fontPx : null,
       layer: e.layer ?? 0, hidden: !!e.hidden,
     };
@@ -255,40 +256,92 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * env(safe-area-inset-*) in CSS points, as WebKit reports them for a full-screen page (viewport-fit=cover, a Home
- * Screen web app with a black-translucent status bar): the UIKit safeAreaInsets of each device. iPhone 14 Pro, 15,
- * 15 Pro, 16 and 16 Plus (Dynamic Island, 393×852 pt @3x): portrait top 59 (status bar + island), bottom 34 (home
- * indicator); landscape left and right 59 (the island may be on either side), bottom 21. iPhone 16 Pro / Pro Max
- * report 62 instead of 59; notched iPhones 12–14 report 47 (the X / 11 Pro: 44). iPhone SE 2/3 (Touch ID, 375×667 pt
- * @2x): the 20 pt status bar in portrait, nothing in landscape. iPad (10th gen) / iPad Air 11" (no Home button,
- * 820×1180 pt @2x): top 24 (status bar), bottom 20 (home indicator) in both orientations.
+ * env(safe-area-inset-*) in CSS points, as WebKit reports them, per device and orientation (the UIKit safeAreaInsets).
+ * The Home Screen presets assume a full-screen page (a web app added to the Home Screen, viewport-fit=cover, a
+ * black-translucent status bar): that page draws under the status bar, the Dynamic Island and the home indicator.
+ *   iphone-portrait / -landscape: iPhone 14 Pro, 15, 15 Pro, 16 (Dynamic Island, 393×852 pt @3x): portrait top 59
+ *     (status bar + island), bottom 34 (home indicator); landscape left and right 59 (the island may be on either
+ *     side), bottom 21.
+ *   iphone-max-portrait / -landscape: iPhone 14 Pro Max, 15 Plus, 15 Pro Max, 16 Plus (430×932 pt @3x): the same insets.
+ *   iphone-16-pro-portrait / -landscape (402×874 pt @3x) and iphone-16-pro-max-* (440×956 pt @3x): 62 instead of 59.
+ *   iphone-safari-portrait / -landscape: an iPhone 15 Safari TAB (viewport 393×659 / 734×343 pt): the status bar and
+ *     the toolbars are outside the page and a page without viewport-fit=cover is kept inside the safe area: no insets.
+ *   iphone-se: iPhone SE 2nd/3rd gen (Touch ID, 375×667 pt @2x): the 20 pt status bar in portrait, nothing in landscape.
+ *   ipad: iPad 10th gen / iPad Air 11" (no Home button, 820×1180 pt @2x): top 24 (status bar), bottom 20 (home
+ *     indicator) in both orientations.
+ * Not listed: notched iPhones X–14 (44–50 pt top: the 12/13 mini 50, the XR/11 48, the 12–14 47, the X/XS/11 Pro 44).
  */
+const IPH = (top, side) => ({ portrait: { top, bottom: 34, left: 0, right: 0 }, landscape: { top: 0, bottom: 21, left: side, right: side } });
+const DI = IPH(59, 59), DI62 = IPH(62, 62);
+const family = (name, device, pt, ins) => ({
+  [`${name}-portrait`]: { device, dpr: 3, only: "portrait", portrait: { pt, insets: ins.portrait } },
+  [`${name}-landscape`]: { device, dpr: 3, only: "landscape", landscape: { pt: [pt[1], pt[0]], insets: ins.landscape } },
+});
 export const SAFE_PRESETS = {
-  "iphone-portrait": { device: "iPhone 14 Pro/15/16 (Dynamic Island)", dpr: 3, only: "portrait", portrait: { pt: [393, 852], insets: { top: 59, bottom: 34, left: 0, right: 0 } } },
-  "iphone-landscape": { device: "iPhone 14 Pro/15/16 (Dynamic Island)", dpr: 3, only: "landscape", landscape: { pt: [852, 393], insets: { top: 0, bottom: 21, left: 59, right: 59 } } },
+  ...family("iphone", "iPhone 14 Pro/15/15 Pro/16 (Dynamic Island), Home Screen web app", [393, 852], DI),
+  ...family("iphone-max", "iPhone 14 Pro Max/15 Plus/15 Pro Max/16 Plus (Dynamic Island), Home Screen web app", [430, 932], DI),
+  ...family("iphone-16-pro", "iPhone 16 Pro (Dynamic Island), Home Screen web app", [402, 874], DI62),
+  ...family("iphone-16-pro-max", "iPhone 16 Pro Max (Dynamic Island), Home Screen web app", [440, 956], DI62),
+  "iphone-safari-portrait": { device: "iPhone 15, Safari tab (toolbars outside the page)", dpr: 3, only: "portrait", portrait: { pt: [393, 659], insets: { top: 0, bottom: 0, left: 0, right: 0 } } },
+  "iphone-safari-landscape": { device: "iPhone 15, Safari tab (toolbars outside the page, no viewport-fit=cover)", dpr: 3, only: "landscape", landscape: { pt: [734, 343], insets: { top: 0, bottom: 0, left: 0, right: 0 } } },
   "iphone-se": { device: "iPhone SE 2nd/3rd gen (Home button)", dpr: 2, portrait: { pt: [375, 667], insets: { top: 20, bottom: 0, left: 0, right: 0 } }, landscape: { pt: [667, 375], insets: { top: 0, bottom: 0, left: 0, right: 0 } } },
   ipad: { device: "iPad 10th gen / iPad Air 11-inch (no Home button)", dpr: 2, portrait: { pt: [820, 1180], insets: { top: 24, bottom: 20, left: 0, right: 0 } }, landscape: { pt: [1180, 820], insets: { top: 24, bottom: 20, left: 0, right: 0 } } },
 };
-const ZONES = {
-  "iphone-portrait": { top: "status bar + Dynamic Island", bottom: "home indicator" },
-  "iphone-landscape": { left: "Dynamic Island / rounded corner", right: "Dynamic Island / rounded corner", bottom: "home indicator" },
-  "iphone-se": { top: "status bar" },
-  ipad: { top: "status bar", bottom: "home indicator" },
-};
+const ISLAND = { top: "status bar + Dynamic Island", bottom: "home indicator", left: "Dynamic Island / rounded corner", right: "Dynamic Island / rounded corner" };
+const zoneName = (name, side) => (name === "iphone-se" || name === "ipad" ? { top: "status bar", bottom: "home indicator" }[side] : ISLAND[side]);
+const FITS = ["contain", "cover", "stretch"];
 
-/** A preset's insets for a W×H screenshot (the screenshot fills the device screen: each axis scaled on its own). */
-export function safePreset(name, W, H) {
+/**
+ * A preset's insets in screenshot px. The screenshot is the game's picture, shown on the device screen by `fit`:
+ *   contain (default): one uniform scale, fitted inside the screen and centred (letterbox / pillarbox bars), as
+ *     browsers and Emscripten show a canvas with its aspect kept; an inset that ends inside a bar costs nothing.
+ *   cover: one uniform scale filling the screen, centred, the overflow cut off.
+ *   stretch: each axis scaled on its own (the picture fills the screen exactly).
+ * A screenshot with the device's aspect (within 3%) is the same under all three. Returns { px: {left, right, top,
+ * bottom}, insetsPt, zones, fit, ptPerPx, bars: {x, y} (pt), mismatch, sizeNote, demote } — demote: stretched over a
+ * different aspect, the numbers are a guess (callers warn instead of failing).
+ */
+export function safePreset(name, W, H, { fit = "contain" } = {}) {
   const p = SAFE_PRESETS[name];
   if (!p) throw new RangeError(`safe-area preset is ${Object.keys(SAFE_PRESETS).join(", ")} or a percentage (got ${name})`);
+  if (!FITS.includes(fit)) throw new RangeError(`--fit is ${FITS.join(", ")} (got ${fit})`);
   const orientation = p.only || (W > H ? "landscape" : "portrait");
-  const o = p[orientation], sx = W / o.pt[0], sy = H / o.pt[1];
+  const o = p[orientation], [PW, PH] = o.pt;
   const I = o.insets;
-  const px = { left: I.left * sx, right: I.right * sx, top: I.top * sy, bottom: I.bottom * sy };
-  let mismatch = null;
+  const aspectOff = Math.abs(W / H / (PW / PH) - 1) > 0.03;
+  let px, ptPerPx, bars = { x: 0, y: 0 }, scale;
+  if (fit === "stretch") {
+    const sx = W / PW, sy = H / PH;
+    px = { left: I.left * sx, right: I.right * sx, top: I.top * sy, bottom: I.bottom * sy };
+    ptPerPx = { x: 1 / sx, y: 1 / sy };
+    scale = { x: r2(sx), y: r2(sy) };
+  } else {
+    const f = fit === "contain" ? Math.min(PW / W, PH / H) : Math.max(PW / W, PH / H);   // pt per screenshot px
+    bars = { x: (PW - W * f) / 2, y: (PH - H * f) / 2 };   // negative under cover: cut off
+    const into = (inset, bar) => Math.max(0, inset - bar) / f;
+    px = { left: into(I.left, bars.x), right: into(I.right, bars.x), top: into(I.top, bars.y), bottom: into(I.bottom, bars.y) };
+    ptPerPx = { x: f, y: f };
+    scale = { x: r2(1 / f), y: r2(1 / f) };
+  }
+  let mismatch = null, sizeNote = null;
   if (p.only && (W > H) !== (orientation === "landscape")) mismatch = `the screenshot is ${W > H ? "landscape" : "portrait"} (${W}×${H}) but ${name} is ${orientation}`;
-  else if (Math.abs(W / H / (o.pt[0] / o.pt[1]) - 1) > 0.03) mismatch = `the screenshot's aspect ${r2(W / H)} is not the device's ${r2(o.pt[0] / o.pt[1])} (${o.pt[0]}×${o.pt[1]} pt): insets scaled per axis (${r2(sx)} px/pt across, ${r2(sy)} down)`;
-  const zones = Object.fromEntries(Object.entries(ZONES[name]).filter(([k]) => I[k] > 0));
-  return { name, device: p.device, orientation, pt: o.pt, dpr: p.dpr, insetsPt: { ...I }, devicePx: Object.fromEntries(Object.entries(I).map(([k, v]) => [k, v * p.dpr])), scale: { x: r2(sx), y: r2(sy) }, px: Object.fromEntries(Object.entries(px).map(([k, v]) => [k, r2(v)])), zones, mismatch };
+  else if (aspectOff) {
+    mismatch = fit === "stretch"
+      ? `the screenshot's aspect ${r2(W / H)} is not the device's ${r2(PW / PH)} (${PW}×${PH} pt) and --fit stretch scales each axis on its own (${r2(1 / ptPerPx.x)} px/pt across, ${r2(1 / ptPerPx.y)} down): no browser shows a canvas like that, so safe-zone findings are warnings`
+      : fit === "contain"
+        ? `the screenshot's aspect ${r2(W / H)} is not the device's ${r2(PW / PH)} (${PW}×${PH} pt): assumed fitted inside the screen at ${r2(ptPerPx.x)} pt per px with ${bars.x > 0.005 ? `${r2(bars.x)} pt bars left and right` : `${r2(bars.y)} pt bars top and bottom`} (--fit cover|stretch if the game fills the screen another way)`
+        : `the screenshot's aspect ${r2(W / H)} is not the device's ${r2(PW / PH)} (${PW}×${PH} pt): assumed filling the screen at ${r2(ptPerPx.x)} pt per px, ${bars.x < -0.005 ? `${r2(-bars.x)} pt cut off left and right` : `${r2(-bars.y)} pt cut off top and bottom`}`;
+  } else {
+    // the device's own aspect: a full-screen capture. Its px per pt should be a whole number (1 CSS px, or the DPR)
+    const k = W / PW;
+    if (Math.abs(k - Math.round(k)) > 0.01 * k) {
+      const other = Object.entries(SAFE_PRESETS).filter(([n]) => n !== name).map(([n, q]) => [n, q[orientation] || null]).find(([, q]) => q && [1, 2, 3].some((d) => W === q.pt[0] * d && Math.abs(H - q.pt[1] * d) <= d));
+      sizeNote = `${W} px wide is ${r2(k)} px per pt: not a whole multiple of ${PW} pt, so this isn't a ${PW}×${PH} pt screen${other ? ` (it is ${other[1].pt.join("×")} pt at @${W / other[1].pt[0]}x: --safe ${other[0]})` : ""}; insets scaled to fit`;
+    }
+  }
+  const zones = Object.fromEntries(["top", "bottom", "left", "right"].filter((k) => I[k] > 0 && px[k] > 0).map((k) => [k, zoneName(name, k)]));
+  return { name, device: p.device, orientation, pt: o.pt, dpr: p.dpr, fit, insetsPt: { ...I }, devicePx: Object.fromEntries(Object.entries(I).map(([k, v]) => [k, v * p.dpr])),
+    scale, ptPerPx: { x: r4(ptPerPx.x), y: r4(ptPerPx.y) }, bars: { x: r2(bars.x), y: r2(bars.y) }, px: Object.fromEntries(Object.entries(px).map(([k, v]) => [k, r2(v)])), zones, mismatch, sizeNote, demote: fit === "stretch" && aspectOff };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,13 +353,18 @@ const meaningful = (k) => k.length >= 3 && /\p{L}/u.test(k);
 const visibleIn = (e, W, H) => e.w > 0 && e.h > 0 && e.x < W && e.y < H && e.x + e.w > 0 && e.y + e.h > 0;
 
 /**
- * Visible elements showing the same text (trimmed, case and spacing ignored; at least 3 characters with a letter),
- * leaving out an element that sits inside another of the group (a button and its own label listed twice).
+ * Visible text showing the same words twice at once (trimmed, case and spacing ignored; at least 3 characters with a
+ * letter), leaving out what repeats on purpose: buttons and icons (two "BUY" buttons), text inside a button, an
+ * element inside another of the group (a label listed twice), 3+ copies (a list or grid of "LOCKED" tiles), and
+ * copies that each sit in their own panel of the same size (cards / tiles).
  */
 export function duplicateTexts(els, { width = Infinity, height = Infinity } = {}) {
   const groups = new Map();
+  const holders = els.filter((p) => p.kind === "panel" || p.kind === "button");
+  const holder = (e, kinds) => holders.filter((p) => p !== e && kinds.includes(p.kind) && contains(p, e)).sort((a, b) => a.w * a.h - b.w * b.h)[0] || null;
   for (const e of els) {
     if (e.text == null || !visibleIn(e, width, height)) continue;
+    if (e.kind === "button" || e.kind === "icon" || holder(e, ["button"])) continue;
     const k = normText(e.text);
     if (!meaningful(k)) continue;
     if (!groups.has(k)) groups.set(k, []);
@@ -316,7 +374,10 @@ export function duplicateTexts(els, { width = Infinity, height = Infinity } = {}
   for (const g of groups.values()) {
     // drop an element inside another of the group (for identical rects keep the first)
     const keep = g.filter((e, i) => !g.some((o, j) => j !== i && contains(o, e) && (!contains(e, o) || j < i)));
-    if (keep.length > 1) out.push({ text: keep[0].text, ids: keep.map((e) => e.id), rects: keep.map((e) => [e.x, e.y, e.w, e.h]) });
+    if (keep.length !== 2) continue;   // 3+: a list or a grid of the same label
+    const [pa, pb] = keep.map((e) => holder(e, ["panel"]));
+    if (pa && pb && pa !== pb && Math.abs(pa.w - pb.w) <= 1 && Math.abs(pa.h - pb.h) <= 1) continue;   // two cards / tiles
+    out.push({ text: keep[0].text, ids: keep.map((e) => e.id), rects: keep.map((e) => [e.x, e.y, e.w, e.h]) });
   }
   return out;
 }
@@ -353,8 +414,10 @@ export function pixelDuplicates(img, rows, { threshold = 24, minIoU = 0.95 } = {
 }
 
 /**
- * samples: [{ f, els }] in frame order (els: normalized UI elements). Returns Map(text key -> { text, shows: [{ f0,
- * f1, id, rect }] }): a show starts when the text is visible at a sample and was not at the one before.
+ * samples: [{ f, els }] in frame order (els: normalized UI elements). Returns Map(key -> { text, id, shows: [{ f0, f1,
+ * id, rect, text }] }), one entry per element: its id (elements without one: per text). A show starts when the
+ * element is visible with a text at a sample and was not at the one before; a text that changes while the element
+ * stays ("HP 10" → "HP 9" → "HP 10") is one show (its text is the first one seen).
  */
 export function textTimeline(samples, { width = Infinity, height = Infinity } = {}) {
   const tl = new Map();
@@ -363,25 +426,32 @@ export function textTimeline(samples, { width = Infinity, height = Infinity } = 
     const now = new Set();
     for (const e of s.els) {
       if (e.text == null || !visibleIn(e, width, height)) continue;
-      const k = normText(e.text);
-      if (!meaningful(k) || now.has(k)) continue;
+      const t = normText(e.text);
+      if (!meaningful(t)) continue;
+      const k = e.autoId ? `text:${t}` : `id:${e.id}`;
+      if (now.has(k)) continue;
       now.add(k);
-      if (!tl.has(k)) tl.set(k, { text: e.text, shows: [] });
+      if (!tl.has(k)) tl.set(k, { text: e.text, id: e.autoId ? null : e.id, shows: [] });
       const shows = tl.get(k).shows;
       if (prev.has(k)) shows[shows.length - 1].f1 = s.f;
-      else shows.push({ f0: s.f, f1: s.f, id: e.id, rect: [e.x, e.y, e.w, e.h] });
+      else shows.push({ f0: s.f, f1: s.f, id: e.id, rect: [e.x, e.y, e.w, e.h], text: e.text });
     }
     prev = now;
   }
   return tl;
 }
 
-/** Texts shown again within `within` s of their previous showing's start: [{ text, first, again, sinceStart, hidden }]. */
+/**
+ * An element that disappeared and came back with the same text within `within` s of its previous showing's start
+ * (a toast shown again): [{ text, id, first, again, sinceStart, hidden }]. Values that only change while the
+ * element stays on screen are never repeats.
+ */
 export function repeatedTexts(tl, { within = 10, fps = 60 } = {}) {
   const out = [];
-  for (const { text, shows } of tl.values()) for (let i = 1; i < shows.length; i++) {
+  for (const { id, shows } of tl.values()) for (let i = 1; i < shows.length; i++) {
     const a = shows[i - 1], b = shows[i], since = (b.f0 - a.f0) / fps;
-    if (since <= within + 1e-9) out.push({ text, first: a, again: b, sinceStart: r2(since), hidden: r2((b.f0 - a.f1) / fps), shows: shows.length });
+    if (normText(a.text) !== normText(b.text)) continue;
+    if (since <= within + 1e-9) out.push({ text: b.text, id, first: a, again: b, sinceStart: r2(since), hidden: r2((b.f0 - a.f1) / fps), shows: shows.length });
   }
   return out.sort((x, y) => x.again.f0 - y.again.f0);
 }
@@ -395,10 +465,10 @@ export function repeatedTexts(tl, { within = 10, fps = 60 } = {}) {
  * not in the `pad` px around it, in thin strokes (most of its pixels touch another colour). The background is every
  * other pixel of the rect + pad: busy when its most common colour cluster covers under 80% of it. Every glyph edge
  * (a text pixel and its 4-neighbour background pixel; an anti-aliased in-between pixel is skipped for the one
- * behind it) gives one WCAG ratio: worst / p10 / median / best, where the worst one is and the colours there.
- * null when no text colour stands out.
+ * behind it) gives one WCAG ratio: worst / p10 / median / best, where the worst one is and the colours there, and
+ * how many are under `need` (under, underShare). null when no text colour stands out.
  */
-export function plateCheck(img, rect, { pad = 2, tol = 10 } = {}) {
+export function plateCheck(img, rect, { pad = 2, tol = 10, need = 4.5 } = {}) {
   const W = img.width, H = img.height, d = img.data;
   const ix0 = Math.max(0, Math.floor(rect.x)), iy0 = Math.max(0, Math.floor(rect.y)), ix1 = Math.min(W, Math.ceil(rect.x + rect.w)), iy1 = Math.min(H, Math.ceil(rect.y + rect.h));
   if (ix1 <= ix0 || iy1 <= iy0) return null;
@@ -475,9 +545,10 @@ export function plateCheck(img, rect, { pad = 2, tol = 10 } = {}) {
   const rs = pairs.map((p) => p.r).sort((a, b) => a - b);
   const worst = pairs.reduce((a, p) => (p.r < a.r ? p : a));
   const q = (f) => rs[Math.min(rs.length - 1, Math.round(f * (rs.length - 1)))];
+  const under = rs.filter((r) => r < need).length;
   return {
     text: clusters[text].color.map(Math.round), textPixels: inC[text], background: bgN, bgShare: r2(bgShare), bgColors: bgSorted.filter((n) => n >= 0.1 * bgN).length,
     busy: bgShare < 0.8,
-    edge: { n: pairs.length, worst: r2(rs[0]), p10: r2(q(0.1)), median: r2(q(0.5)), best: r2(rs[rs.length - 1]), worstDeltaE: r2(deltaE(rgbOf(worst.t), rgbOf(worst.b))), at: [worst.x, worst.y], textAt: rgbOf(worst.t), bgAt: rgbOf(worst.b) },
+    edge: { n: pairs.length, need, under, underShare: r2(under / pairs.length), worst: r2(rs[0]), p10: r2(q(0.1)), median: r2(q(0.5)), best: r2(rs[rs.length - 1]), worstDeltaE: r2(deltaE(rgbOf(worst.t), rgbOf(worst.b))), at: [worst.x, worst.y], textAt: rgbOf(worst.t), bgAt: rgbOf(worst.b) },
   };
 }

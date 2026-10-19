@@ -1,6 +1,18 @@
 // Browser launches in `witness doctor`: the device and engine, how the canvas really lands on the screen (device
 // pixels: fractional scaling, smoothing blur), and the audio autoplay policy (the iPhone "no sound until a tap" bug).
 import { describeDevice, canvasDisplay } from "../core/devices.js";
+
+/** The measure ui --safe preset for a device profile (null: desktop or a custom profile without one). */
+export function safePresetFor(d) {
+  if (!d || !d.safe) return null;
+  const land = !!d.landscape;
+  if (d.safe === "safari") return land ? "iphone-safari-landscape" : "iphone-safari-portrait";
+  if (d.safe === "iphone") return land ? "iphone-landscape" : "iphone-portrait";
+  if (d.safe === "iphone-max") return land ? "iphone-max-landscape" : "iphone-max-portrait";
+  if (d.safe === "iphone-se") return "iphone-se";
+  if (d.safe === "ipad") return "ipad";
+  return null;
+}
 import { begin, stepTo, queueInput } from "../core/runner.js";
 import { parseWitnessInput } from "../core/input-spec.js";
 
@@ -19,7 +31,14 @@ export async function displayReport(web, media) {
   const info = await web.info();
   if (!info) return { lines: [["⚠", "the page has no Witness init script (attached page?): no display facts"]], display: null, info };
   const ua = /iPhone|iPad|Macintosh|Android|Windows|Linux/.exec(info.userAgent);
-  lines.push(["", `page: ${info.viewport.join("×")} CSS px, DPR ${info.dpr}, ${info.maxTouchPoints ? `maxTouchPoints ${info.maxTouchPoints}` : "maxTouchPoints 0"}${web.device && web.device.touch && !info.touchEvents ? " (this build has no TouchEvent: Witness touches arrive as pointer events only; real iPhones send both)" : ""}${info.standalone ? ", navigator.standalone" : ""}${ua ? `, user agent says ${ua[0]}` : ""}`]);
+  lines.push(["", `page: ${info.viewport.join("×")} CSS px, DPR ${info.dpr}${info.screen ? `, screen ${info.screen.join("×")}` : ""}, ${info.maxTouchPoints ? `maxTouchPoints ${info.maxTouchPoints}` : "maxTouchPoints 0"}${web.device && web.device.touch && !info.touchEvents ? " (this build has no TouchEvent: Witness touches arrive as pointer events only; real iPhones send both)" : ""}${info.standalone ? ", navigator.standalone" : ""}${info.platform ? `, platform ${info.platform}` : ""}${ua ? `, user agent says ${ua[0]}` : ""}`]);
+  // a touch profile whose page says "no touch" or a desktop platform: games would pick their mouse / desktop UI
+  const dev = web.device;
+  if (dev && dev.touch && (info.maxTouchPoints || 0) < 2) lines.push(["⚠", `${dev.name} is a touch screen but the page reports maxTouchPoints ${info.maxTouchPoints || 0} (a real one reports 5): a touch-UI check (maxTouchPoints > 0) or the iPad check (platform MacIntel && maxTouchPoints > 1) picks the desktop UI here`]);
+  if (dev && dev.platform && info.platform && info.platform !== dev.platform) lines.push(["⚠", `${dev.name}: navigator.platform is "${info.platform}", a real one says "${dev.platform}"`]);
+  // safe areas: the notch / Dynamic Island / home indicator aren't emulated (env(safe-area-inset-*) is 0 here)
+  const preset = safePresetFor(dev);
+  if (preset) lines.push(["", `safe areas are not emulated (env(safe-area-inset-*) is 0 in this page${dev.standalone ? "; on the device a Home Screen web app with viewport-fit=cover gets the insets" : ""}): check the HUD with \`witness measure ui --safe ${preset}\``]);
   if (info.webAudio === false) lines.push(["⚠", `this ${web.engine} build has no Web Audio (Playwright's WebKit for Windows is built without it): Witness put in a silent AudioContext so the page loads; audio can't be captured or heard here (check the unlock path with --engine chromium --no-auto-unlock)`]);
   const c = mainCanvas(info);
   if (!c) { lines.push(["⚠", "no visible <canvas> on the page"]); return { lines, display: null, info }; }
@@ -43,10 +62,23 @@ export async function displayReport(web, media) {
       const block = d.integer && want > 1 ? media.blockScale(img, want, { region }) : null;
       const runs = media.pixelRuns(img, { region });
       const exact = !!block && !block.blurry && !runs.fractional;
-      pixels = { width: img.width, height: img.height, k: block ? want : null, exact, scale: runs.scale, fractional: runs.fractional, blurry: runs.blurry || !!(block && block.blurry), softPercent: runs.softPercent };
-      const ax = runs.x.uneven ? runs.x : runs.y.uneven ? runs.y : null;
-      const what = exact ? `exact ×${want}: every ${want}×${want} cell is one colour` : pixels.blurry ? `blurry (${block && block.blurry ? `${block.nonUniformPercent}% of ${want}×${want} cells mixed, ` : ""}${runs.softPercent}% of colour changes are soft ramps)` : runs.fractional ? `≈×${runs.scale[0].toFixed(2)}${Math.abs(runs.scale[0] - runs.scale[1]) > 0.02 ? ` × ${runs.scale[1].toFixed(2)}` : ""}, uneven: one game pixel is ${ax.single[0]} or ${ax.single[1]} device px (${Math.round(ax.longShare * 100)}% are ${ax.single[1]})` : runs.scale[0] ? `≈×${runs.scale[0].toFixed(2)}` : "no pixel grid found (too few one-pixel details to read a scale)";
-      lines.push([pixels.exact || (!pixels.blurry && !pixels.fractional) ? "✔" : "⚠", `pixels on screen (the canvas captured at device pixels, ${img.width}×${img.height}): ${what}`]);
+      // the layout's scale is exact; the picture's is read from runs of one colour. When they disagree by more than
+      // 3% the picture couldn't be read (too few one-pixel details, or chrome around the canvas): no ✔ from it
+      const lay = d.scale, rs = runs.scale;
+      const agrees = rs[0] != null && rs[1] != null && Math.abs(rs[0] - lay[0]) / lay[0] <= 0.03 && Math.abs(rs[1] - lay[1]) / lay[1] <= 0.03;
+      const blurry = runs.blurry || !!(block && block.blurry);
+      pixels = { width: img.width, height: img.height, k: block ? want : null, exact, scale: rs, layoutScale: lay, agrees, fractional: runs.fractional, blurry, softPercent: runs.softPercent, smearPercent: runs.smearPercent };
+      const pct = (v) => Math.round((v - Math.floor(v)) * 1000) / 10;
+      // the share of game pixels drawn one px wider, exactly, from the layout's scale (nearest-neighbour: its fraction)
+      const layShare = `${pct(lay[0])}% of game pixels are ${Math.floor(lay[0]) + 1} device px wide${Math.abs(lay[0] - lay[1]) > 0.005 ? `, ${pct(lay[1])}% are ${Math.floor(lay[1]) + 1} tall` : ""} (from the layout's ×${lay[0]})`;
+      const runTxt = rs[0] == null ? "no scale" : `≈×${rs[0].toFixed(3)}${Math.abs(rs[0] - (rs[1] ?? rs[0])) > 0.002 && rs[1] != null ? ` × ${rs[1].toFixed(3)}` : ""}`;
+      let mark, what;
+      if (exact) { mark = "✔"; what = `exact ×${want}: every ${want}×${want} cell is one colour`; }
+      else if (blurry) { mark = "⚠"; what = `blurry (${block && block.blurry ? `${block.nonUniformPercent}% of ${want}×${want} cells mixed` : `${runs.smearPercent}% of hard edges smeared over 2+ px, ${runs.softPercent}% of colour changes are soft ramps`})`; }
+      else if (!agrees) { mark = d.problem ? "⚠" : ""; what = `couldn't read the scale from the picture (${runTxt} from runs of one colour vs ×${lay[0]}${Math.abs(lay[0] - lay[1]) > 0.005 ? ` × ${lay[1]}` : ""} from the layout: too few one-pixel details, or something drawn over the canvas); the layout's numbers above hold${d.problem === "fractional" ? `: ${layShare}` : ""}`; }
+      else if (runs.fractional || d.problem === "fractional") { mark = "⚠"; what = `${runTxt}, uneven: one game pixel is ${Math.floor(lay[0])} or ${Math.floor(lay[0]) + 1} device px; ${layShare}`; }
+      else { mark = "✔"; what = `${runTxt}, matches the layout`; }
+      lines.push([mark, `pixels on screen (the canvas captured at device pixels, ${img.width}×${img.height}): ${what}`]);
     } catch (e) { lines.push(["⚠", `couldn't capture the canvas at device pixels: ${e.message}`]); }
   }
   return { lines, display: { canvas: name, size: [c.w, c.h], css: [fx(c.rect[2], 4), fx(c.rect[3], 4)], ...d, pixels }, info };

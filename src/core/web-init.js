@@ -12,7 +12,8 @@
 //     The state Witness reports is the emulated one (the engine's own may differ: headless pages play nothing).
 //   * info(): device pixel ratio, viewport, user agent, touch points, standalone, every canvas with its backing size,
 //     CSS box and image-rendering, and the audio contexts.
-//   * standalone emulation (navigator.standalone, display-mode: standalone) for Home Screen web app profiles.
+//   * standalone emulation (navigator.standalone, display-mode: standalone) for Home Screen web app profiles, and the
+//     device's navigator.platform / maxTouchPoints ("iPhone" or "MacIntel", 5) for device profiles.
 export function webInit(opts) {
   const G = globalThis;
   if (G.__witnessWeb) return;
@@ -56,7 +57,7 @@ export function webInit(opts) {
       const nav = G.navigator || {};
       return {
         dpr: G.devicePixelRatio || 1, viewport: [G.innerWidth || 0, G.innerHeight || 0], screen: G.screen ? [G.screen.width, G.screen.height] : null,
-        userAgent: nav.userAgent || "", maxTouchPoints: nav.maxTouchPoints || 0, touchEvents: typeof G.TouchEvent === "function",
+        userAgent: nav.userAgent || "", platform: nav.platform || "", maxTouchPoints: nav.maxTouchPoints || 0, touchEvents: typeof G.TouchEvent === "function",
         standalone: nav.standalone === true, canvases, audio: this.audio(), webAudio: !this.noWebAudio,
       };
     },
@@ -150,6 +151,15 @@ export function webInit(opts) {
   const AC = G.AudioContext, WAC = G.webkitAudioContext, wAC = wrap(AC);
   if (AC) G.AudioContext = wAC;
   if (WAC) G.webkitAudioContext = WAC === AC ? wAC : wrap(WAC);
+
+  // the device's navigator.platform and touch points, matching its user agent (headless engines report the host:
+  // "Win32" and 0 or 1 touch points, so an iPad check or a touch-UI check would pick the desktop UI)
+  const navProp = (k, v) => {
+    if (v == null || !G.navigator) return;
+    try { Object.defineProperty(Object.getPrototypeOf(G.navigator), k, { configurable: true, get: () => v }); } catch { /* read-only */ }
+    try { if (G.navigator[k] !== v) Object.defineProperty(G.navigator, k, { configurable: true, get: () => v }); } catch { /* read-only */ }
+  };
+  if (opts) { navProp("platform", opts.platform); navProp("maxTouchPoints", opts.maxTouchPoints); }
 
   // Home Screen web app (iOS): navigator.standalone and the display-mode media query
   if (opts && opts.standalone && G.navigator) {

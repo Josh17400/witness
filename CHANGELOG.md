@@ -51,35 +51,54 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
   `luminanceOf`, `LINEAR`.
 
 **Phone safe areas, doubled and repeated text, text without a plate, figure vs ground**
-- `measure ui --safe iphone-portrait | iphone-landscape | iphone-se | ipad`: the device's `env(safe-area-inset-*)`
-  in points, scaled to the screenshot per axis (screenshot px ÷ device pt; a warning when the aspect differs).
-  iPhone 14 Pro/15/16 (393×852 pt @3x): portrait top 59 pt (status bar + Dynamic Island), bottom 34 (home
-  indicator); landscape left and right 59 (the island can be on either side), bottom 21 (16 Pro / Pro Max report
-  62, notched 12–14 report 47). iPhone SE 2/3 (375×667 @2x): portrait top 20 (status bar), landscape none. iPad
-  10th gen / Air 11" (820×1180 @2x): top 24, bottom 20. Text, buttons and icons inside a zone are ✖ with the zone
-  named ("Dynamic Island / rounded corner (25.24 px into the 33.24 px left inset), home indicator (…)"); panels ⚠.
-  The `%` form is unchanged.
-- `measure ui`: ✖ the same text shown twice at once (case and spacing ignored, ≥ 3 characters with a letter; a
-  button's own label listed twice is not a copy), both rects; without `state.ui`, text rows with the same ink (⚠).
-- `measure ui --from 0 --to 30 [--within 10] [--every 1f]`: samples `state.ui` and reports texts shown again within
-  `--within` s of their previous showing (a repeated toast: when it showed, when it came back, how long it was
-  hidden, its rect), and texts doubled at any sampled frame (first frame, how many frames).
+- `measure ui --safe <preset> [--fit contain|cover|stretch]`: the device's `env(safe-area-inset-*)` in points,
+  mapped onto the screenshot as the device shows it: `contain` (default: one uniform scale, fitted and centred, as
+  browsers and Emscripten show a canvas; an inset that ends inside the letterbox bars costs nothing), `cover`, or
+  `stretch` (each axis on its own; with a different aspect the zone findings are only ⚠). Home Screen web app
+  presets (viewport-fit=cover): `iphone-portrait` / `iphone-landscape` = iPhone 14 Pro, 15, 15 Pro, 16 (393×852 pt
+  @3x): portrait top 59 pt (status bar + Dynamic Island), bottom 34 (home indicator); landscape left and right 59
+  (the island can be on either side), bottom 21. `iphone-max-portrait/-landscape`: 14 Pro Max, 15 Plus, 15 Pro Max,
+  16 Plus (430×932 pt), the same insets. `iphone-16-pro-*` (402×874) and `iphone-16-pro-max-*` (440×956): 62 instead
+  of 59. `iphone-safari-portrait/-landscape`: an iPhone 15 Safari tab (393×659 / 734×343 pt; the toolbars are outside
+  the page): no insets. `iphone-se` (375×667 @2x): portrait top 20 (status bar), landscape none. `ipad` (10th gen /
+  Air 11", 820×1180 @2x): top 24, bottom 20. Not covered: notched iPhones X–14 (44–50 pt: 12/13 mini 50, XR/11 48,
+  12–14 47, X/XS/11 Pro 44). A full-screen shot whose width isn't a whole number of the preset's points is warned
+  about, with the preset that fits ("1290 px wide is 3.28 px per pt … it is 430×932 pt at @3x: --safe
+  iphone-max-portrait"). Text, buttons and icons inside a zone are ✖ with the zone named; panels ⚠. On
+  examples/arena (480×288) with `iphone-landscape`: 1.3646 pt per px, 98.5 pt bars left and right, so only the
+  bottom 21 pt = 15.39 px applies ("goal … home indicator (12.39 px into the 15.39 px bottom inset)"). The `%` form is
+  unchanged.
+- `measure ui`: ✖ the same text shown twice at once (case and spacing ignored, ≥ 3 characters with a letter), both
+  rects; labels that repeat on purpose are left out: buttons and icons (two "BUY" buttons), text inside a button, an
+  element inside another of the group, 3+ copies (a list or grid of "LOCKED" tiles) and copies on same-size cards.
+  Without `state.ui`, text rows with the same ink (⚠).
+- `measure ui --from 0 --to 30 [--within 10] [--every 1f]`: samples `state.ui` per element id and reports ⚠ an
+  element that hid and came back with the same text within `--within` s of its previous showing (a repeated toast or
+  prompt: when it showed, when it came back, how long it was hidden, its rect; a value that changes while the element
+  stays, HP 10 → 9 → 10, is not a repeat; gate with `--expect "repeats == 0"`), and ✖ texts doubled at any sampled
+  frame (first frame, how many frames).
 - `measure ui`: text not held by a panel or button is checked for a backing plate. When the background around the
-  glyphs is busy (its main colour under 80% of it), the text is judged by its worst glyph edge (each text pixel vs
-  the background pixel next to it; anti-aliased in-between pixels stand for the colour they blend into), not the
-  averaged ratio: "status (text "WEARY") over the world without a plate: worst glyph-edge contrast 1.38:1 < 4.5
-  (rgb(240,240,240) on rgb(222,205,160) at 171,115; median 15.47 …)". The averaged ratio of that text is 6.13.
+  glyphs is busy (its main colour under 80% of it), every glyph edge (each text pixel vs the background pixel next
+  to it; anti-aliased in-between pixels stand for the colour they blend into) gets a ratio: ✖ when over 10% of them
+  are under the bar (⚠ for 3 or more weak edges below that), with p10, median and the worst pixel and its colours,
+  so one flower or sparkle pixel touching a letter doesn't fail the text. The averaged ratio of the mock's "WEARY"
+  half over sand is 6.13 and passes; its glyph edges over the sand are 1.38:1.
 - `witness measure figure --of <Type | id | state.path> [--scenes a,b] [--params '[{"hour":12},{"hour":22}]']
   [--at 1,2]`: a sprite's edge contrast against every ground around it, per scene × param set × time. Silhouette:
   the same run with the new reserved reset param `hide: [id]` (or `--without <variant>`), diffed; else the
   entity's state `box`/`rect` minus the ground's colours, else the sprite at its state position (both marked as
   guesses). The ring of ground pixels touching it is compared with the figure pixels within `--edge` px, clustered
   into surfaces (ΔE ≤ 12), and each surface gets WCAG ratio and ΔE worst / p10 / median, the share of its edge under
-  `--min 3`, the worst pixel and colours. Surfaces are named from `state.map` tiles, `--surfaces sand=#c2b280,…`, or
-  by position from an earlier shot of the same scene and frame (so night surfaces keep their day names). ✖ when a
-  surface's median is under `--min`; `--expect "worstMedianRatio >= 3"`; `--out` draws each figure and its ring
-  (red under `--min`). Also from files: `measure figure shot.png --mask diff:without.png`. On `examples/arena`: the
-  player's dark outline against the floor 2.93:1 worst / 3.53:1 median, against the wall 1.19:1.
+  `--min 3`, the worst pixel and colours. Surfaces under `--min-share` (5%; a bare 5 means 5%) are minor; minor
+  surfaces covering 25%+ of the ring (textured ground) are judged together as one, and all of the ring when none is
+  big enough, so a figure is never passed with nothing judged. Surfaces are named from `state.map` tiles,
+  `--surfaces sand=#c2b280,…` (used first when most surfaces match the given colours, so a param that moves the
+  ground keeps true names), or by position from an earlier shot of the same scene and frame (night: other colours at
+  the same places). A target without an id is hidden by its type and its diff cut to the part at its position. ✖
+  when a surface's median is under `--min`; `--expect "worstMedianRatio >= 3"`; `--out` draws each figure and its
+  ring (red under `--min`). Also from files: `measure figure shot.png --mask diff:without.png`. On `examples/arena`
+  (`--of player --at 1`): the player's dark outline against the floor 2.93:1 worst / 3.53:1 median; walked into the
+  left wall (`--input a@0-3 --at 3`): the wall 1.19:1 worst but 13.4:1 median, a 6% wall-edge strip 2.32:1 median (✖).
 - `examples/arena` honours `hide` (drawing only).
 - Media: `safePreset`, `duplicateTexts`, `pixelDuplicates`, `textTimeline`, `repeatedTexts`, `plateCheck` in
   `ui.js`; `figureGround`, `clusterColors` in `color.js`; `layoutChecks` takes per-side safe margins.
@@ -113,27 +132,43 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 **Web / WASM builds on phones: device profiles, WebKit, device pixels, audio unlock, Emscripten**
 - Device profiles for browser launches: witness.json `launch.device` or `--device iphone-15 | iphone-15-safari |
   iphone-15-pro-max | iphone-se | ipad` (`-landscape` too; or custom `{width, height, dpr, touch, mobile, userAgent,
-  standalone}`): CSS viewport, devicePixelRatio, touch, mobile viewport, user agent, and for Home Screen web apps
-  `navigator.standalone` / `display-mode: standalone`. `--engine webkit` (iPhone/iPad Safari's engine) or `firefox`;
+  standalone, screen, platform, maxTouchPoints}`): CSS viewport, devicePixelRatio, touch, mobile viewport, user
+  agent, `navigator.platform` and `maxTouchPoints` matching it ("iPhone" / "MacIntel", 5: the usual iPad check
+  `platform === "MacIntel" && maxTouchPoints > 1` passes; headless engines said "Win32" and 0 or 1), `screen` at the
+  portrait point size in both orientations (as iOS), and for Home Screen web apps `navigator.standalone` /
+  `display-mode: standalone`. The Safari tab's landscape viewport is its own, 734×343 (Playwright's "iPhone 15
+  landscape"), not the portrait one swapped. Safe areas are not emulated (`env(safe-area-inset-*)` is 0 headless):
+  doctor names the `measure ui --safe` preset for the profile. `--engine webkit` (iPhone/iPad Safari's engine) or `firefox`;
   when the engine's build isn't installed the error gives the install command (`npx playwright install webkit`, no
   admin). Playwright's WebKit for Windows has no Web Audio and no TouchEvent: Witness puts in a silent AudioContext so
   pages load, and doctor says so. `WITNESS_PLAYWRIGHT=<folder>` finds Playwright outside the game project.
-- `witness doctor` on a browser launch: engine, device, page (viewport, DPR, touch), and how the main canvas lands on
-  the screen from the layout ("canvas#game 320×180 shown at 361×203.06 CSS px = 1083×609.19 device px: ×3.3844, not a
+- `witness doctor` on a browser launch: engine, device, page (viewport, DPR, screen, touch points, platform; ⚠ a
+  touch profile reporting under 2 touch points), the safe-area preset to check, and how the main canvas lands on the
+  screen from the layout ("canvas#game 320×180 shown at 361×203.06 CSS px = 1083×609.19 device px: ×3.3844, not a
   whole number: pixels drawn unevenly (some 3 px, some 4 px wide)", or "×3 upscaled with smoothing: blurry") and from
-  a capture at device pixels ("≈×3.40, one game pixel is 3 or 4 device px"; an integer layout scale is checked cell
-  by cell). `summary.web` in `--json`.
+  a capture at device pixels ("≈×3.384 × 3.380, uneven: one game pixel is 3 or 4 device px; 38.4% of game pixels are
+  4 device px wide (from the layout's ×3.3844)": the share is the layout's exact fraction, 1083 = 3·320 + 123; an
+  integer layout scale is checked cell by cell; when the picture disagrees with the layout by over 3% it says it
+  couldn't read the picture instead of ✔). `summary.web` in `--json`.
 - `--capture canvas | element | screen` (witness.json `launch.capture`): screenshots from the game's buffer (default),
-  the canvas as the screen shows it, or the whole viewport, both at device pixels.
-- `measure scale` reads any scale from runs of one colour: ✖ FRACTIONAL (`≈×3.38`, a source pixel drawn 3 or 4 px,
-  with the share of each) and ✖ BLURRY (soft one-pixel ramps), where it used to say "no pixel grid larger than 1".
-  On synthetic nearest-neighbour scalings of ×2.5, ×3.384375, ×3.684 and ×4.2 it is within 1%; on the real iPhone 15
-  capture of examples/js-browser (×3.384375) it read ×3.36 to ×3.40 depending on the frame (within 1%; the
-  sample game has few one-pixel details). Media: `pixelRuns` in measure.js.
+  the canvas as the screen shows it, or the whole viewport, both at device pixels (`shot` says "1083×612 device px:
+  element capture at DPR 3, not game pixels"). Commands that place game-pixel coordinates on a screenshot refuse
+  device-pixel captures with a clear message (`shot --crop/--follow/--annotate/--scale`, `measure ui`, `figure`,
+  `align`, `registration`, `anim --region/--follow`, `motion --region`); `test` warns when it matches screenshots.
+- `measure scale` reads any scale from runs of one colour, refined to the pixel grid that holds the colour changes
+  (a few % in from the edges unless `--region`, so an element capture's rounded border doesn't count): ✖ FRACTIONAL
+  (`≈×3.38`, a source pixel drawn 3 or 4 px; the share drawn wider is the scale's fraction) and ✖ BLURRY (hard edges
+  smeared over 2+ pixels: smoothing or filtered upscaling), where it used to say "no pixel grid larger than 1". Soft
+  one-pixel steps alone (a 1:1 gradient, anti-aliased art) are not blur, and a 1:1 picture still says "no pixel grid
+  larger than 1", ok. Synthetic nearest-neighbour scalings of ×2.5, ×3.384375, ×3.684, ×4.2 and a sparse ×2.14375
+  with a rounded border: within 0.05% (share within 1%). Real captures of examples/js-browser: iPhone 15 ×3.384 /
+  3.383 (layout 3.3844, 38% of pixels 4 px), iPhone SE ×2.144 / 2.143 (layout 2.1437, 14% 3 px), iPad ×4.925 / 4.923
+  (layout 4.925). Media: `pixelRuns` in measure.js (also `grid`, `smearPercent`).
 - Audio unlock (the iPhone "no sound until a tap" bug): every browser launch emulates the autoplay policy in the
   page, the same in every engine. Default `auto`: Witness counts as the first gesture. `--no-auto-unlock` (witness.json
-  `launch.audioUnlock: false`): like iPhone Safari, an AudioContext starts suspended (the JS adapter's capture is
-  silent), and `resume()` works only while a gesture is being handled: Witness input that is one (key down, mouse
+  `launch.audioUnlock: false`): like iPhone Safari, an AudioContext starts suspended and frozen (the JS adapter's
+  captured context doesn't render, `currentTime` stays 0, the capture is silent; music queued while locked plays
+  from its start after the tap), and `resume()` works only while a gesture is being handled: Witness input that is one (key down, mouse
   button, finger lifted, text; adapters mark it) or real browser input. `doctor --no-auto-unlock` taps the canvas
   centre, clicks, presses space and enter, and says which resumed audio (on a touch device a key alone is a ⚠), or
   that it stayed suspended with the number of blocked `resume()` calls. Tests read `web.audio.state`,
@@ -144,7 +179,8 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
   (`--pre-js`) holds the WebSocket and calls back into the module (`witness_emscripten_inbuf/recv/closed`, exported by
   the header). `witness_run()` returns control to the browser and keeps the runtime alive; in witness mode the game
   doesn't start `emscripten_set_main_loop`. The shim answers `screenshot` from the canvas when the game has no
-  handler and keeps WebGL drawing buffers. `witness.h` marks gesture input around the game's `input` handler.
+  handler and keeps WebGL drawing buffers. Closure-safe for `-O2 --closure 1` (quoted names wherever they cross the
+  bundle's edge; checked by a test that scans the files). `witness.h` marks gesture input around the game's `input` handler.
   adapters/cpp/GUIDE.md §13 "Web (Emscripten) builds". **Not verified with a real emcc build** (none here): the C side
   is compiled natively against a stand-in `emscripten.h` (C and C++, warnings as errors) and driven through the real
   shim and CLI (doctor, the shared coins test ×2, 23 of 23 gestures marked); the shim runs in Chromium and WebKit
@@ -196,9 +232,12 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 
 **Behaviour changes**
 - `measure scale` on a fractionally scaled or smoothed picture is now `ok: false` (✖ FRACTIONAL / ✖ BLURRY; it said
-  "no pixel grid larger than 1", ok). Summary adds `fractional`, `scaleX`, `scaleY`, `softPercent`.
-- JS adapter: a captured AudioContext reports and honours `suspend()` (silent until `resume()`) and `close()`; its
+  "no pixel grid larger than 1", ok). Summary adds `fractional`, `scaleX`, `scaleY`, `softPercent`, `smearPercent`.
+- JS adapter: a captured AudioContext reports and honours `suspend()` and `close()`: while not running it is frozen
+  (no rendering, `currentTime` still, scheduled sounds wait, silent capture) and resumes where it stopped; its
   `currentTime` is half a sample after the rendered frame.
+- Browser device profiles report `navigator.platform` / `maxTouchPoints` 5 / the portrait `screen` of the device:
+  a game that picks its touch or iPad UI from them now shows that UI under `--device` (it showed the desktop one).
 - `trace --json` `summary`: vector series are summarized per axis (`"state.player.pos.x": {start, end, min, ...}`)
   instead of `{"error": null}`. `trace` now accepts `--expect` (over the summary).
 
@@ -218,6 +257,13 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
    teleports no longer count as distance, and each heatmap run is one frame shorter).
 8. *Optional:* C#, Unity, Godot, Go and Lua games can re-vendor their adapter and call its `sound(...)` helper where
    a sound starts, so `listen` and `effect` can name sounds.
+9. Browser games tested with `--device`: re-check screenshots and goldens made with a device profile (the page now
+   reports the phone's platform and 5 touch points, so a game may switch to its touch UI), and re-vendor the JS
+   adapter (`adapters/js/witness.js`) so suspended audio is frozen as on an iPhone. C/C++ web builds: re-copy
+   `witness.h` and `witness_emscripten.js` (closure-safe).
+10. *Optional:* `measure ui --safe`: pick the preset for how the game ships (`iphone-safari-portrait` for a Safari
+    tab, `iphone-portrait` for a Home Screen web app, `iphone-max-*` for 430 pt phones); a letterboxed canvas is now
+    fitted (`--fit contain`), so side insets that fall in the bars no longer fail.
 9. If a test or script gates on `measure ui` (`ok`, `problems`, `lowContrast`): two new ✖ kinds can appear (`duplicate`,
    `no-plate`), and text over a busy background is now judged by its worst glyph edge (`no-plate`) instead of the
    averaged `contrast` finding. Re-run it once and fix or accept what it finds.
