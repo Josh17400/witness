@@ -45,6 +45,8 @@
 //                  tiny text with fontPx 3, hint text (70,70,90) on the background (20,24,40) (low contrast), btn_c
 //                  2 px right of btn_a and tiny. Reset param window [w, h] resizes the screen (btn_b stays at x 240..300,
 //                  the minimap stays 30 px from the right edge): at 280×180 btn_b is clipped too.
+//                  MOCK_UI=world is MOCK_UI=pixels plus world things seen through the camera (MOCK_CAMERA=flat scrolls
+//                  them): an "INN" sign at world 240,92 (8×16 letters) and three villagers at 120..153,60 (filled sprites, one with a hat).
 //                  MOCK_UI=look adds: "QUEST UPDATED" twice at once (quest1 30,36 and quest2 30,56, 104×16), a "SAVED GAME"
 //                  toast (180,10 80×16) shown f30–f90 and again f150–f210, and "WEARY" (240,240,240) at 150,112 40×16
 //                  without a plate, half over a sand patch (222,205,160) at x ≥ 170 (worst edge 1.38:1, else 15.4:1).
@@ -271,6 +273,18 @@ function screenshot() {
   }
   if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
   if (LAG && xAt != null && frame - xAt >= 5) for (let y = 10; y < 20; y++) for (let x = 300; x < 310; x++) put(x, y, 255, 255, 255);
+  if (UI === "world") {
+    // world things seen through the camera: an "INN" sign (real letters, but on the world) and three villagers
+    const wx = (x) => Math.round(x - cam);
+    [..."INN"].forEach((ch, i) => { const g = glyph(ch); for (let y = 0; y < 16; y++) for (let x = 0; x < 8; x++) if (g[y * 8 + x]) put(wx(240) + i * 8 + x, 92 + y, 240, 230, 200); });
+    [[200, 40, 40], [40, 90, 200], [230, 200, 50]].forEach((shirt, i) => {
+      const x0 = wx(120 + i * 11), y0 = 60 + (i % 2);
+      for (let y = 0; y < 4; y++) for (let x = 2; x < 6; x++) put(x0 + x, y0 + y, 240, 200, 160);
+      for (let y = 4; y < 9; y++) for (let x = 1; x < 7; x++) put(x0 + x, y0 + y, ...shirt);
+      for (let y = 9; y < 12; y++) for (const x of [2, 3, 5, 6]) put(x0 + x, y0 + y, 60, 50, 120);
+      if (i === 1) for (let x = 1; x < 7; x++) put(x0 + x, y0 - 1, 90, 60, 30);   // a hat: not three identical icons
+    });
+  }
   if (UI) drawUI(put);
   if (process.env.MOCK_PNG) return { width: W, height: H, format: "png", data: Buffer.from(encodePNG(W, H, px)).toString("base64") };
   return { width: W, height: H, format: "rgba8", data: px.toString("base64") };
@@ -305,7 +319,7 @@ sock.on("data", (d) => {
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; stepMs = []; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
       case "snapshot": {
-        let state = { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins, ...(NPCS || [])], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(PERF ? { particles } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) };
+        let state = { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins, ...(NPCS || [])], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(PERF ? { particles } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}), ...(UI && UI !== "pixels" && UI !== "world" ? { ui: uiElements().map(({ fill, ink, ...e }) => e) } : {}) };
         if (BIG) state.world = BIG;
         // the protocol's paths filter: only the asked-for top-level keys (MOCK_PATHS=bad drops them all, a broken
         // adapter; MOCK_PATHS=ignore sends everything; MOCK_PATHS=log logs the first filtered request)

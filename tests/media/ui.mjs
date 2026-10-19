@@ -87,7 +87,9 @@ const LAYOUT = [
 // ---- regressions: rows don't depend on unrelated shapes elsewhere; outlined text is judged by its edges
 {
   const im = img(200, 150, [10, 10, 20]);
-  rect(im, 40, 15, 4, 4, [255, 255, 255]); rect(im, 52, 10, 5, 9, [255, 255, 255]); rect(im, 60, 13, 4, 6, [255, 255, 255]);
+  // three letter-like outlines (1 px strokes; filled blocks are not letters) on one baseline
+  const box = (x, y, w, h) => { rect(im, x, y, w, 1, [255, 255, 255]); rect(im, x, y + h - 1, w, 1, [255, 255, 255]); rect(im, x, y, 1, h, [255, 255, 255]); rect(im, x + w - 1, y, 1, h, [255, 255, 255]); };
+  box(40, 15, 4, 4); box(52, 10, 5, 9); box(60, 13, 4, 6);
   const before = findTextRows(im).rows;
   rect(im, 50, 100, 3, 4, [255, 255, 255]);   // far below, but between the glyphs in x order
   const after = findTextRows(im).rows;
@@ -232,6 +234,33 @@ const LAYOUT = [
   const one = plateCheck(busy, bb);
   show("one pale pixel", `clean worst ${clean.edge.worst} p10 ${clean.edge.p10}; with it worst ${one.edge.worst} p10 ${one.edge.p10} under ${one.edge.under}/${one.edge.n}`);
   ok("one pale pixel next to a stroke: worst drops, but 1 edge of " + one.edge.n + " is under 4.5 (share ≤ 10%), p10 unchanged", clean.busy && clean.edge.under === 0 && one.edge.worst < 1.5 && one.edge.under <= 2 && one.edge.underShare <= 0.1 && one.edge.p10 === clean.edge.p10, one.edge);
+}
+
+// ---- a village with a HUD and no state.ui: world sprites are not text (trees, houses, villagers, flowers, tufts,
+// path stones); the 3 real text rows are
+function village() {
+  const im = img(320, 180, [60, 140, 60]);
+  let s = 5;
+  const rnd = (n) => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s % n; };
+  for (let gy = 20; gy < 176; gy += 9) for (let gx = 4; gx < 316; gx += 11) { const x = gx + rnd(5), y = gy + rnd(4); rect(im, x, y, 2 + rnd(2), 2, [40, 105, 40]); }   // grass tufts on a jittered grid
+  for (let i = 0; i < 18; i++) { const x = 10 + rnd(300), y = 30 + rnd(140), c = [[220, 60, 60], [240, 220, 70], [240, 240, 255]][i % 3]; put(im, x, y, c); put(im, x - 1, y, c); put(im, x + 1, y, c); put(im, x, y - 1, c); put(im, x, y + 1, c); }   // flowers
+  for (let i = 0; i < 9; i++) rect(im, 20 + i * 12 + rnd(3), 120 + rnd(2), 6 + rnd(3), 4, [150, 150, 140]);   // path stones in a row
+  const tree = (x, y) => { for (let j = 0; j < 14; j++) for (let i = 0; i < 14; i++) if ((i - 6.5) ** 2 + (j - 6.5) ** 2 <= 49) put(im, x + i, y + j, [20, 80 + ((i * j) % 3) * 10, 30]); rect(im, x + 6, y + 14, 3, 5, [110, 70, 30]); };
+  for (const [x, y] of [[200, 40], [217, 42], [234, 39], [251, 41]]) tree(x, y);   // a row of trees
+  const house = (x, y) => { rect(im, x, y + 8, 28, 16, [210, 180, 130]); for (let j = 0; j < 9; j++) rect(im, x + 13 - j * 1.6, y + j, 2 + j * 3.2, 1, [170, 50, 40]); rect(im, x + 11, y + 14, 6, 10, [90, 60, 30]); rect(im, x + 3, y + 12, 5, 4, [120, 170, 220]); rect(im, x + 20, y + 12, 5, 4, [120, 170, 220]); };
+  house(40, 60); house(76, 62); house(112, 59);
+  const npc = (x, y, shirt) => { rect(im, x + 2, y, 4, 4, [240, 200, 160]); rect(im, x + 1, y + 4, 6, 5, shirt); rect(im, x + 2, y + 9, 2, 3, [60, 50, 120]); rect(im, x + 5, y + 9, 2, 3, [60, 50, 120]); };
+  npc(160, 100, [200, 40, 40]); npc(171, 101, [40, 90, 200]); npc(182, 99, [230, 200, 50]);   // villagers side by side
+  rect(im, 4, 4, 92, 30, [20, 20, 30]);   // the HUD plate
+  const hp = text(im, "HP 10/10", 8, 2, [255, 255, 255]), gold = text(im, "GOLD 25", 8, 17, [255, 220, 80]);
+  const title = text(im, "OAKVALE", 230, 2, [255, 255, 255]);   // a place name straight on the grass
+  return { im, want: [hp, gold, title] };
+}
+{
+  const { im, want } = village();
+  const { rows } = findTextRows(im);
+  show("village rows", rows.map((r) => `${r.x},${r.y} ${r.w}×${r.h} ${r.glyphs}g`).join(" · "));
+  ok("village: exactly the 3 text rows (HP, GOLD, OAKVALE), no world sprites", rows.length === 3 && want.every((b) => rows.some((r) => r.x === b.x && r.y === b.y && r.w === b.w && r.h === b.h)), rows.map((r) => [r.x, r.y, r.w, r.h, r.glyphs]));
 }
 
 done("ui");

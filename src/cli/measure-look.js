@@ -30,7 +30,7 @@ export async function lookMeasure(what, files, opt) {
 }
 
 /** The frame(s) to look at: a PNG file, or the game's screenshot (+ snapshot) at --at, once per --window size. */
-async function getFrames(m, files, opt, gameCoords = null) {
+async function getFrames(m, files, opt, gameCoords = null, { second = null } = {}) {
   if (files[0]) return { frames: [{ img: readImage(m, files[0]), snap: null, label: path.basename(String(files[0])) }], file: path.resolve(String(files[0])) };
   const wins = val(opt.window) ? val(opt.window).split(",").map((w) => w.trim()).filter(Boolean) : [null];
   const frames = [];
@@ -46,7 +46,11 @@ async function getFrames(m, files, opt, gameCoords = null) {
       const shot = await s.screenshot();
       const img = await shotImage(shot);
       const snap = await s.snapshot();
-      frames.push({ img: { width: img.width, height: img.height, data: Uint8Array.from(img.data) }, snap, f, window: w, label: `f${f}${w ? ` at ${w}` : ""}` });
+      const fr = { img: { width: img.width, height: img.height, data: Uint8Array.from(img.data) }, snap, f, window: w, label: `f${f}${w ? ` at ${w}` : ""}` };
+      // a second frame a little later (second(snap) frames on): what moves with the camera is the world, not HUD
+      const k = second ? second(snap) : 0;
+      if (k) { await stepTo(s, st, f + k); const im2 = await shotImage(await s.screenshot()); fr.next = { f: f + k, img: { width: im2.width, height: im2.height, data: Uint8Array.from(im2.data) } }; }
+      frames.push(fr);
       printLogs(await s.drainLogs());
     }
   });
@@ -127,7 +131,8 @@ async function uiSweep(ui, opt) {
 async function uiMeasure(m, files, opt) {
   const ui = await import("../media/ui.js");
   if (opt.from !== undefined || opt.to !== undefined) return uiSweep(ui, opt);
-  const got = await getFrames(m, files, opt, "measure ui (state.ui rects)");
+  // without state.ui the rows come from pixels: a frame 6 frames later tells world things (they scroll) from HUD
+  const got = await getFrames(m, files, opt, "measure ui (state.ui rects)", { second: (snap) => (!val(opt.ui) && (opt.pixels || !Array.isArray(snap?.state?.ui)) ? 6 : 0) });
   let uiFile = null;
   if (val(opt.ui)) {
     const p = path.resolve(val(opt.ui));
@@ -153,12 +158,16 @@ async function uiMeasure(m, files, opt) {
     const minT = pctOrPx(opt["min-text"], H, "2%");
     const list = uiFile || (opt.pixels ? null : fr.snap?.state?.ui);
     let els, source;
-    const panels = [];
+    const panels = [], moved = [];
     if (Array.isArray(list)) {
       try { els = ui.normalizeUI(list); } catch (e) { die(e.message); }
       source = uiFile ? path.basename(val(opt.ui)) : "state.ui";
     } else {
       const found = ui.findTextRows(img, { threshold: +(opt.threshold || 24) });
+      if (fr.next) {
+        const pal = ui.backgroundPaletteOf(img);
+        found.rows = found.rows.filter((r) => { const mv = ui.worldMotion(img, fr.next.img, r, { threshold: +(opt.threshold || 24), palette: pal }); if (mv) moved.push({ rect: [r.x, r.y, r.w, r.h], dx: mv.dx, dy: mv.dy }); return !mv; });
+      }
       els = found.rows.map((r) => ({ id: `text@${r.x},${r.y}`, kind: "text", x: r.x, y: r.y, w: r.w, h: r.h, text: null, fontPx: r2(r.glyphPx / 0.7), glyphPx: r.glyphPx, glyphs: r.glyphs, layer: 0 }));
       for (const p of found.panels) panels.push({ id: `panel@${p.x},${p.y}`, kind: "panel", ...p, text: null, fontPx: null, layer: 0 });
       els = els.concat(panels);
@@ -237,13 +246,16 @@ async function uiMeasure(m, files, opt) {
       fs.writeFileSync(file, png);
       written.push(file);
     }
-    results.push({ fr, W, H, source, els, chk, contrasts, F, fails, warns, readable, minT, safe, preset, dups });
+    if (source === "pixels") for (const f of F) f.confidence = "low";
+    results.push({ fr, W, H, source, els, chk, contrasts, F, fails, warns, readable, minT, safe, preset, dups, moved });
   }
   // text
   const lines = [];
   for (const r of results) {
     const heur = r.source === "pixels";
-    lines.push(`measure ui ${r.fr.label} (${r.W}×${r.H}): ${heur ? `no state.ui — ${r.els.filter((e) => e.kind === "text").length} text-like rows and ${r.els.filter((e) => e.kind === "panel").length} panels found from pixels (a heuristic: expose state.ui for exact checks)` : `${r.els.length} elements from ${r.source}`}`);
+    lines.push(`measure ui ${r.fr.label} (${r.W}×${r.H}): ${heur ? `no state.ui — ${r.els.filter((e) => e.kind === "text").length} text-like rows and ${r.els.filter((e) => e.kind === "panel").length} panels found from pixels` : `${r.els.length} elements from ${r.source}`}`);
+    if (heur) lines.push(`  ? low confidence: pixel guesses (thin-stroke glyph rows on one baseline; world art can still pass) → list the HUD in state.ui = [{id, kind, rect, text}] for exact checks`);
+    if (r.moved.length) lines.push(`  · ${r.moved.length} text-like row${r.moved.length > 1 ? "s" : ""} moved with the world from ${r.fr.label} to f${r.fr.next.f} (${r.moved.slice(0, 4).map((q) => `${q.rect[0]},${q.rect[1]} ${q.rect[2]}×${q.rect[3]} by ${q.dx},${q.dy}`).join("; ")}): left out as world art, not HUD`);
     if (r.preset) {
       const p = r.preset;
       const side = (k) => `${k} ${p.insetsPt[k]} pt = ${p.px[k]} px${p.px[k] === 0 ? " (inside the bars)" : ` (${p.zones[k] || k})`}`;
@@ -253,7 +265,7 @@ async function uiMeasure(m, files, opt) {
       if (p.canvasNote) lines.push(`  · ${p.canvasNote}`);
     }
     lines.push(`  ${r.preset ? "" : `safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · `}min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? "4.5 (3 for 24 px+)"} · edges within ${alignTol} px`);
-    lines.push(r.F.length ? `  ${r.fails ? "✖" : "⚠"} ${r.fails} problem${r.fails === 1 ? "" : "s"}, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : r.els.length ? `  ✔ no layout problems` : "  nothing to check: no UI elements found");
+    lines.push(r.F.length ? `  ${r.fails ? "✖" : "⚠"} ${r.fails} problem${r.fails === 1 ? "" : "s"}, ${r.warns} warning${r.warns === 1 ? "" : "s"}${heur ? " (low confidence)" : ""}` : r.els.length ? `  ✔ no layout problems` : "  nothing to check: no UI elements found");
     for (const f of r.F) lines.push(`  ${f.level === "fail" ? "✖" : "⚠"} ${f.text}`);
     if (r.readable.length) lines.push(`  ✔ readable: ${r.readable.slice(0, 8).map((c) => { const e = r.els.find((x) => x.id === c.id); return `${c.id} ${e.glyphPx != null ? `glyphs ${e.glyphPx}` : e.fontPx ?? e.h} px ${c.ratio.toFixed(1)}:1${c.outline ? ` (outline; ${c.outline.plainRatio.toFixed(1)}:1 without)` : ""}`; }).join(" · ")}${r.readable.length > 8 ? ` (+${r.readable.length - 8})` : ""}`);
   }
@@ -268,11 +280,11 @@ async function uiMeasure(m, files, opt) {
   if (written.length) lines.push(`picture: ${written.join(", ")} (open it: boxes by status, the safe area in blue)`);
   const first = results[0];
   const count = (r, k) => r.F.filter((f) => f.kind === k).length;
-  const sumOf = (r) => ({ elements: r.els.length, source: r.source, problems: r.fails, warnings: r.warns, clipped: count(r, "clipped"), offscreen: count(r, "offscreen"), overlaps: count(r, "overlap"), smallText: count(r, "small"), lowContrast: count(r, "contrast"), noPlate: count(r, "no-plate"), duplicates: count(r, "duplicate"), unsafe: count(r, "safe"), misaligned: count(r, "align"), touchingEdge: count(r, "edge"), ...(r.preset ? { safePreset: r.preset.name } : {}) });
+  const sumOf = (r) => ({ elements: r.els.length, source: r.source, problems: r.fails, warnings: r.warns, clipped: count(r, "clipped"), offscreen: count(r, "offscreen"), overlaps: count(r, "overlap"), smallText: count(r, "small"), lowContrast: count(r, "contrast"), noPlate: count(r, "no-plate"), duplicates: count(r, "duplicate"), unsafe: count(r, "safe"), misaligned: count(r, "align"), touchingEdge: count(r, "edge"), confidence: r.source === "pixels" ? "low" : "exact", ...(r.source === "pixels" ? { movedWithWorld: r.moved.length } : {}), ...(r.preset ? { safePreset: r.preset.name } : {}) });
   const dataOf = (r) => ({
     frame: r.fr.f ?? null, window: r.fr.window ?? null, width: r.W, height: r.H, source: r.source, margins: r.chk.margins, minText: r.chk.minText,
     elements: r.els.map((e) => ({ id: e.id, kind: e.kind, rect: [e.x, e.y, e.w, e.h], text: e.text, fontPx: e.fontPx, ...(e.glyphPx != null ? { glyphPx: e.glyphPx, glyphs: e.glyphs } : {}) })),
-    findings: r.F, contrast: r.contrasts, duplicates: r.dups, ...(r.preset ? { safe: r.preset } : {}), checks: { clipped: r.chk.clipped, offscreen: r.chk.offscreen, unsafe: r.chk.unsafe, overlaps: r.chk.overlaps, small: r.chk.small, aligned: r.chk.aligned },
+    findings: r.F, contrast: r.contrasts, duplicates: r.dups, ...(r.source === "pixels" ? { movedWithWorld: r.moved } : {}), ...(r.preset ? { safe: r.preset } : {}), checks: { clipped: r.chk.clipped, offscreen: r.chk.offscreen, unsafe: r.chk.unsafe, overlaps: r.chk.overlaps, small: r.chk.small, aligned: r.chk.aligned },
   });
   const totalFails = results.reduce((s, r) => s + r.fails, 0);
   const env = envelope("measure ui", {

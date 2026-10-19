@@ -197,6 +197,68 @@ export function textContrast(img, rect) {
  * glyph after dropping outliers (the cap height for capitals). Rows of 1 px bars (fences) and of identical shapes (a
  * row of hearts or coins) are not text. Also returns the solid panels it looked inside.
  */
+/**
+ * Did the ink inside rect move with the world between two frames (a sign or sprite scrolled by the camera, not HUD)?
+ * Ink = pixels unlike the background palette of img. Static (80%+ of the ink unchanged in place) → null; else the
+ * shift within ±range px (not 0,0) where 90%+ of it matches → { dx, dy }; else null (changed in place: animated, or
+ * HUD text that changed).
+ */
+export const backgroundPaletteOf = (img) => backgroundPalette(img);
+
+export function worldMotion(img, other, rect, { threshold = 24, range = 32, palette = null } = {}) {
+  if (!other || other.width !== img.width || other.height !== img.height) return null;
+  const W = img.width, H = img.height, a = img.data, b = other.data, pal = palette || backgroundPalette(img);
+  const near = (o, c) => Math.abs(a[o] - c[0]) <= threshold && Math.abs(a[o + 1] - c[1]) <= threshold && Math.abs(a[o + 2] - c[2]) <= threshold;
+  const ink = [];
+  for (let y = rect.y; y < rect.y + rect.h; y++) for (let x = rect.x; x < rect.x + rect.w; x++) { const o = (y * W + x) * 4; if (x >= 0 && y >= 0 && x < W && y < H && !pal.some((c) => near(o, c))) ink.push([x, y, o]); }
+  if (!ink.length) return null;
+  const share = (dx, dy) => {
+    let n = 0;
+    for (const [x, y, o] of ink) {
+      const X = x + dx, Y = y + dy;
+      if (X < 0 || Y < 0 || X >= W || Y >= H) continue;
+      const q = (Y * W + X) * 4;
+      if (Math.abs(a[o] - b[q]) <= threshold && Math.abs(a[o + 1] - b[q + 1]) <= threshold && Math.abs(a[o + 2] - b[q + 2]) <= threshold) n++;
+    }
+    return n / ink.length;
+  };
+  if (share(0, 0) >= 0.8) return null;
+  let best = null;
+  for (let dy = -range; dy <= range; dy++) for (let dx = -range; dx <= range; dx++) {
+    if (!dx && !dy) continue;
+    const v = share(dx, dy);
+    if (v >= 0.9 && (!best || v > best.v)) best = { dx, dy, v };
+  }
+  return best ? { dx: best.dx, dy: best.dy } : null;
+}
+
+/** Median over a shape's ink pixels of the shorter of the horizontal and vertical ink runs through it (px). */
+function strokeWidth(mask, W, b) {
+  const hr = new Uint16Array(b.w * b.h), out = [];
+  for (let y = 0; y < b.h; y++) {
+    let x = 0;
+    while (x < b.w) {
+      if (!mask[(b.y + y) * W + b.x + x]) { x++; continue; }
+      let e = x;
+      while (e < b.w && mask[(b.y + y) * W + b.x + e]) e++;
+      for (let k = x; k < e; k++) hr[y * b.w + k] = e - x;
+      x = e;
+    }
+  }
+  for (let x = 0; x < b.w; x++) {
+    let y = 0;
+    while (y < b.h) {
+      if (!mask[(b.y + y) * W + b.x + x]) { y++; continue; }
+      let e = y;
+      while (e < b.h && mask[(b.y + e) * W + b.x + x]) e++;
+      for (let k = y; k < e; k++) out.push(Math.min(e - y, hr[k * b.w + x]));
+      y = e;
+    }
+  }
+  out.sort((a, c) => a - c);
+  return out.length ? out[out.length >> 1] : 0;
+}
+
 export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
   const W = img.width, H = img.height, d = img.data;
   const near = (o, c) => Math.abs(d[o] - c[0]) <= threshold && Math.abs(d[o + 1] - c[1]) <= threshold && Math.abs(d[o + 2] - c[2]) <= threshold;
@@ -215,12 +277,12 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
       const top = [...counts].sort((p, q) => q[1] - p[1])[0][0], pc = [top >> 16, (top >> 8) & 255, top & 255];
       const inner = new Uint8Array(W * H);
       for (let y = b.y + 1; y < b.y + b.h - 1; y++) for (let x = b.x + 1; x < b.x + b.w - 1; x++) { const i = y * W + x; if (mask[i] && !near(i * 4, pc)) inner[i] = 1; }
-      glyphs.push(...components(inner, W, H, { region: { x: b.x + 1, y: b.y + 1, w: b.w - 2, h: b.h - 2 }, minPixels: 1 }));
+      glyphs.push(...components(inner, W, H, { region: { x: b.x + 1, y: b.y + 1, w: b.w - 2, h: b.h - 2 }, minPixels: 1 }).map((g) => ({ ...g, src: inner })));
       continue;
     }
-    glyphs.push(c);
+    glyphs.push({ ...c, src: mask });
   }
-  const cand = glyphs.filter((g) => g.bbox.h >= 2 && g.bbox.h <= 64 && g.bbox.w <= 3 * g.bbox.h + 2).map((g) => ({ ...g.bbox, count: g.count })).sort((a, b) => a.x - b.x);
+  const cand = glyphs.filter((g) => g.bbox.h >= 2 && g.bbox.h <= 64 && g.bbox.w <= 3 * g.bbox.h + 2).map((g) => ({ ...g.bbox, count: g.count, stroke: strokeWidth(g.src, W, g.bbox) })).sort((a, b) => a.x - b.x);
   // union glyphs that sit side by side on a line
   const parent = cand.map((_, i) => i);
   const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
@@ -243,6 +305,13 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
     if (g.every((c) => c.w === g[0].w && c.h === g[0].h && c.count === g[0].count)) continue;   // identical shapes: a row of icons (hearts, coins)
     const hs = g.map((c) => c.h).sort((a, b) => a - b), med = hs[hs.length >> 1];
     const glyphPx = Math.max(...hs.filter((h) => h <= 1.5 * med));
+    // letters are strokes: their typical stroke (the shorter of the horizontal and vertical runs through each ink
+    // pixel) is thin for their height; trees, houses, villagers and stones are filled shapes
+    const strokes = g.map((c) => c.stroke).sort((a, b) => a - b), stroke = strokes[strokes.length >> 1];
+    if (stroke > Math.max(2, 0.25 * glyphPx)) continue;
+    // and they share a baseline: most glyph bottoms within 1 px of the row's (descenders and punctuation aside)
+    const bots = g.map((c) => c.y + c.h).sort((a, b) => a - b), base = bots[bots.length >> 1];
+    if (bots.filter((y) => Math.abs(y - base) <= 1).length * 2 < g.length) continue;
     const x0 = Math.min(...g.map((c) => c.x)), y0 = Math.min(...g.map((c) => c.y));
     const x1 = Math.max(...g.map((c) => c.x + c.w)), y1 = Math.max(...g.map((c) => c.y + c.h));
     rows.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0, glyphs: g.length, glyphPx });

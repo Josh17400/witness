@@ -45,6 +45,19 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   and right): canvas px = (inset pt − bar) ÷ 1.3322` (`data.safe.canvasNote`). A PNG file still gets the warning,
   which now says a game canvas is fine.
 
+**measure ui without state.ui**
+- The pixel heuristic no longer reads world sprites as text: a row's glyphs must be strokes (the median of the
+  shorter horizontal/vertical ink run through each pixel ≤ max(2, 0.25 × glyph height): trees, houses, villagers and
+  path stones are filled) and share a baseline (half the glyph bottoms within 1 px). A synthetic village (grass tufts,
+  flowers, a row of trees, 3 houses, 3 villagers, path stones, a HUD plate and a place name) gave 7 rows; now exactly
+  the 3 text rows.
+- Driving the game, a second frame 6 frames later leaves out rows that moved with the world (a sign scrolled by the
+  camera: `· 1 text-like row moved with the world from f6 to f12 (230,95 21×10 by -12,0): left out as world art`;
+  `data.movedWithWorld`, `summary.movedWithWorld`).
+- One hint line says the findings are pixel guesses and how to get exact ones (`state.ui`); the count line says
+  "(low confidence)", each finding carries `confidence: "low"`, `summary.confidence` is `low` (else `exact`).
+- Mock game: `MOCK_UI=world` (an INN sign and three villagers in the world).
+
 **Adoption steps**
 1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
    `--config witness.web.json`.

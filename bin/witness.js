@@ -236,7 +236,8 @@ const CMD_HELP = {
       may hold others), ✖ text smaller than --min-text (default 2% of the screen height), ✖ text contrast under 4.5
       (3 for 24 px+; the text and background colours inside the rect, anti-aliased edges left out), ⚠ inside the
       safe-area margin, ⚠ edges almost aligned (1..--align px apart). Without state.ui (or with --pixels): text-like
-      rows and solid panels found from pixels, a weaker heuristic (marked as such). --window runs once per size (the
+      rows (thin strokes on one baseline; filled sprites are not text) and solid panels from pixels, findings marked
+      low confidence; a frame 6 frames later leaves out rows that scroll with the camera (world signs). --window runs once per size (the
       reserved reset param) and says what breaks only at one size. --out: boxes coloured by status, safe area in blue.
       ✖ the same text shown twice at once (both rects; from pixels: rows with the same ink, a ⚠; buttons, icons, text
       in buttons, 3+ copies and copies on same-size cards are labels that repeat on purpose). ✖ text not held by a
