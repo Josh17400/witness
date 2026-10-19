@@ -6,7 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, MAX_SESSIONS, removeEntry } from "./registry.js";
+import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, MAX_SESSIONS, removeEntry, writeShim } from "./registry.js";
 import { makeBrief, PERSONAS } from "./brief.js";
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
@@ -150,7 +150,9 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       }
       const e = readEntry(name);
       const r = await request(e, "look", { json: !!opt.json }).catch((err) => fail(err.message));
-      if (!opt.json) console.log(`▶ playtest "${name}" started (${path.relative(process.cwd(), dir) || dir}); orders: ${cli} play do "<orders>" -s ${name}\n`);
+      let shim = null;
+      try { shim = writeShim(name, path.join(ROOT, "bin", "witness.js")); } catch { /* the long form still works */ }
+      if (!opt.json) console.log(`▶ playtest "${name}" started (${path.relative(process.cwd(), dir) || dir}); orders: ${shim ? `cd "${path.dirname(shim).replace(/\\/g, "/")}" then ./${path.basename(shim)} "<orders>"  (or ` : ""}${cli} play do "<orders>" -s ${name}${shim ? ")" : ""}\n`);
       print(r, opt);
       return;
     }

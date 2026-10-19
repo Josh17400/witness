@@ -136,7 +136,7 @@ r = witness(["replay", path.join(aliveDir, "replay.jsonl")], { cwd: arena, env }
 ok("live arena: the replay ends in exactly the recorded state", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out.split("\n").slice(-6).join("\n"));
 
 // ---- the process cap and cleanup
-const regFiles = fs.existsSync(env.WITNESS_PLAY_REGISTRY) ? fs.readdirSync(env.WITNESS_PLAY_REGISTRY) : [];
+const regFiles = fs.existsSync(env.WITNESS_PLAY_REGISTRY) ? fs.readdirSync(env.WITNESS_PLAY_REGISTRY).filter((f) => f.endsWith(".json")) : [];
 const live = regFiles.map((f) => JSON.parse(fs.readFileSync(path.join(env.WITNESS_PLAY_REGISTRY, f), "utf8"))).filter((e) => pidAlive(e.pid));
 ok("no session daemons left running", live.length === 0, JSON.stringify(live));
 r = witness(["play", "list"], { cwd: tmp, env });

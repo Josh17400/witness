@@ -17,7 +17,21 @@ const file = (name) => path.join(REG_DIR, `${name.replace(/[^\w.-]+/g, "_")}.jso
 export function readEntry(name) { try { return JSON.parse(fs.readFileSync(file(name), "utf8")); } catch { return null; } }
 export function writeEntry(e) { fs.mkdirSync(REG_DIR, { recursive: true }); fs.writeFileSync(file(e.name), JSON.stringify(e, null, 1)); }
 export function updateEntry(name, patch) { const e = readEntry(name) || { name }; Object.assign(e, patch); writeEntry(e); return e; }
-export function removeEntry(name) { try { fs.unlinkSync(file(name)); } catch { /* gone */ } }
+export function removeEntry(name) { for (const f of [file(name), shimPath(name), `${shimPath(name)}.cmd`]) { try { fs.unlinkSync(f); } catch { /* gone */ } } }
+
+/**
+ * A tiny per-session command next to the registry, so a tester types `./t1 "fight wolf"` instead of the full
+ * `node ".../witness.js" play do "fight wolf" -s t1` (output tokens are most of a model's turn time).
+ * A first word that isn't a play command means `do`. Written for sh (Git Bash, macOS, Linux) and cmd.
+ */
+export const shimPath = (name) => path.join(REG_DIR, name.replace(/[^\w.-]+/g, "_"));
+export function writeShim(name, cliJs) {
+  const node = process.execPath.replace(/\\/g, "/"), js = cliJs.replace(/\\/g, "/"), sub = "do|next|look|shot|note|end|status|stop";
+  fs.mkdirSync(REG_DIR, { recursive: true });
+  fs.writeFileSync(shimPath(name), `#!/bin/sh\ncase "$1" in ${sub}) ;; *) set -- do "$@" ;; esac\nexec "${node}" "${js}" play "$@" -s ${name}\n`, { mode: 0o755 });
+  fs.writeFileSync(`${shimPath(name)}.cmd`, `@echo off\r\nset s=%1\r\nfor %%c in (${sub.split("|").join(" ")}) do if "%s%"=="%%c" goto run\r\n"${node}" "${js}" play do %* -s ${name}\r\ngoto :eof\r\n:run\r\n"${node}" "${js}" play %* -s ${name}\r\n`);
+  return shimPath(name);
+}
 
 /** All registry entries, with `live` = the daemon process is still running. */
 export function listEntries() {

@@ -180,7 +180,7 @@ const txt = observeText(w0, { cfg: pc, grid: grid0, ap: null, result: { line: "â
 ok("observation shows hp, goal, near, map, orders", /hp 10\/10/.test(txt) && /goal: Talk to the Old Guard/.test(txt) && /Wolf#5\s+1\.3 E\s+hp 3\/3/.test(txt) && /map \(/.test(txt) && /orders:/.test(txt), txt);
 ok("observation stays small", txt.length < 2400, txt.length);
 const br = makeBrief({ cli: 'node "C:/w/bin/witness.js"', configDir: "C:/game", name: "t7", goal: "win", persona: "breaker", minutes: 3, model: "haiku" });
-ok("brief has the exact commands", br.includes('node "C:/w/bin/witness.js" play start --name t7 --config "C:/game" --goal "win" --persona breaker --model haiku') && br.includes("play end -s t7") && /bug hunter/.test(br));
+ok("brief has the exact commands", br.includes('node "C:/w/bin/witness.js" play start --name t7 --config "C:/game" --goal "win" --persona breaker --model haiku') && br.includes("play end -s t7") === false && br.includes('./t7 end --fun') && br.includes('./t7 "<orders>"') && /bug hunter/.test(br));
 ok("util compass/editDistance/singular", compass([1, -1]) === "NE" && compass([0, 1]) === "S" && editDistance("atack", "attack") === 1 && singular("wolves") === "wolf" && singular("enemies") === "enemy");
 
 // ---- the autopilot in a simulated top-down world (no game process)

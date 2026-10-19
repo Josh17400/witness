@@ -1,5 +1,6 @@
 // Witness play: the prompt a main agent hands to a playtester subagent (Agent tool, model sonnet at low effort, or haiku).
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
+import { REG_DIR } from "./registry.js";
 
 export const PERSONAS = {
   newbie: { reaction: 0.35, text: "a new player: follows the game's hints, reads dialogue, notices what's confusing" },
@@ -14,6 +15,7 @@ const q = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
 export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie", minutes = 4, game = "the game", profile = "topdown", controls = "", seed, scene, params, extra, model, live = false, watch = false }) {
   const P = PERSONAS[persona] ? persona : "newbie";
   const W = `${cli} play`;
+  const S = name.replace(/[^\w.-]+/g, "_");   // the session's short command (registry.writeShim)
   const start = [`${W} start --name ${name}`, `--config ${q(configDir)}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, watch ? "--watch" : live ? "--live" : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
   const card = profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
     : profile === "fps" ? `goto <thing|x,y> · go forward|back|left|right [cells] · go <n|s|e|w…> [cells] · explore [dir] · follow <thing>
@@ -43,12 +45,15 @@ HOW IT WORKS: you give plain-word orders; an autopilot carries them out frame by
 
 COMMANDS (run with your Bash tool, one at a time, exactly like this; each returns in a few seconds):
   start:  ${start}
-  order:  ${W} do "<orders>" -s ${name}
-  look:   ${W} look -s ${name}${live || watch ? `
-  next:   ${W} next -s ${name}          (keep your order running; returns at the next important moment or after ~4 s)` : ""}
-  screen: ${W} shot -s ${name}          (prints a PNG path: open it with your Read tool to SEE the game)
-  note:   ${W} note "<what you noticed>" --bug|--confusing|--fun|--idea -s ${name}
-  end:    ${W} end -s ${name} --fun <1-5> --difficulty <1-5> --feedback "<3-6 sentences>"
+  then, once: cd "${REG_DIR.replace(/\\/g, "/")}"      (the short commands below live there)
+  order:  ./${S} "<orders>"
+  look:   ./${S} look${live || watch ? `
+  next:   ./${S} next          (keep your order running; returns at the next important moment or after ~4 s)` : ""}
+  screen: ./${S} shot          (prints a PNG path: open it with your Read tool to SEE the game)
+  note:   ./${S} note "<what you noticed>" --bug|--confusing|--fun|--idea
+  end:    ./${S} end --fun <1-5> --difficulty <1-5> --feedback "<3-6 sentences>"
+  (if ./${S} isn't found, the long form works the same: ${W} do "<orders>" -s ${name}, ${W} next -s ${name}, …)
+SPEED: every turn, send ONLY the next command. No text before or after it, no plans written out: typing costs you time${live || watch ? " while the game plays on" : ""}. Think briefly, act.
 
 ORDERS (chain several with ";"):
 ${card.split("\n").map((l) => `  ${l}`).join("\n")}
