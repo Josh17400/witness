@@ -257,7 +257,7 @@ pub enum Input {
     /// Anything else, as sent.
     Other(Value),
     /// One finger (docs/PROTOCOL.md §4): `id` 0 is the first finger down and keeps its id until
-    /// `Up`; `x`/`y` are logical pixels like the mouse; `pressure` is 0..1 (1 when not given).
+    /// `Up` (or `Cancel`); `x`/`y` are logical pixels like the mouse; `pressure` is 0..1 (1 when not given).
     Touch {
         id: u32,
         x: f64,
@@ -273,24 +273,47 @@ pub enum TouchPhase {
     Down,
     Move,
     Up,
+    /// The system ended the touch (SDL's `FINGER_CANCELED`: the OS took the gesture, focus was
+    /// lost). It ends the finger like `Up`, but it is not a completed tap; games that don't care
+    /// may treat it as `Up`.
+    Cancel,
 }
 
 impl TouchPhase {
-    /// `"down"` / `"up"`; anything else (including a missing phase) is `Move`.
+    /// `"down"` / `"up"` / `"cancel"`; anything else (including a missing phase) is `Move`.
     pub fn parse(phase: &str) -> TouchPhase {
         match phase {
             "down" => TouchPhase::Down,
             "up" => TouchPhase::Up,
+            "cancel" => TouchPhase::Cancel,
             _ => TouchPhase::Move,
         }
     }
-    /// The protocol name: `"down"`, `"move"` or `"up"`.
+    /// The protocol name: `"down"`, `"move"`, `"up"` or `"cancel"`.
     pub fn as_str(self) -> &'static str {
         match self {
             TouchPhase::Down => "down",
             TouchPhase::Move => "move",
             TouchPhase::Up => "up",
+            TouchPhase::Cancel => "cancel",
         }
+    }
+    /// True for the phases that end a touch: `Up` and `Cancel`.
+    pub fn ends(self) -> bool {
+        matches!(self, TouchPhase::Up | TouchPhase::Cancel)
+    }
+}
+
+/// Track a finger in the down-fingers list: `Up` / `Cancel` remove it, anything else sets it.
+fn track_touch(touches: &mut Vec<(u32, f64, f64)>, id: u32, x: f64, y: f64, phase: TouchPhase) {
+    let slot = touches.iter().position(|t| t.0 == id);
+    match (slot, phase.ends()) {
+        (Some(i), true) => {
+            touches.remove(i);
+        }
+        (Some(i), false) => touches[i] = (id, x, y),
+        (None, true) => {}
+        (None, false) => touches.push((id, x, y)),
     }
 }
 
@@ -304,7 +327,7 @@ impl Input {
     }
 
     /// The mouse event finger 0 also produces (the mouse fallback): down -> button 0 down,
-    /// move -> move, up -> button 0 up. `None` for anything else.
+    /// move -> move, up / cancel -> button 0 up. `None` for anything else.
     fn mouse_from_touch(&self) -> Option<Input> {
         match self {
             Input::Touch {
@@ -313,7 +336,7 @@ impl Input {
                 let down = match phase {
                     TouchPhase::Down => Some(true),
                     TouchPhase::Move => None,
-                    TouchPhase::Up => Some(false),
+                    TouchPhase::Up | TouchPhase::Cancel => Some(false),
                 };
                 Some(Input::Mouse {
                     pos: Some((*x, *y)),
@@ -944,17 +967,7 @@ impl Connection {
             }
             Input::Touch {
                 id, x, y, phase, ..
-            } => {
-                let slot = self.touches.iter().position(|t| t.0 == *id);
-                match (slot, phase) {
-                    (Some(i), TouchPhase::Up) => {
-                        self.touches.remove(i);
-                    }
-                    (Some(i), _) => self.touches[i] = (*id, *x, *y),
-                    (None, TouchPhase::Up) => {}
-                    (None, _) => self.touches.push((*id, *x, *y)),
-                }
-            }
+            } => track_touch(&mut self.touches, *id, *x, *y, *phase),
             _ => {}
         }
     }
@@ -1141,6 +1154,37 @@ mod tests {
         assert_eq!(fallback(&finger(1, TouchPhase::Down)), "");
         let mouse = finger(0, TouchPhase::Down).mouse_from_touch().unwrap();
         assert!(mouse.is_from_touch() && !finger(0, TouchPhase::Down).is_from_touch());
+    }
+
+    #[test]
+    fn touch_cancel_parses_ends_and_round_trips() {
+        let t = r#"{"type":"touch","id":0,"x":5,"y":6,"phase":"cancel"}"#;
+        let touch = Input::from_json(&Value::parse(t).unwrap());
+        assert_eq!(touch, finger(0, TouchPhase::Cancel));
+        assert_eq!(touch.to_json().to_string(), t);
+        assert_eq!(TouchPhase::parse("cancel"), TouchPhase::Cancel);
+        assert_eq!(TouchPhase::parse("lift"), TouchPhase::Move);
+        assert!(TouchPhase::Cancel.ends() && TouchPhase::Up.ends() && !TouchPhase::Move.ends());
+        // the mouse fallback releases button 0, like up
+        let up = r#"{"type":"mouse","x":5,"y":6,"button":0,"down":false}"#;
+        assert_eq!(fallback(&touch), up);
+        // the finger is no longer down
+        let mut touches = Vec::new();
+        track_touch(&mut touches, 0, 5.0, 6.0, TouchPhase::Down);
+        track_touch(&mut touches, 1, 7.0, 8.0, TouchPhase::Down);
+        track_touch(&mut touches, 0, 5.0, 6.0, TouchPhase::Cancel);
+        assert_eq!(touches, vec![(1, 7.0, 8.0)]);
+        // recorded as "cancel"
+        let name = format!("witness-cancel-{}.jsonl", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        let mut r = Recorder::create(path.clone(), "touch", 60).unwrap();
+        r.touch(0, 5.0, 6.0, TouchPhase::Cancel);
+        r.frame(0.5);
+        drop(r);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let w = r#"{"f":0,"dt":0.5,"in":[{"type":"touch","id":0,"x":5,"y":6,"phase":"cancel"}]}"#;
+        assert_eq!(text.lines().nth(1), Some(w));
     }
 
     #[test]

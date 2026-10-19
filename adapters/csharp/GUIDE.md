@@ -122,9 +122,12 @@ enum by name: MonoGame/FNA `Keys`, `ConsoleKey`, WinForms `Keys`, SDL wrappers. 
 `Witness.FrameEvents` inside `Step` instead of setting `Input`.
 
 **Touch.** A `Type == "touch"` event has `Id` (finger, 0 = the first finger down), `X`/`Y` (logical
-pixels, like the mouse), `Phase` (`WitnessTouchPhase.Down` / `Move` / `Up`; `Down` is also
-true / null / false) and `Pressure` (1 when not given). By default the adapter also delivers finger 0
-as a `"mouse"` event right after each touch (down → button 0 down, move → move, up → button 0 up),
+pixels, like the mouse), `Phase` (`WitnessTouchPhase.Down` / `Move` / `Up` / `Cancel`; `Down` is also
+true / null / false, false for `Cancel` too) and `Pressure` (1 when not given). `Cancel` is a touch the
+system ended (SDL's FINGER_CANCELED, Unity's `TouchPhase.Canceled`): it ends the finger like `Up`, but
+it isn't a completed tap (games that don't care can treat it as `Up`). By default the adapter also
+delivers finger 0 as a `"mouse"` event right after each touch (down → button 0 down, move → move,
+up or cancel → button 0 up),
 flagged `FromTouch`, so touch tests (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only
 games too. A game with real touch handling (virtual sticks, gestures) sets
 `new WitnessHello { ..., Touch = true }`: it then gets only the touch events (the hello says
@@ -191,7 +194,8 @@ runs on `ProcessExit`). Seed the game with `Witness.Seed`. `witness replay run.j
 through reset + input + per-frame dts.
 
 Event pumps that see input one event at a time can queue it instead: `Witness.RecordEvent(e)` and
-`Witness.RecordTouch(id, x, y, WitnessTouchPhase.Down, pressure)` go into the next `RecordFrame` line.
+`Witness.RecordTouch(id, x, y, WitnessTouchPhase.Down, pressure)` go into the next `RecordFrame` line
+(record a touch the system ended as `WitnessTouchPhase.Cancel`; it replays as a cancel).
 Touch: record fingers in the same logical pixels Witness injects (convert from window pixels, or from
 normalized 0–1 coordinates like SDL's), with small ids (0 = first finger down; map the platform's
 finger ids to slots and reuse a slot after its finger lifts). Don't record the mouse events the

@@ -91,10 +91,11 @@ the same way):
 * New Input System: on the first touch event the bridge adds a virtual `Touchscreen` (none before,
   so games that show on-screen controls when `Touchscreen.current != null` behave as on desktop until
   a test touches) and queues a `TouchState` per finger change (`touchId` = Witness finger id + 1,
-  `Began` / `Moved` / `Ended`). `Touchscreen.current.touches`, touch `InputAction`s and EnhancedTouch
+  `Began` / `Moved` / `Ended`, `Canceled` for a Witness `cancel`). `Touchscreen.current.touches`, touch `InputAction`s and EnhancedTouch
   all see it.
 * Old Input Manager: `WitnessInput.touchCount`, `GetTouch(i)`, `touches`, `touchSupported`
-  (`fingerId` = Witness finger id; phases `Began`, `Moved`, `Stationary`, `Ended` per frame).
+  (`fingerId` = Witness finger id; phases `Began`, `Moved`, `Stationary`, `Ended` per frame, and
+  `Canceled` for a Witness `cancel`, the system ending the touch).
 * Mouse fallback: finger 0 also arrives as the mouse (button 0 down / move / up), like Unity's
   `Input.simulateMouseWithTouches`, so touch tests drive mouse-only games. A game that reads touches
   itself sets `WitnessBridge.Hello.Touch = true` (in a `[RuntimeInitializeOnLoadMethod]` or `Awake`):
@@ -167,7 +168,8 @@ records each frame's unscaled delta, key presses/releases and touches (Input Sys
 `Touchscreen.current`, or the old Input Manager's `Input.touches`), F8 adds a mark, and the file is
 flushed on quit. Seed with `Witness.Seed`. `witness replay run.jsonl` replays it with the recorded
 per-frame dts. Touches are written in the hello's logical pixels (top-left origin) with small finger
-ids (0 = first finger down). The mouse Unity simulates from touches is not recorded: on replay the
+ids (0 = first finger down); a touch Unity reports as `Canceled` is recorded as `cancel`, not `up`.
+The mouse Unity simulates from touches is not recorded: on replay the
 mouse fallback recreates it.
 
 ## 10. Determinism pitfalls (Unity)

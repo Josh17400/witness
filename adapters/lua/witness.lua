@@ -407,10 +407,12 @@ end
 
 -------------------------------------------------------------------------------- touch
 
-local TOUCH_PHASES = { down = true, move = true, up = true }
+-- "cancel": the system ended the touch (SDL's FINGER_CANCELED, the OS took the gesture). It ends
+-- the finger like "up" but is not a completed tap; games that don't care may treat it as "up".
+local TOUCH_PHASES = { down = true, move = true, up = true, cancel = true }
 
--- Normalize a protocol touch event in place: integer id (default 0), phase "down" | "move" | "up"
--- (missing/unknown = "move"), numeric x/y, pressure (default 1).
+-- Normalize a protocol touch event in place: integer id (default 0), phase "down" | "move" | "up" |
+-- "cancel" (missing/unknown = "move"), numeric x/y, pressure (default 1).
 local function normalize_touch(e)
   e.id = floor(tonumber(e.id) or 0)
   if not TOUCH_PHASES[e.phase] then e.phase = "move" end
@@ -421,7 +423,7 @@ end
 
 --- Events as the adapter queues them: touch events normalized and, unless `native_touch`, each
 --- finger-0 touch followed by its mouse fallback (down -> button 0 down at x,y; move -> move;
---- up -> button 0 up), flagged from_touch = true. Other fingers never make mouse events.
+--- up / cancel -> button 0 up), flagged from_touch = true. Other fingers never make mouse events.
 function witness.expand_input(events, native_touch)
   local out = {}
   for _, e in ipairs(events or {}) do
@@ -503,7 +505,7 @@ local function step_once(h, dt)
       if e.x ~= nil then A.mouse.x, A.mouse.y = tonumber(e.x) or 0, tonumber(e.y) or 0 end
       if e.down ~= nil then A.mouse.buttons[floor(tonumber(e.button) or 0)] = e.down and true or nil end
     elseif e.type == "touch" then
-      if e.phase == "up" then A.touches[e.id] = nil
+      if e.phase == "up" or e.phase == "cancel" then A.touches[e.id] = nil
       else A.touches[e.id] = { x = e.x, y = e.y, pressure = e.pressure } end
     end
     if h.input then h.input(e) end
@@ -757,8 +759,8 @@ function witness.record_mouse(x, y, button, down)
   if button == nil or button < 0 then witness.record_event({ type = "mouse", x = x, y = y })
   else witness.record_event({ type = "mouse", x = x, y = y, button = button, down = down and true or false }) end
 end
---- A finger: id 0 = first finger down (map engine ids to small slots), phase "down" | "move" | "up",
---- logical pixels. Don't also record the mouse events the platform synthesizes from touch.
+--- A finger: id 0 = first finger down (map engine ids to small slots), phase "down" | "move" | "up" |
+--- "cancel" (the system ended it; replays as "cancel"), logical pixels. Don't also record the mouse events the platform synthesizes from touch.
 function witness.record_touch(id, x, y, phase, pressure)
   witness.record_event({ type = "touch", id = id, x = x, y = y, phase = phase, pressure = pressure })
 end

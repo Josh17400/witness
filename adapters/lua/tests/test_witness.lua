@@ -118,6 +118,21 @@ eq(#got, 1, "touch = true: no mouse fallback")
 local expanded = w.expand_input(w.decode('[{"type":"touch","id":0,"x":1,"y":2,"phase":"up"}]'), false)
 eq(#expanded .. expanded[2].type .. tostring(expanded[2].down), "2mousefalse", "expand_input fallback")
 
+-- cancel: the system ended the touch. It ends the finger like up (and finger 0's mouse button)
+got = {}
+h.touch = nil
+cmds.reset(h, { seed = 1 })
+cmds.input(h, { events = w.decode('[{"frame":0,"type":"touch","id":0,"x":5,"y":6,"phase":"down"},' ..
+  '{"frame":0,"type":"touch","id":0,"x":5,"y":6,"phase":"cancel"}]') })
+cmds.step(h, { frames = 1 })
+eq(#got, 4, "down + cancel, each with its mouse fallback")
+eq(got[3].type .. got[3].phase, "touchcancel", "cancel delivered as cancel")
+eq(got[4].type .. tostring(got[4].down) .. got[4].button, "mousefalse0", "fallback: cancel -> button 0 up")
+eq(w.touch(0), nil, "touch(0) after cancel")
+eq(w.mouse_down(0), false, "mouse button released after cancel")
+local unknown = w.expand_input(w.decode('[{"type":"touch","id":3,"x":1,"y":2,"phase":"lift"}]'), false)
+eq(unknown[1].phase, "move", "unknown phase -> move")
+
 -- recording: touch shape, pressure only when not 1, synthesized mouse events skipped
 local rec_path = here .. "touch_record_test.jsonl"
 local real_getenv = os.getenv
@@ -130,6 +145,8 @@ w.record_touch(1, 3, 4, "down", 0.25)
 w.record_key("f8", true)
 w.record_frame(1 / 60, { { type = "touch", id = 0, x = 15.5, y = 22, phase = "up", pressure = 1 },
                          { type = "mouse", x = 15.5, y = 22, istouch = true }, { type = "key", key = "space", down = true } })
+w.record_touch(1, 3, 4, "cancel")
+w.record_frame(1 / 60)
 w.stop_recording()
 os.getenv = real_getenv -- luacheck: ignore
 local lines = {}
@@ -137,10 +154,11 @@ local fh = io.open(rec_path, "r")
 for l in fh:lines() do lines[#lines + 1] = l end
 fh:close()
 os.remove(rec_path)
-eq(#lines, 3, "header + 2 frames")
+eq(#lines, 4, "header + 3 frames")
 eq(lines[2], '{"dt":0.016666666666666666,"f":0,"in":[{"id":0,"phase":"down","type":"touch","x":10,"y":20}]}', "touch recorded, fallback mouse skipped")
 eq(lines[3], '{"dt":0.016666666666666666,"f":1,"in":[{"id":1,"phase":"down","pressure":0.25,"type":"touch","x":3,"y":4},' ..
    '{"id":0,"phase":"up","type":"touch","x":15.5,"y":22},{"down":true,"key":"space","type":"key"}],"mark":"F8"}', "pressure kept when not 1, istouch mouse skipped, f8 marks")
+eq(lines[4], '{"dt":0.016666666666666666,"f":2,"in":[{"id":1,"phase":"cancel","type":"touch","x":3,"y":4}]}', "cancel recorded as cancel")
 
 print(string.format("%s: %d checks, %d failed", fails == 0 and "OK" or "FAILED", count, fails))
 if fails > 0 then os.exit(1) end

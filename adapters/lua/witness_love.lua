@@ -163,7 +163,8 @@ local function inject(ev, user_input)
     if ev.phase == "down" then
       W.touches[id] = { x = x, y = y, pressure = p }
       fire("touchpressed", id, x, y, 0, 0, p)
-    elseif ev.phase == "up" then
+    elseif ev.phase == "up" or ev.phase == "cancel" then
+      -- LÖVE has no touch-cancel callback: "cancel" (the system ended the touch) arrives as touchreleased
       W.touches[id] = nil
       fire("touchreleased", id, x, y, prev and x - prev.x or 0, prev and y - prev.y or 0, p)
     else

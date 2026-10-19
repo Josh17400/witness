@@ -7,7 +7,7 @@ import { findConfig, openGame, runBuild, CONFIG_NAME } from "../src/core/launch.
 import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay } from "../src/core/runner.js";
 import { evaluate, check, fmt, keyPaths, ExprError } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
-import { Matcher, diffValues, digestOf } from "../src/core/compare.js";
+import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -57,10 +57,12 @@ const CMD_HELP = {
   listen: `witness listen [--time 8] [--input ...] [--out dir] [--wav]
   Captures the game's audio (adapter 'audio' capability) and prints an analysis: sounds found (pitch, length,
   brightness, loudness), music tempo/key/chords, mix problems; writes timeline.png + sounds.png (+ mix.wav).`,
-  replay: `witness replay [file.jsonl | last] [--at 5,10] [--shot] [--watch "expr, ..."]
+  replay: `witness replay [file.jsonl | last] [--at 5,10] [--shot] [--watch "expr, ..."] [--ignore "path, ..."]
   Replays are recorded when a human plays with WITNESS_RECORD=<file.jsonl> set (F8 adds a marker). The header's seed,
   scene and params go to reset. If <file.jsonl>.state.json exists (the state the recording ended in), the replay's
-  final state is compared to it field by field.`,
+  final state is compared to it field by field. Paths that legitimately differ (window-dependent fields) can be left
+  out with --ignore or witness.json "replay": {"ignore": [...]}: "player.px" skips that field and everything under it,
+  "entities[*].dist" any index, "view.*" any key.`,
   init: `witness init [--lang <id>] [--force]   (ids: witness adapters)`,
   measure: `witness measure <what> ...   exact pixel measurements (no eyeballing); add --json for machine output
   scale <shot.png> [--k 3] [--region x,y,w,h] [--tolerance 0]
@@ -202,6 +204,7 @@ const commands = {
       const caps = h.capabilities || [];
       const all = ["reset", "step", "input", "snapshot", "screenshot", "audio", "call", "eval", "logs", "perf"];
       report.push(`  capabilities: ${all.map((c) => (caps.includes(c) ? c : `(${c})`)).join(" ")}`);
+      if (caps.includes("input")) report.push(`  touch: ${h.touch ? "native (hello.touch: finger events only, no mouse fallback)" : "finger 0 also arrives as the mouse (set hello.touch if the game handles touch itself)"}`);
       for (const need of ["step", "snapshot"]) if (!caps.includes(need)) bad(`missing required capability '${need}'`);
       if (!caps.includes("reset")) warn("no 'reset': Witness restarts the game for every run (slower)");
       if (h.calls && h.calls.length) report.push(`  calls: ${h.calls.map((c) => `${c.name}${c.args ? ` ${c.args}` : ""}`).join(" · ")}`);
@@ -517,6 +520,9 @@ const commands = {
       const st = await begin(s, { replay: r });
       const times = opt.at ? nums(opt.at) : [...r.marks.map((m) => m.t), r.duration];
       const endFile = `${r.file}.state.json`;   // written by adapters/games at the end of a recording (optional)
+      // state paths left out of the end-state check (window-dependent fields and the like): witness.json replay.ignore + --ignore
+      const ignore = [...(cfg.replay && Array.isArray(cfg.replay.ignore) ? cfg.replay.ignore : []), ...(opt.ignore && opt.ignore !== true ? splitTop(String(opt.ignore)) : [])];
+      const skip = ignore.length ? pathFilter(ignore) : null;
       let endChecked = false;
       for (const t of [...new Set(times)].sort((a, b) => a - b)) {
         await stepTo(s, st, frameAt(t, s.fps, r.dts), r.dts);
@@ -528,8 +534,8 @@ const commands = {
           if (want !== undefined) {
             // the file holds a snapshot ({frame, time, state}) or just the state
             const wantState = want && typeof want === "object" && "state" in want && ("frame" in want || "time" in want) ? want.state : want;
-            const d = diffValues(wantState, snap.state, "state", [], 20);
-            if (!d.length) console.log(`✔ the replay ended in exactly the recorded end state (${path.basename(endFile)})`);
+            const d = diffValues(wantState, snap.state, "state", [], 20, skip);
+            if (!d.length) console.log(`✔ the replay ended in exactly the recorded end state (${path.basename(endFile)})${ignore.length ? ` (ignoring ${ignore.join(", ")})` : ""}`);
             else {
               console.log(`✖ the replay's end state differs from the recording's (${path.basename(endFile)}) at ${d.length >= 20 ? "20+" : d.length} path(s):`);
               for (const x of d.slice(0, 12)) console.log(`    ${x.path}: recorded ${String(JSON.stringify(x.a)).slice(0, 80)} → replayed ${String(JSON.stringify(x.b)).slice(0, 80)}`);

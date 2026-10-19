@@ -96,7 +96,8 @@ func (r *Recorder) Mouse(x, y float64, button int, down bool) {
 }
 
 // Touch queues a finger event: id 0 = the first finger down (keep it until TouchUp), x/y in
-// logical pixels (convert from the engine's normalized 0..1 coordinates). Don't also record the
+// logical pixels (convert from the engine's normalized 0..1 coordinates). Record a touch the system
+// ended (SDL's FINGER_CANCELED) as TouchCancel: it replays as "cancel". Don't also record the
 // mouse events the platform synthesizes from touch: replay recreates them from the touch.
 func (r *Recorder) Touch(id int, x, y float64, phase TouchPhase) {
 	r.Input(Event{Type: "touch", ID: id, X: x, Y: y, HasPos: true, Phase: phase, Pressure: 1, Button: -1,

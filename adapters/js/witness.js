@@ -572,7 +572,9 @@ const PAD_AXES = { leftx: 0, lefty: 1, rightx: 2, righty: 3 };
 // Touch: finger ids are small integers (0 = first finger down). Injected touch pointers get
 // pointerId TOUCH_POINTER_ID + id, so they never collide with the mouse (pointerId 1).
 const TOUCH_POINTER_ID = 100;
-const touchPhase = (p) => (p === "down" || p === "up" ? p : "move");
+// "cancel" = the system ended the touch (touchcancel / pointercancel): it ends the finger like "up".
+const touchPhase = (p) => (p === "down" || p === "up" || p === "cancel" ? p : "move");
+const touchEnds = (p) => p === "up" || p === "cancel";
 const touchId = (id) => (Number.isFinite(+id) ? Math.trunc(+id) : 0);
 /** An incoming touch event with defaults filled in: id 0, phase "move" when missing/unknown, pressure 1. */
 const normTouch = (e) => ({ ...e, id: touchId(e.id), x: +e.x || 0, y: +e.y || 0, phase: touchPhase(e.phase), pressure: e.pressure != null && Number.isFinite(+e.pressure) ? +e.pressure : 1 });
@@ -582,7 +584,7 @@ function touchShape(e) {
   if (+e.pressure > 0 && +e.pressure !== 1) o.pressure = +e.pressure;
   return o;
 }
-/** The mouse fallback for finger 0: down -> button 0 down, move -> move, up -> button 0 up (flagged fromTouch). */
+/** The mouse fallback for finger 0: down -> button 0 down, move -> move, up/cancel -> button 0 up (flagged fromTouch). */
 function touchMouse(t) {
   const m = { frame: t.frame, type: "mouse", x: t.x, y: t.y, fromTouch: true };
   if (t.phase !== "move") { m.button = 0; m.down = t.phase === "down"; }
@@ -630,7 +632,7 @@ function track(ev) {
     if (ev.x != null) { s.mouse.x = +ev.x; s.mouse.y = +ev.y; }
     if (typeof ev.down === "boolean") { const m = [1, 4, 2][ev.button | 0] || 1; s.mouse.buttons = ev.down ? s.mouse.buttons | m : s.mouse.buttons & ~m; }
   } else if (ev.type === "touch") {
-    if (ev.phase === "up") s.touches.delete(ev.id);
+    if (touchEnds(ev.phase)) s.touches.delete(ev.id);
     else s.touches.set(ev.id, { x: ev.x, y: ev.y, pressure: ev.pressure });
   } else if (ev.type === "action") { if (ev.down) s.actions.add(ev.action); else s.actions.delete(ev.action); }
   else if (ev.type === "pad") { const i = PAD_BUTTONS[PAD_ALIASES[ev.button] || ev.button]; if (i != null) s.pad.buttons[i] = ev.down ? 1 : 0; }
@@ -726,44 +728,44 @@ const dom = {
     } catch { return null; }
   },
   /** A touch as real DOM events: pointer events (pointerType "touch") then TouchEvents (touchstart /
-   *  touchmove / touchend, with touches / targetTouches / changedTouches across all fingers). Every
+   *  touchmove / touchend / touchcancel, with touches / targetTouches / changedTouches across all fingers). Every
    *  event of a finger goes to the element it went down on (implicit capture, like real touch).
    *  Returns false when the page cancelled it (preventDefault on pointerdown/touchstart for the whole
    *  touch, on touchmove for that move), so no compatibility mouse event follows. */
   finger(ev) {
-    const { id, phase } = ev, x = ev.x, y = ev.y;
+    const { id, phase } = ev, x = ev.x, y = ev.y, ends = touchEnds(phase), cancel = phase === "cancel";
     const [cx, cy] = this.toClient(x, y);
     const under = document.elementFromPoint(cx, cy) || this.canvases()[0] || document.body;
     let t = this.fingers.get(id);
     if (phase === "down" || !t) {
       t = { id, target: under, compat: true };
-      if (phase !== "up") this.fingers.set(id, t);   // a move without a down: a finger that came from off-canvas
+      if (!ends) this.fingers.set(id, t);   // a move without a down: a finger that came from off-canvas
     }
-    Object.assign(t, { x, y, cx, cy, force: phase === "up" ? 0 : ev.pressure });
-    if (phase === "up") this.fingers.delete(id);
+    Object.assign(t, { x, y, cx, cy, force: ends ? 0 : ev.pressure });
+    if (ends) this.fingers.delete(id);
     const target = t.target;
     const base = { bubbles: true, cancelable: true, composed: true, view: G, ...this.mods() };
     let pointerOk = true, touchOk = true;
     if (G.PointerEvent) {
       const p = { ...base, clientX: cx, clientY: cy, screenX: cx, screenY: cy, pointerId: TOUCH_POINTER_ID + id, pointerType: "touch",
-        isPrimary: id === 0, width: 1, height: 1, pressure: phase === "up" ? 0 : ev.pressure, button: phase === "move" ? -1 : 0, buttons: phase === "up" ? 0 : 1 };
+        isPrimary: id === 0, width: 1, height: 1, pressure: ends ? 0 : ev.pressure, button: phase === "move" || cancel ? -1 : 0, buttons: ends ? 0 : 1 };
       const send = (type, extra) => target.dispatchEvent(new PointerEvent(type, extra ? { ...p, ...extra } : p));
       if (phase === "down") { send("pointerover"); send("pointerenter", { bubbles: false, cancelable: false }); }
-      pointerOk = send(`pointer${phase}`);
-      if (phase === "up") { send("pointerout"); send("pointerleave", { bubbles: false, cancelable: false }); }
+      pointerOk = send(`pointer${phase}`, cancel ? { cancelable: false } : undefined);   // pointercancel can't be cancelled
+      if (ends) { send("pointerout"); send("pointerleave", { bubbles: false, cancelable: false }); }
     }
     if (typeof G.TouchEvent === "function" && typeof G.Touch === "function") {
       const all = [...this.fingers.values()];
       const changed = this.touchList([t]), touches = this.touchList(all), targetTouches = this.touchList(all.filter((o) => o.target === target));
       if (changed && touches && targetTouches) {
         try {
-          touchOk = target.dispatchEvent(new TouchEvent(phase === "down" ? "touchstart" : phase === "up" ? "touchend" : "touchmove", { ...base, touches, targetTouches, changedTouches: changed }));
+          touchOk = target.dispatchEvent(new TouchEvent(phase === "down" ? "touchstart" : phase === "up" ? "touchend" : cancel ? "touchcancel" : "touchmove", { ...base, ...(cancel ? { cancelable: false } : {}), touches, targetTouches, changedTouches: changed }));
         } catch (e) { warnOnce("touch-event", `TouchEvent could not be created here (${e && e.message}); only pointer events were sent`); }
       }
     }
     if (phase === "down") { if (!pointerOk || !touchOk) t.compat = false; return t.compat; }
     if (phase === "move") return t.compat && touchOk;
-    return t.compat;   // up: the mouse button that went down is always released
+    return t.compat;   // up / cancel: the mouse button that went down is always released
   },
   inject(ev) {
     switch (ev.type) {
@@ -1020,12 +1022,12 @@ function installRecorderListeners() {
       slot = { id, x: 0, y: 0 };
       slots.set(e.pointerId, slot);
     } else if (phase === "down") phase = "move";
-    if (phase === "up") slots.delete(e.pointerId);
+    if (touchEnds(phase)) slots.delete(e.pointerId);
     const id = slot.id;
-    // pointercancel (e.g. the browser took the gesture over for scrolling) carries no position: lift where it was
+    // pointercancel (e.g. the browser took the gesture over for scrolling) carries no position: end it where it was
     const [x, y] = cancel ? [slot.x, slot.y] : dom.toLogical(e.clientX, e.clientY);
     slot.x = x; slot.y = y;
-    const ev = touchShape({ id, x, y, phase, pressure: phase === "up" ? 0 : e.pressure });
+    const ev = touchShape({ id, x, y, phase, pressure: touchEnds(phase) ? 0 : e.pressure });
     if (phase === "move") {   // keep only the latest position of a finger per frame
       for (let i = rec.pending.length - 1; i >= 0; i--) {
         const p = rec.pending[i];
@@ -1039,7 +1041,7 @@ function installRecorderListeners() {
   G.addEventListener("pointermove", (e) => (e.pointerType === "touch" ? touch(e, "move") : mouse(e)), opt);
   G.addEventListener("pointerdown", (e) => (e.pointerType === "touch" ? touch(e, "down") : mouse(e, true)), opt);
   G.addEventListener("pointerup", (e) => (e.pointerType === "touch" ? touch(e, "up") : mouse(e, false)), opt);
-  G.addEventListener("pointercancel", (e) => { if (e.pointerType === "touch") touch(e, "up", true); }, opt);
+  G.addEventListener("pointercancel", (e) => { if (e.pointerType === "touch") touch(e, "cancel", true); }, opt);
   G.addEventListener("wheel", (e) => { if (e.isTrusted) push({ type: "wheel", dy: e.deltaY * (e.deltaMode === 1 ? 32 : 1) }); }, opt);
 }
 
@@ -1331,7 +1333,7 @@ const api = {
   mark(label = "mark") { if (rec.on) rec.mark = String(label); },
   recordFrame,
   recordInput(ev) { if (rec.on && isObj(ev)) rec.pending.push(ev); },
-  /** Record a finger (Node / custom loops): id 0 = first finger down, game pixels, phase "down" | "move" | "up". */
+  /** Record a finger (Node / custom loops): id 0 = first finger down, game pixels, phase "down" | "move" | "up" | "cancel" (the system ended it; replays as cancel). */
   recordTouch(id, x, y, phase = "move", pressure) { if (rec.on) rec.pending.push(touchShape({ id, x, y, phase, pressure })); },
   saveRecording() { return rec.sink && rec.sink.save ? rec.sink.save() : null; },
   /** Input events applied at the current frame (for games that pull input). */

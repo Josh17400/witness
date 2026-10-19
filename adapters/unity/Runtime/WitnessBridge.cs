@@ -609,11 +609,17 @@ namespace WitnessKit
             if (ts != null || _recFingers.Count > 0)
             {
                 _recSeen.Clear();
+                _recCanceled.Clear();
                 if (ts != null)
                 {
                     foreach (var t in ts.touches)
                     {
-                        if (!t.press.isPressed) continue;
+                        if (!t.press.isPressed)
+                        {
+                            // the system ended it (Canceled): its lift is recorded as "cancel", not "up"
+                            if (t.phase.ReadValue() == UnityEngine.InputSystem.TouchPhase.Canceled) _recCanceled.Add(t.touchId.ReadValue());
+                            continue;
+                        }
                         RecordFinger(t.touchId.ReadValue(), t.position.ReadValue(), t.pressure.ReadValue());
                     }
                 }
@@ -639,10 +645,13 @@ namespace WitnessKit
             if (Input.touchCount > 0 || _recFingers.Count > 0)
             {
                 _recSeen.Clear();
+                _recCanceled.Clear();
                 for (int i = 0; i < Input.touchCount; i++)
                 {
                     var t = Input.GetTouch(i);
-                    if (t.phase == UnityEngine.TouchPhase.Ended || t.phase == UnityEngine.TouchPhase.Canceled) continue;
+                    // the system ended it (Canceled): its lift is recorded as "cancel", not "up"
+                    if (t.phase == UnityEngine.TouchPhase.Canceled) { _recCanceled.Add(t.fingerId); continue; }
+                    if (t.phase == UnityEngine.TouchPhase.Ended) continue;
                     RecordFinger(t.fingerId, t.position, t.pressure);
                 }
                 RecordLifts();
@@ -664,6 +673,7 @@ namespace WitnessKit
         private readonly Dictionary<int, RecFinger> _recFingers = new Dictionary<int, RecFinger>();
         private readonly HashSet<int> _recSeen = new HashSet<int>();
         private readonly List<int> _recGone = new List<int>();
+        private readonly HashSet<int> _recCanceled = new HashSet<int>();   // platform ids the system canceled this frame
 
         private void RecordFinger(int platformId, Vector2 screenPos, float pressure)
         {
@@ -696,7 +706,8 @@ namespace WitnessKit
             foreach (int id in _recGone)
             {
                 var f = _recFingers[id];
-                _recordEvents.Add(TouchEventAt(f.Slot, f.Pos, WitnessTouchPhase.Up, 1f));
+                var phase = _recCanceled.Contains(id) ? WitnessTouchPhase.Cancel : WitnessTouchPhase.Up;
+                _recordEvents.Add(TouchEventAt(f.Slot, f.Pos, phase, 1f));
                 _recFingers.Remove(id);
             }
         }

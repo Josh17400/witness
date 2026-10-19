@@ -69,7 +69,7 @@ func TestTouchEvents(t *testing.T) {
 	if want := `{"id":0,"phase":"move","type":"touch","x":1,"y":2}`; string(b) != want || bare.Pressure != 1 {
 		t.Errorf("defaults: got %s (pressure %v)\nwant %s", b, bare.Pressure, want)
 	}
-	if TouchUp.String() != "up" || touchPhase("up") != TouchUp || touchPhase("cancel") != TouchMove {
+	if TouchUp.String() != "up" || touchPhase("up") != TouchUp || touchPhase("lift") != TouchMove {
 		t.Error("touch phase names")
 	}
 }
@@ -126,6 +126,67 @@ func TestTouchMouseFallback(t *testing.T) {
 	}
 	if _, _, down := s.Touch(0); down {
 		t.Error("finger 0 is still down after its up")
+	}
+}
+
+func TestTouchCancel(t *testing.T) {
+	// parses, ends the touch (and finger 0's mouse button), and round-trips as "cancel"
+	if TouchCancel.String() != "cancel" || touchPhase("cancel") != TouchCancel || !TouchCancel.Ends() || TouchMove.Ends() {
+		t.Error("cancel phase name")
+	}
+	e := eventFromJSON(map[string]any{"frame": 3.0, "type": "touch", "id": 0.0, "x": 4.0, "y": 5.0, "phase": "cancel"})
+	if e.Phase != TouchCancel || e.Down || !e.HasDown {
+		t.Fatalf("bad cancel event %+v", e)
+	}
+	b, _ := marshal(e.JSON())
+	if want := `{"id":0,"phase":"cancel","type":"touch","x":4,"y":5}`; string(b) != want {
+		t.Errorf("got %s
+want %s", b, want)
+	}
+	if m, ok := mouseFromTouch(e); !ok || m.Button != 0 || m.Down || !m.HasDown {
+		t.Errorf("cancel must release mouse button 0: %+v", m)
+	}
+	g := &touchGame{}
+	c := &Conn{game: g, fps: 60, held: map[string]bool{}, touches: map[int][2]float64{}}
+	events := []any{
+		map[string]any{"frame": 0.0, "type": "touch", "id": 0.0, "x": 5.0, "y": 6.0, "phase": "down"},
+		map[string]any{"frame": 1.0, "type": "touch", "id": 0.0, "x": 5.0, "y": 6.0, "phase": "cancel"},
+	}
+	if _, err := c.dispatch(map[string]any{"cmd": "input", "events": events}); err != nil {
+		t.Fatal(err)
+	}
+	c.stepOnce(1.0 / 60)
+	c.stepOnce(1.0 / 60)
+	s := &Step{c: c}
+	if _, _, down := s.Touch(0); down {
+		t.Error("finger 0 is still down after its cancel")
+	}
+	if _, _, btn := s.Mouse(); btn != 0 {
+		t.Errorf("mouse button still down after cancel: %v", btn)
+	}
+	if len(g.got) != 4 || g.got[2].Phase != TouchCancel || g.got[3].Type != "mouse" || g.got[3].Down {
+		t.Fatalf("cancel events %+v", g.got)
+	}
+	path := filepath.Join(t.TempDir(), "cancel.jsonl")
+	r, err := Record(path, "touch", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Touch(0, 4, 5, TouchCancel)
+	r.Frame(0.5)
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rb, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(rb)), "
+")
+	want := `{"dt":0.5,"f":0,"in":[{"id":0,"phase":"cancel","type":"touch","x":4,"y":5}]}`
+	if len(lines) != 2 || lines[1] != want {
+		t.Errorf("got %q
+want %s", lines, want)
 	}
 }
 

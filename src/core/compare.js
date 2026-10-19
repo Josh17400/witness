@@ -5,8 +5,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 
 /** Deep differences between two JSON values: [{path, a, b}], at most `limit`. */
-export function diffValues(a, b, at = "", out = [], limit = 12) {
+export function diffValues(a, b, at = "", out = [], limit = 12, skip = null) {
   if (out.length >= limit) return out;
+  if (skip && at && skip(at)) return out;
   if (a === b) return out;
   const ta = Array.isArray(a) ? "array" : a === null ? "null" : typeof a;
   const tb = Array.isArray(b) ? "array" : b === null ? "null" : typeof b;
@@ -17,18 +18,34 @@ export function diffValues(a, b, at = "", out = [], limit = 12) {
   }
   if (ta === "array") {
     if (a.length !== b.length) out.push({ path: `${at}.length`, a: a.length, b: b.length });
-    for (let i = 0; i < Math.min(a.length, b.length) && out.length < limit; i++) diffValues(a[i], b[i], `${at}[${i}]`, out, limit);
+    for (let i = 0; i < Math.min(a.length, b.length) && out.length < limit; i++) diffValues(a[i], b[i], `${at}[${i}]`, out, limit, skip);
     return out;
   }
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const k of keys) {
     if (out.length >= limit) break;
     const p = at ? `${at}.${k}` : k;
+    if (skip && skip(p)) continue;
     if (!(k in a)) out.push({ path: p, a: undefined, b: b[k] });
     else if (!(k in b)) out.push({ path: p, a: a[k], b: undefined });
-    else diffValues(a[k], b[k], p, out, limit);
+    else diffValues(a[k], b[k], p, out, limit, skip);
   }
   return out;
+}
+
+/**
+ * A skip test for diffValues from path patterns like "player.px", "entities[*].dist" or "view.*": a diff path is
+ * skipped when it is a pattern or lies under one. `*` matches one key, `[*]` any index; the leading "state." is optional.
+ */
+export function pathFilter(patterns, root = "state") {
+  const esc = (s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  const res = patterns.map((p) => String(p).trim()).filter(Boolean).map((p) => {
+    const full = p === root || p.startsWith(`${root}.`) || p.startsWith(`${root}[`) ? p : `${root}.${p}`;
+    // "[*]" any index, "[3]" that index, "*" one key; the rest is literal
+    const src = full.split(/(\[\*\]|\[\d+\]|\*)/).map((t) => (t === "[*]" ? "\\[\\d+\\]" : /^\[\d+\]$/.test(t) ? `\\[${t.slice(1, -1)}\\]` : t === "*" ? "[^.[]+" : esc(t))).join("");
+    return new RegExp(`^${src}(?:$|[.[])`);
+  });
+  return (path) => res.some((re) => re.test(path));
 }
 
 const sha1 = (buf) => crypto.createHash("sha1").update(buf).digest("hex");

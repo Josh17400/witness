@@ -149,7 +149,8 @@ class Bridge:
 
     * inject(event)   posts KEYDOWN/KEYUP/MOUSE*/TEXTINPUT/FINGER* events with pygame.event.post, so
                       the game's normal `for e in pygame.event.get()` loop sees them. Touch becomes
-                      FINGERDOWN/FINGERMOTION/FINGERUP with pygame's normalized 0..1 x/y/dx/dy (the
+                      FINGERDOWN/FINGERMOTION/FINGERUP ("cancel" also posts FINGERUP: pygame has no
+                      cancel event) with pygame's normalized 0..1 x/y/dx/dy (the
                       pixel coordinates divided by `size`: Bridge(size=...), else the hello size,
                       else the surface's size); finger 0's mouse fallback arrives as MOUSE* events
                       with touch=True, like pygame's own mouse-from-touch events.
@@ -215,11 +216,13 @@ class Bridge:
                 pygame.event.post(pygame.event.Event(kind, pos=pos, button=b + 1, touch=touch))
         elif t == "touch":
             phase = ev.get("phase", "move")
-            kind = {"down": pygame.FINGERDOWN, "up": pygame.FINGERUP}.get(phase, pygame.FINGERMOTION)
+            # pygame has no finger-cancel event: "cancel" (the system ended the touch) arrives as FINGERUP
+            kind = {"down": pygame.FINGERDOWN, "up": pygame.FINGERUP,
+                    "cancel": pygame.FINGERUP}.get(phase, pygame.FINGERMOTION)
             fid = int(ev.get("id", 0) or 0)
             x, y = float(ev.get("x", 0)), float(ev.get("y", 0))
             px, py = (x, y) if phase == "down" else self.fingers.get(fid, (x, y))
-            if phase == "up":
+            if phase in ("up", "cancel"):
                 self.fingers.pop(fid, None)
             else:
                 self.fingers[fid] = (x, y)

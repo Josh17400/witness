@@ -106,6 +106,7 @@ Witness events become real `InputEvent`s pushed through `Input.parse_input_event
 | `pad` a/b/x/y/start/dpup… | `InputEventJoypadButton`, device 0 |
 | `axis` leftx/lefty/… value | `InputEventJoypadMotion` |
 | `touch` id, x, y, phase down/up | `InputEventScreenTouch` (`index` = id, `pressed`) |
+| `touch` phase cancel | `InputEventScreenTouch` with `pressed = false`, `canceled = true` (the system ended the touch; recorded back as `cancel`) |
 | `touch` phase move (+ pressure) | `InputEventScreenDrag` (`index`, `position`, `relative` from that finger's last position, `pressure`) |
 
 Coordinates: with `display/window/stretch/mode = "viewport"`, window pixels equal logical pixels.

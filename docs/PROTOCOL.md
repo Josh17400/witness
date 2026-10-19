@@ -98,16 +98,24 @@ them like `logs`.
 ### Touch
 
 * `id` is the finger: an integer, 0 for the first finger down, 1 for the second, and so on.
-  One finger keeps its id from `down` through its `move`s to `up`, and an id may be reused
+  One finger keeps its id from `down` through its `move`s to `up` (or `cancel`), and an id may be reused
   after `up`. Several fingers can be down at once.
 * `x`/`y` are in the same logical pixel space as mouse events (top-left origin), never
   normalized 0–1: adapters convert from/to engine-normalized coordinates (SDL, pygame).
-* `phase` is `"down"`, `"move"` or `"up"`. `pressure` is optional (0–1; adapters use 1 when
-  it is missing).
+* `phase` is `"down"`, `"move"`, `"up"` or `"cancel"`. `pressure` is optional (0–1; adapters
+  use 1 when it is missing).
+* **Cancel.** `cancel` ends a touch exactly like `up`: the finger is no longer down and its id
+  is free for reuse. It means the system ended the touch rather than the user lifting the
+  finger (SDL's `SDL_EVENT_FINGER_CANCELED`, Android `ACTION_CANCEL`, the browser's
+  `touchcancel`/`pointercancel`, Unity's `TouchPhase.Canceled`; e.g. the OS took over a gesture
+  or the window lost focus), so games should not treat it as a completed tap or click. Games
+  that don't make the distinction may handle `cancel` as `up`. Adapters deliver it through the
+  engine's cancel path where one exists, and as a lift otherwise.
+* Only these four names are valid. An adapter reads an unknown `phase` as `"move"`.
 * **Mouse fallback.** Adapters deliver touch events as touch (the engine's touch path, or a
   touch event in the adapter's event API). For finger `id` 0 they also deliver the matching
   mouse event right after it, unless the game opts out: `down` → button 0 down at x,y,
-  `move` → mouse move to x,y, `up` → button 0 up at x,y. So touch-only tests still drive
+  `move` → mouse move to x,y, `up` or `cancel` → button 0 up at x,y. So touch-only tests still drive
   mouse-driven games, the way phones and browsers emulate a mouse from the first finger.
   Where the engine has a marker for "mouse from touch", the synthesized event carries it
   (SDL's `SDL_TOUCH_MOUSEID`, pygame's `touch`, LÖVE's `istouch`); other fingers never make
@@ -120,7 +128,8 @@ them like `logs`.
   event, in the shape above without `frame`. Record the real touches and skip the mouse
   events the platform synthesizes from them (SDL `which == SDL_TOUCH_MOUSEID`, pygame
   `event.touch`, LÖVE `istouch`, browser compatibility mouse events): on replay the fallback
-  recreates those, so recording both would deliver them twice.
+  recreates those, so recording both would deliver them twice. A system-ended touch is recorded
+  as `cancel` and replays as `cancel` (a round trip keeps it; it is never rewritten to `up`).
 * Scripted input (`--input` and test `input`): `touch:x,y@t` taps with finger 0 (down at t,
   up one frame later), `touch:x,y@a-b` holds, `touch2:x,y@…` uses finger 1 (`touchN` is
   finger N−1), and `swipe:x1,y1->x2,y2@a-b` puts finger 0 down at a, moves it every frame

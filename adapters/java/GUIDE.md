@@ -80,14 +80,16 @@ and for touch `id`, `phase`, `pressure`. Feed it to the same input state the dev
 void apply(Witness.Event e) {
     if ("key".equals(e.type)) { int code = Witness.Keys.lookup(e.key, Input.Keys::valueOf); if (code >= 0) processor.keyEvent(code, e.isDown()); }
     else if ("mouse".equals(e.type)) { mouseX = (int) e.x; mouseY = (int) e.y; if (e.down != null) processor.button(e.button, e.isDown()); }
-    else if ("touch".equals(e.type)) processor.finger(e.id, (float) e.x, (float) e.y, e.phase);   // "down" | "move" | "up"
+    else if ("touch".equals(e.type)) processor.finger(e.id, (float) e.x, (float) e.y, e.phase);   // "down" | "move" | "up" | "cancel"
 }
 ```
 
 **Touch.** A `touch` event has `id` (finger, 0 = first finger down), `x`/`y` in the same logical pixels
-as the mouse, `phase` (`"down"` / `"move"` / `"up"`; `down` is also true / null / false) and `pressure`
-(1 when not given). By default finger 0 is also delivered as a mouse event right after each touch
-event (down → button 0 down, move → move, up → button 0 up) with `fromTouch = true`, so touch tests
+as the mouse, `phase` (`"down"` / `"move"` / `"up"` / `"cancel"`; `down` is also true / null / false,
+false for cancel too) and `pressure` (1 when not given). `"cancel"` is a touch the system ended (SDL's
+FINGER_CANCELED, Android's `ACTION_CANCEL`): it ends the finger like `"up"`, but it isn't a completed
+tap (games that don't care can treat it as `"up"`). By default finger 0 is also delivered as a mouse
+event right after each touch event (down → button 0 down, move → move, up or cancel → button 0 up) with `fromTouch = true`, so touch tests
 (`touch:160,90@1`, `swipe:40,90->200,90@1-1.5`) drive mouse-only games. A game with its own touch
 handling sets `new Witness.Hello(...).touch(true)`: it then receives only the touch events (and the
 hello says `"touch": true`). LibGDX games want this: LibGDX reports the mouse as pointer 0 too, so
@@ -217,6 +219,7 @@ public class WitnessLauncher {
           case "touch":   // with Hello.touch(true): fingers are pointers, as on a phone
               if ("down".equals(e.phase)) p.touchDown((int) e.x, (int) e.y, e.id, Input.Buttons.LEFT);
               else if ("up".equals(e.phase)) p.touchUp((int) e.x, (int) e.y, e.id, Input.Buttons.LEFT);
+              else if ("cancel".equals(e.phase)) p.touchCancelled((int) e.x, (int) e.y, e.id, Input.Buttons.LEFT);   // LibGDX 1.12+; older: touchUp
               else p.touchDragged((int) e.x, (int) e.y, e.id);
               break;
       }

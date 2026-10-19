@@ -46,7 +46,7 @@ __all__ = [
 PROTOCOL = 1
 DEFAULT_ADDR = "127.0.0.1:7357"
 _LEVELS = ("info", "warn", "error")
-_PHASES = ("down", "move", "up")
+_PHASES = ("down", "move", "up", "cancel")   # "cancel": the system ended the touch; ends it like "up"
 _BIG_ENDIAN = sys.byteorder == "big"
 
 
@@ -323,7 +323,7 @@ def _touch(e):
 
 
 def _mouse_from_touch(t):
-    """The mouse fallback for finger 0: down -> button 0 down, move -> a move, up -> button 0 up."""
+    """The mouse fallback for finger 0: down -> button 0 down, move -> a move, up/cancel -> button 0 up."""
     m = {"frame": t.get("frame", 0), "type": "mouse", "x": t["x"], "y": t["y"], "from_touch": True}
     if t["phase"] != "move":
         m["button"] = 0
@@ -815,7 +815,9 @@ def record_event(event):
 def record_touch(id, x, y, phase, pressure=None):  # noqa: A002 - "id" is the protocol's name
     """Queue a finger for the current frame's replay line: id 0 = first finger down (keep it
     stable until "up"), x/y in logical pixels (convert normalized 0..1 touch coordinates), phase
-    "down" | "move" | "up". Don't also record the mouse events the platform synthesizes from the
+    "down" | "move" | "up" | "cancel" ("cancel" = the system ended the touch, e.g. SDL's
+    FINGER_CANCELED; it ends the finger like "up" and replays as "cancel"; anything else records
+    as "move"). Don't also record the mouse events the platform synthesizes from the
     touch (pygame: event.touch); replay recreates them. Does nothing unless recording()."""
     if not recording():
         return

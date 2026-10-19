@@ -119,7 +119,10 @@ typedef enum witness_event_type {
 } witness_event_type;
 
 typedef enum witness_touch_phase {
-    WITNESS_TOUCH_DOWN, WITNESS_TOUCH_MOVE, WITNESS_TOUCH_UP
+    WITNESS_TOUCH_DOWN, WITNESS_TOUCH_MOVE, WITNESS_TOUCH_UP,
+    WITNESS_TOUCH_CANCEL  /* appended last: the system ended the touch (SDL_EVENT_FINGER_CANCELED).
+                             Ends it like UP (finger no longer down, id freed), but it is not a
+                             completed tap; games that don't care may treat it as UP. */
 } witness_touch_phase;
 
 typedef struct witness_event {
@@ -128,7 +131,7 @@ typedef struct witness_event {
     char name[32];    /* KEY: key name ("a", "space", "left"); ACTION: action; PAD: button;
                          AXIS: axis; OTHER: the unrecognised "type" string */
     int down;         /* 1 pressed, 0 released, -1 not given (mouse move, axis, text).
-                         TOUCH: 1 on down, 0 on up, -1 on move */
+                         TOUCH: 1 on down, 0 on up or cancel, -1 on move */
     int has_pos;      /* MOUSE: 1 when x/y are set. TOUCH: always 1 */
     double x, y;      /* MOUSE / TOUCH: logical pixels, top-left origin */
     int button;       /* MOUSE: 0 left, 1 middle, 2 right; -1 when not a button event */
@@ -136,7 +139,7 @@ typedef struct witness_event {
     double value;     /* AXIS: -1..1 */
     char text[128];   /* TEXT: UTF-8 */
     int id;           /* TOUCH: finger, 0 = first finger down (stable from down to up) */
-    int phase;        /* TOUCH: WITNESS_TOUCH_DOWN / _MOVE / _UP */
+    int phase;        /* TOUCH: WITNESS_TOUCH_DOWN / _MOVE / _UP / _CANCEL */
     double pressure;  /* TOUCH: 0..1, 1 when not given (when recording, 0 also means not given) */
     int from_touch;   /* MOUSE: 1 = synthesized from finger 0 (like SDL_TOUCH_MOUSEID); skip it if
                          the game also handles the TOUCH event. Never recorded. */
@@ -267,10 +270,14 @@ WITNESS_API int witness_recording(void);
 WITNESS_API void witness_record_event(const witness_event *event);
 WITNESS_API void witness_record_key(const char *key, int down);
 WITNESS_API void witness_record_mouse(double x, double y, int button, int down); /* button -1 = move */
-/* A finger: id 0 = first finger, phase WITNESS_TOUCH_DOWN / _MOVE / _UP, logical pixels (convert
- * SDL's normalized 0..1 finger coordinates). Don't also record the mouse events the platform
- * synthesizes from touch (SDL: which == SDL_TOUCH_MOUSEID); replay recreates them. */
+/* A finger: id 0 = first finger, phase WITNESS_TOUCH_DOWN / _MOVE / _UP / _CANCEL, logical pixels
+ * (convert SDL's normalized 0..1 finger coordinates). Record SDL_EVENT_FINGER_CANCELED as
+ * WITNESS_TOUCH_CANCEL: it replays as a cancel, not an up. Don't also record the mouse events the
+ * platform synthesizes from touch (SDL: which == SDL_TOUCH_MOUSEID); replay recreates them.
+ * witness_record_touch records no pressure (replays use 1); witness_record_touch_ex also records
+ * the finger's pressure, 0..1 (SDL's event.tfinger.pressure); pressure <= 0 means not given. */
 WITNESS_API void witness_record_touch(int id, double x, double y, int phase);
+WITNESS_API void witness_record_touch_ex(int id, double x, double y, int phase, double pressure);
 /* End of frame: write one line with this frame's dt and queued events (flushed every frame,
  * so a crash keeps the replay). */
 WITNESS_API void witness_record_frame(double dt);
@@ -1258,7 +1265,7 @@ static void witness__track(const witness_event *e) {
             else witness__g.mouse_buttons &= ~(1 << e->button);
         }
     } else if (e->type == WITNESS_EV_TOUCH && e->id >= 0 && e->id < WITNESS__MAX_TOUCHES) {
-        witness__g.touch_down[e->id] = e->phase != WITNESS_TOUCH_UP;
+        witness__g.touch_down[e->id] = e->phase != WITNESS_TOUCH_UP && e->phase != WITNESS_TOUCH_CANCEL;
         witness__g.touch_x[e->id] = e->x;
         witness__g.touch_y[e->id] = e->y;
     }
@@ -1304,8 +1311,9 @@ static void witness__parse_event(const witness_value *v, witness_event *e) {
         e->has_pos = 1;
         e->x = witness_number(witness_get(v, "x"), 0);
         e->y = witness_number(witness_get(v, "y"), 0);
-        e->phase = strcmp(phase, "down") == 0 ? WITNESS_TOUCH_DOWN : strcmp(phase, "up") == 0 ? WITNESS_TOUCH_UP : WITNESS_TOUCH_MOVE;
-        e->down = e->phase == WITNESS_TOUCH_DOWN ? 1 : e->phase == WITNESS_TOUCH_UP ? 0 : -1;
+        e->phase = strcmp(phase, "down") == 0 ? WITNESS_TOUCH_DOWN : strcmp(phase, "up") == 0 ? WITNESS_TOUCH_UP
+                 : strcmp(phase, "cancel") == 0 ? WITNESS_TOUCH_CANCEL : WITNESS_TOUCH_MOVE;
+        e->down = e->phase == WITNESS_TOUCH_DOWN ? 1 : e->phase == WITNESS_TOUCH_MOVE ? -1 : 0;
         e->pressure = witness_number(witness_get(v, "pressure"), 1);
     } else {
         e->type = WITNESS_EV_OTHER;
@@ -1316,7 +1324,7 @@ static void witness__parse_event(const witness_value *v, witness_event *e) {
 /* Protocol shape of an event (shared by recording). */
 static void witness__write_event(witness_json *w, const witness_event *e) {
     static const char *const names[] = {"key", "mouse", "wheel", "text", "action", "pad", "axis"};
-    static const char *const phases[] = {"down", "move", "up"};
+    static const char *const phases[] = {"down", "move", "up", "cancel"};
     witness_json_begin_object(w);
     witness_json_field_string(w, "type", e->type == WITNESS_EV_TOUCH ? "touch" : e->type >= WITNESS_EV_OTHER ? e->name : names[e->type]);
     switch (e->type) {
@@ -1340,7 +1348,7 @@ static void witness__write_event(witness_json *w, const witness_event *e) {
             witness_json_field_int(w, "id", e->id);
             witness_json_field_number(w, "x", e->x);
             witness_json_field_number(w, "y", e->y);
-            witness_json_field_string(w, "phase", phases[e->phase >= WITNESS_TOUCH_DOWN && e->phase <= WITNESS_TOUCH_UP ? e->phase : WITNESS_TOUCH_MOVE]);
+            witness_json_field_string(w, "phase", phases[e->phase >= WITNESS_TOUCH_DOWN && e->phase <= WITNESS_TOUCH_CANCEL ? e->phase : WITNESS_TOUCH_MOVE]);
             if (e->pressure > 0 && e->pressure != 1) witness_json_field_number(w, "pressure", e->pressure);
             break;
         default: break;
@@ -1666,7 +1674,7 @@ static void witness__dispatch(const witness_value *m) {
             witness__parse_event(e, &parsed);
             witness__queue_event(&parsed);
             if (parsed.type == WITNESS_EV_TOUCH && parsed.id == 0 && !g->touch_native) {
-                /* mouse fallback: finger 0 is also the mouse (down -> button 0 down, move, up -> button up) */
+                /* mouse fallback: finger 0 is also the mouse (down -> button 0 down, move, up/cancel -> button up) */
                 witness_event mouse;
                 memset(&mouse, 0, sizeof mouse);
                 mouse.type = WITNESS_EV_MOUSE;
@@ -2092,6 +2100,10 @@ void witness_record_mouse(double x, double y, int button, int down) {
 }
 
 void witness_record_touch(int id, double x, double y, int phase) {
+    witness_record_touch_ex(id, x, y, phase, 0);
+}
+
+void witness_record_touch_ex(int id, double x, double y, int phase, double pressure) {
     witness_event e;
     if (!witness__g.rec) return;
     memset(&e, 0, sizeof e);
@@ -2100,10 +2112,10 @@ void witness_record_touch(int id, double x, double y, int phase) {
     e.has_pos = 1;
     e.x = x;
     e.y = y;
-    e.phase = phase == WITNESS_TOUCH_DOWN || phase == WITNESS_TOUCH_UP ? phase : WITNESS_TOUCH_MOVE;
-    e.down = e.phase == WITNESS_TOUCH_DOWN ? 1 : e.phase == WITNESS_TOUCH_UP ? 0 : -1;
+    e.phase = phase == WITNESS_TOUCH_DOWN || phase == WITNESS_TOUCH_UP || phase == WITNESS_TOUCH_CANCEL ? phase : WITNESS_TOUCH_MOVE;
+    e.down = e.phase == WITNESS_TOUCH_DOWN ? 1 : e.phase == WITNESS_TOUCH_MOVE ? -1 : 0;
     e.button = -1;
-    e.pressure = 1;
+    e.pressure = pressure > 0 ? (pressure < 1 ? pressure : 1) : 1;
     witness_record_event(&e);
 }
 

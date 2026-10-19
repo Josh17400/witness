@@ -77,6 +77,10 @@ namespace WitnessKit
         Down,
         Move,
         Up,
+        /// <summary>The system ended the touch (SDL's FINGER_CANCELED, Unity's TouchPhase.Canceled: the OS took
+        /// the gesture, focus was lost). Ends the finger like Up, but it is not a completed tap; games that don't
+        /// care may treat it as Up. Appended last so the values above keep their numbers.</summary>
+        Cancel,
     }
 
     /// <summary>One input event (protocol section 4). Unused fields keep their defaults.</summary>
@@ -87,7 +91,7 @@ namespace WitnessKit
         public string Type = "";
         public string Key;
         /// <summary>null for events without a down/up meaning (mouse moves, wheel, text, axis, touch moves).
-        /// Touch: true on down, false on up.</summary>
+        /// Touch: true on down, false on up or cancel.</summary>
         public bool? Down;
         /// <summary>Mouse and touch: logical pixels, top-left origin.</summary>
         public double X;
@@ -103,7 +107,7 @@ namespace WitnessKit
         public double Value;
         /// <summary>Touch: the finger, 0 = the first finger down (the same from down to up).</summary>
         public int Id;
-        /// <summary>Touch: down, move or up (a missing or unknown phase reads as Move).</summary>
+        /// <summary>Touch: down, move, up or cancel (a missing or unknown phase reads as Move).</summary>
         public WitnessTouchPhase Phase = WitnessTouchPhase.Move;
         /// <summary>Touch: 0..1, 1 when not given.</summary>
         public double Pressure = 1;
@@ -127,7 +131,7 @@ namespace WitnessKit
             return new WitnessEvent
             {
                 Type = "touch", Id = id, X = x, Y = y, Phase = phase, Pressure = pressure,
-                Down = phase == WitnessTouchPhase.Down ? true : phase == WitnessTouchPhase.Up ? false : (bool?)null,
+                Down = phase == WitnessTouchPhase.Down ? true : phase == WitnessTouchPhase.Move ? (bool?)null : false,
             };
         }
 
@@ -154,9 +158,10 @@ namespace WitnessKit
             {
                 e.Id = (int)WitnessJson.Long(WitnessJson.Get(o, "id"), 0);
                 string phase = WitnessJson.Str(WitnessJson.Get(o, "phase"));
-                e.Phase = phase == "down" ? WitnessTouchPhase.Down : phase == "up" ? WitnessTouchPhase.Up : WitnessTouchPhase.Move;
+                e.Phase = phase == "down" ? WitnessTouchPhase.Down : phase == "up" ? WitnessTouchPhase.Up
+                        : phase == "cancel" ? WitnessTouchPhase.Cancel : WitnessTouchPhase.Move;
                 e.Pressure = WitnessJson.Double(WitnessJson.Get(o, "pressure"), 1);
-                e.Down = e.Phase == WitnessTouchPhase.Down ? true : e.Phase == WitnessTouchPhase.Up ? false : (bool?)null;
+                e.Down = e.Phase == WitnessTouchPhase.Down ? true : e.Phase == WitnessTouchPhase.Move ? (bool?)null : false;
             }
             return e;
         }
@@ -178,7 +183,8 @@ namespace WitnessKit
                 case "axis": o["axis"] = Axis; o["value"] = Value; break;
                 case "touch":
                     o["id"] = Id; o["x"] = X; o["y"] = Y;
-                    o["phase"] = Phase == WitnessTouchPhase.Down ? "down" : Phase == WitnessTouchPhase.Up ? "up" : "move";
+                    o["phase"] = Phase == WitnessTouchPhase.Down ? "down" : Phase == WitnessTouchPhase.Up ? "up"
+                        : Phase == WitnessTouchPhase.Cancel ? "cancel" : "move";
                     if (Pressure > 0 && Pressure != 1) o["pressure"] = Pressure;
                     return o;   // a touch's down/up is its phase
                 default:
@@ -690,7 +696,7 @@ namespace WitnessKit
         /// <summary>
         /// Queues protocol events (the "events" array of an input command). Mouse fallback: unless the hello
         /// set Touch, each touch of finger 0 is followed by the matching mouse event (down: button 0 down at
-        /// x,y; move: a move; up: button 0 up), flagged FromTouch. Other fingers never make mouse events.
+        /// x,y; move: a move; up or cancel: button 0 up), flagged FromTouch. Other fingers never make mouse events.
         /// </summary>
         public static void QueueInput(List<object> events)
         {
@@ -864,7 +870,9 @@ namespace WitnessKit
         /// <summary>
         /// Normal play: queues a finger for the next RecordFrame line. id 0 = the first finger down; x/y in the
         /// same logical pixels Witness injects (convert from the engine's screen or normalized coordinates).
-        /// Don't also record the mouse events the platform synthesizes from touch. No-op unless recording.
+        /// Record a touch the system ended (SDL's FINGER_CANCELED, Unity's TouchPhase.Canceled) as Cancel: it
+        /// replays as "cancel". Don't also record the mouse events the platform synthesizes from touch. No-op
+        /// unless recording.
         /// </summary>
         public static void RecordTouch(int id, double x, double y, WitnessTouchPhase phase, double pressure = 1)
         {
