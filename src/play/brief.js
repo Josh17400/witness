@@ -37,7 +37,7 @@ press <key> [xN] · hold <key> <s> · wait [s] · stop · respawn · modifiers: 
 GOAL: ${goal || "play the game and see how far you get"}
 PERSONA: ${PERSONAS[P].text}.
 ${live || watch ? `BUDGET: about ${minutes} minutes of game time (the session shows it as [t …s]).
-THE GAME IS LIVE: it keeps running in real time while you think${watch ? " (and a person is watching it)" : ""}. Decide quickly. Your last order keeps running until it's done or you give a new one; with nothing ordered the autopilot stands by (holds position, guards, shoots back). A \`do\` replaces the plan at once and comes back after about 4 s of game time, or sooner if the order finishes or something important happens; the game doesn't stop when it comes back. Prefer longer orders that keep you busy ("explore north", "goto <far thing>", "fight nearest enemy") over many tiny ones. To keep your order running and just hear what happens next, use the WAIT command. Enemies met on the way are fought automatically and your order then carries on.` : `BUDGET: about ${minutes} minutes of GAME time (the session shows it as [t …s]). Game time only passes inside \`do\` orders; the game is paused while you think, so take your time.`}
+THE GAME IS LIVE: it keeps running in real time while you think${watch ? " (and a person is watching it)" : ""}. Decide quickly. Your last order keeps running until it's done or you give a new one; with nothing ordered the autopilot stands by (holds position, guards, shoots back). A \`do\` replaces the plan at once and comes back after about 4 s of game time, or sooner if the order finishes or something important happens; the game doesn't stop when it comes back. Prefer longer orders that keep you busy ("explore north", "goto <far thing>", "fight nearest enemy") over many tiny ones. To keep your order running and just hear what happens next, run the NEXT command (it gives no new order). Enemies met on the way are fought automatically and your order then carries on.` : `BUDGET: about ${minutes} minutes of GAME time (the session shows it as [t …s]). Game time only passes inside \`do\` orders; the game is paused while you think, so take your time.`}
 
 HOW IT WORKS: you give plain-word orders; an autopilot carries them out frame by frame (${does}). You decide WHAT to do and WHY. After every order you get a short text observation: your hp and stats, why the order stopped, what is near (distance in map cells and compass direction, north = up), a small map, dialogue, recent events.
 
@@ -45,7 +45,7 @@ COMMANDS (run with your Bash tool, one at a time, exactly like this; each return
   start:  ${start}
   order:  ${W} do "<orders>" -s ${name}
   look:   ${W} look -s ${name}${live || watch ? `
-  wait:   ${W} next -s ${name}          (keep your order running; returns at the next important moment or after ~4 s)` : ""}
+  next:   ${W} next -s ${name}          (keep your order running; returns at the next important moment or after ~4 s)` : ""}
   screen: ${W} shot -s ${name}          (prints a PNG path: open it with your Read tool to SEE the game)
   note:   ${W} note "<what you noticed>" --bug|--confusing|--fun|--idea -s ${name}
   end:    ${W} end -s ${name} --fun <1-5> --difficulty <1-5> --feedback "<3-6 sentences>"
