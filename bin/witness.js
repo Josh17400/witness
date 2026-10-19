@@ -237,10 +237,6 @@ const CMD_HELP = {
       safe-area margin, ⚠ edges almost aligned (1..--align px apart). Without state.ui (or with --pixels): text-like
       rows and solid panels found from pixels, a weaker heuristic (marked as such). --window runs once per size (the
       reserved reset param) and says what breaks only at one size. --out: boxes coloured by status, safe area in blue.
-  colorblind [shot.png] [--at 1] [--type protan|deutan|tritan|achroma|all] [--colors name=#hex,...] [--types Wolf,Guard]
-     [--a <mask> --b <mask>] [--min-de 20] [--out dir] [--no-images]
-      colour-vision deficiency (Machado 2009, linear RGB): writes <name>-cvd.png (normal + each type side by side)
-      and one picture per type, and reports which key colours stop being distinguishable (ΔE under --min-de that
       ✖ the same text shown twice at once (both rects; from pixels: rows with the same ink, a ⚠; buttons, icons, text
       in buttons, 3+ copies and copies on same-size cards are labels that repeat on purpose). ✖ text not held by a
       panel/button over a busy background (no plate): over 10% of its glyph edges (text pixel vs the background pixel
@@ -276,6 +272,10 @@ const CMD_HELP = {
       (day → night: other colours, same places). An entity without an id is hidden by type: its diff is cut to the
       part at its position. ✖ when a surface's median < --min; nothing judged is ✖ too. --expect "worstMedianRatio >= 3".
       --out: each figure and its ground ring, red where the edge is under --min.
+  colorblind [shot.png] [--at 1] [--type protan|deutan|tritan|achroma|all] [--colors name=#hex,...] [--types Wolf,Guard]
+     [--a <mask> --b <mask>] [--min-de 20] [--out dir] [--no-images]
+      colour-vision deficiency (Machado 2009, linear RGB): writes <name>-cvd.png (normal + each type side by side)
+      and one picture per type, and reports which key colours stop being distinguishable (ΔE under --min-de that
       were distinct normally). Key colours: --colors, else (driving the game) each entity type's sprite colour
       (sprites fitted to state positions, like align) + the background, else the picture's most common colours.
       --a/--b: the contrast of two masks under each type (as in contrast).

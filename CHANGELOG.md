@@ -3,7 +3,7 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
-## 0.7.0 (unreleased)
+## 0.7.0 (2026-10-19)
 
 **Chart v2: compare runs, paths, heatmaps, histograms**
 - `witness trace --compare <variant>`: the same trace run twice (the `witness ab` variants: env var, `params={...}`,
@@ -264,20 +264,20 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 10. *Optional:* `measure ui --safe`: pick the preset for how the game ships (`iphone-safari-portrait` for a Safari
     tab, `iphone-portrait` for a Home Screen web app, `iphone-max-*` for 430 pt phones); a letterboxed canvas is now
     fitted (`--fit contain`), so side insets that fall in the bars no longer fail.
-9. If a test or script gates on `measure ui` (`ok`, `problems`, `lowContrast`): two new ✖ kinds can appear (`duplicate`,
+11. If a test or script gates on `measure ui` (`ok`, `problems`, `lowContrast`): two new ✖ kinds can appear (`duplicate`,
    `no-plate`), and text over a busy background is now judged by its worst glyph edge (`no-plate`) instead of the
    averaged `contrast` finding. Re-run it once and fix or accept what it finds.
-10. *Optional:* honour the reserved reset param `hide: [ids or type names]` (don't draw those entities; change
+12. *Optional:* honour the reserved reset param `hide: [ids or type names]` (don't draw those entities; change
    nothing else) so `measure figure` gets exact silhouettes; without it the silhouette is estimated from the
    entity's state `box`/`rect` or the sprite at its position. Phone/web builds: `measure ui --safe iphone-landscape`
    (or `iphone-portrait`, `iphone-se`, `ipad`) on a screenshot of the phone-sized layout; list toasts in `state.ui`
    only while they show, so `measure ui --from/--to` can catch repeats.
-11. If a script gates on `measure scale`'s `ok`: fractional or smoothed pictures now fail; re-check them.
-12. *Optional, web games:* re-vendor `adapters/js/witness.js` (determinism fix for sounds started at `currentTime`,
+13. If a script gates on `measure scale`'s `ok`: fractional or smoothed pictures now fail; re-check them.
+14. *Optional, web games:* re-vendor `adapters/js/witness.js` (determinism fix for sounds started at `currentTime`,
    gesture marking), run `witness doctor --device iphone-15` (and `--engine webkit` after
    `npx playwright install webkit`), and `witness doctor --no-auto-unlock`: if audio stays suspended, call
    `ctx.resume()` inside the touchend/click/keydown handler. Pin it with a test reading `web.audio.state`.
-13. *Optional, C/C++ web builds (Emscripten):* re-vendor `witness.h`, copy `witness_emscripten.js` next to it, link it
+15. *Optional, C/C++ web builds (Emscripten):* re-vendor `witness.h`, copy `witness_emscripten.js` next to it, link it
    with `--pre-js`, and skip `emscripten_set_main_loop` in witness mode (adapters/cpp/GUIDE.md §13). Native builds
    need nothing.
 

@@ -1,7 +1,7 @@
 ---
 name: witness-playtester
-description: For a SUBAGENT that was asked to playtest a game through `witness play` (start a session, give orders, read observations, take notes, end with feedback). Not for the main agent that builds games or wires up Witness; that agent uses the `witness` skill and spawns playtesters.
-when_to_use: You were spawned as a playtester, your prompt asks you to play a game with `witness play` commands, or it hands you a `witness play start` command. Do not use it to build, test or debug game code.
+description: 'For a SUBAGENT that was asked to playtest a game through `witness play` (start a session, give orders, read observations, take notes, end with feedback). Not for the main agent that builds games or wires up Witness; that agent uses the `witness` skill and spawns playtesters.'
+when_to_use: 'You were spawned as a playtester, your prompt asks you to play a game with `witness play` commands, or it hands you a `witness play start` command. Do not use it to build, test or debug game code.'
 ---
 
 # Witness playtester: play the game, then report
