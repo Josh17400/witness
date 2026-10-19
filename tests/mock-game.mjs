@@ -58,6 +58,8 @@
 //                  "Bob" at 200,40 and "Ann" at 260,140, 6×6 red squares; hidden by type). MOCK_FIGURE=sort adds two
 //                  untracked props tied on y at 150,113 (5×11, red and blue): whenever anything is hidden the other one
 //                  is drawn on top (an unstable sort), so a hide diff also changes 55 px far from the hidden entity.
+//                  MOCK_FIGURE_DX=200 draws the player 200 px right of its state position (a camera the state doesn't
+//                  show); MOCK_FIGURE_BAR=1 adds a 15×2 health bar 3 px above the player's sprite (hidden with it).
 import net from "node:net";
 import { encodePNG } from "../src/media/png.js";
 import { glyph } from "../src/media/font.js";
@@ -265,7 +267,11 @@ function screenshot() {
   // screen = (world - camera) × zoom; MOCK_ALIGN draws coin 12 six screen pixels left of its state position
   const blob = (p, r, c, dx = 0) => { const R = r * ZOOM, sx = Math.round((p[0] - cam) * ZOOM) + dx, sy = Math.round((p[1] - (CAMERA ? camY : 0)) * ZOOM); for (let y = -R; y <= R; y++) for (let x = -R; x <= R; x++) if (x * x + y * y <= R * R) put(sx + x, sy + y, ...c); };
   coins.forEach((c) => blob(c.pos, 5, [255, 210, 60], ALIGN && c.id === 12 ? -6 : 0));
-  if (!hidden.has("1") && !hidden.has("Player")) blob(player.pos, bigPlayer ? 9 : 7, [80, 200, 255]);
+  if (!hidden.has("1") && !hidden.has("Player")) {
+    const dx = +(process.env.MOCK_FIGURE_DX || 0), R = bigPlayer ? 9 : 7;
+    blob(player.pos, R, [80, 200, 255], dx);
+    if (process.env.MOCK_FIGURE_BAR) { const sx = Math.round((player.pos[0] - cam) * ZOOM) + dx, sy = Math.round((player.pos[1] - (CAMERA ? camY : 0)) * ZOOM); for (let y = sy - R - 5; y < sy - R - 3; y++) for (let x = sx - 7; x <= sx + 7; x++) put(x, y, 230, 40, 40); }
+  }
   if (ANIM) {
     const [ox, oy] = [[-4, -4], [0, -4], [0, 0], [-4, 0]][poseAt(frame)];
     const sx = Math.round((player.pos[0] - cam) * ZOOM), sy = Math.round((player.pos[1] - (CAMERA ? camY : 0)) * ZOOM);

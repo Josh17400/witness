@@ -597,6 +597,79 @@ export function regionAt(g, sx, sy, R, near = 4) {
   return dx * dx + dy * dy <= near * near;
 }
 
+/** The gap in px between two boxes {x, y, w, h} (0 when they touch or overlap). */
+const boxGap = (a, b) => Math.hypot(Math.max(0, a.x - (b.x + b.w), b.x - (a.x + a.w)), Math.max(0, a.y - (b.y + b.h), b.y - (a.y + a.h)));
+
+/**
+ * Did a diff region vanish to show the ground (a part of the hidden thing: a marker, bar, label, shadow), or does the
+ * image without it hold other paint there (a draw-order change: tied sprites re-sorted)? Vanished when most of the
+ * region's pixels in the without image B match a colour on the ground just around it in the with image A (ΔE ≤ 10).
+ */
+export function regionVanished(g, A, B, mask, near) {
+  const W = A.width, H = A.height, ring = [];
+  const x0 = Math.max(0, g.x - 2), y0 = Math.max(0, g.y - 2), x1 = Math.min(W - 1, g.x + g.w + 1), y1 = Math.min(H - 1, g.y + g.h + 1);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    if (y !== y0 && y !== y1 && x !== x0 && x !== x1) continue;
+    const i = y * W + x;
+    if (!mask[i]) ring.push([A.data[i * 4], A.data[i * 4 + 1], A.data[i * 4 + 2]]);
+  }
+  if (!ring.length) return false;
+  const step = Math.max(1, Math.floor(g.px.length / 400));
+  let n = 0, hit = 0;
+  for (let k = 0; k < g.px.length; k += step) {
+    const o = g.px[k] * 4, col = [B.data[o], B.data[o + 1], B.data[o + 2]];
+    n++;
+    if (ring.some((r) => near(col, r))) hit++;
+  }
+  return hit >= 0.6 * n;
+}
+
+/**
+ * Which with/without diff regions are the hidden figure. `at`: the regions at its state position or box (may be
+ * empty); sx, sy: its screen point (NaN when unknown); trusted: the screen point comes from a projection the entities
+ * or state.camera confirm (not just screen = state).
+ *  - kept: the regions at it; when none touches it, the nearest one (trusted point) or else the largest (`unplaced`);
+ *  - parts: other regions that vanished to show the ground within one figure size of the kept ones (a health bar, a
+ *    quest marker, a name tag: part of the hidden thing), added to the silhouette;
+ *  - others: the rest, each { g, kind: "vanished" | "draw" } (draw: other paint there without it, a draw-order change).
+ * No per-pixel spreads (a region can hold 200k+ pixels).
+ */
+export function figureRegions(regions, at, { sx = NaN, sy = NaN, trusted = false, A, B, mask, near }) {
+  let kept = at, unplaced = false, how = "at";
+  if (!kept.length) {
+    unplaced = true;
+    if (Number.isFinite(sx) && trusted) {
+      const d = (g) => boxGap(g, { x: sx, y: sy, w: 0, h: 0 });
+      kept = [regions.reduce((a, g) => (d(g) < d(a) ? g : a))]; how = "nearest";
+    } else { kept = [regions.reduce((a, g) => (g.px.length > a.px.length ? g : a))]; how = "largest"; }
+  }
+  const K = kept.reduce((b, g) => ({ x: Math.min(b.x, g.x), y: Math.min(b.y, g.y), x1: Math.max(b.x1, g.x + g.w), y1: Math.max(b.y1, g.y + g.h) }), { x: Infinity, y: Infinity, x1: -Infinity, y1: -Infinity });
+  const box = { x: K.x, y: K.y, w: K.x1 - K.x, h: K.y1 - K.y }, size = Math.max(box.w, box.h);
+  const parts = [], others = [];
+  for (const g of regions) {
+    if (kept.includes(g)) continue;
+    const kind = A && B ? (regionVanished(g, A, B, mask, near) ? "vanished" : "draw") : "vanished";
+    if (kind === "vanished" && boxGap(g, box) <= size) parts.push(g); else others.push({ g, kind });
+  }
+  return { kept, parts, others, unplaced, how };
+}
+
+/** The elsewhere report from figureRegions().others: { pixels, regions: [[x,y,w,h]], draw, vanished } (largest first). */
+function elsewhereOf(others) {
+  if (!others.length) return null;
+  const s = [...others].sort((a, b) => b.g.px.length - a.g.px.length);
+  return { pixels: s.reduce((a, o) => a + o.g.px.length, 0), regions: s.map((o) => [o.g.x, o.g.y, o.g.w, o.g.h]), draw: s.filter((o) => o.kind === "draw").length, vanished: s.filter((o) => o.kind === "vanished").length };
+}
+
+/** The ⚠ line for diff regions left out of a figure's silhouette. */
+function elsewhereLine(e) {
+  const g = e.regions[0], n = e.regions.length;
+  const why = !e.vanished ? "draw order / unstable sort? (other paint is there without it)"
+    : !e.draw ? "parts that vanished with it, away from it (a marker, label, shadow?): give it a box to include them"
+    : `${e.draw} with other paint there without it (draw order / unstable sort?), ${e.vanished} that vanished with it (a detached part?)`;
+  return `⚠ ${e.pixels} px changed elsewhere (${n === 1 ? "1 region:" : `${n} regions, largest`} ${g[2]}×${g[3]} at ${g[0]},${g[1]}): ${why}. Left out of the silhouette.`;
+}
+
 async function figureMeasure(m, c, files, opt) {
   const of = val(opt.of);
   const edge = val(opt.edge) != null ? Math.max(1, Math.round(+opt.edge)) : 1;
@@ -616,12 +689,26 @@ async function figureMeasure(m, c, files, opt) {
     const img = readImage(m, files[0]);
     const spec = val(opt.mask);
     if (!spec) die("usage: witness measure figure <shot.png> --mask diff:<without.png> | #rrggbb[~tol] | x,y,w,h   (or --of <entity> to drive the game)");
-    let mask, method;
-    if (spec.startsWith("diff:")) { const p = path.resolve(spec.slice(5)); if (!fs.existsSync(p)) die(`no such image: ${spec.slice(5)}`); mask = m.maskDiff(img, fs.readFileSync(p), { threshold }).mask; method = `with/without diff (${path.basename(p)})`; }
+    let mask, method, elsewhere = null, parts = null;
+    if (spec.startsWith("diff:")) {
+      // no position to anchor to: the largest region (plus parts beside it that vanished too), the others reported
+      const p = path.resolve(spec.slice(5)); if (!fs.existsSync(p)) die(`no such image: ${spec.slice(5)}`);
+      const B = readImage(m, p), d = m.maskDiff(img, B, { threshold });
+      mask = d.mask; method = `with/without diff (${path.basename(p)})`;
+      const regions = d.count ? diffRegions(d.mask, img.width, img.height) : [];
+      if (regions.length > 1) {
+        const fr = figureRegions(regions, [], { A: img, B, mask: d.mask, near: (a, b) => c.deltaE(a, b) <= 10 });
+        mask = new Uint8Array(img.width * img.height);
+        for (const g of [...fr.kept, ...fr.parts]) for (const i of g.px) mask[i] = 1;
+        elsewhere = elsewhereOf(fr.others);
+        if (fr.parts.length) parts = fr.parts.map((g) => [g.x, g.y, g.w, g.h]);
+        method += `, its largest region${fr.parts.length ? ` + ${fr.parts.length} part${fr.parts.length > 1 ? "s" : ""} beside it that vanished too` : ""} (${regions.length} regions; pass a rect to choose)`;
+      }
+    }
     else if (spec.startsWith("#") || spec.startsWith("rgb")) { const [col, tol] = spec.split("~"); mask = m.maskFromColor(img, col, +(tol || 0)); method = `colour ${spec}`; }
     else { mask = rectSilhouette(c, img, parseRect(spec)); method = `rect ${spec} minus its surroundings' colours (a guess)`; }
     if (!mask || !mask.some((v) => v)) die(`--mask ${spec} selects no pixels`);
-    shots.push({ label: path.basename(String(files[0])), img, mask, method, target: "figure" });
+    shots.push({ label: path.basename(String(files[0])), img, mask, method, target: "figure", elsewhere, parts });
   } else {
     if (!of) die("usage: witness measure figure --of <Type | id | state.path> [--scenes a,b] [--params '[{...},{...}]'] [--at 1,2] [--without \"params={...}\"]");
     const { evaluate } = await import("../core/expr.js");
@@ -689,22 +776,30 @@ async function figureMeasure(m, c, files, opt) {
           const hiddenPlaces = without ? [] : (cap.snap?.state?.entities || []).filter((e) => e && (hiddenSet.has(String(e.id)) || (e.id == null && hiddenSet.has(String(e.type ?? e.kind))))).map((e) => placeOf(figureTargets({ state: { entities: [e] } }, String(e.id ?? e.type ?? e.kind), evaluate)[0] || {}));
           for (const t of targets) {
             const { sx, sy, R } = placeOf(t);
-            let mask = null, method = null, elsewhere = null;
+            let mask = null, method = null, elsewhere = null, parts = null, unplaced = null;
             if (regions.length) {
-              // keep the region(s) at the entity's position or box; others are reported (a draw-order change far
-              // away, e.g. an unstable sort reordering tied sprites, must not grow the silhouette)
-              let mine = regions.filter((g) => regionAt(g, sx, sy, R)), fallback = false;
-              if (!mine.length && Number.isFinite(sx)) {
-                const d2 = (g) => Math.min(...g.px.map((i) => { const x = i % cap.img.width, y = (i - x) / cap.img.width; return (x - sx) ** 2 + (y - sy) ** 2; }));
-                mine = [regions.reduce((a, g) => (d2(g) < d2(a) ? g : a))]; fallback = true;
+              // keep the region(s) at the entity's position or box, plus parts beside them that vanished with it (a
+              // health bar, a quest marker); others are reported (a draw-order change far away, e.g. an unstable sort
+              // reordering tied sprites, must not grow the silhouette). Regions at another hidden thing are its own.
+              const placed = Number.isFinite(sx) || !!R;
+              const theirs = (g) => targets.some((o) => { if (o === t) return false; const q = placeOf(o); return regionAt(g, q.sx, q.sy, q.R); }) || hiddenPlaces.some((p) => regionAt(g, p.sx, p.sy, p.R));
+              const pool = regions.filter((g) => regionAt(g, sx, sy, R) || !theirs(g));
+              let mine = regions, fr = null;   // no position or box: the whole diff
+              if (placed && pool.length) {
+                fr = figureRegions(pool, pool.filter((g) => regionAt(g, sx, sy, R)), { sx, sy, trusted: !!R || proj.assumed !== "screen = state", A: cap.img, B, mask: diff.mask, near: (a, b) => c.deltaE(a, b) <= 10 });
+                mine = [...fr.kept, ...fr.parts];
+                elsewhere = elsewhereOf(fr.others);
+                if (fr.parts.length) parts = fr.parts.map((g) => [g.x, g.y, g.w, g.h]);
+                if (fr.unplaced) unplaced = { at: R ? [Math.round(R.x), Math.round(R.y), Math.round(R.w), Math.round(R.h)] : [Math.round(sx), Math.round(sy)], how: fr.how };
               }
-              if (!mine.length) mine = regions;   // no position or box: the whole diff
               mask = new Uint8Array(cap.img.width * cap.img.height);
               for (const g of mine) for (const i of g.px) mask[i] = 1;
-              const others = regions.filter((g) => !mine.includes(g) && !targets.some((o) => { if (o === t) return false; const q = placeOf(o); return regionAt(g, q.sx, q.sy, q.R); }) && !hiddenPlaces.some((p) => regionAt(g, p.sx, p.sy, p.R)));
-              if (others.length) elsewhere = { pixels: others.reduce((a, g) => a + g.px.length, 0), regions: others.sort((a, b) => b.px.length - a.px.length).map((g) => [g.x, g.y, g.w, g.h]) };
               method = without ? `with/without diff (--without ${without.label})` : `with/without diff (reset param hide: ${JSON.stringify(hide)}${byType ? Number.isFinite(sx) ? `: no id, so every ${targets0.find((t) => t.id == null).type} was hidden; the part at its position kept` : `: no id, so every ${targets0.find((t) => t.id == null).type} was hidden and it has no position: the diff may hold the others` : ""})`;
-              if (regions.length > 1 && Number.isFinite(sx)) method += fallback ? `, the region nearest its position ${Math.round(sx)},${Math.round(sy)} (none touches it)` : `, the region${mine.length > 1 ? "s" : ""} at its ${R ? "box" : "position"}`;
+              if (fr && regions.length > 1) {
+                const p = fr.parts.length ? ` + ${fr.parts.length} part${fr.parts.length > 1 ? "s" : ""} beside it that vanished too (${fr.parts.map((g) => `${g.w}×${g.h} at ${g.x},${g.y}`).join(", ")})` : "";
+                method += fr.how === "at" ? `, the region${fr.kept.length > 1 ? "s" : ""} at its ${R ? "box" : "position"}${p}`
+                  : fr.how === "nearest" ? `, the region nearest its position ${Math.round(sx)},${Math.round(sy)}${p}` : `, the largest region${p}`;
+              }
             }
             const note = runB && !(diff && diff.count) ? (without ? "--without changed no pixels" : `the game ignored the hide param (${JSON.stringify(hide)})`) : null;
             if (!mask && R) {
@@ -716,7 +811,7 @@ async function figureMeasure(m, c, files, opt) {
               if (mask) method = `the sprite at its state position ${Math.round(sx)},${Math.round(sy)} (${proj.assumed ? proj.assumed : "fitted to the entities"}; a guess: edge pixels that match the ground drop out${note ? `; ${note}` : ""})`;
             }
             if (!mask) { shots.push({ label, target: t.label, error: `no silhouette for ${t.label}${note ? ` (${note})` : ""}: give it a box/rect in the state, support the reset param "hide", or pass --without` }); continue; }
-            shots.push({ label, img: cap.img, mask, method, target: t.label, mapLabel, scene, params, f: cap.f, elsewhere, hint: without ? null : "draw order / unstable sort?" });
+            shots.push({ label, img: cap.img, mask, method, target: t.label, mapLabel, scene, params, f: cap.f, elsewhere, parts, unplaced, proj: proj.assumed || null });
           }
         }
       }
@@ -785,7 +880,8 @@ async function figureMeasure(m, c, files, opt) {
     if (x.error) { lines.push(`  ✖ ${x.label ? `${x.label}: ` : ""}${x.error}`); continue; }
     const b = x.r.bbox;
     lines.push(`  ${x.label} · ${x.target}: ${b.w}×${b.h} px at ${b.x},${b.y}, ${x.r.figure} px, ring ${x.r.ground} px · silhouette: ${x.method}`);
-    if (x.elsewhere) { const e = x.elsewhere, g = e.regions[0], n = e.regions.length; lines.push(`    ⚠ ${e.pixels} px changed elsewhere (${n === 1 ? "1 region:" : `${n} regions, largest`} ${g[2]}×${g[3]} at ${g[0]},${g[1]})${x.hint ? `: ${x.hint}` : ""} Left out of the silhouette.`); }
+    if (x.unplaced) lines.push(`    ⚠ its state ${x.unplaced.at.length > 2 ? `box ${x.unplaced.at.slice(0, 2).join(",")} ${x.unplaced.at[2]}×${x.unplaced.at[3]} touches` : `position ${x.unplaced.at.join(",")} is on`} no changed pixel${x.proj === "screen = state" ? " (screen = state was assumed: world coords? add state.camera or a box)" : ""}: measured the ${x.unplaced.how} changed region instead`);
+    if (x.elsewhere) lines.push(`    ${elsewhereLine(x.elsewhere)}`);
     // the small surfaces judged together come first: they decide when nothing else is big enough
     for (const s of [...x.r.surfaces.filter((q) => q.combined), ...x.r.surfaces.filter((q) => !q.combined)].slice(0, 8)) lines.push(`    ${fmtS(s)}`);
     if (x.r.surfaces.length > 8) lines.push(`    … ${x.r.surfaces.length - 8} more surfaces (--json)`);
@@ -803,8 +899,8 @@ async function figureMeasure(m, c, files, opt) {
   const env = envelope("measure figure", {
     ok: !failing.length && !errors && judged.length > 0,
     verdict: !judged.length ? "no surface judged" : failing.length ? `${failing.length} surface${failing.length > 1 ? "s" : ""} under ${min}:1 (median edge): ${failing.slice(0, 4).map((f) => `${f.surface} ${f.median}:1 at ${f.shot}`).join(", ")}` : errors ? `${errors} shot${errors > 1 ? "s" : ""} without a silhouette` : `edge contrast ≥ ${min}:1 (median) on every surface in ${good.length} shot${good.length > 1 ? "s" : ""}`,
-    summary: { shots: good.length, errors, warnings: good.filter((x) => x.elsewhere).length, surfaces: judged.length, failing: failing.length, min, worstRatio: lowest("ratio", "worst"), worstMedianRatio: lowest("ratio", "median"), worstDeltaE: lowest("deltaE", "worst"), worstMedianDeltaE: lowest("deltaE", "median"), worstSurface: worstS ? sName(worstS) : null },
-    data: { edge, merge, minShare: minShareF, shots: results.map((x) => (x.error ? { shot: x.label, target: x.target, error: x.error } : { shot: x.label, target: x.target, scene: x.scene ?? null, params: x.params ?? null, frame: x.f ?? null, silhouette: x.method, ...(x.elsewhere ? { elsewhere: x.elsewhere } : {}), bbox: x.r.bbox, figurePixels: x.r.figure, ringPixels: x.r.ground, surfaces: x.r.surfaces, all: x.r.all })), failing },
+    summary: { shots: good.length, errors, warnings: good.filter((x) => x.elsewhere || x.unplaced).length, surfaces: judged.length, failing: failing.length, min, worstRatio: lowest("ratio", "worst"), worstMedianRatio: lowest("ratio", "median"), worstDeltaE: lowest("deltaE", "worst"), worstMedianDeltaE: lowest("deltaE", "median"), worstSurface: worstS ? sName(worstS) : null },
+    data: { edge, merge, minShare: minShareF, shots: results.map((x) => (x.error ? { shot: x.label, target: x.target, error: x.error } : { shot: x.label, target: x.target, scene: x.scene ?? null, params: x.params ?? null, frame: x.f ?? null, silhouette: x.method, ...(x.elsewhere ? { elsewhere: x.elsewhere } : {}), ...(x.parts ? { parts: x.parts } : {}), ...(x.unplaced ? { unplaced: x.unplaced } : {}), bbox: x.r.bbox, figurePixels: x.r.figure, ringPixels: x.r.ground, surfaces: x.r.surfaces, all: x.r.all })), failing },
     files: written,
   });
   return emit(env, lines.join("\n"), opt);
