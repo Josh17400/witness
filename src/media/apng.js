@@ -1,6 +1,6 @@
 // Witness media: animated PNG (APNG) clips, no dependencies (node:zlib only).
 //
-//   encodeAPNG(frames, { delays, fps, plays, maxBytes })  -> { png, stored, delays, bytes }
+//   encodeAPNG(frames, { delays, fps, plays })  -> { png, stored, delays, sourceIndex, rects, bytes }
 //   decodeAPNG(buffer)                                    -> { width, height, plays, frames: [...], chunks }
 //
 // APNG = a normal PNG (IHDR, IDAT = the first frame, which every PNG viewer shows) plus three chunk types:
