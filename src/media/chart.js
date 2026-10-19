@@ -4,7 +4,9 @@
 //   renderChart(spec) -> Raster (to composite further)
 //
 // spec = { title, series: [{ label, points: [[t, value], ...], color?, step? }],
-//          width: 1280, height: 640, markers?: [{ t, label }], subtitle? }
+//          width: 1280, height: 640, markers?: [{ t, label, color? }], subtitle?,
+//          inputs?: [{ label, t0, t1 }] (held inputs: one row per label under the plot, a tick line at each press),
+//          fps? (names frames on the time axis) }
 //
 // Dark style: one time axis in seconds shared by all series, gridlines, a legend with each
 // series' final value, and dashed marker lines (e.g. replay F8 marks). Series whose value
@@ -12,7 +14,8 @@
 // with their own value axis, so a 0..1 flag and a 0..900 position are both readable;
 // similar series share a lane.
 // Values: numbers plot as lines; booleans as 0/1 steps (axis labelled false/true);
-// null, undefined, NaN, ±Infinity and non-numeric strings leave a gap in the line.
+// null, undefined, NaN, ±Infinity and non-numeric strings leave a gap in the line. A series with no
+// numeric sample at all stays in the legend as "no data" (so a typo in an expression is visible).
 
 import { Raster } from "./raster.js";
 
@@ -50,7 +53,10 @@ export function fmtTick(v, step, ref = Math.abs(v)) {
   if (Math.abs(v) < step * 1e-6) v = 0;
   const unit = ref >= 1e6 ? 1e6 : ref >= 1e4 ? 1e3 : 1, suffix = unit === 1e6 ? "M" : unit === 1e3 ? "k" : "";
   if (v === 0 && unit !== 1) return "0";
-  const d = Math.max(0, Math.min(6, -Math.floor(Math.log10(step / unit) + 1e-9)));
+  // as many decimals as the step really has (0.25 -> 2, 2.5 -> 1, 0.5 -> 1, 5 -> 0), so every tick is exact
+  const x = step / unit;
+  let d = 0;
+  while (d < 6 && Math.abs(x * 10 ** d - Math.round(x * 10 ** d)) > 1e-6 * Math.max(1, x * 10 ** d)) d++;
   return (v / unit).toFixed(d) + suffix;
 }
 
@@ -71,8 +77,8 @@ function numeric(v) {
   return null;
 }
 
-/** Normalize the spec's series: sorted points, gaps as null, booleans flagged. */
-function prepare(series) {
+/** Normalize the spec's series: sorted points, gaps as null, booleans flagged (series without numbers included). */
+function prepareAll(series) {
   return (Array.isArray(series) ? series : []).map((s, i) => {
     const raw = (Array.isArray(s?.points) ? s.points : []).filter((p) => Array.isArray(p) && Number.isFinite(+p[0]));
     const present = raw.filter((p) => p[1] !== null && p[1] !== undefined);
@@ -85,8 +91,9 @@ function prepare(series) {
       step: !!s?.step || isBool, isBool, points, valid,
       last: valid.length ? valid[valid.length - 1][1] : null,
     };
-  }).filter((s) => s.valid.length);
+  });
 }
+const prepare = (series) => prepareAll(series).filter((s) => s.valid.length);
 
 function rangeOf(points) {
   let lo = Infinity, hi = -Infinity;
@@ -128,8 +135,12 @@ function labelRows(items, maxRows) {
 export function renderChart(spec = {}) {
   const W = Math.max(320, Math.min(4096, Math.round(spec.width ?? 1280)));
   let H = Math.max(200, Math.min(4096, Math.round(spec.height ?? 640)));
-  const series = prepare(spec.series);
-  const markers = (Array.isArray(spec.markers) ? spec.markers : []).filter((m) => m && Number.isFinite(+m.t)).map((m) => ({ t: +m.t, label: String(m.label ?? "mark") }));
+  const everything = prepareAll(spec.series);
+  const series = everything.filter((s) => s.valid.length);
+  const markers = (Array.isArray(spec.markers) ? spec.markers : []).filter((m) => m && Number.isFinite(+m.t)).map((m) => ({ t: +m.t, label: String(m.label ?? "mark"), color: m.color || MARK }));
+  const inputs = (Array.isArray(spec.inputs) ? spec.inputs : []).filter((x) => x && Number.isFinite(+x.t0)).map((x) => ({ label: String(x.label ?? "input"), t0: +x.t0, t1: Number.isFinite(+x.t1) ? Math.max(+x.t0, +x.t1) : +x.t0 }));
+  const inputRows = [...new Set(inputs.map((x) => x.label))];
+  const ROW = 16, stripH = inputRows.length ? inputRows.length * ROW + 10 : 0;
   const lanes = series.length ? lanesFor(series) : [];
 
   // ---- measure the header first so the picture can grow to fit every lane ------------
@@ -137,8 +148,8 @@ export function renderChart(spec = {}) {
   const legend = [];
   {
     let x = 24, row = 0;
-    for (const s of series) {
-      const name = probe.fitText(s.label, W * 0.4), value = s.last === null ? "—" : fmtValue(s.last, s.isBool);
+    for (const s of everything) {
+      const name = probe.fitText(s.label, W * 0.4), value = !s.valid.length ? "no data" : s.last === null ? "—" : fmtValue(s.last, s.isBool);
       const w = 26 + probe.measureText(name) + 10 + probe.measureText(value);
       if (x + w > W - 24 && x > 24) { x = 24; row++; }
       legend.push({ s, name, value, x, row, w });
@@ -150,13 +161,14 @@ export function renderChart(spec = {}) {
   const gap = 12, head = lanes.length > 1 ? 22 : 0;   // split lanes get a caption strip above the panel
   const weights = lanes.map((items) => (items.every((x) => x.isBool) ? 0.4 : 1));
   const minLane = (w) => (w < 1 ? MIN_BOOL_LANE_H : MIN_LANE_H);
-  H = Math.min(4096, Math.max(H, top + weights.reduce((a, w) => a + minLane(w), 0) + (lanes.length - 1) * gap + lanes.length * head + 60));
+  H = Math.min(4096, Math.max(H, top + weights.reduce((a, w) => a + minLane(w), 0) + (lanes.length - 1) * gap + lanes.length * head + 60 + stripH));
   const g = new Raster(W, H, BG);
 
   // ---- title, subtitle, legend ----------------------------------------------------------
   let t0 = Infinity, t1 = -Infinity, samples = 0;
   for (const s of series) { t0 = Math.min(t0, s.points[0][0]); t1 = Math.max(t1, s.points[s.points.length - 1][0]); samples += s.valid.length; }
   for (const m of markers) { t0 = Math.min(t0, m.t); t1 = Math.max(t1, m.t); }
+  for (const x of inputs) { t0 = Math.min(t0, x.t0); t1 = Math.max(t1, x.t1); }
   const subtitle = spec.subtitle ?? (series.length
     ? `${series.length} series · ${samples.toLocaleString("en-US")} samples · ${t0.toFixed(2)}–${t1.toFixed(2)} s${markers.length ? ` · ${markers.length} mark${markers.length === 1 ? "" : "s"}` : ""}`
     : "");
@@ -167,10 +179,10 @@ export function renderChart(spec = {}) {
     const y = 72 + it.row * 22;
     g.roundRect(it.x, y - 2, 18, 4, 2, it.s.color);
     g.text(it.name, it.x + 26, y, { color: TEXT, baseline: "middle" });
-    g.text(it.value, it.x + 26 + g.measureText(it.name) + 10, y, { color: it.s.color, bold: true, baseline: "middle" });
+    g.text(it.value, it.x + 26 + g.measureText(it.name) + 10, y, { color: it.s.valid.length ? it.s.color : DIM, bold: true, baseline: "middle" });
   }
 
-  const bottom = H - 52;
+  const bottom = H - 52 - stripH;
   if (!series.length) {
     g.roundRect(24, top, W - 48, bottom - top, 8, PANEL);
     g.text("no numeric samples to plot", W / 2, (top + bottom) / 2, { color: DIM, scale: 2, align: "center", baseline: "middle" });
@@ -200,7 +212,7 @@ export function renderChart(spec = {}) {
     }
     return { items, ly0, ly1, lo, hi, ticks };
   });
-  const left = Math.max(64, 24 + Math.max(...laneInfo.flatMap((L) => L.ticks.map(([, s]) => g.measureText(s)))));
+  const left = Math.max(64, 24 + Math.max(...laneInfo.flatMap((L) => L.ticks.map(([, s]) => g.measureText(s))), ...inputRows.map((r) => Math.min(160, g.measureText(r)))));
   const right = W - 28;
   const tx = (t) => left + INSET + ((t - t0) / (t1 - t0)) * (right - left - 2 * INSET);
   const tStep = niceStep(t1 - t0, Math.max(4, Math.floor((right - left) / 120)));
@@ -251,22 +263,40 @@ export function renderChart(spec = {}) {
     }
   }
 
+  // ---- held inputs: a row per input under the plot, a faint line at each press across the lanes -----
+  if (inputs.length) {
+    const sy = bottom + 6;
+    inputRows.forEach((r, i) => {
+      const y = sy + i * ROW;
+      g.text(g.fitText(r, left - 14), left - 10, y + ROW / 2, { color: DIM, align: "right", baseline: "middle" });
+      g.fillRect(left, y + ROW / 2, right - left, 1, GRID);
+    });
+    for (const x of inputs) {
+      const i = inputRows.indexOf(x.label), y = sy + i * ROW;
+      const xa = tx(x.t0), xb = Math.max(xa + 2, tx(x.t1));
+      g.roundRect(xa, y + 3, xb - xa, ROW - 6, 2, "rgba(142,202,230,0.85)");
+      g.fillRect(Math.round(xa), laneInfo[0].ly0, 1, bottom - laneInfo[0].ly0, "rgba(142,202,230,0.28)");
+    }
+  }
+
   // ---- markers ----------------------------------------------------------------------------
   if (markers.length) {
     const items = markers.map((m) => ({ m, x: tx(m.t), w: g.measureText(m.label) + 12 })).sort((a, b) => a.x - b.x);
     const rows = labelRows(items.map((it) => ({ x: Math.min(right - it.w, it.x + 4), w: it.w })), 3);
     items.forEach((it, i) => {
       const xx = Math.round(it.x) + 0.5;
-      g.line(xx, laneInfo[0].ly0, xx, bottom, MARK, 1.5, { dash: [6, 5] });
+      g.line(xx, laneInfo[0].ly0, xx, bottom, it.m.color, 1.5, { dash: [6, 5] });
       const bx = Math.min(right - it.w, Math.round(it.x) + 4), by = laneInfo[0].ly0 + 6 + rows[i] * 24;
-      g.roundRect(bx, by, it.w, 20, 4, MARK);
-      g.text(it.m.label, bx + 6, by + 10, { color: "#ffffff", bold: true, baseline: "middle" });
+      g.roundRect(bx, by, it.w, 20, 4, it.m.color);
+      g.text(it.m.label, bx + 6, by + 10, { color: it.m.color === MARK ? "#ffffff" : BG, bold: true, baseline: "middle" });
     });
   }
 
   // ---- time labels ------------------------------------------------------------------------
-  for (const t of tTicks) g.text(fmtTick(t, tStep, 0), tx(t), bottom + 10, { color: DIM, align: "center" });
-  g.text("seconds", (left + right) / 2, bottom + 30, { color: DIM, align: "center" });
+  const ty = bottom + stripH + 10;
+  for (const t of tTicks) g.text(fmtTick(t, tStep, 0), tx(t), ty, { color: DIM, align: "center" });
+  const fps = +spec.fps > 0 ? +spec.fps : 0;
+  g.text(fps ? `seconds  (frame = seconds × ${fps})` : "seconds", (left + right) / 2, ty + 20, { color: DIM, align: "center" });
   return g;
 }
 

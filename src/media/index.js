@@ -7,6 +7,7 @@
 //             plus Lumen's analysis core (analyzeEvent, analyzeMusic, analyzeMix, ...)  (witness listen)
 //   pictures  timelinePNG, soundSheetPNG                     (witness listen)
 //   diff      diffImages                                     (witness shot --diff)
+//   sheets    cropImage, zoomImage, contactSheet, frameDiffScore, pickKeyFrames  (witness shot --sheet/--crop/--zoom)
 //   measure   blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo,
 //             maskStats, ringMask, contrast, motion           (witness measure)
 
@@ -25,5 +26,6 @@ export { timelinePNG, soundSheetPNG } from "./spectrogram.js";
 export { diffImages } from "./diff.js";
 export {
   blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
-  ringMask, contrast, motion,
+  ringMask, contrast, motion, motionStream, medianPlate, medianSampleIndices, pathJitter, AUTO_MEDIAN_FRAMES,
 } from "./measure.js";
+export { cropImage, zoomImage, frameDiffScore, pickKeyFrames, contactSheet } from "./sheet.js";

@@ -1171,13 +1171,45 @@ function levelAt(fine, t0, t1) {
 }
 
 /**
+ * The first sample of a sound's attack near a detected onset t (seconds): scanning from 30 ms before t
+ * (never before `lo`) to 5 ms after it, the first loud sample (above 2% of the sound's early peak and
+ * 3x the level just before) that follows >= 1.5 ms of quiet. Over a loud bed with no quiet stretch,
+ * t is returned unchanged.
+ */
+export function refineOnset(x, sr, t, lo = 0) {
+  const i = Math.round(t * sr), a = Math.max(0, Math.round(lo * sr), i - Math.round(0.03 * sr));
+  const pkEnd = Math.min(x.length, i + Math.round(0.03 * sr));
+  let peak = 0;
+  for (let k = Math.max(a, i - Math.round(0.005 * sr)); k < pkEnd; k++) { const v = Math.abs(x[k]); if (v > peak) peak = v; }
+  if (peak < 1e-6) return t;
+  const b0 = Math.max(0, a - Math.round(0.05 * sr));
+  const bed = [];
+  for (let k = b0; k < a; k++) bed.push(Math.abs(x[k]));
+  bed.sort((p, q) => p - q);
+  const base = bed.length ? bed[Math.floor(bed.length * 0.9)] : 0;
+  const thr = Math.max(peak * 0.02, base * 3, 1e-6);
+  if (thr >= peak * 0.5) return t;
+  const need = Math.max(2, Math.round(0.0015 * sr));
+  // the first loud sample at or after a, preceded by `need` quiet samples
+  let quiet = 0;
+  for (let k = a; k < Math.min(x.length, i + Math.round(0.005 * sr)); k++) {
+    if (Math.abs(x[k]) <= thr) { quiet++; continue; }
+    if (quiet >= need || (k === a && a === 0)) {
+      return k / sr;   // the first loud sample after a quiet stretch (may be a little after t: t is rounded to 1 ms)
+    }
+    quiet = 0;
+  }
+  return t;
+}
+
+/**
  * Onset times of distinct sounds in a (mono) signal: spectral-flux peaks that come with a real
  * rise in level (a pitch change inside one sound is not a new sound), plus the starts of sounds
  * that fade in out of silence. Each time is refined to the first millisecond within 20 dB of the
- * sound's early peak.
+ * sound's early peak, then (with `refine`) to the first sample of its attack after a quiet stretch.
  * @returns [{ t, strength }] sorted by time
  */
-export function detectOnsets(x, sr, { minGap = 0.06 } = {}) {
+export function detectOnsets(x, sr, { minGap = 0.06, refine = true } = {}) {
   if (!x.length) return [];
   const fine = envelope([x], sr, 0.001);
   let peak = 0;
@@ -1233,7 +1265,19 @@ export function detectOnsets(x, sr, { minGap = 0.06 } = {}) {
     if (last && t - last.t < minGap) { if (f.strength > last.strength) last.strength = f.strength; continue; }
     out.push({ t, strength: f.strength });
   }
+  if (refine) for (let k = 0; k < out.length; k++) out[k].t = refineOnset(x, sr, out[k].t, k ? out[k - 1].t + 0.01 : 0);
   return out;
+}
+
+/** The first moment in [a, b] (seconds) where a 1 ms envelope is at its floor for that span (within 1.5x). */
+function quietPoint(fine, a, b) {
+  const i0 = Math.max(0, Math.floor(a * 1000)), i1 = Math.min(fine.length, Math.ceil(b * 1000));
+  if (i1 <= i0) return b;
+  let mn = Infinity;
+  for (let i = i0; i < i1; i++) if (fine[i] < mn) mn = fine[i];
+  const thr = mn * 1.5 + 1e-7;
+  for (let i = i0; i < i1; i++) if (fine[i] <= thr) return Math.min(b, (i + 1) / 1000);
+  return b;
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,8 +1550,12 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
       const bed = msToLufs(curveStat(short, o.t - 1.5, o.t - 0.1, "median")), top = msToLufs(curveStat(short, o.t, o.t + 0.3, "max"));
       return top - bed >= 6;
     });
+    // a sound ends at the quietest point before the next one starts (never in the next sound's attack),
+    // and starts at most 10 ms before its onset (never before the previous sound's end)
+    const fine = envelope([x], sr, 0.001);
+    let prevEnd = 0;
     segs = kept.map((o, i) => {
-      let t1 = Math.min(duration, kept[i + 1] ? kept[i + 1].t - 0.005 : Infinity, o.t + 8);
+      let t1 = Math.min(duration, kept[i + 1] ? quietPoint(fine, o.t + 0.02, kept[i + 1].t) : Infinity, o.t + 8);
       const next = music.find((m) => m.t0 > o.t);
       if (next) t1 = Math.min(t1, next.t0 - 0.005);   // a sound before the music ends where the music begins
       const mu = inMusic(o.t);
@@ -1516,7 +1564,9 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
         const k = short.times.findIndex((t, j) => t > o.t + 0.08 && short.ms[j] <= bedMs * 2);
         if (k >= 0) t1 = Math.min(t1, short.times[k] + short.win / 2);
       }
-      return { t: o.t, t0: Math.max(0, o.t - 0.01), t1 };
+      const t0 = Math.max(0, prevEnd, o.t - 0.01);
+      prevEnd = t1;
+      return { t: o.t, t0, t1 };
     });
   }
   const late = segs.filter((s) => s.label !== undefined && s.t >= duration - 0.01);

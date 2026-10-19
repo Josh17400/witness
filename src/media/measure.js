@@ -489,10 +489,18 @@ export function contrast(input, maskA, maskB) {
 
 const MEDIAN_SAMPLES = 15;
 
-/** Per-pixel, per-channel median of up to 15 evenly spaced frames, inside R (a clean plate). */
-function medianPlate(imgs, R) {
-  const N = imgs.length, S = Math.min(N, MEDIAN_SAMPLES);
-  const pick = Array.from({ length: S }, (_, i) => imgs[S === 1 ? 0 : Math.round((i * (N - 1)) / (S - 1))]);
+/** Pick up to 15 evenly spaced indices of N frames (the frames a median plate is built from). */
+export function medianSampleIndices(N) {
+  const S = Math.min(N, MEDIAN_SAMPLES);
+  return Array.from({ length: S }, (_, i) => (S === 1 ? 0 : Math.round((i * (N - 1)) / (S - 1))));
+}
+
+/** Per-pixel, per-channel median of the given frames (up to 15 used), inside R (a clean plate). */
+export function medianPlate(frames, region) {
+  const imgs = frames.map((f, i) => toImage(f, "medianPlate", `#${i}`));
+  const R = clipRegion(region, imgs[0].width, imgs[0].height, "medianPlate");
+  const pick = medianSampleIndices(imgs.length).map((i) => imgs[i]);
+  const S = pick.length;
   const Ps = pick.map(packed), w = imgs[0].width;
   const out = { width: w, height: imgs[0].height, data: Uint8Array.from(imgs[0].data.subarray(0, w * imgs[0].height * 4)) };
   const vals = new Uint8Array(S);
@@ -516,55 +524,58 @@ function medianPlate(imgs, R) {
   return out;
 }
 
+/** Savitzky–Golay smoothing (quadratic, 5 points): a constant acceleration passes through unchanged. */
+const SG5 = [-3, 12, 17, 12, -3].map((c) => c / 35);
+
 /**
- * Track one moving object across consecutive frames. Each frame's object mask = the pixels that
- * differ (by > threshold) from a background plate, only inside `region` (use it to keep HUD
- * counters and other movers out):
- *   background: an image  — a clean plate (the scene without the object): exact silhouettes
- *               "first"   — frames[0] is the plate (default); it must not contain the object, and
- *                           its own entry comes out empty
- *               "median"  — per-pixel median of the frames; works without a plate when the object
- *                           moves more than its own size over the clip (no pixel covered > half the time)
- * Frames whose mask has fewer than `minPixels` pixels count as "no object" (bbox/centroid null).
- *
- * Per frame: { index, count, bbox, centroid, lowestRowSpan: { y, x0, x1 } } — lowestRowSpan is the
- * leftmost/rightmost mask pixel on the bottom-most mask row (the feet, for a standing character).
- * steps[i] = centroid(i + 1) - centroid(i) as [dx, dy] (null if either frame has no object).
- * summary: pathLength (sum of step lengths), net ([dx, dy] first->last frame with an object),
- * netDistance, maxStep, meanStep, jitter (population stddev of step lengths; 0 = perfectly even).
- *
- * Measuring foot slide: while a foot is planted its x must not change even though the body moves.
- * Give a clean plate and a region around the feet (or use the whole sprite), then for each step
- * compare the planted foot's movement — lowestRowSpan.x0 / x1 (or their midpoint) frame to frame —
- * with the body's centroid dx. Planted: foot dx ≈ 0 while body dx ≠ 0 during the contact frames;
- * sliding: foot dx ≈ body dx on every step ("moonwalking" = the foot moves against the body).
+ * Jitter of a centroid path: RMS distance of each position from a quadratic fitted through it and its two
+ * neighbours on each side. Steady motion and smooth acceleration/braking give 0; an uneven step (a hitch, a
+ * duplicated frame, a 2× step) does not. Null when no 5 consecutive frames have the object.
  */
-export function motion(frames, { region, threshold = 16, background = "first", minPixels = 1 } = {}) {
-  if (!Array.isArray(frames) || frames.length === 0) throw new TypeError("motion: frames must be a non-empty array of images");
-  const imgs = frames.map((f, i) => toImage(f, "motion", `#${i}`));
-  const w = imgs[0].width, h = imgs[0].height;
-  imgs.forEach((im, i) => { if (im.width !== w || im.height !== h) throw new RangeError(`motion: frame #${i} is ${im.width}×${im.height}, frame #0 is ${w}×${h}`); });
-  const R = clipRegion(region, w, h, "motion");
-  const thr = clampThreshold(threshold, "motion");
-  let plate, mode;
-  if (background == null || background === "first") { plate = imgs[0]; mode = "first"; }
-  else if (background === "median") { plate = medianPlate(imgs, R); mode = "median"; }
-  else {
-    plate = toImage(background, "motion", "background"); mode = "image";
-    if (plate.width !== w || plate.height !== h) throw new RangeError(`motion: background is ${plate.width}×${plate.height}, frames are ${w}×${h}`);
+export function pathJitter(points) {
+  let sum = 0, n = 0;
+  for (let i = 2; i + 2 < points.length; i++) {
+    const win = points.slice(i - 2, i + 3);
+    if (win.some((p) => !p)) continue;
+    const sx = win.reduce((a, p, k) => a + SG5[k] * p[0], 0), sy = win.reduce((a, p, k) => a + SG5[k] * p[1], 0);
+    sum += (points[i][0] - sx) ** 2 + (points[i][1] - sy) ** 2; n++;
   }
+  return n ? Math.sqrt(sum / n) : null;
+}
+
+/**
+ * Streaming version of motion(): push frames one at a time (only the plate is kept), then finish().
+ * plate: a clean background image, or "first" (the first pushed frame becomes the plate).
+ */
+export function motionStream({ region, threshold = 16, plate = "first", minPixels = 1 } = {}) {
+  const thr = clampThreshold(threshold, "motion");
   const minPx = Math.max(1, Math.floor(Number(minPixels) || 1));
+  let P = plate === "first" || plate == null ? null : toImage(plate, "motion", "background");
+  let R = null, w = 0, h = 0;
+  const raw = [];
+  return {
+    push(frame) {
+      const im = toImage(frame, "motion", `#${raw.length}`);
+      if (!R) { w = im.width; h = im.height; R = clipRegion(region, w, h, "motion"); }
+      if (im.width !== w || im.height !== h) throw new RangeError(`motion: frame #${raw.length} is ${im.width}×${im.height}, frame #0 is ${w}×${h}`);
+      if (!P) P = { width: w, height: h, data: Uint8Array.from(im.data.subarray(0, w * h * 4)) };
+      if (P.width !== w || P.height !== h) throw new RangeError(`motion: background is ${P.width}×${P.height}, frames are ${w}×${h}`);
+      const mask = diffMask(P, im, R, thr);
+      const s = maskSums(mask, w, h);
+      if (s.count < minPx) { raw.push({ count: s.count, bbox: null, cx: null, cy: null, low: null }); return; }
+      const y = s.bbox.y + s.bbox.h - 1;
+      let x0 = -1, x1 = -1;
+      for (let x = s.bbox.x; x < s.bbox.x + s.bbox.w; x++) if (mask[y * w + x]) { if (x0 < 0) x0 = x; x1 = x; }
+      raw.push({ ...s, low: { y, x0, x1 } });
+    },
+    finish(mode = plate === "first" || plate == null ? "first" : "image") {
+      if (!raw.length) throw new TypeError("motion: no frames");
+      return motionResult(raw, { w, h, R, mode, thr });
+    },
+  };
+}
 
-  const raw = imgs.map((im) => {
-    const mask = diffMask(plate, im, R, thr);
-    const s = maskSums(mask, w, h);
-    if (s.count < minPx) return { count: s.count, bbox: null, cx: null, cy: null, low: null };
-    const y = s.bbox.y + s.bbox.h - 1;
-    let x0 = -1, x1 = -1;
-    for (let x = s.bbox.x; x < s.bbox.x + s.bbox.w; x++) if (mask[y * w + x]) { if (x0 < 0) x0 = x; x1 = x; }
-    return { ...s, low: { y, x0, x1 } };
-  });
-
+function motionResult(raw, { w, h, R, mode, thr }) {
   const steps = [], lengths = [];
   for (let i = 0; i + 1 < raw.length; i++) {
     const p = raw[i], q = raw[i + 1];
@@ -576,12 +587,21 @@ export function motion(frames, { region, threshold = 16, background = "first", m
   const present = raw.filter((f) => f.cx != null);
   const pathLength = lengths.reduce((a, b) => a + b, 0);
   const meanStep = lengths.length ? pathLength / lengths.length : 0;
-  const jitter = lengths.length ? Math.sqrt(lengths.reduce((a, l) => a + (l - meanStep) ** 2, 0) / lengths.length) : 0;
+  const stepSpread = lengths.length ? Math.sqrt(lengths.reduce((a, l) => a + (l - meanStep) ** 2, 0) / lengths.length) : 0;
+  const jitter = pathJitter(raw.map((f) => (f.cx == null ? null : [f.cx, f.cy])));
   const first = present[0], last = present[present.length - 1];
   const net = first ? [last.cx - first.cx, last.cy - first.cy] : null;
-
+  // how far the object travelled compared with its own size (a median plate needs it to move its size)
+  const size = present.length ? Math.max(...present.map((f) => Math.max(f.bbox.w, f.bbox.h))) : 0;
+  const warnings = [];
+  if (mode === "median" && present.length && net && Math.hypot(net[0], net[1]) < size) {
+    warnings.push(`the object moved ${r3(Math.hypot(net[0], net[1]))} px, less than its own size (${size} px): the median plate may contain it, so boxes can be wrong — pass a clean background (--background <file.png>)`);
+  }
+  if (mode === "first" && raw.length > 1 && raw[0].count === 0 && raw[1].count > 0) {
+    warnings.push("compared with frame 0 as the clean plate: if the object is already visible there, every box covers its old and new position (steps come out halved) — use --background median or a clean <file.png>");
+  }
   return {
-    width: w, height: h, region: R, background: mode, threshold: thr,
+    width: w, height: h, region: R, background: mode, threshold: thr, warnings,
     frames: raw.map((f, index) => ({ index, count: f.count, bbox: f.bbox, centroid: f.cx == null ? null : [r3(f.cx), r3(f.cy)], lowestRowSpan: f.low })),
     steps,
     summary: {
@@ -592,7 +612,57 @@ export function motion(frames, { region, threshold = 16, background = "first", m
       netDistance: net ? r3(Math.hypot(net[0], net[1])) : 0,
       maxStep: r3(lengths.length ? Math.max(...lengths) : 0),
       meanStep: r3(meanStep),
-      jitter: r3(jitter),
+      jitter: jitter == null ? null : r3(jitter),
+      stepSpread: r3(stepSpread),
     },
   };
 }
+
+/**
+ * Track one moving object across consecutive frames. Each frame's object mask = the pixels that
+ * differ (by > threshold) from a background plate, only inside `region` (use it to keep HUD
+ * counters and other movers out):
+ *   background: an image  — a clean plate (the scene without the object): exact silhouettes
+ *               "auto"    — "median" for 8 frames or more, else "first" (default)
+ *               "median"  — per-pixel median of the frames; works without a plate when the object
+ *                           moves more than its own size over the clip (no pixel covered > half the time)
+ *               "first"   — frames[0] is the plate; it must not contain the object, and its own
+ *                           entry comes out empty
+ * Frames whose mask has fewer than `minPixels` pixels count as "no object" (bbox/centroid null).
+ *
+ * Per frame: { index, count, bbox, centroid, lowestRowSpan: { y, x0, x1 } } — lowestRowSpan is the
+ * leftmost/rightmost mask pixel on the bottom-most mask row (the feet, for a standing character).
+ * steps[i] = centroid(i + 1) - centroid(i) as [dx, dy] (null if either frame has no object).
+ * summary: pathLength (sum of step lengths), net ([dx, dy] first->last frame with an object),
+ * netDistance, maxStep, meanStep, jitter (RMS px off a smooth quadratic path: 0 for steady motion
+ * and for smooth acceleration; null under 5 frames), stepSpread (stddev of step lengths: also
+ * counts acceleration). warnings: reasons the boxes may be wrong (a plate that contains the object).
+ *
+ * Measuring foot slide: while a foot is planted its x must not change even though the body moves.
+ * Give a clean plate and a region around the feet (or use the whole sprite), then for each step
+ * compare the planted foot's movement — lowestRowSpan.x0 / x1 (or their midpoint) frame to frame —
+ * with the body's centroid dx. Planted: foot dx ≈ 0 while body dx ≠ 0 during the contact frames;
+ * sliding: foot dx ≈ body dx on every step ("moonwalking" = the foot moves against the body).
+ */
+export function motion(frames, { region, threshold = 16, background = "auto", minPixels = 1 } = {}) {
+  if (!Array.isArray(frames) || frames.length === 0) throw new TypeError("motion: frames must be a non-empty array of images");
+  const imgs = frames.map((f, i) => toImage(f, "motion", `#${i}`));
+  const w = imgs[0].width, h = imgs[0].height;
+  imgs.forEach((im, i) => { if (im.width !== w || im.height !== h) throw new RangeError(`motion: frame #${i} is ${im.width}×${im.height}, frame #0 is ${w}×${h}`); });
+  let mode = background == null ? "auto" : background;
+  if (mode === "auto") mode = imgs.length >= AUTO_MEDIAN_FRAMES ? "median" : "first";
+  let plate;
+  if (mode === "first") plate = "first";
+  else if (mode === "median") plate = medianPlate(imgs, region);
+  else { plate = toImage(background, "motion", "background"); mode = "image"; }
+  const st = motionStream({ region, threshold, plate, minPixels });
+  for (const im of imgs) st.push(im);
+  const r = st.finish(mode);
+  if (background === "auto" || background == null) {
+    r.backgroundChoice = mode === "median" ? `auto → median (${imgs.length} frames)` : `auto → first (only ${imgs.length} frames; median needs ${AUTO_MEDIAN_FRAMES})`;
+  }
+  return r;
+}
+
+/** With "auto", clips of at least this many frames use a median plate. */
+export const AUTO_MEDIAN_FRAMES = 8;

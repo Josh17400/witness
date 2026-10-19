@@ -2,7 +2,7 @@
 // Every image is synthesized so the right answer is known by construction.
 import {
   blockScale, detectScale, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
-  ringMask, contrast, motion,
+  ringMask, contrast, motion, motionStream, medianPlate,
 } from "../../src/media/measure.js";
 import { encodePNG } from "../../src/media/png.js";
 import { Raster } from "../../src/media/raster.js";
@@ -290,9 +290,42 @@ function framesOf(positions, { size = 8, y = 30, hud = false } = {}) {
   ok("motion median plate: exact boxes", m.frames.every((f, i) => sameBox(f.bbox, 4 + 8 * i, 30, 4, 4)), m.frames.map((f) => f.bbox));
 }
 {
-  // uneven steps 2, 4, 2, 4 -> mean 3, stddev 1
+  // uneven steps 2, 4, 2, 4 -> mean 3, step spread (stddev) 1; jitter = off the smooth path: 6 vs 186/35
   const m = motion(framesOf([10, 12, 16, 18, 22]), { background: stage });
-  ok("motion: jitter of 2,4,2,4 is 1", m.summary.jitter === 1 && m.summary.meanStep === 3 && m.summary.maxStep === 4, m.summary);
+  ok("motion: steps 2,4,2,4 spread 1", m.summary.stepSpread === 1 && m.summary.meanStep === 3 && m.summary.maxStep === 4, m.summary);
+  ok("motion: steps 2,4,2,4 jitter 0.686 (6 - 186/35)", m.summary.jitter === 0.686, m.summary.jitter);
+}
+{
+  // B4: smooth acceleration is not jitter (steps 0,1,2,3,4,5,6), a single hitch in steady motion is
+  const acc = [10, 10, 11, 13, 16, 20, 25, 31];
+  const a = motion(framesOf(acc), { background: stage });
+  show("accelerating square (steps 0..6)", `jitter ${a.summary.jitter} · step spread ${a.summary.stepSpread}`);
+  ok("motion B4: accelerating square has jitter 0", a.summary.jitter === 0, a.summary);
+  ok("motion B4: its step spread is large (2)", a.summary.stepSpread === 2, a.summary.stepSpread);
+  const hitch = motion(framesOf([10, 12, 14, 16, 16, 18, 20, 22, 24]), { background: stage });   // frame 4 repeats frame 3
+  ok("motion B4: a repeated frame in steady motion shows as jitter", hitch.summary.jitter > 0.3, hitch.summary);
+  ok("motion: under 5 frames there is no jitter figure", motion(framesOf([10, 12, 14]), { background: stage }).summary.jitter === null);
+}
+{
+  // B3: the object is on screen in frame 0 (no clean plate). "first" halves every step (old ∪ new silhouette);
+  // "auto" picks the median for 8+ frames and gets the true 2 px/frame
+  const xs = Array.from({ length: 20 }, (_, i) => 6 + 2 * i);
+  const frames = framesOf(xs, { size: 6 });
+  const first = motion(frames, { background: "first" });
+  const auto = motion(frames);
+  show("object visible in frame 0", `first: mean step ${first.summary.meanStep} · auto: ${auto.backgroundChoice}, mean step ${auto.summary.meanStep}`);
+  ok("motion B3: 'first' with the object in frame 0 halves the step (the old bug)", first.summary.meanStep === 1 && first.warnings.length === 1, first.summary);
+  ok("motion B3: auto → median, true step 2", auto.background === "median" && auto.summary.meanStep === 2 && auto.steps.slice(1).every((d) => d[0] === 2 && d[1] === 0) && /median/.test(auto.backgroundChoice), auto.summary);
+  ok("motion B3: auto boxes are the real 6×6 sprite", auto.frames.every((f, i) => sameBox(f.bbox, 6 + 2 * i, 30, 6, 6)), auto.frames.slice(0, 3).map((f) => f.bbox));
+  const short = motion(frames.slice(0, 5));
+  ok("motion B3: auto on a short clip falls back to first, with a warning", short.background === "first" && /first \(only 5 frames/.test(short.backgroundChoice) && short.warnings.length === 1, short.backgroundChoice);
+  const crawl = motion(framesOf(Array.from({ length: 10 }, (_, i) => 20 + (i % 2)), { size: 8 }), { background: "median" });
+  ok("motion: median warns when the object moves less than its size", crawl.warnings.some((w) => /less than its own size/.test(w)), crawl.warnings);
+  // streaming gives the same result as the array version (only the plate is kept)
+  const st = motionStream({ plate: medianPlate(frames) });
+  frames.forEach((f) => st.push(f));
+  const sr = st.finish("median");
+  ok("motionStream = motion", JSON.stringify(sr.frames) === JSON.stringify(auto.frames) && JSON.stringify(sr.summary) === JSON.stringify(auto.summary));
 }
 {
   // a HUD counter ticking in the corner: region keeps it out

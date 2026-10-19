@@ -385,4 +385,30 @@ console.log("\naudio analysis — raw game audio (analyzePCM)");
   ok("silent: logged events but no audio is a problem", report.problems.some((p) => /logged but the audio is silent/.test(p.text)), report.problems);
 }
 
+{
+  // B5: three identical 80 ms bursts (j@1, j@1.5, j@3 in the arena). A segment used to end 5 ms before the next
+  // detected onset, which trails the true start, so it swallowed the next attack: "2 distinct sounds", one 1.5 s long.
+  const burst = new Float32Array(Math.round(0.08 * SR));
+  for (let i = 0; i < burst.length; i++) burst[i] = rnd() * 0.3 * Math.min(1, i / (SR * 0.002)) * Math.exp(-i / (SR * 0.03));
+  const x = buf(4);
+  const starts = [1, 1.5, 3].map((t) => t + 1 / 60);   // the arena's sounds start a frame after the press
+  for (const t of starts) x.set(burst, Math.round(t * SR));
+  const { report } = analyzePCM(toPCM([x]), { title: "three swings" });
+  show("B5 three identical bursts", report.sounds.map((q) => `${q.label} ×${q.count} ${Math.round(q.analysis.length * 1000)} ms`).join(" · "));
+  ok("B5: three identical bursts are 1 sound ×3", report.sounds.length === 1 && report.sounds[0].count === 3, report.sounds.map((q) => [q.label, q.count, q.analysis.length]));
+  ok("B5: each is 80 ms long (no swallowed attack)", report.sounds.length === 1 && Math.abs(report.sounds[0].analysis.length - 0.08) <= 0.006, report.sounds[0]?.analysis.length);
+  const on = detectOnsets(x, SR);
+  ok("onsets: refined to the attack within 0.2 ms (was 2-7 ms late)", on.length === 3 && on.every((o, i) => o.t >= Math.round(starts[i] * SR) / SR && o.t - Math.round(starts[i] * SR) / SR <= 0.0002), on.map((o) => o.t));
+}
+{
+  // labelled events (the game's {"event": "sound"} lines): overlapping sounds keep their names and counts
+  const x = buf(2.5);
+  addTone(x, 0.5, 0.3, () => 440, fades(0.3, 0.3));
+  addNoise(x, 0.54, 0.15, (t) => 0.4 * Math.min(1, t / 0.002) * Math.exp(-t / 0.04));
+  addTone(x, 1.5, 0.3, () => 440, fades(0.3, 0.3));
+  const { report } = analyzePCM(toPCM([x]), { events: [{ t: 0.5, label: "beep" }, { t: 0.54, label: "hit" }, { t: 1.5, label: "beep" }] });
+  const by = Object.fromEntries(report.sounds.map((q) => [q.label, q]));
+  ok("labelled: overlapping sounds keep their names and counts", report.segmentation === "events" && by.beep?.count === 2 && by.hit?.count === 1 && by.beep.times.join() === "0.5,1.5", report.sounds.map((q) => [q.label, q.times]));
+}
+
 done("audio");
