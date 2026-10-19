@@ -114,13 +114,16 @@ export function powerSpectrum(x, start, n, out) {
 // envelope & loudness
 // ---------------------------------------------------------------------------
 
-/** RMS envelope over the channels in windows of `win` seconds. */
+/** RMS envelope over the channels in windows of `win` seconds: window w covers [w * win, (w + 1) * win) exactly (at
+ *  22.05 or 44.1 kHz a window is 22 or 23 samples, so index × win stays the time: whole 22-sample windows drifted
+ *  0.23%, 2.7 ms by 1.2 s and 30 ms by 13 s). */
 export function envelope(channels, sr, win = 0.005) {
-  const n = Math.max(1, Math.round(sr * win)), len = channels[0].length;
-  const out = new Float32Array(Math.ceil(len / n));
+  const len = channels[0].length, step = sr * win;
+  const out = new Float32Array(Math.ceil(len / step - 1e-9));
   for (let w = 0; w < out.length; w++) {
+    const i0 = Math.round(w * step), i1 = Math.min(len, Math.max(i0 + 1, Math.round((w + 1) * step)));
     let s = 0, c = 0;
-    for (const ch of channels) for (let i = w * n; i < Math.min(len, (w + 1) * n); i++) { s += ch[i] * ch[i]; c++; }
+    for (const ch of channels) for (let i = i0; i < i1; i++) { s += ch[i] * ch[i]; c++; }
     out[w] = Math.sqrt(s / Math.max(1, c));
   }
   return out;
@@ -418,6 +421,16 @@ export const tonalityWord = (periodic) => (periodic >= 0.7 ? "tonal" : periodic 
 // one sound
 // ---------------------------------------------------------------------------
 
+/** A sound's shape word from its attack, time to peak, length (seconds) and share held within 6 dB of its peak. */
+function shapeOf(attack, toPeak, length, holdFrac) {
+  if (attack >= Math.max(0.06, length * 0.3) || (attack >= 0.03 && toPeak >= Math.max(0.12, length * 0.3))) return "swell";
+  if (length < 0.07) return "clicky";
+  if (attack <= 0.025 && length < 0.25) return "punchy";
+  if (holdFrac >= 0.5 && length >= 0.15) return "sustained";
+  if (attack <= 0.025) return "plucky";
+  return "soft";
+}
+
 /**
  * Analyze one sound rendered on its own. `channels` = [L, R] (or [mono]).
  * Times are relative to the start of the buffer.
@@ -457,13 +470,7 @@ export function analyzeEvent(channels, sr, { envWin = 0.005 } = {}) {
   const smax = Math.max(...sm);
   for (let i = on; i <= off; i++) if (sm[i] >= smax * 0.5) hold++;
   const holdFrac = hold / Math.max(1, off - on + 1);
-  let shape;
-  if (attack >= Math.max(0.06, length * 0.3) || (attack >= 0.03 && toPeak >= Math.max(0.12, length * 0.3))) shape = "swell";
-  else if (length < 0.07) shape = "clicky";
-  else if (attack <= 0.025 && length < 0.25) shape = "punchy";
-  else if (holdFrac >= 0.5 && length >= 0.15) shape = "sustained";
-  else if (attack <= 0.025) shape = "plucky";
-  else shape = "soft";
+  const shape = shapeOf(attack, toPeak, length, holdFrac);
 
   const i0 = Math.floor(tOn * sr), i1 = Math.min(len, Math.ceil(tOff * sr));
   let s2 = 0;
@@ -508,7 +515,11 @@ export function analyzeEvent(channels, sr, { envWin = 0.005 } = {}) {
 /** One line of plain language for an analyzed event. */
 export function describeEvent(a) {
   if (a.silent) return "SILENT (nothing audible)";
-  const bits = [
+  const bits = a.ownBands ? [   // heard under another sound, measured on the bands it added (see analyzePCM)
+    `${fmtS(a.length)} ${a.shape} (attack ${fmtS(a.attack)})`,
+    `${a.brightness} (centroid ${fmtHz(a.centroid)})`,
+    `peak ${r1(a.peakDb)} dBFS, ${r1(a.loudness)} LUFS in its own bands ${fmtHz(a.ownBands[0])}–${fmtHz(a.ownBands[1])}`,
+  ] : [
     `${fmtS(a.length)} ${a.shape} (attack ${fmtS(a.attack)})`,
     a.pitch.kind === "unpitched" ? (a.sweep || "unpitched") : a.pitch.text,
     `${a.brightness} (centroid ${fmtHz(a.centroid)})`,
@@ -851,9 +862,9 @@ export function analyzeMix(mix, sr, music, events, { duration, audition = false 
   for (const { e, under, bed, count } of masked.values()) {
     add(2, `${e.label} at ${e.t.toFixed(2)} s is ${r1(under)} dB under the music (${r1(e.analysis.loudness)} vs ${r1(bed)} LUFS)${count > 1 ? ` (${count} times)` : ""} and may be masked → ${volumeAdvice(e, under + 3)}, or lower the music volume`);
   }
-  // loudness spread across distinct sounds
+  // loudness spread across distinct sounds (not one measured on its own bands under another: part of its energy)
   const byLabel = new Map();
-  for (const e of sounds) if (!e.analysis.silent && !byLabel.has(e.label)) byLabel.set(e.label, e.analysis.loudness);
+  for (const e of sounds) if (!e.analysis.silent && !e.analysis.ownBands && !byLabel.has(e.label)) byLabel.set(e.label, e.analysis.loudness);
   if (byLabel.size >= 3) {
     const med = median([...byLabel.values()]);
     for (const [label, l] of byLabel) {
@@ -1221,48 +1232,96 @@ export function bandPass(x, sr, t0, t1, bands) {
   return y;
 }
 
+// third-octave bands from 50 Hz for an n-point FFT, the low ones pooled until each spans 6+ bins (a band of 1-2 bins
+// rises 10 dB by chance in steady noise or wind)
+const bandCache = new Map();
+function addedBands(sr, n) {
+  const key = `${sr}|${n}`;
+  if (bandCache.has(key)) return bandCache.get(key);
+  const out = [], top = Math.min(12000, sr / 2), r = Math.pow(2, 1 / 3);
+  for (let lo = 50; lo < top * 0.999;) {
+    let hi = lo * r;
+    while (hi < top && Math.ceil((hi * n) / sr) - Math.ceil((lo * n) / sr) < 6) hi *= r;
+    hi = Math.min(hi, top);
+    out.push({ lo, hi, k0: Math.ceil((lo * n) / sr), k1: Math.min(n / 2, Math.ceil((hi * n) / sr) - 1) });
+    lo = hi;
+  }
+  bandCache.set(key, out);
+  return out;
+}
+
+/** addedSound with its strength: { bands, frac } (frac = the share of the energy after t that the new sound adds), or null. */
+function addedSoundAt(x, sr, t, minFrac = 0.01) {
+  const w = Math.round(0.04 * sr), gap = Math.round(0.004 * sr), hop = Math.round(0.008 * sr), i = Math.round(t * sr);
+  const back = [0, 8, 20, 36, 56].map((ms) => i - w - gap - Math.round((ms / 1000) * sr));
+  if (back[back.length - 1] < 0 || i + w + hop > x.length) return null;
+  let n = 256;
+  while (n < w) n *= 2;
+  const bands = addedBands(sr, n), re = new Float64Array(n), im = new Float64Array(n);
+  const spec = (a) => {   // Hann over the 40 ms window itself (zero-padded to n)
+    re.fill(0); im.fill(0);
+    for (let k = 0; k < w; k++) re[k] = x[a + k] * (0.5 - 0.5 * Math.cos((2 * Math.PI * k) / (w - 1)));
+    fft(re, im);
+    return bands.map(({ k0, k1 }) => { let v = 0; for (let k = k0; k <= k1; k++) v += re[k] * re[k] + im[k] * im[k]; return v; });
+  };
+  const bs = back.map(spec), b1 = bs[0], b2 = bs[1], a1 = spec(i), a2 = spec(i + hop);
+  const before = b1.map((v, b) => Math.max(...bs.map((q) => q[b]))), after = a1.map((v, b) => Math.min(v, a2[b]));
+  const bm = b1.map((v, b) => (v + b2[b]) / 2), am = a1.map((v, b) => (v + a2[b]) / 2);
+  const rose = after.map((v, b) => v > before[b] * 10);
+  let total = 0, added = 0, vacated = 0;
+  const found = [], held = bm.reduce((a, v) => a + v, 0);
+  for (let b = 0; b < bands.length; b++) {
+    total += am[b];
+    // emptied: a band that carried 2%+ of the sound before and lost half of it (not a transient's thin splatter)
+    if (!rose[b]) { if (bm[b] > am[b] * 2 && bm[b] >= 0.02 * held) vacated += bm[b] - am[b]; continue; }
+    let moved = 0;
+    for (let j = Math.max(0, b - 2); j <= Math.min(bands.length - 1, b + 2); j++) if (!rose[j]) moved += Math.max(0, bm[j] - am[j]);
+    const add = after[b] - before[b] - moved;
+    if (add > 0) { added += add; found.push([b, add]); }
+  }
+  // an added sound leaves the bands already sounding playing; a pitch step or a fast sweep empties the ones it left
+  if (!(total > 0 && added >= minFrac * total)) return null;
+  // (while the level carries on: a sound that ends as a quieter one starts is not a move)
+  if (vacated >= 0.5 * added && vacated >= 0.05 * total && total >= 0.6 * held) return { moved: true };
+  // the bands that carry it (5%+ of what was added), adjacent ones merged
+  const out = [];
+  for (const [b] of found.filter(([, v]) => v >= 0.05 * added)) {
+    const last = out[out.length - 1];
+    if (last && Math.abs(last[1] - bands[b].lo) < 1e-6) last[1] = bands[b].hi; else out.push([bands[b].lo, bands[b].hi]);
+  }
+  return { bands: out, frac: added / total };
+}
+
 /**
- * Did a new sound start at t on top of one already playing? Third-octave band energies over the 40 ms before t
- * (ending 4 ms before it) vs the 40 ms from t. A band that rose 10x (10 dB) or more adds its rise minus what the
- * bands up to 2 away (2/3 octave) lost: a pitch change, a sweep or vibrato moves energy into a neighbouring band, an
- * added sound leaves the old bands sounding. New sound when that adds at least 1% of the energy after t (a sound up
- * to 20 dB under the one playing, in bands it leaves free). Returns the rising band edges in Hz, or null.
+ * Did a new sound start at t on top of one already playing? Band energies (third-octave, the low bands pooled to 6+
+ * FFT bins) over five 40 ms windows before t (ending 4 to 60 ms before it) vs two from t (and 8 ms later). A band
+ * that rose 10x (10 dB) in both after windows over every before window (so steady noise wavering by chance doesn't)
+ * adds its rise minus what the bands up to 2 away (2/3 octave) lost: vibrato moves energy into a neighbouring band,
+ * an added sound leaves the old bands sounding. New sound when that adds at least 1% of the energy after t (a sound up
+ * to 20 dB under the one playing, in bands it leaves free), unless the bands that emptied (bands holding 2%+ that fell
+ * 3 dB+) lost half as much or more while the level held (60%+): a pitch step or a fast sweep moving away.
+ * Returns the rising band edges in Hz, or null.
  */
 export function addedSound(x, sr, t) {
-  const n = 2048, w = Math.round(0.04 * sr), i = Math.round(t * sr);
-  if (i - w - Math.round(0.004 * sr) < 0 || i + w > x.length) return null;
-  const band = (a) => {
-    const seg = new Float32Array(n);
-    for (let k = 0; k < w; k++) seg[k] = x[a + k];
-    const p = powerSpectrum(seg, 0, n), out = [];
-    for (let lo = 50; lo < Math.min(12000, sr / 2); lo *= Math.pow(2, 1 / 3)) {
-      const k0 = Math.ceil((lo * n) / sr), k1 = Math.min(n / 2, Math.floor((lo * Math.pow(2, 1 / 3) * n) / sr));
-      let s = 0;
-      for (let k = k0; k <= k1; k++) s += p[k];
-      out.push(s);
-    }
-    return out;
-  };
-  const before = band(i - w - Math.round(0.004 * sr)), after = band(i);
-  const rose = after.map((v, b) => v > before[b] * 10);
-  let total = 0, added = 0;
-  const bands = [];
-  for (let b = 0; b < after.length; b++) {
-    total += after[b];
-    if (!rose[b]) continue;
-    let moved = 0;
-    for (let j = Math.max(0, b - 2); j <= Math.min(after.length - 1, b + 2); j++) if (!rose[j]) moved += Math.max(0, before[j] - after[j]);
-    const add = after[b] - before[b] - moved;
-    if (add > 0) { added += add; bands.push([b, add]); }
+  const r = addedSoundAt(x, sr, t);
+  return r && r.bands ? r.bands : null;
+}
+
+/** The added sound near a flux peak at tk: the flux frame is 46 ms long, so from 30 ms before tk (never before
+ *  `from`), at the window where it stands out most (the after windows start at its attack, the before windows hold
+ *  none of it), and still there 5 ms later: { bands, frac, q }. A pitch step or a fast sweep reads as added at the
+ *  window that only just reaches it and as moved once the window is past it: one sound, null. */
+function addedNear(x, sr, tk, from = 0) {
+  let best = null;
+  for (let q = Math.max(tk - 0.03, from); q <= tk + 0.0051; q += 0.005) {
+    const r = addedSoundAt(x, sr, q);
+    if (r && r.moved) return null;
+    if (r && (!best || r.frac > best.frac)) best = { ...r, q };
   }
-  if (!(total > 0 && added >= 0.01 * total)) return null;
-  // the bands that carry it (5%+ of what was added), adjacent ones merged
-  const edge = (b) => 50 * Math.pow(2, b / 3), out = [];
-  for (const [b] of bands.filter(([, a]) => a >= 0.05 * added)) {
-    const last = out[out.length - 1];
-    if (last && Math.abs(last[1] - edge(b)) < 1e-6) last[1] = edge(b + 1); else out.push([edge(b), edge(b + 1)]);
-  }
-  return out;
+  // a sound that really starts there reads as added 5 ms before or after too (half the share will do: it decays, or
+  // the sound under it ends); a slow sweep edging into the next band reads as added at one window only
+  if (best && ![-0.005, 0.005].some((d) => { if (best.q + d < from) return false; const r = addedSoundAt(x, sr, best.q + d, 0.005); return r && r.bands; })) return null;
+  return best;
 }
 
 /**
@@ -1297,16 +1356,21 @@ export function detectOnsets(x, sr, { minGap = 0.06, refine = true } = {}) {
     // the flux frame spans [k*hop, k*hop + 1024): the new energy entered in its last part
     const tk = (k * 256 + 768) / sr;
     const pre = levelAt(fine, tk - 0.045, tk - 0.012), post = levelAt(fine, tk - 0.004, tk + 0.03);
+    // a short sound on a steady bed rises in its first 20 ms (and tk is up to ~10 ms off): the loudest 20 ms near tk
+    // against the loudest 20 ms before it (like with like, so a bed that wavers by itself doesn't pass)
+    let post20 = 0, pre20 = 0;
+    for (let q = tk - 0.012; q <= tk + 0.0101; q += 0.002) post20 = Math.max(post20, levelAt(fine, q, q + 0.02));
+    for (let q = tk - 0.06; q <= tk - 0.0319; q += 0.002) pre20 = Math.max(pre20, levelAt(fine, q, q + 0.02));
     if (post < floor) continue;
     // a level rise, or (under a longer, louder sound the level hardly moves) new energy in bands that were quiet
     // while the bands already sounding carry on: a sound added on top, not a pitch change inside one sound
     let bands = null, at = tk;
-    if (!(post > pre * 1.5 || (pre < floor * 3 && post > pre * 1.2))) {
-      // the flux frame is 46 ms long: look for the added sound from 30 ms before tk
-      for (let q = tk - 0.03; q <= tk + 0.0051 && !bands; q += 0.005) { bands = addedSound(x, sr, q); if (bands) at = q; }
-      if (!bands) continue;
+    if (!(post > pre * 1.5 || post20 > pre20 * 1.5 || (pre < floor * 3 && post > pre * 1.2))) {
+      const best = addedNear(x, sr, tk);
+      if (!best) continue;
+      bands = best.bands; at = best.q;
     }
-    found.push({ t: at, strength: v / ref, bands });
+    found.push({ t: at, tk, strength: v / ref, bands });
   }
   // sounds that swell out of silence have no sharp flux peak: catch them on the level gate
   const gate = envelope([x], sr, 0.005);
@@ -1323,24 +1387,38 @@ export function detectOnsets(x, sr, { minGap = 0.06, refine = true } = {}) {
   // a sound that started under a louder one is timed on its own bands (the louder sound's level would hide its rise)
   const out = [];
   for (const f of found) {
+    // within minGap of the last onset: the same sound's attack again, unless it is a different sound starting right
+    // after the first (a swing 40 ms into a jingle, a chord 30 ms after a swing): new energy in bands the first
+    // wasn't using (a re-trigger of the same sound rises in its own bands, which were already sounding)
+    // (its nearest before window must hold the first sound: from 34 ms after it; earlier, the "added" bands are the
+    // first sound's own, rising out of what came before it)
+    const prev = out[out.length - 1];
+    if (prev && f.t - prev.t < minGap) {
+      const r = addedNear(x, sr, f.tk ?? f.t, prev.t + 0.034);
+      f.bands = r ? r.bands : null;
+      if (r) f.t = r.q;
+    }
     let lp = 0;
     const y = f.bands ? bandPass(x, sr, f.t - 0.15, f.t + 0.1, f.bands) : null;
     f.signal = y;
     const fine = y ? envelope([y], sr, 0.001) : fineAll;
-    const a = Math.max(0, Math.floor((f.t - 0.03) * 1000)), b = Math.min(fine.length, Math.ceil((f.t + 0.06) * 1000));
+    // (an added sound's window starts within ~5 ms of its attack: look from 10 ms before it, not 30, so a wobble in
+    // the bed under it can't time it early; its rise must hold for 2 ms)
+    const a = Math.max(0, Math.floor((f.t - (y ? 0.01 : 0.03)) * 1000)), b = Math.min(fine.length, Math.ceil((f.t + 0.06) * 1000));
     for (let i = a; i < b; i++) if (fine[i] > lp) lp = fine[i];
     const before = Array.from(fine.subarray(Math.max(0, a - 50), a)).sort((p, q) => p - q);
     const base = before.length ? before[Math.floor(before.length * 0.9)] : 0;   // 1 ms RMS of a bass wobbles: use its peaks
     const rise = base + (lp - base) * 0.1;
-    const prevT = out.length ? out[out.length - 1].t : -1;
+    const prevT = out.length ? out[out.length - 1].t + (y ? 0.012 : 0) : -1;
     let i = a;
-    while (i < b && (fine[i] < rise || i / 1000 <= prevT)) i++;
+    while (i < b && (fine[i] < rise || (y && fine[i + 1] < rise) || i / 1000 <= prevT)) i++;
     const t = Math.min(f.t + 0.03, i / 1000);
     const last = out[out.length - 1];
-    if (last && t - last.t < minGap) { if (f.strength > last.strength) last.strength = f.strength; continue; }
-    out.push({ t, strength: f.strength, ...(y ? { over: true, signal: y } : {}) });
+    if (last && t - last.t < (f.bands ? 0.012 : minGap)) { if (f.strength > last.strength) last.strength = f.strength; continue; }
+    out.push({ t, strength: f.strength, ...(y ? { over: true, bands: f.bands, signal: y } : {}) });
   }
-  if (refine) for (let k = 0; k < out.length; k++) out[k].t = refineOnset(out[k].signal || x, sr, out[k].t, k ? out[k - 1].t + 0.01 : 0);
+  // (an added sound's own bands still hold the bed's noise: no further than 5 ms back from its 1 ms time)
+  if (refine) for (let k = 0; k < out.length; k++) out[k].t = refineOnset(out[k].signal || x, sr, out[k].t, Math.max(k ? out[k - 1].t + 0.01 : 0, out[k].signal ? out[k].t - 0.005 : 0));
   for (const o of out) delete o.signal;
   return out;
 }
@@ -1637,7 +1715,10 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
       return { t: e.t, label: e.label, t0: Math.max(0, e.t - 0.01), t1 };
     });
     // which sounds overlap another (their own analysis would hold both)
-    for (const sg of segs) sg.over = segs.filter((o) => o !== sg && o.label !== sg.label && o.t < sg.t1 - 0.005 && sg.t < o.t1 - 0.005).map((o) => o.label);
+    for (const sg of segs) {
+      sg.over = segs.filter((o) => o !== sg && o.label !== sg.label && o.t < sg.t1 - 0.005 && sg.t < o.t1 - 0.005).map((o) => o.label);
+      sg.with = segs.filter((o) => o !== sg && o.label !== sg.label && Math.abs(o.t - sg.t) < 0.002).map((o) => o.label);   // started together
+    }
   } else {
     // inside music every beat is an onset: keep only sounds that rise >= 6 dB above the bed
     // (and not the music's own first note)
@@ -1672,6 +1753,38 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
   segs = segs.filter((s) => s.t1 - s.t0 >= 0.01);
 
   // ---- analyze each segment, then group repeats ----------------------------------------------
+  // a sound that starts under another one is measured on the bands it added (where it rose 10 dB over what was
+  // playing; the onset detector found them): its own length, attack and brightness, not the other sound's. Its pitch
+  // and tonality can't be separated from the other sound's, so they are left out. With no such bands (it is the
+  // louder one, or no onset of its own) it is measured with the other sound, and says so.
+  const ownOf = (s) => {
+    if (!(s.over || []).length || (s.with || []).length) return null;
+    const o = onsets.find((q) => q.bands && q.bands.length && Math.abs(q.t - s.t) <= 0.004);
+    if (!o) return null;
+    // (its segment from the events ends where the mix is back near the other sound: too soon; look up to 4 s on)
+    const lim = Math.min(duration, s.t + 4);
+    // (8th order: twice through the band-pass, so the other sound leaks in 48 dB down an octave away, not 24)
+    const y = bandPass(bandPass(x, sr, Math.max(0, s.t - 0.15), lim, o.bands), sr, Math.max(0, s.t - 0.15), lim, o.bands), f1 = envelope([y], sr, 0.001);
+    const bed = levelAt(f1, s.t - 0.06, s.t - 0.005), i0 = Math.floor(s.t * 1000);
+    let pk = 0, pi = i0;
+    for (let i = i0; i < Math.min(f1.length, Math.ceil((s.t + 0.1) * 1000)); i++) if (f1[i] > pk) { pk = f1[i]; pi = i; }
+    if (!(pk > bed * 2)) return null;
+    // length and attack against the level its bands had before it (the other sound leaks into them a little):
+    // it ends back down at twice that level (or 40 dB under its peak), held for 20 ms
+    const stop = Math.max(bed * 2, pk * 0.01);
+    let end = lim;
+    for (let i = pi, q = 0; i < Math.min(f1.length, Math.ceil(lim * 1000)); i++) { q = f1[i] <= stop ? q + 1 : 0; if (q >= 20) { end = (i - 19) / 1000; break; } }
+    let ia = i0;
+    while (ia < pi && f1[ia] < Math.max(pk * 0.316, bed * 2)) ia++;
+    const seg = [y.subarray(Math.max(0, Math.floor(s.t0 * sr)), Math.min(y.length, Math.ceil(end * sr)))];
+    const a = analyzeEvent(seg, sr);
+    if (a.silent) return null;
+    const length = Math.max(0.001, end - s.t), attack = Math.max(0.001, (ia - i0 + 1) / 1000);
+    const lo = Math.min(...o.bands.map((b) => b[0])), hi = Math.max(...o.bands.map((b) => b[1]));
+    Object.assign(a, { start: s.t - s.t0, length, attack, shape: shapeOf(attack, (pi - i0 + 1) / 1000, length, a.hold), ownBands: [Math.round(lo), Math.round(hi)],
+      pitch: { kind: "unknown", text: "pitch not separable" }, tonality: "not separable", periodic: null });
+    return { analysis: a, channels: seg, y };
+  };
   const groups = [];
   let skipped = 0;
   for (const s of segs) {
@@ -1680,19 +1793,23 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
       g.times.push(s.t);
       if (g.over.length && !(s.over || []).length) {   // describe it from an occurrence that plays alone
         const seg = sliceChannels(chs, sr, s.t0, s.t1);
-        Object.assign(g, { t0: s.t0, t1: s.t1, analysis: analyzeEvent(seg, sr), channels: seg, over: [], from: s.t });
+        Object.assign(g, { t0: s.t0, t1: s.t1, analysis: analyzeEvent(seg, sr), channels: seg, over: [], with: [], from: s.t });
+      } else if (g.over.length && !g.analysis.ownBands) {
+        const own = ownOf(s);
+        if (own) Object.assign(g, { t0: s.t0, t1: s.t1, analysis: own.analysis, channels: own.channels, over: s.over, with: [], from: s.t });
       }
       continue;
     }
     if (groups.length >= maxSounds) { skipped++; continue; }
-    const seg = sliceChannels(chs, sr, s.t0, s.t1);
-    const a = analyzeEvent(seg, sr);
+    const own = ownOf(s);
+    const seg = own ? own.channels : sliceChannels(chs, sr, s.t0, s.t1);
+    const a = own ? own.analysis : analyzeEvent(seg, sr);
     if (s.label === undefined) {
       if (a.silent || a.peakDb < dB(peak) - 50) continue;   // residue under the noise floor
       g = groups.find((q) => sameSound(q.analysis, a));
       if (g) { g.times.push(s.t); continue; }
     }
-    groups.push({ label: s.label, t: s.t, t0: s.t0, t1: s.t1, times: [s.t], analysis: a, channels: seg, overMusic: !!inMusic(s.t), over: s.over || [] });
+    groups.push({ label: s.label, t: s.t, t0: s.t0, t1: s.t1, times: [s.t], analysis: a, channels: seg, overMusic: !!inMusic(s.t), over: s.over || [], with: s.with || [] });
   }
   groups.forEach((g, i) => { if (g.label === undefined) g.label = `sound ${i + 1}`; });
   if (skipped) notes.push(`${skipped} more segments were not analyzed (limit ${maxSounds} distinct sounds)`);
@@ -1758,8 +1875,17 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
   if (pp.length) problems.push({ severity: 2, text: `${pp.length} pop${pp.length === 1 ? "" : "s"} inside the audio at ${pp.slice(0, 5).map((q) => `${q.t.toFixed(3)} s`).join(", ")}${pp.length > 5 ? ", …" : ""} (a jump of ${pp[0].jump} where the waveform is otherwise smooth) → a buffer cut short, or a sound stopped mid-waveform` });
   const env2 = envelope([x], sr, 0.002);
   const doubles = new Map();
+  const segAt = new Map(segs.map((q) => [q.t, q]));
   for (const o of occurrences) {
-    const sa = secondAttack(env2, o.t, 0.002);
+    // under another sound the mix's level moves with that one too: look for a restart on its own bands, or not at all
+    const sg = segAt.get(o.t);
+    let env = env2;
+    if (sg && (sg.over || []).length) {
+      const on = onsets.find((q) => q.bands && q.bands.length && Math.abs(q.t - o.t) <= 0.004);
+      if (!on) continue;
+      env = envelope([bandPass(x, sr, Math.max(0, o.t - 0.15), Math.min(duration, o.t + 0.2), on.bands)], sr, 0.002);
+    }
+    const sa = secondAttack(env, o.t, 0.002);
     // only a restart 1-2 frames later (14-36 ms) counts: shorter gaps are a sound's own texture
     if (sa && sa.dt >= 14 && sa.dt <= 36) { const d = doubles.get(o.label) || { label: o.label, hits: [] }; d.hits.push({ t: o.t, ...sa }); doubles.set(o.label, d); }
   }
@@ -1793,7 +1919,7 @@ export function analyzePCM(pcm, { events = null, title = "game", maxSounds = 40 
   const sounds = groups.map((g) => ({
     label: g.label, t: r3(g.t), times: g.times.map(r3), count: g.times.length, overMusic: g.overMusic,
     musicLoudness: g.musicLoudness ?? null, ownLoudness: g.ownLoudness ?? null,
-    description: g.buried ? "barely audible over the music (it adds almost nothing to the mix there), so it can't be described on its own" : describeEvent(g.analysis) + (g.over && g.over.length ? ` (always overlapped by ${[...new Set(g.over)].join(", ")}: measured with it)` : ""),
+    description: g.buried ? "barely audible over the music (it adds almost nothing to the mix there), so it can't be described on its own" : describeEvent(g.analysis) + (g.with && g.with.length ? ` (starts together with ${[...new Set(g.with)].join(", ")}: measured with it, they can't be told apart)` : g.over && g.over.length ? (g.analysis.ownBands ? ` (always under ${[...new Set(g.over)].join(", ")}: measured on the bands it adds; pitch not separable)` : ` (always overlapped by ${[...new Set(g.over)].join(", ")}: measured with it)`) : ""),
     analysis: g.analysis,
   }));
   const report = jsonSafe({

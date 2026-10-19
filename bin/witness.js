@@ -161,12 +161,15 @@ const CMD_HELP = {
   * events vs sounds: each input press (unless --no-input-events) and each --events state change gets the sound it
     caused within the window: ✔ "+1f" (an input's sound can come +1f at the earliest; a state change's +0f),
     ✖ no sound (with a hint when the same input played one before), ⚠ played twice; then sounds with no event;
+    a sound that starts under a louder one is heard from the bands it adds (from ~35-40 ms after the other starts) and
+    measured on them;
   * sounds found (pitch, length, brightness, loudness), music tempo/key/chords, mix problems (clipping, true peak,
     loudness, sounds that start/stop abruptly and click, pops, sounds played twice a frame apart, the same sample
     repeated identically); --loop a..b checks a music loop's seam (level step, jump at the joint, brightness);
   * timeline.png + sounds.png (+ mix.wav).
   Games that announce sounds ({"event": "sound"}, e.g. witness.sound("jump")) get them named and checked against the
-  audio (announced but silent, audible but unannounced).`,
+  audio (announced but silent, audible but unannounced; an onset belongs to one announced sound). summary.problems
+  counts the audio's own problems; gate events with --expect "eventIssues == 0" (✖ missing + doubled + unheard).`,
   ab: `witness ab --a <variant> --b <variant> [--input ...] [--at 3.2,4] [--rect x,y,w,h] [--from 3 --to 4 --every 0.1]
               [--zoom 2] [--state] [--threshold 16]
   Runs the same scenario as A and as B and compares them at the same frames. A variant is KEY=VALUE items joined by
@@ -273,8 +276,10 @@ const CMD_HELP = {
       surfaces are named by state.map tiles, --surfaces colours (ΔE < 15; used first when most surfaces match them, so
       a param that moves the ground keeps true names), or by position from an earlier shot of the same scene and frame
       (day → night: other colours, same places). Only the diff region(s) at the entity's position or box are its
-      silhouette (an entity without an id is hidden by type: the part at its position); ⚠ "N px changed elsewhere"
-      names other regions a hide changed (draw order / an unstable sort of tied sprites). ✖ when a surface's median < --min; nothing judged is ✖ too. --expect "worstMedianRatio >= 3".
+      silhouette (an entity without an id is hidden by type: the part at its position), plus parts within one figure
+      size that vanished to the ground with it (a health bar, a "!" marker); ⚠ when the position is on no changed
+      pixel (state coords ≠ screen?: the largest region is used), ⚠ "N px changed elsewhere" for other regions (draw
+      order / an unstable sort when other paint is there without it). A PNG diff keeps its largest region the same way. ✖ when a surface's median < --min; nothing judged is ✖ too. --expect "worstMedianRatio >= 3".
       --out: each figure and its ground ring, red where the edge is under --min.
   colorblind [shot.png] [--at 1] [--type protan|deutan|tritan|achroma|all] [--colors name=#hex,...] [--types Wolf,Guard]
      [--a <mask> --b <mask>] [--min-de 20] [--out dir] [--no-images]

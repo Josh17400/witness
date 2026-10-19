@@ -17,6 +17,7 @@ import { analyzeJump, analyzeMove, frozenSpans, response, lag, stutters, summari
 import { matchSounds, alignSoundEvents, soundFrame } from "../src/core/soundmatch.js";
 import { windowsOf } from "../src/cli/window.js";
 import { parseVariant, compareRect } from "../src/cli/ab.js";
+import { figureRegions } from "../src/cli/measure-look.js";
 import { compareSeries, posOf, autoDeathExpr, mapOf, tickPoints, respawnFrames, deathAt } from "../src/cli/trace.js";
 import { parseWitnessInput } from "../src/core/input-spec.js";
 import { loadReplay, frameAt } from "../src/core/runner.js";
@@ -269,6 +270,27 @@ ok("bad time: a clear error", (() => { try { frameAt("soon", 60); return false; 
   const al = alignSoundEvents([{ name: "swing", frame: 60 }, { name: "ghost", frame: 200 }], [{ t: 1 + 1 / 60 }, { t: 5 }], fps);
   ok("align: announced sound heard at the nearest onset (1f late here)", al.sounds[0].heard && al.sounds[0].f === 62 && al.lag === 1, al);
   ok("align: announced but silent, and an onset nobody announced", al.sounds[1].heard === false && al.unreported.length === 1 && Math.abs(al.unreported[0].t - 5) < 1e-9, al);
+  // quest_start (f66) has the onset at 1.1 s; a swing announced 2 frames later must not take it
+  const ov = alignSoundEvents([{ name: "quest_start", frame: 66 }, { name: "swing", frame: 68 }], [{ t: 1.1 }], fps);
+  ok("align: an onset belongs to one sound: a later swing doesn't snap back onto quest_start's", ov.sounds[0].heard && !ov.sounds[1].heard && ov.sounds[1].near.label === "quest_start" && ov.sounds[1].near.ms === 33, ov.sounds);
+  const ov2 = alignSoundEvents([{ name: "quest_start", frame: 66 }, { name: "swing", frame: 68 }], [{ t: 68 / 60 }], fps);
+  ok("align: an onset at or after an event beats one before it (quest_start's onset unheard, the swing keeps its own)", !ov2.sounds[0].heard && ov2.sounds[1].heard && ov2.sounds[1].f === 69, ov2.sounds);
+  const tg = alignSoundEvents([{ name: "quest_start", frame: 66 }, { name: "swing", frame: 66 }], [{ t: 1.1 }], fps);
+  ok("align: sounds started in the same frame share an onset, marked together", tg.sounds.every((x) => x.heard) && tg.sounds[1].together[0] === "quest_start" && tg.sounds[0].together[0] === "swing", tg.sounds);
+  const z = matchSounds([{ label: "j pressed", f: 67, kind: "input" }], [{ label: "quest_start", f: 67, t: 1.1 }]);
+  ok("match: an input's sound can't be at +0f (that sound started before the press could be heard)", z.matches[0].sound === null && z.matches[0].early.offset === 0, z.matches[0]);
+}
+
+// ---- measure figure: which diff regions are the figure
+{
+  // a 600×400 region (240,000 px) that doesn't touch the point: picked without spreading its pixels (no stack overflow)
+  const W = 800, big = { px: Array.from({ length: 600 * 400 }, (_, k) => (100 + Math.floor(k / 600)) * W + 150 + (k % 600)), x: 150, y: 100, w: 600, h: 400 };
+  const small = { px: [5 * W + 5], x: 5, y: 5, w: 1, h: 1 };
+  let fr = null, err = null;
+  try { fr = figureRegions([small, big], [], { sx: 120, sy: 300, trusted: true }); } catch (e) { err = e.message; }
+  ok("figureRegions: a 240k-px region is chosen as the nearest without a stack overflow", fr && fr.kept[0] === big && fr.how === "nearest" && fr.unplaced, err || fr);
+  const fr2 = figureRegions([small, big], [], { sx: 6, sy: 6, trusted: false });
+  ok("figureRegions: an assumed (screen = state) point on nothing keeps the largest region, not the nearest", fr2.kept[0] === big && fr2.how === "largest", fr2.how);
 }
 
 // ---- input spec
@@ -646,6 +668,22 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
     cli(["shot", "--at", "0.1", "--out", withoutP, "--params", '{"hide":["Player"]}'], { MOCK_FIGURE: "1" });
     r = cli(["measure", "figure", withP, "--mask", `diff:${withoutP}`, "--json"]);
     ok("measure figure <png> --mask diff:<without.png>: the same 4 surfaces as driving the game", (() => { const d = J(r)?.data.shots[0]; return d && d.figurePixels === 149 && d.surfaces.length === 4 && J(r).summary.worstMedianRatio === rr(contrastRatio(F, G.sand)); })(), r.stdout.slice(0, 600) + r.stderr);
+    // the same from files when the hide also re-sorted the tied props: the largest region, the other one reported
+    cli(["shot", "--at", "0.1", "--out", withP], { MOCK_FIGURE: "sort" });
+    cli(["shot", "--at", "0.1", "--out", withoutP, "--params", '{"hide":["Player"]}'], { MOCK_FIGURE: "sort" });
+    r = cli(["measure", "figure", withP, "--mask", `diff:${withoutP}`, "--json"]);
+    ok("measure figure <png> --mask diff: (re-sorted props too): the largest region (149 px), the 55 px elsewhere warned as draw order", (() => { const j = J(r), d = j?.data.shots[0]; return d && d.figurePixels === 149 && d.bbox.x === 33 && d.elsewhere?.pixels === 55 && d.elsewhere.draw === 1 && j.summary.warnings === 1; })(), r.stdout.slice(0, 900) + r.stderr);
+    // the player drawn 200 px right of its state position (world coords, no state.camera): no region is at 40,90
+    r = cli(["measure", "figure", "--of", "Player", "--at", "0.1", "--json"], { MOCK_FIGURE: "sort", MOCK_FIGURE_DX: "200" });
+    ok("measure figure: state position on no changed pixel (screen = state assumed): the largest region (the hero, 149 px at 233,83), warned", (() => { const j = J(r), d = j?.data.shots[0]; return d && d.figurePixels === 149 && d.bbox.x === 233 && d.unplaced?.how === "largest" && d.elsewhere?.regions[0].join() === "150,113,5,11" && d.elsewhere.draw === 1 && j.summary.warnings === 1; })(), r.stdout.slice(0, 900) + r.stderr);
+    r = cli(["measure", "figure", "--of", "Player", "--at", "0.1"], { MOCK_FIGURE: "sort", MOCK_FIGURE_DX: "200" });
+    ok("measure figure text: says the position landed on nothing and why", /⚠ its state position 40,90 is on no changed pixel \(screen = state was assumed: world coords\? add state\.camera or a box\): measured the largest changed region instead/.test(r.stdout), r.stdout + r.stderr);
+    // a health bar 3 px above the sprite vanishes with it: part of the figure, no warning
+    r = cli(["measure", "figure", "--of", "Player", "--at", "0.1", "--json"], { MOCK_FIGURE: "1", MOCK_FIGURE_BAR: "1" });
+    ok("measure figure: a health bar 3 px above the sprite is part of the figure (149 + 30 px, 15×20), not 'draw order'", (() => { const j = J(r), d = j?.data.shots[0]; return d && d.figurePixels === 179 && d.bbox.h === 20 && d.parts?.[0].join() === "33,78,15,2" && !d.elsewhere && j.summary.warnings === 0; })(), r.stdout.slice(0, 900) + r.stderr);
+    // examples/arena: the Guard's "!" quest marker (drawn 20 px above it) vanishes with it: part of it, not a sort change
+    r = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "measure", "figure", "--of", "Guard", "--json"], { encoding: "utf8", timeout: 120000, cwd: path.join(root, "examples", "arena") });
+    ok("measure figure (arena) --of Guard: its '!' marker joins the figure, no 'draw order' warning", (() => { const j = J(r), d = j?.data.shots[0]; return d && d.parts?.length === 2 && d.parts.every((q) => q[0] === 71) && !d.elsewhere && j.summary.warnings === 0; })(), r.stdout.slice(0, 900) + r.stderr);
   }
   r = cli(["measure", "registration", "--pos", "state.player.pos", "--at", "0", "--time", "36f", "--input", "right@0-1, down@0-1", "--json"], { MOCK_CAMERA: "1" });
   ok("registration: the sprite sits on its state position (offset 0, spread 0); a disc's feet glide", (() => { const q = J(r)?.summary; return q && q.offset.join() === "0,0" && q.spread.join() === "0,0" && q.gliding === 36 && q.planted === 0; })(), r.stdout.slice(0, 400) + r.stderr);
@@ -721,6 +759,17 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   ok("listen: a sound starting under a longer, louder one is heard (+1f), all 3 announced sounds line up", (() => { const j = J(r); if (!j) return false; const sw = j.data.matches.filter((m) => m.sound === "swing"); const q = j.data.report.sounds.find((x) => x.label === "quest_start"), s = j.data.report.sounds.find((x) => x.label === "swing"); return sw.length === 2 && sw.every((m) => m.offset === 1) && j.data.soundEvents.every((e) => e.heard) && j.summary.unheard === 0 && s.count === 2 && s.times.join() === "0.5,1.2" && Math.abs(q.analysis.length - 0.555) <= 0.01 && !j.data.report.problems.length; })(), r.stdout.slice(0, 1500) + r.stderr);
   r = cli(["listen", "--time", "2", "--input", "j@0.5, j@1.2", "--out", work], { MOCK_SOUNDS: "overlap" });
   ok("listen text: ✔ both swings, no 'nothing audible' contradiction", /✔ j pressed f72 → swing at \+1f/.test(r.stdout) && !/nothing audible/.test(r.stdout) && /swing ×2 +at 0\.50, 1\.20 s/.test(r.stdout), r.stdout + r.stderr);
+  // the swing pressed at, 1 and 2 frames after quest_start's f66: it never takes quest_start's onset or description
+  r = cli(["listen", "--time", "2", "--input", "j@1.1", "--out", work, "--json"], { MOCK_SOUNDS: "overlap" });
+  ok("listen j@1.10 (same frame as quest_start): ✔ +1f, both share the onset, marked 'starts together'", (() => { const j = J(r); if (!j) return false; const s = j.data.report.sounds.find((x) => x.label === "swing"); return j.summary.matched === 1 && j.data.matches[0].offset === 1 && j.data.soundEvents.find((e) => e.label === "swing").together[0] === "quest_start" && /starts together with quest_start/.test(s.description); })(), r.stdout.slice(0, 1500) + r.stderr);
+  r = cli(["listen", "--time", "2", "--input", "j@1.12", "--out", work, "--json"], { MOCK_SOUNDS: "overlap" });
+  ok("listen j@1.12 (17 ms after quest_start): ⚠ too close for an onset of its own, not matched to quest_start at +0f, counted", (() => { const j = J(r); if (!j) return false; const sw = j.data.soundEvents.find((e) => e.label === "swing"); return j.summary.matched === 0 && j.summary.unheard === 1 && j.summary.eventIssues === 1 && j.data.matches[0].sound === "swing" && !sw.heard && sw.near.label === "quest_start" && !j.data.report.sounds.some((x) => x.label === "swing"); })(), r.stdout.slice(0, 1500) + r.stderr);
+  r = cli(["listen", "--time", "2", "--input", "j@1.12"], { MOCK_SOUNDS: "overlap" });
+  ok("listen text j@1.12: says why, and not 'No problems found'", /⚠ j pressed f67 → swing announced at \+1f, but no onset of its own: it starts 1\d ms after quest_start's/.test(r.stdout) && !/No problems found/.test(r.stdout) && /1 event above is ✖\/⚠/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["listen", "--time", "2", "--input", "j@1.13", "--out", work, "--json"], { MOCK_SOUNDS: "overlap" });
+  ok("listen j@1.13 (33 ms after quest_start): ✔ swing +1f from its own onset, ~80 ms on its own bands, only quest_start without an event", (() => { const j = J(r); if (!j) return false; const s = j.data.report.sounds.find((x) => x.label === "swing"); return j.summary.matched === 1 && j.data.matches[0].sound === "swing" && j.data.matches[0].offset === 1 && j.data.soundEvents.every((e) => e.heard) && j.summary.unexplained === 1 && j.data.unexplained[0].sound === "quest_start" && s && s.analysis.length >= 0.07 && s.analysis.length <= 0.095 && !/C5|tonal \(/.test(s.description) && !j.data.report.problems.length; })(), r.stdout.slice(0, 1500) + r.stderr);
+  r = cli(["listen", "--time", "2", "--input", "j@1.4, j@1.6", "--out", work, "--json"], { MOCK_SOUNDS: "overlap" });
+  ok("listen j@1.4,1.6 under the chord: no 'double-triggered?' problem", (() => { const j = J(r); return j && j.summary.matched === 2 && !j.data.report.problems.some((p) => /second attack/.test(p.text)); })(), r.stdout.slice(0, 1500) + r.stderr);
   // ---- measure perf (MOCK_PERF: update 1 ms, a 25 ms particle burst at f90, memory +0.05 MB/frame)
   r = cli(["measure", "perf", "--time", "3", "--input", "right@0-3", "--json"], { MOCK_PERF: "1" });
   ok("measure perf: game update_ms p50 1, p95 1, max 25 at f90, one spike", (() => { const s = J(r)?.summary; return s && s.source === "game" && s.key === "update_ms" && s.frames === 180 && s.p50 === 1 && s.p95 === 1 && s.max === 25 && s.maxFrame === 90 && s.spikes === 1 && s.spikeFrames.join() === "90" && s.overBudget === 1 && s.deterministic === false; })(), r.stdout.slice(0, 1200) + r.stderr);

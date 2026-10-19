@@ -433,6 +433,100 @@ console.log("\naudio analysis — raw game audio (analyzePCM)");
   ok("overlap: quest_start is 555 ms long (not cut at the swing inside it)", by.quest_start && Math.abs(by.quest_start.analysis.length - 0.555) <= 0.01, by.quest_start?.analysis.length);
   ok("overlap: swing ×2 described from the clean one: 80 ms, noisy", by.swing && by.swing.count === 2 && Math.abs(by.swing.analysis.length - 0.08) <= 0.006 && by.swing.analysis.tonality === "noisy", [by.swing?.count, by.swing?.analysis.length, by.swing?.analysis.tonality]);
   ok("overlap: no double trigger read into the chord's beating or the overlap", !report.problems.some((q) => /second attack/.test(q.text)), report.problems.map((q) => q.text));
+
+  // ---- the added-sound path must not invent sounds, time them early, or split one moving sound ----
+  const seeded = (s) => { s = s >>> 0 || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296 * 2 - 1; }; };
+  const fmt = (os) => os.map((o) => o.t.toFixed(3)).join(" ");
+  const bad = [];
+  for (let sd = 1; sd <= 12; sd++) for (const lv of [0.05, 0.15, 0.4]) {   // rain: steady white noise 0.2-2.8 s
+    const r = seeded(sd * 7919), z = buf(3);
+    for (let i = Math.round(0.2 * SR); i < Math.round(2.8 * SR); i++) z[i] = lv * r();
+    const os = detectOnsets(z, SR);
+    if (os.length !== 1) bad.push(`noise ${lv} seed ${sd}: ${fmt(os)}`);
+  }
+  for (let sd = 1; sd <= 10; sd++) {   // wind: low-passed noise
+    const r = seeded(sd * 104729), z = buf(3);
+    let y = 0;
+    for (let i = Math.round(0.2 * SR); i < Math.round(2.8 * SR); i++) { y = 0.98 * y + 0.02 * r(); z[i] = y * 0.9; }
+    const os = detectOnsets(z, SR);
+    if (os.length !== 1) bad.push(`wind seed ${sd}: ${fmt(os)}`);
+  }
+  ok("overlap: steady noise (36 runs) and wind (10 runs) are one onset each", !bad.length, bad.slice(0, 6));
+  const errs = [];
+  for (let s = 0; s < 10; s++) {   // a swing (peak 0.3) on a 0.15 noise bed: timed within -3..+5 ms
+    const r = seeded(1000 + s), z = buf(2), t0 = 0.9 + s * 0.013;
+    for (let i = Math.round(0.2 * SR); i < Math.round(1.6 * SR); i++) z[i] = 0.15 * r();
+    for (let i = 0; i < 0.08 * SR; i++) { const u = i / SR; z[Math.round(t0 * SR) + i] += 0.3 * Math.min(1, u / 0.001) * Math.exp(-u / 0.03) * r(); }
+    const os = detectOnsets(z, SR).filter((o) => Math.abs(o.t - t0) < 0.08);
+    errs.push(os.length === 1 ? Math.round((os[0].t - t0) * 1000) : `${os.length} found`);
+  }
+  show("swing on a noise bed: error (ms)", errs.join(" "));
+  ok("overlap: a swing on a noise bed is found once, never more than 3 ms early or 5 ms late", errs.every((e) => typeof e === "number" && e >= -3 && e <= 5), errs);
+  const steps = buf(1.2);
+  addTone(steps, 0.3, 0.4, (t) => [262, 523, 1047, 2093][Math.min(3, Math.floor(t / 0.1))], (t) => 0.4 * Math.min(1, t / 0.005, (0.4 - t) / 0.005));
+  ok("overlap: one tone stepping up by octaves (a one-voice jingle) is one onset", detectOnsets(steps, SR).length === 1, fmt(detectOnsets(steps, SR)));
+  const sweep = buf(1);
+  addTone(sweep, 0.3, 0.2, (t) => 200 * Math.pow(40, t / 0.2), (t) => 0.4 * Math.min(1, t / 0.005, (0.2 - t) / 0.005));
+  ok("overlap: a fast up-sweep (200 Hz → 8 kHz in 0.2 s) is one onset", detectOnsets(sweep, SR).length === 1, fmt(detectOnsets(sweep, SR)));
+  // a second sound 40-50 ms into a louder one (and a chord 30 ms after a swing) is its own onset
+  const near = [];
+  for (const off of [0.04, 0.05]) {
+    const z = buf(2);
+    chord(z, 1.1, 0.555); swing(z, 1.1 + off);
+    const os = detectOnsets(z, SR);
+    if (!(os.length === 2 && Math.abs(os[1].t - 1.1 - off) <= 0.003)) near.push(`swing +${off * 1000} ms: ${fmt(os)}`);
+  }
+  {
+    const z = buf(2);
+    swing(z, 1.0); chord(z, 1.03, 0.555);
+    const os = detectOnsets(z, SR);
+    if (!(os.length === 2 && Math.abs(os[1].t - 1.03) <= 0.003)) near.push(`chord 30 ms after a swing: ${fmt(os)}`);
+  }
+  ok("overlap: a different sound 40-50 ms after another is its own onset", !near.length, near);
+  // a swing that only plays under the chord: its length is its own (80 ms), and no pitch/tonality from the chord
+  const under = buf(2);
+  chord(under, 1.1, 0.555); swing(under, 1.18);
+  const ur = analyzePCM(toPCM([under]), { events: [{ t: 1.1, label: "quest_start" }, { t: 1.18, label: "swing" }] }).report;
+  const us = ur.sounds.find((q) => q.label === "swing");
+  show("swing only under the chord", us?.description);
+  ok("overlap: an always-overlapped swing is measured on its own bands: ~80 ms (60-100), no tonality or pitch from the chord", us && us.analysis.length >= 0.06 && us.analysis.length <= 0.1 && !/tonal \(|% pitched|C5/.test(us.description), us?.description);
+  const late = buf(2);
+  chord(late, 1.1, 0.555); swing(late, 1.5);
+  const lr = analyzePCM(toPCM([late]), { events: [{ t: 1.1, label: "quest_start" }, { t: 1.5, label: "swing" }] }).report;
+  ok("overlap: a swing late in the chord is not 'double-triggered'", !lr.problems.some((q) => /second attack/.test(q.text)), lr.problems.map((q) => q.text));
+  const ls = lr.sounds.find((q) => q.label === "swing");
+  ok("overlap: …and isn't described as 'unpitched' and 'tonal' at once", ls && !(/unpitched/.test(ls.description) && /tonal \(/.test(ls.description)), ls?.description);
+
+  // the mock game's MOCK_SOUNDS=overlap at its 22.05 kHz: the swing pressed every frame from f66 to f100 inside
+  // quest_start (f66, 555 ms): each is heard at +1f from its own onset, except f66 (starts with it: shared) and f67
+  // (17 ms after it: too close for an onset of its own, and said so)
+  const { alignSoundEvents, matchSounds } = await import("../../src/core/soundmatch.js");
+  const MS = 22050, qs = Float32Array.from({ length: Math.round(MS * 0.555) }, (_, i) => [523.25, 659.25, 783.99].reduce((a, f) => a + Math.sin(2 * Math.PI * f * i / MS), 0) * 0.2 * Math.min(1, i / (MS * 0.005), (MS * 0.555 - i) / (MS * 0.01)) * (1 - 0.5 * i / (MS * 0.555)));
+  const sweepBad = [];
+  for (let F = 66; F <= 100; F++) {
+    let seed = 7;
+    const z = new Float32Array(MS * 2), put = (smp, f) => { const st = Math.round((f / 60) * MS); for (let i = 0; i < smp.length && st + i < z.length; i++) z[st + i] += smp[i]; };
+    put(qs, 66);
+    put(Float32Array.from({ length: Math.round(MS * 0.08) }, (_, i) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return ((seed / 0x7fffffff) * 2 - 1) * 0.15 * Math.min(1, i / (MS * 0.001)) * Math.exp(-i / (MS * 0.03)); }), F);
+    const al = alignSoundEvents([{ name: "quest_start", frame: 66 }, { name: "swing", frame: F }], detectOnsets(z, MS), 60);
+    const sw = al.sounds[1], m = matchSounds([{ label: "j pressed", f: F, kind: "input" }], al.sounds).matches[0];
+    const good = F === 66 ? sw.heard && sw.together?.[0] === "quest_start" : F === 67 ? !sw.heard && sw.near?.label === "quest_start" : sw.heard && m.sound === sw && m.offset === 1;
+    if (!good) sweepBad.push(`f${F}: ${sw.heard ? `heard f${sw.f}` : "unheard"} → ${m.sound ? `${m.sound.label} +${m.offset}f` : "none"}`);
+  }
+  ok("overlap: swing pressed every frame f66-f100 inside quest_start: f68+ each ✔ +1f, f66 shared, f67 too close", !sweepBad.length, sweepBad);
+}
+
+// ---- onset times at 22.05 / 44.1 kHz stay right late in a long capture (1 ms envelope windows are 22 or 23 samples)
+{
+  const late = [];
+  for (const sr of [22050, 44100]) {
+    const z = new Float32Array(sr * 32);
+    let sd = 3;
+    for (const t0 of [5, 15, 30]) for (let i = 0; i < 0.08 * sr; i++) { sd = (sd * 1103515245 + 12345) & 0x7fffffff; z[Math.round(t0 * sr) + i] = ((sd / 0x7fffffff) * 2 - 1) * 0.3 * Math.min(1, i / (sr * 0.001)) * Math.exp(-i / (sr * 0.03)); }
+    const os = detectOnsets(z, sr);
+    if (!(os.length === 3 && [5, 15, 30].every((t, k) => Math.abs(os[k].t - t) <= 0.001))) late.push(`${sr}: ${os.map((o) => o.t.toFixed(4)).join(" ")}`);
+  }
+  ok("onsets at 5, 15 and 30 s at 22.05 and 44.1 kHz: each within 1 ms (whole-sample windows drifted 34 ms by 15 s)", !late.length, late);
 }
 
 // ---- hygiene: clicks at sound edges, pops, true peak, double triggers, repetition, loop seams ----------------

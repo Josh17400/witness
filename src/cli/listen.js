@@ -82,6 +82,8 @@ function report(r, opt) {
   const { fps, rep, aligned, match, within } = r;
   const lines = [];
   const fr = (f) => `f${f}`;
+  // an announced sound with no onset of its own because it starts right after another one (the detector needs ~40 ms)
+  const tooClose = (x) => (x.near ? `no onset of its own: it starts ${x.near.ms} ms after ${x.near.label ? `${x.near.label}'s` : "another sound's"}, too close to tell apart` : null);
   let counts = null;
   if (match) {
     counts = { events: match.matches.length, matched: 0, missing: 0, doubled: 0, early: 0, unheard: 0 };
@@ -92,12 +94,12 @@ function report(r, opt) {
       if (x.sound) {
         counts.matched++;
         if (x.doubles.length) { counts.doubled++; lines.push(`  ⚠ ${head} → ${x.sound.label} ${x.doubles.length + 1} times (+${x.offset}f, ${x.doubles.map((d) => `+${d.offset}f`).join(", ")}): double-triggered?`); }
-        else if (x.sound.heard === false) { counts.matched--; counts.unheard++; lines.push(`  ⚠ ${head} → ${x.sound.label} announced at +${x.offset}f, but nothing audible starts there`); }
+        else if (x.sound.heard === false) { counts.matched--; counts.unheard++; lines.push(`  ⚠ ${head} → ${x.sound.label} announced at +${x.offset}f, but ${tooClose(x.sound) || "nothing audible starts there"}`); }
         else lines.push(`  ✔ ${head} → ${x.sound.label} at +${x.offset}f`);
       } else {
         counts.missing++;
         if (x.early) counts.early++;
-        const hint = x.early ? ` — but ${x.early.sound.label} started ${-x.early.offset}f BEFORE it` : x.before ? ` (the ${x.before.action.label.replace(/ pressed$/, " press")} at ${fr(x.before.action.f)} played ${x.before.sound.label}: a cooldown or retrigger rule eating this one?)` : "";
+        const hint = x.early ? ` — but ${x.early.sound.label} started ${x.early.offset === 0 ? "in the same frame, before the press could be heard" : `${-x.early.offset}f BEFORE it`}` : x.before ? ` (the ${x.before.action.label.replace(/ pressed$/, " press")} at ${fr(x.before.action.f)} played ${x.before.sound.label}: a cooldown or retrigger rule eating this one?)` : "";
         lines.push(`  ✖ ${head} → no sound within ${within}f${hint}`);
       }
     }
@@ -111,8 +113,9 @@ function report(r, opt) {
   if (aligned) {
     const heard = aligned.sounds.filter((x) => x.heard).length;
     lines.push(`The game announced ${aligned.sounds.length} sound${aligned.sounds.length === 1 ? "" : "s"} ({"event": "sound"} lines); ${heard} line up with an onset in the audio${aligned.lag ? `, heard ${Math.abs(aligned.lag)}f ${aligned.lag > 0 ? "after" : "before"} the frame the game announced (median)` : ""}.`);
-    const silent = aligned.sounds.filter((x) => !x.heard);
+    const silent = aligned.sounds.filter((x) => !x.heard && !x.near), close = aligned.sounds.filter((x) => !x.heard && x.near);
     if (silent.length) lines.push(`  ⚠ announced but nothing audible starts there: ${silent.slice(0, 6).map((x) => `${x.label} (${fr(x.declared)})`).join(", ")}${silent.length > 6 ? ", …" : ""} — an empty/muted sample, or a sound starting inside another`);
+    if (close.length) lines.push(`  ⚠ announced, no onset of its own (under ~40 ms after another): ${close.slice(0, 6).map((x) => `${x.label} (${fr(x.declared)}, ${x.near.ms} ms after ${x.near.label || "an onset"})`).join(", ")}${close.length > 6 ? ", …" : ""} — left out of Sounds`);
     if (aligned.unreported.length) lines.push(`  ⚠ audible onsets the game didn't announce: ${aligned.unreported.slice(0, 6).map((o) => `${fmtT(o.t)} (${fr(o.f)})`).join(", ")}${aligned.unreported.length > 6 ? ", …" : ""}`);
     lines.push("");
   }
@@ -120,13 +123,16 @@ function report(r, opt) {
     const q = r.seam;
     lines.push(`Loop ${q.a}–${q.b} s seam: ${q.ok ? "✔ clean" : "✖"} · level step ${q.levelStep} dB · jump at the joint ${q.joint} (the slope around it ${q.slope})${q.click ? " → it clicks" : ""} · brightness jump ${q.brightnessJump} Hz${q.ok ? "" : " → cut the loop on a zero crossing at the same phase, or crossfade 10–50 ms"}`, "");
   }
-  const text = [...lines, rep.text].join("\n").replace(/pass event times for exact labels\./, "games can name them with {\"event\": \"sound\"} lines (docs/PROTOCOL.md).");
+  const eventIssues = counts ? counts.missing + counts.doubled + counts.unheard : 0;
+  let text = [...lines, rep.text].join("\n").replace(/pass event times for exact labels\./, "games can name them with {\"event\": \"sound\"} lines (docs/PROTOCOL.md).");
+  // the audio report's "No problems found." is about the audio itself: not when the events list above has ✖/⚠
+  if (eventIssues) text = text.replace(/^No problems found\.$/m, `No problems in the audio itself; ${eventIssues} event${eventIssues === 1 ? "" : "s"} above ${eventIssues === 1 ? "is" : "are"} ✖/⚠.`);
   {
     const ma = match ? match.matches.map((x) => ({ event: x.action.label, frame: x.action.f, kind: x.action.kind, sound: x.sound ? x.sound.label : null, soundFrame: x.sound ? x.sound.f : null, offset: x.offset, doubles: x.doubles.map((d) => d.offset), early: x.early ? x.early.offset : null })) : [];
     // a report, not a test: missing sounds don't fail it (movement keys have none); gate with --expect "missing == 0"
     const env = envelope("listen", {
       verdict: rep.text.split("\n")[0] + (counts ? ` · events: ${counts.matched}/${counts.events} have their sound, ${counts.missing} missing, ${counts.doubled} doubled${counts.unheard ? `, ${counts.unheard} announced but not audible` : ""}` : ""),
-      summary: { ...(r.seam ? { loopOk: r.seam.ok, loopJoint: r.seam.joint, loopLevelStep: r.seam.levelStep } : {}), truePeakDb: rep.report.mix.truePeakDb, sounds: rep.report.sounds.length, occurrences: rep.report.sounds.reduce((a, x) => a + x.count, 0), problems: rep.report.problems.length, ...(counts || {}), unexplained: match ? match.unexplained.length : null, announced: aligned ? aligned.sounds.length : 0 },
+      summary: { ...(r.seam ? { loopOk: r.seam.ok, loopJoint: r.seam.joint, loopLevelStep: r.seam.levelStep } : {}), truePeakDb: rep.report.mix.truePeakDb, sounds: rep.report.sounds.length, occurrences: rep.report.sounds.reduce((a, x) => a + x.count, 0), problems: rep.report.problems.length, ...(counts || {}), ...(counts ? { eventIssues } : {}), unexplained: match ? match.unexplained.length : null, announced: aligned ? aligned.sounds.length : 0 },
       data: { report: rep.report, matches: ma, unexplained: match ? match.unexplained.map((x) => ({ sound: x.label, frame: x.f, t: x.t })) : [], soundEvents: aligned ? aligned.sounds : [], unreported: aligned ? aligned.unreported : [], fps },
       files: r.files,
     });

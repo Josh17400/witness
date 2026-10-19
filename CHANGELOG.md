@@ -18,20 +18,72 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   overlapping its box/rect), as type hides already did; it was the whole diff, so a hide that also re-sorted two
   tied sprites far away (an unstable `std::sort` on equal y) turned a hero into a 119×55 "silhouette". Other regions
   not at a hidden entity are reported: `⚠ 55 px changed elsewhere (1 region: 5×11 at 150,113): draw order /
-  unstable sort? Left out of the silhouette.`; `--json`: `data.shots[].elsewhere {pixels, regions: [[x,y,w,h]]}`,
-  `summary.warnings`.
+  unstable sort? (other paint is there without it). Left out of the silhouette.`; `--json`:
+  `data.shots[].elsewhere {pixels, regions: [[x,y,w,h]], draw, vanished}`, `summary.warnings`.
+- Parts of the hidden entity apart from its body (a health bar 3 px above it, the arena Guard's "!" marker 20 px
+  above it) are part of its silhouette when they vanished to the ground with it within one figure size
+  (`data.shots[].parts`); "draw order / unstable sort?" is said only when the image without it has other paint there
+  (re-sorted sprites), else "parts that vanished with it, away from it". The arena Guard was `⚠ 16 px changed
+  elsewhere … draw order / unstable sort?`; now no warning, 12×26 px with its marker.
 - A projection fitted from a single entity on a single sprite is no longer trusted (one entity lands on any blob:
-  the player was mapped onto the far-away prop): screen = state, or `state.camera`, unless 2+ entities agree.
+  the player was mapped onto the far-away prop): screen = state, or `state.camera`, unless 2+ entities agree. When
+  the position then lands on no changed pixel (state in world coords, no `state.camera`), the largest region is
+  measured and it says so: `⚠ its state position 40,90 is on no changed pixel (screen = state was assumed: world
+  coords? add state.camera or a box): measured the largest changed region instead` (`data.shots[].unplaced`); it
+  measured the nearest region (the 5×11 prop) and called the hero "draw order". With a confirmed projection the
+  nearest region is used, found without spreading its pixels into `Math.min` (a 200k-px region threw "Maximum call
+  stack size exceeded").
+- `measure figure <png> --mask diff:<without.png>` splits the diff the same way: its largest region (plus parts that
+  vanished beside it), the other regions in the ⚠ line (was the whole diff, silently: a 122×41 box over hero and
+  props).
+- Mock game: `MOCK_FIGURE_DX=200` (the player drawn 200 px right of its state position), `MOCK_FIGURE_BAR=1` (a health
+  bar 3 px above it).
 
 **listen: sounds that start under another sound**
 - Onsets under a longer, louder sound are found: when the level hardly rises, a spectral-flux peak still counts if
-  third-octave bands that were quiet rise 10 dB and add at least 1% of the energy (what neighbouring bands lost is
-  subtracted, so a pitch change, sweep or vibrato inside one sound is still one sound); the onset is timed on those
-  bands (causal filters, never early). A 0.15 swing at 1.2 s inside a 555 ms chord at 1.1 s: found at 1.2002 s.
+  bands that were quiet rise 10 dB over all of the 60 ms before (five 40 ms windows; third-octave bands, the low ones
+  pooled to 6+ FFT bins) in two windows after, and add at least 1% of the energy. What neighbouring bands lost is
+  subtracted, and when bands that held the sound empty while the level holds (a pitch step, a fast sweep) it is one
+  sound. The onset is timed on those bands (causal filters, from 10 ms before, a rise held 2 ms). A 0.15 swing at
+  1.2 s inside a 555 ms chord at 1.1 s: found at 1.2003 s. Checked against: steady white noise at 0.05/0.15/0.4 (36
+  runs) and wind (10): exactly one onset each (the first version of this found 6 and 12 phantom onsets 60-155 ms
+  in); a swing on a 0.15 noise bed, 10 starts: within 0..+1 ms (was -39..+3 ms, 1 missed); a tone stepping up by
+  octaves and a 200 Hz → 8 kHz sweep in 0.2 s: one onset (were 4 and 2).
+- A level rise also counts on the loudest 20 ms near the flux peak against the loudest 20 ms before it, so a short
+  sound on a steady bed (+3.4 dB over 34 ms) is found.
+- Onset times at 22.05 and 44.1 kHz drifted late in long captures: the 1 ms envelope used whole 22-sample (44-sample)
+  windows but read each as 1 ms, 0.23% slow, so a burst at 15 s read 15.034 s and one at 30 s 30.068 s (44.1 kHz:
+  29.900 s, refined onto the wrong stretch). Envelope windows now cover exact times (22 or 23 samples): 15.0001 and
+  30.0000 s. This also moved the swing in the mock (22.05 kHz) 3 ms late at 1.2 s once onsets were timed on their own
+  bands.
+- Two sounds within 60 ms (the merge gap) are both kept when the second adds bands the first wasn't using, from
+  ~35-40 ms after the first (a swing 40 or 50 ms into the chord, a chord 30 ms after a swing), and still reads as
+  added 5 ms later (a slow sweep edging into the next band does once: one sound); closer than that the detector can't
+  separate them, and `listen` says so (below).
 - The sections agree: `listen --input "j@0.5,j@1.2"` said "swing at +1f (announced, but nothing audible starts
   there)" and then listed "swing ×2" under Sounds. Now both swings are ✔ +1f. An announced sound that really has no
   onset is ⚠ in the events list (`summary.unheard`, not counted as matched) and is left out of the Sounds analysis
   instead of describing whatever else plays there as it.
+- An onset belongs to one announced sound: it goes to the sound it is at or after (2 ms slack) before one it is up to
+  2 frames before, best pairs first; sounds announced in the same frame share it (`together`, described as "starts
+  together with X: measured with it, they can't be told apart"). `j@1.13` (the swing 33 ms into quest_start) was "✖ j
+  pressed f68 → no sound — but quest_start started 1f BEFORE it", "2 line up" with one onset, the swing described as
+  the 555 ms C5 chord and "No problems found"; now ✔ swing +1f, 83 ms on its own bands. Pressing j every frame from
+  f66 to f100 inside quest_start (the mock, 22.05 kHz): f68-f100 all ✔ +1f (f69 was ⚠ "nothing audible", f67/f68
+  taken by quest_start's onset). f67 (17 ms after it) is `⚠ … swing announced at +1f, but no onset of its own: it
+  starts 16 ms after quest_start's, too close to tell apart` (`soundEvents[].near {label, ms}`).
+- An input's sound is matched from +1f (it can't be heard in the press's own frame): `j@1.12` was "✔ j pressed f67 →
+  quest_start at +0f"; a sound at +0f is now the "started in the same frame, before the press could be heard" hint.
+- With ✖/⚠ events the audio report's last line reads "No problems in the audio itself; N events above are ✖/⚠."
+  instead of "No problems found." (`summary.eventIssues` = missing + doubled + unheard; `summary.problems` stays the
+  audio's own problems, since a movement key with no sound is ✖ too).
+- A sound that always plays under another is measured on the bands it added (8th-order band-pass, its length and
+  attack against those bands' level before it): an 80 ms swing under the chord was "35 ms clicky · unpitched · …
+  tonal (100% pitched) (always overlapped by quest_start: measured with it)"; now "81 ms punchy (attack 1 ms) · bright
+  (centroid 5.76 kHz) · peak -20.5 dBFS, -33.3 LUFS in its own bands 1.60 kHz–12.0 kHz (always under quest_start:
+  measured on the bands it adds; pitch not separable)" (`analysis.ownBands`, pitch kind "unknown", tonality "not
+  separable"). The double-trigger check for it runs on those bands too: `j@1.5` and `j@1.4,j@1.6` reported "swing …
+  has a second attack 14 ms after the first (+5.9 dB): played twice" for one burst; no longer.
 - With announced sounds, a sound still playing when the next one starts runs on under it (quest_start: 555 ms, not
   cut to 100 ms at the swing); a sound is described from an occurrence that plays alone when there is one, else marked
   "(always overlapped by swing: measured with it)". A segment no longer takes in the first samples of the next sound
@@ -86,8 +138,11 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
    doesn't reorder the rest.
 3. If a script gates on `listen` counts (`matched`, `unexplained`, sound counts, `problems`): sounds that start
    under a louder one are now heard, so "announced but nothing audible" entries and unexplained onsets can move
-   into matches; announced sounds with no onset no longer count as matched (`summary.unheard`). Sound lengths for
-   overlapped sounds and the double-trigger problems on chords change for the better; re-check thresholds.
+   into matches; announced sounds with no onset no longer count as matched (`summary.unheard`), and an input no
+   longer matches a sound at +0f. Sound lengths for overlapped sounds and the double-trigger problems on chords
+   change for the better; re-check thresholds. Steady noise or wind no longer yields unexplained onsets. At 22.05 or
+   44.1 kHz, sound times late in a capture move earlier (the drift fix: 34 ms at 15 s). To fail on
+   event trouble, gate on `summary.eventIssues` (or `missing`/`unheard`), not `problems`.
 4. Nothing to do for `measure ui --safe` on the game's canvas (the warning just went away). Scripts that gate on
    pixel-mode `measure ui` (`problems`) will see fewer: world sprites are no longer text. Better: list the HUD in
    `state.ui`.
