@@ -137,7 +137,9 @@ ok("live arena: the replay ends in exactly the recorded state", r.code === 0 && 
 
 // ---- the process cap and cleanup
 const regFiles = fs.existsSync(env.WITNESS_PLAY_REGISTRY) ? fs.readdirSync(env.WITNESS_PLAY_REGISTRY).filter((f) => f.endsWith(".json")) : [];
-const live = regFiles.map((f) => JSON.parse(fs.readFileSync(path.join(env.WITNESS_PLAY_REGISTRY, f), "utf8"))).filter((e) => pidAlive(e.pid));
+// an ended daemon can take a few seconds to exit on a busy Windows runner: give it up to 10 s
+let live = regFiles.map((f) => JSON.parse(fs.readFileSync(path.join(env.WITNESS_PLAY_REGISTRY, f), "utf8"))).filter((e) => pidAlive(e.pid));
+for (let i = 0; i < 20 && live.length; i++) { await new Promise((res) => setTimeout(res, 500)); live = live.filter((e) => pidAlive(e.pid)); }
 ok("no session daemons left running", live.length === 0, JSON.stringify(live));
 r = witness(["play", "list"], { cwd: tmp, env });
 ok("play list shows ended sessions", /○ fake\s+ended/.test(r.out) && /○ m\s+ended/.test(r.out), r.out);
