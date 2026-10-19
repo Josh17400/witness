@@ -90,6 +90,7 @@ Games may announce their sounds (`witness.sound("coin")`) so `listen` names them
 than the adapter.
 
 * Spec: [docs/PROTOCOL.md](docs/PROTOCOL.md)
+* What changed and how to adopt each release: [CHANGELOG.md](CHANGELOG.md)
 * Agent playtests: [docs/PLAYTEST.md](docs/PLAYTEST.md)
 * Writing adapters: [docs/ADAPTERS.md](docs/ADAPTERS.md)
 * The Claude skill: [skills/witness/SKILL.md](skills/witness/SKILL.md)
