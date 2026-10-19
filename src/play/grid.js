@@ -281,6 +281,43 @@ export class NavGrid {
     return best;
   }
 
+  /** Door cells (the map's door/avoid characters, or doors/stairs/exits listed as things) at or next to cell c, nearest first. */
+  doorsNear(c, r = 1) {
+    const out = [];
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const x = c[0] + dx, y = c[1] + dy, k = K(x, y);
+      if (this.avoidMap.has(k) || this.avoidThings.has(k)) out.push({ cell: [x, y], thing: this.avoidThings.get(k) || null, d: Math.hypot(dx, dy) });
+    }
+    return out.sort((a, b) => a.d - b.d);
+  }
+
+  /**
+   * The open cell nearest to `target` that can be walked to from `from` (8-connected, no corner cutting, not through
+   * doors/stairs/exits). Known open ground beats unknown ground at the same distance; ties go to the shorter walk.
+   * Returns {cell, d} (d: cells from the target) or null.
+   */
+  nearestOpen(from, target, { t = 0, margin = 12, maxNodes = 20000 } = {}) {
+    const box = { x0: Math.min(from[0], target[0]) - margin, y0: Math.min(from[1], target[1]) - margin, x1: Math.max(from[0], target[0]) + margin, y1: Math.max(from[1], target[1]) + margin };
+    const bd = this.bounds;
+    if (bd && !this.windowed) { box.x0 = Math.max(box.x0, bd.x0); box.y0 = Math.max(box.y0, bd.y0); box.x1 = Math.min(box.x1, bd.x1); box.y1 = Math.min(box.y1, bd.y1); }
+    const q = [[from[0], from[1], 0]], seenQ = new Set([K(from[0], from[1])]);
+    let best = null, bestS = Infinity, nodes = 0;
+    while (nodes < q.length && nodes < maxNodes) {
+      const [x, y, depth] = q[nodes++];
+      const d = Math.hypot(x - target[0], y - target[1]);
+      const s = d + (this.isOpenKnown(x, y) ? 0 : 0.5) + depth * 1e-3;
+      if (s < bestS && !(x === target[0] && y === target[1])) { bestS = s; best = { cell: [x, y], d }; }
+      for (const [dx, dy] of N8) {
+        const nx = x + dx, ny = y + dy, nk = K(nx, ny);
+        if (seenQ.has(nk) || nx < box.x0 || ny < box.y0 || nx > box.x1 || ny > box.y1) continue;
+        if (this.isBlocked(nx, ny, t) || this.isAvoid(nx, ny)) continue;
+        if (dx && dy && (this.isBlocked(x + dx, y, t) || this.isBlocked(x, y + dy, t))) continue;
+        seenQ.add(nk); q.push([nx, ny, depth + 1]);
+      }
+    }
+    return best;
+  }
+
   /** Open cells the map knows (for coverage). */
   openCells() { let n = 0; for (const v of this.mapSolid.values()) if (v === false) n++; return n; }
 

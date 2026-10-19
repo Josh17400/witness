@@ -245,6 +245,7 @@ class GoTo extends Behaviour {
   /** May the path cross this door/stairs/exit cell? Only on the goal itself, a door leading to the target, or a building's own doors. */
   exemptCell(x, y) {
     const grid = this.ap.grid, g = this.goal;
+    if (this.via && this.via.door && x === this.via.cell[0] && y === this.via.cell[1]) return true;   // the way in to a target in a wall
     if (!g) return false;
     const gc = grid.toCell(g), d = Math.max(Math.abs(x - gc[0]), Math.abs(y - gc[1]));
     if (d === 0) return true;
@@ -280,6 +281,33 @@ class GoTo extends Behaviour {
     const where = th && th.p2 ? ` (last seen at cell ${fmtCell(this.ap.grid.toCell(th.p2))}${this.lastSeenT != null && this.ap.t - this.lastSeenT > 0.5 ? `, ${r1(this.ap.t - this.lastSeenT)}s ago` : ""})` : "";
     return `${this.desc} went out of view${where}`;
   }
+  /**
+   * A goto whose target is a solid cell (the map says so, or bumping into it taught us): pushing into it only gets
+   * stuck. Go in by a door at or next to it, else to the nearest open cell. Things keep "stand next to it" (a sign
+   * or a chest on a wall, a locked gate) unless no open ground touches them or they're a building beside its door.
+   * Returns {goal, reach, cell, door, msg} or null.
+   */
+  solidDetour(w, goal) {
+    const grid = this.ap.grid, t = this.ap.t, gc = grid.toCell(goal), kind = grid.blockedKind(gc[0], gc[1], t);
+    const th = this.thingId != null ? this.lastThing : null;
+    if (kind !== "map" && !(kind === "learned" && !th)) return null;
+    const doors = grid.doorsNear(gc).filter((d) => !th || d.thing !== th && !(d.thing && d.thing.id === th.id));
+    if (th) {
+      if (th.avoid || th.locked) return null;
+      const building = th.rel === "neutral" && BUILDING.test(`${th.type} ${th.name || ""}`);
+      const side = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => !grid.isBlocked(gc[0] + dx, gc[1] + dy, t) && !grid.isAvoid(gc[0] + dx, gc[1] + dy));
+      if (!(building && doors.length) && side) return null;
+    }
+    const head = `target ${th ? `${this.desc} at ${fmtCell(gc)}` : fmtCell(gc)} is inside a wall${kind === "learned" ? " (found by bumping into it)" : ""}`;
+    if (doors.length) {
+      const dc = doors[0].cell;
+      return { goal: grid.center(dc), reach: w.cell * 0.45, cell: dc, door: true, msg: `${head}: ${fmtCell(gc)} is in a building; entering by its door at ${fmtCell(dc)}` };
+    }
+    const n = grid.nearestOpen(grid.toCell(w.player.p2), gc, { t });
+    if (!n) return null;
+    const d = +r1(n.d);
+    return { goal: grid.center(n.cell), reach: w.cell * 0.45, cell: n.cell, door: false, msg: `${head}: nearest open cell ${fmtCell(n.cell)}, ${d} cell${d === 1 ? "" : "s"} from the target` };
+  }
   tick(w, want) {
     // entering the target (a building, a door, an exit) changed the scene: that was the point of the order
     if (this.sceneDone) return this.done(this.sceneDone);
@@ -295,10 +323,29 @@ class GoTo extends Behaviour {
       if (r.fail) return this.fail(r.fail);
       return this.age > this.maxT ? this.fail(`gave up after ${r1(this.age)}s`) : this.run();
     }
-    const r = this.nav.tick(w, goal, reach);
+    // a target in a wall: decided up front from the map, or the moment bumping into it shows it's solid
+    if (this.o.verb === "goto" && !this.outOfView && (!this.via || this.ap.grid.isBlocked(this.via.cell[0], this.via.cell[1], this.ap.t)) && (this.detours || 0) < 3) {
+      const v = this.solidDetour(w, goal);
+      if (v) {
+        this.detours = (this.detours || 0) + 1;
+        this.via = v; this.note = null;
+        this.nav.closeIncident(w, true, "the target is a wall: changed course");
+        this.nav.reset();
+        this.ap.emit("nav", v.msg, { cell: v.cell });
+      }
+    }
+    const via = this.via;
+    const r = this.nav.tick(w, via ? via.goal : goal, via ? via.reach : reach);
+    if (r.arrived && via) {
+      if (!via.door) return this.done(`${via.msg} — arrived there`);
+      // standing in the door: give the game a moment to change the scene (that finishes the goto through observe)
+      this.inDoorT ??= this.ap.t;
+      if (this.ap.t - this.inDoorT < 1) return this.run();
+      return this.done(`${via.msg} — standing in the door (the scene didn't change)`);
+    }
     if (r.arrived && this.outOfView) return this.fail(`${this.outOfViewMsg()}: reached that spot, but it isn't in view here`);
     if (r.arrived) return this.done(`arrived at ${this.desc}${this.note ? ` — ${this.note}` : ""}`);
-    if (r.fail) return this.fail(this.ap.blockerHint(w, r.fail));
+    if (r.fail) return this.fail(`${via ? `${via.msg} — ` : ""}${this.ap.blockerHint(w, r.fail, { dir: this.nav.lastDir, goal: via ? via.goal : goal, targetId: this.thingId })}`);
     this.ap.moveTo(w, r.dir, want);
     return this.age > this.maxT ? this.fail(`gave up reaching ${this.desc} after ${r1(this.age)}s`) : this.run();
   }
@@ -899,7 +946,9 @@ export class Autopilot {
     const th = g.lastThing, words = th ? [th.name, th.type].filter(Boolean).map((x) => String(x).toLowerCase()) : [];
     const door = th && pw.things.find((x) => x.avoid && x.leadsTo != null && dist2(x.p2, p0) <= 2 * cell && words.some((wd) => String(x.leadsTo).toLowerCase().includes(wd)));
     if (inner || (!near && !door)) { if (!listed) return null; g.nav.reset(); return g.desc; }
-    g.sceneDone = `entered ${g.desc}${door && door.id !== g.thingId ? ` through ${door.key}` : ""} (the scene changed${w.scene ? ` to ${w.scene}` : ""})`;
+    const changed = `(the scene changed${w.scene ? ` to ${w.scene}` : ""})`;
+    g.sceneDone = g.via && g.via.door ? `${g.via.msg} — entered ${changed}`
+      : `entered ${g.desc}${door && door.id !== g.thingId ? ` through ${door.key}` : ""} ${changed}`;
     return g.desc;
   }
 
@@ -993,9 +1042,24 @@ export class Autopilot {
     return fight;
   }
 
-  /** Add "next to X (locked)" to a stuck message when a door-like thing is right there. */
-  blockerHint(w, msg) {
-    const near = w.things.filter((th) => th.rel !== "item" && th.rel !== "hostile" && th.dist <= 1.6).sort((a, b) => a.dist - b.dist)[0];
+  /**
+   * Add "X is right there" to a stuck message when X may be what's in the way: a door-like thing (locked, a door,
+   * stairs), or someone standing in the cell ahead. Never a bystander when the cell ahead is a wall, and never the
+   * target itself. `dir` (the heading) or `goal` give "ahead".
+   */
+  blockerHint(w, msg, { dir = null, goal = null, targetId = null } = {}) {
+    const grid = this.grid, p = w.player && w.player.p2;
+    let ahead = null, wallAhead = false;
+    const hd = dir && len(dir) > 1e-9 ? norm(dir) : p && goal && dist2(p, goal) > 1e-9 ? norm(sub(goal, p)) : null;
+    if (p && hd) {
+      const pc = grid.toCell(p);
+      ahead = grid.toCell(add(p, scale(hd, w.cell * 0.8)));
+      if (ahead[0] === pc[0] && ahead[1] === pc[1]) ahead = grid.toCell(add(p, scale(hd, w.cell * 1.1)));
+      const k = grid.blockedKind(ahead[0], ahead[1], this.t);
+      wallAhead = k === "map" || k === "learned" || k === "hazard";
+    }
+    const inWay = (th) => ahead && !wallAhead && dist2(th.p2, grid.center(ahead)) < w.cell * 0.9;
+    const near = w.things.filter((th) => th.rel !== "item" && th.rel !== "hostile" && !th.dead && th.dist <= 1.6 && !(targetId != null && th.id === targetId) && (th.locked || th.avoid || inWay(th))).sort((a, b) => a.dist - b.dist)[0];
     if (!near) return msg;
     return `${msg} — ${near.key}${near.locked ? " (locked)" : ""} is right there${near.locked || near.rel === "neutral" ? `: try "interact ${near.key}"` : ""}`;
   }

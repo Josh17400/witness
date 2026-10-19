@@ -254,4 +254,103 @@ export function runFixTests(ok) {
     const dup = coalesceEvents([{ t: 49.8, kind: "gone", text: "Wolf#76 is gone" }, { t: 49.8, kind: "gone", text: "Wolf#76 is gone" }]);
     ok("bug 8: identical events at the same time show once", dup.length === 1);
   }
+
+  // ---- 9. goto a solid cell (Vond (172,-101): "goto 172,-100" pushed into the Inn's front wall beside its door for
+  // 3.2 s, twice, and the hint blamed a farmer standing by): say the target is a wall, enter by the door next to it,
+  // else stop at the nearest open cell
+  {
+    const TOWN = [
+      "####################",
+      "#..................#",
+      "#..................#",
+      "#.....#######......#",
+      "#.....#.....#.###..#",
+      "#.....#.....#.###..#",
+      "#.....###+###.###..#",
+      "#..................#",
+      "#..................#",
+      "#..................#",
+      "####################",
+    ];
+    const INSIDE = ["#######", "#.....#", "#.....#", "#######"];
+    // stepping on the door (9,6) takes you inside, like Embervale's doors
+    const town = ({ start, entities = [], rows = TOWN, map = true, door = true }) => {
+      const S = tileWorld({
+        start,
+        solid: (x, y) => { const m = S.scene === "inn" ? INSIDE : rows; return !m[y] || m[y][x] === undefined || m[y][x] === "#"; },
+        snapState: (S2) => S2.scene === "inn"
+          ? { entities: [], map: { id: "inn", cell: 1, origin: [0, 0], rows: INSIDE, solid: "#" } }
+          : { entities, ...(map ? { map: { id: "town", cell: 1, origin: [0, 0], rows, solid: "#", door: "+" } } : {}) },
+        onStep: (S2) => { if (door && S2.scene === "outside" && Math.floor(S2.p[0]) === 9 && Math.floor(S2.p[1]) === 6) { S2.scene = "inn"; S2.p = [3.5, 2.5]; } },
+      });
+      S.scene = "outside";
+      return S;
+    };
+    const stuckEvents = (r) => r.events.filter((e) => /stuck at|bumped into/.test(e.text)).map((e) => e.text);
+    const farmer = { id: 40, type: "Farmer", name: "Odo", pos: [7.5, 7.5], talk: true };
+
+    // (a) a wall cell right beside the door (the reported case): enter by the door instead of pushing into the wall
+    {
+      const S = town({ start: [8.5, 8.5], entities: [farmer] });
+      const r = driveDo(S, {}, "goto 8,6", { maxFrames: 60 * 15 });
+      ok("bug 9: goto a wall cell beside a door enters by the door", r.status === "done" && S.scene === "inn" && /target \(8,6\) is inside a wall/.test(r.msg) && /\(8,6\) is in a building; entering by its door at \(9,6\)/.test(r.msg) && S.t < 3, `${r.status} ${r.msg} scene=${S.scene} t=${S.t.toFixed(1)}`);
+      ok("bug 9: ... said up front, before walking", r.events.some((e) => /target \(8,6\) is inside a wall/.test(e.text)) && !stuckEvents(r).length, r.events.map((e) => e.text).join(" | "));
+      ok("bug 9: ... no farmer blamed", !/Farmer/.test(r.msg), r.msg);
+    }
+    // (a2) a door that's a thing (Door with leadsTo; the map cell is plain ground)
+    {
+      const rows = TOWN.map((row) => row.replace("+", "."));
+      const S = town({ start: [12.5, 8.5], rows, entities: [{ id: 31, type: "Door", name: "Inn door", leadsTo: "Inn", pos: [9.5, 6.5] }] });
+      const r = driveDo(S, {}, "goto 10,6", { maxFrames: 60 * 15 });
+      ok("bug 9: a Door entity next to the wall cell is the way in too", r.status === "done" && S.scene === "inn" && /entering by its door at \(9,6\)/.test(r.msg), `${r.status} ${r.msg} scene=${S.scene}`);
+    }
+    // (b) a solid cell with no door near (the middle of a 3x3 block): end at the nearest open cell, done
+    {
+      const S = town({ start: [15.5, 9.5], entities: [farmer] });
+      const r = driveDo(S, {}, "goto 15,5", { maxFrames: 60 * 15 });
+      const c = S.p.map(Math.floor);
+      ok("bug 9: goto a solid cell without a door ends at the nearest open cell", r.status === "done" && /target \(15,5\) is inside a wall/.test(r.msg) && /nearest open cell \(15,7\), 2 cells from the target/.test(r.msg) && c[0] === 15 && c[1] === 7, `${r.status} ${r.msg} at ${c}`);
+      ok("bug 9: ... without bumping into it", !stuckEvents(r).length && S.t < 3, `${stuckEvents(r).join(" | ")} t=${S.t.toFixed(1)}`);
+    }
+    // (c) a thing standing in a wall cell
+    {
+      // deep inside the block: no open cell next to it, so the nearest open one
+      const S = town({ start: [15.5, 9.5], entities: [{ id: 50, type: "Marker", name: "Quest", pos: [15.5, 5.5] }] });
+      const r = driveDo(S, {}, "goto Marker", { maxFrames: 60 * 15 });
+      ok("bug 9: goto a thing deep in a wall ends at the nearest open cell", r.status === "done" && /Marker#50 at \(15,5\) is inside a wall/.test(r.msg) && /nearest open cell \(15,7\)/.test(r.msg) && S.p.map(Math.floor).join() === "15,7", `${r.status} ${r.msg} at ${S.p.map(Math.floor)}`);
+      // a building whose position is in its own front wall, beside its door: enter it
+      const S2 = town({ start: [4.5, 8.5], entities: [{ id: 51, type: "Building", name: "Inn", pos: [8.5, 6.5] }] });
+      const r2 = driveDo(S2, {}, "goto Inn", { maxFrames: 60 * 15 });
+      ok("bug 9: goto a building positioned in its wall enters by its door", r2.status === "done" && S2.scene === "inn" && /entering by its door at \(9,6\)/.test(r2.msg), `${r2.status} ${r2.msg} scene=${S2.scene}`);
+      // a sign on the wall beside the door, with ground in front of it: still "stand next to it", not taken indoors
+      const S3 = town({ start: [4.5, 8.5], entities: [{ id: 52, type: "Sign", pos: [8.5, 6.5] }] });
+      const r3 = driveDo(S3, {}, "goto Sign", { maxFrames: 60 * 15 });
+      ok("bug 9: a sign on a wall is still reached from beside it", r3.status === "done" && S3.scene === "outside" && /Sign#52 is solid/.test(r3.msg), `${r3.status} ${r3.msg} scene=${S3.scene}`);
+    }
+    // (d) no map: the wall is only learned by bumping into it. Switch at once, don't fail after 3.2 s stuck
+    {
+      const S = town({ start: [10.5, 2.5], map: false, door: false, entities: [{ id: 40, type: "Farmer", name: "Odo", pos: [11.5, 2.5], talk: true }] });
+      const r = driveDo(S, {}, "goto 10,3", { maxFrames: 60 * 15 });
+      ok("bug 9: no map: the target learned solid by bumping ends at the nearest open cell", r.status === "done" && /target \(10,3\) is inside a wall/.test(r.msg) && /nearest open cell \(10,2\), 1 cell from the target/.test(r.msg) && S.t < 2, `${r.status} ${r.msg} t=${S.t.toFixed(1)}`);
+      ok("bug 9: ... no 'stuck for 3.2s', no farmer blamed", !/stuck at|Farmer/.test(r.msg) && !r.events.some((e) => /stuck at .*unresolved/.test(e.text)), `${r.msg} | ${r.events.map((e) => e.text).join(" | ")}`);
+    }
+    // (e) the "X is right there" hint names a bystander only when it stands in the way, never for a wall or the target
+    {
+      const S = town({ start: [10.5, 2.5], entities: [{ id: 40, type: "Farmer", name: "Odo", pos: [11.5, 2.5], talk: true }] });
+      const cfg = resolvePlayConfig({ cell: 1, controls: { move: "wasd", interact: "e" } }, { keys: KEYS });
+      const per = new Perceiver(cfg, { fps: 60 }), w = per.perceive(S.snap(), 0);
+      const ap = new Autopilot(cfg, { fps: 60, grid: new NavGrid({ cell: 1 }), perceiver: per });
+      ap.observe(w);
+      const wall = ap.blockerHint(w, "stuck", { goal: [10.5, 3.5] });
+      ok("bug 9: the hint doesn't blame a bystander when a wall is in the way", wall === "stuck", wall);
+      const inWay = ap.blockerHint(w, "stuck", { goal: [13.5, 2.5] });
+      ok("bug 9: the hint names someone standing in the way", /Farmer#40 is right there/.test(inWay), inWay);
+      const target = ap.blockerHint(w, "stuck", { goal: [11.5, 2.5], targetId: 40 });
+      ok("bug 9: the hint doesn't name the target itself", target === "stuck", target);
+      const S2 = town({ start: [5.5, 7.5], entities: [{ id: 41, type: "Gate", pos: [5.5, 8.5], locked: true }, { id: 42, type: "Farmer", pos: [4.5, 7.5], talk: true }] });
+      const w2 = per.perceive(S2.snap(), 1); ap.observe(w2);
+      const gate = ap.blockerHint(w2, "stuck", { goal: [5.5, 9.5] });
+      ok("bug 9: a locked gate is still named", /Gate#41 \(locked\) is right there/.test(gate) && !/Farmer/.test(gate), gate);
+    }
+  }
 }

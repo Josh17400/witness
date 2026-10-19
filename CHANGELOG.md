@@ -3,6 +3,22 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.2 (unreleased)
+
+**play: goto a target inside a wall** (reported by Embervale: `goto 172,-100`, a cell in the Inn's front wall beside
+its door, was "stuck at cell (172,-101) heading S for 3.2s", twice, then "learned a wall, replanned → gave up", and
+the hint blamed a farmer standing nearby)
+- A `goto` whose target cell is solid (the map says so, or bumping into it just showed it) says so up front and
+  changes course: with a door at or next to it (map door cells `+`, or Door/`leadsTo` things) it goes in by the door
+  (`target (172,-100) is inside a wall: (172,-100) is in a building; entering by its door at (173,-100) — entered (the
+  scene changed to Inn)`); otherwise it walks to the nearest open cell and is done there (`target (15,5) is inside a
+  wall: nearest open cell (15,7), 2 cells from the target — arrived there`). Without a map it switches the moment the
+  bump teaches it the target is a wall, instead of failing 3.2 s later. Things in a wall keep "stand next to it"
+  (a sign, a chest, a locked gate) unless no open ground touches them or they're a building beside its door.
+- The "X is right there" hint on a stuck goto names only door-like things (locked, doors, stairs) or someone standing
+  in the cell ahead: never a bystander when a wall is ahead, and never the target itself.
+- Adoption steps: none.
+
 ## 0.7.1 (2026-10-19)
 
 Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web builds).
