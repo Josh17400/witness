@@ -28,11 +28,68 @@ reflex layer:
 | a 4v4 first-person shooter (OpenGL) | Haiku 5.5, fighter | its team won 40–17; the tester had 28 kills and 6 deaths; feedback: the line-of-sight flag doesn't match who can shoot you (bullets penetrate walls), shotgun one-shots, cheap deaths |
 | the same shooter | Sonnet 5.5 (low effort), fighter | a short run that found two harness gaps (`fight` chased away from the team, `respawn` gave up early), both fixed |
 
+## Playtest-ready snapshots
+
+Without these, a tester plays half blind. Your snapshot is **playtest-ready** when it has:
+
+| # | the snapshot has | it unlocks |
+|---|---|---|
+| 1 | `state.map`: a walkability grid (rows of characters), the whole level or a window that follows the player | exact paths around walls and coverage %; without it, walls are learned by bumping into them |
+| 2 | global positions: the player, the entities and `map.origin` in one world frame | distances, remembered things and paths stay right as the player (and a map window) moves |
+| 3 | entities with `id`, `type`, `pos`, and `hostile` / `talk` / `item` flags | targets by name, the near list, kills and pickups; exact enemy / NPC / item classification instead of name guesses |
+| 4 | quest objectives as things (`objective: true` or `quest: "<title>"` on the entity, or a marker thing) | `goto`, `fight` and `talk` straight to what the quest asks for |
+| 5 | doors, exits and stairs as things (type Door / Exit / Stairs, `leadsTo: "Inn"`), or `+` door cells in map rows | `goto Inn`, `goto Exit`; paths keep off doors unless they're the goal ([`avoid`](#snapshot-conventions)); entering the target finishes the goto |
+| 6 | player `facing` | attacks land the first time, talking faces the right person |
+| 7 | `state.goal = {text, pos}` | the goal line, and `goto goal` |
+| 8 | telegraph states: enemy `state: "windup"` or `telegraph: <seconds left>` | blocking and dodging at human reaction speed, windup stats in the report |
+| 9 | `state.dialogue = {speaker, text, options[]}` (null when closed) | `talk` / `choose`, and `talk` checks the right person answered |
+| 10 | `state.won` / `state.dead` | the outcome, goal and death wakes, respawn |
+
+**`witness play check`** starts the game once, takes a snapshot after a fresh reset (like a playtest start) and lists
+each item as ✔ present, ✖ missing (with what to add and what it unlocks) or ? (not visible at this moment: no enemy
+is winding up, no dialogue is open; check those with `--scene` / `--params` or `--at S`). `--json` gives the same
+as data. `witness play suggest` prints the same checklist after its config.
+
+Minimal examples (all fields optional; each line adds what the table says):
+
+```json
+{ "player": { "pos": [212.5, 30.5], "hp": 80, "maxHp": 100, "facing": "N" },
+  "entities": [ { "id": 4, "type": "Guard", "name": "Hrolf", "pos": [215, 28], "talk": true },
+                { "id": 76, "type": "Wolf", "pos": [230, 41], "hp": 12, "maxHp": 12, "hostile": true, "state": "windup", "telegraph": 0.3 },
+                { "id": 90, "type": "Potion", "pos": [210, 33], "item": true },
+                { "id": 31, "type": "Door", "name": "Inn door", "leadsTo": "Inn", "pos": [220, 25] },
+                { "id": 55, "type": "Wolf", "pos": [260, 12], "hostile": true, "objective": true, "quest": "The den" } ],
+  "map": { "id": "overworld", "cell": 1, "origin": [192, 10], "rows": ["#####...", "#..+...."], "solid": "#" },
+  "goal": { "text": "Clear the wolf den", "pos": [260, 12] },
+  "dialogue": null, "won": false, "dead": false }
+```
+top-down / RPG (positions in tiles, `cell: 1`; the map here is a window around the player).
+
+```json
+{ "player": { "pos": [120, 88], "size": [12, 16], "vel": [1.5, 0], "onGround": true, "hp": 1 },
+  "entities": [ { "id": 7, "type": "Goomba", "pos": [180, 88], "size": [14, 14], "hostile": true },
+                { "id": 8, "type": "Piranha", "pos": [260, 72], "hostile": true, "stompable": false, "state": "hidden" },
+                { "id": 9, "type": "Flag", "pos": [3100, 40] } ],
+  "map": { "cell": 16, "origin": [0, 0], "rows": ["........", "..==..^.", "########"], "solid": "#" },
+  "goal": { "text": "Reach the flag", "pos": [3100, 40] }, "won": false, "dead": false }
+```
+platformer (`onGround`, `size` and `vel` drive jump planning; `=` one-way, `^` hazard; rows below the map are a pit).
+
+```json
+{ "player": { "pos": [4.2, 0, -7.5], "yaw": 1.57, "pitch": 0, "hp": 100, "maxHp": 100, "ammo": 24, "team": "blue" },
+  "entities": [ { "id": 12, "type": "Soldier", "name": "Red 3", "team": "red", "pos": [10, 0, -2], "hp": 100, "los": true },
+                { "id": 20, "type": "Stairs", "pos": [6, 0, -12] } ],
+  "map": { "cell": 1, "origin": [-20, -20], "rows": ["####", "#..#", "####"], "solid": "#" },
+  "goal": { "text": "Capture point B", "pos": [18, 0, 3] }, "won": false, "dead": false }
+```
+fps (the ground plane is x/z; `yaw`/`pitch` or a `look` vector, `ammo`, `team` and entity `los` drive aiming).
+
 ## Quick start (for the main agent)
 
 1. **Write or adjust the `"play"` section of `witness.json`** (reference below). For a game that follows the
    snapshot conventions, `{"controls": {...}}` is often all it needs. `witness play suggest` probes the game and
-   proposes one (`--write` merges it into witness.json).
+   proposes one (`--write` merges it into witness.json). `witness play check` says what the snapshot still lacks
+   ([Playtest-ready snapshots](#playtest-ready-snapshots)).
 2. **Sanity-check it yourself** before spending a subagent on it:
    ```bash
    witness play start --name check --goal "smoke test"
@@ -51,6 +108,8 @@ reflex layer:
    That's the default: in a side-by-side on the 4v4 shooter it played the smartest at nearly Haiku's speed. Haiku is
    cheaper and fast, but it plays shallowly (it trailed the nearest teammate and ignored its weapons), and Haiku at
    medium effort wasn't better. Use Haiku for simple games or quick smoke runs. Run at most 2 testers at once.
+   **No Agent tool** (a workflow subagent can't spawn subagents)? `witness play batch` launches the testers itself:
+   see [Batch runs](#batch-runs-witness-play-batch).
 5. **Read `witness/playtests/t1/report.md`** when it returns: the tester's feedback and bug notes first, then fights,
    stuck incidents, deaths, coverage. Open the key screenshots and `coverage.png`.
 6. **Reproduce** anything marked: `witness replay witness/playtests/t1/replay.jsonl --at 12.40 --shot` (report.md
@@ -82,6 +141,8 @@ of a second. `--config DIR` (or `--cmd "<launch>"`) works as in every Witness co
 | `play report` | `[name\|dir]` `--json` | Prints report.md (or report.json). report.json is also updated after every order while a session runs. |
 | `play brief` | `--goal` `--persona` (newbie) `--minutes` (4) `--name` (t1) `--seed` `--scene` `--params` `--model` `--extra "…"` `--live` `--watch` | Prints the tester prompt. `--extra` (or `play.brief` in witness.json) adds a "notes from the developer" paragraph. `--live` / `--watch` print the live-mode variant (decide quickly, prefer longer orders, `play next`) and put the flag in its start command. |
 | `play suggest` | `--seed` `--scene` `--params` `--write` | Probes the game (holds each key for 0.35 s from a fresh reset) and proposes a `"play"` config, plus which snapshot conventions the game follows. `--write` merges it into witness.json. It runs one game process. |
+| `play check` | `--seed` `--scene` `--params` `--at S` `--json` | Is the snapshot playtest-ready? One snapshot from a fresh reset, checked against [the list](#playtest-ready-snapshots): ✔ / ✖ (what to add, what it unlocks) / ? (not visible now). Runs one game process. |
+| `play batch` | `--goals FILE` `--persona P` `--model sonnet` `--effort low` `--parallel 2` `--minutes 3` `--timeout M` `--seed` `--scene` `--params` `--live` `--out DIR` `--dry-run` | Runs one headless tester (`claude -p`) per goal, at most 2 at once, and prints a combined summary. See [Batch runs](#batch-runs-witness-play-batch). |
 | `play orders` | | The order card. |
 
 **Personas** (`--persona`): `newbie` (follows hints, reports confusion), `explorer` (coverage, talks to everyone,
@@ -198,6 +259,35 @@ Other lines you'll see: `✔ done: fight wolves block — 3 enemies defeated (7.
 0.2s`, `★ GOAL REACHED: goto Exit#13 — the game reports a win (1.3s)`, `YOU ARE DEAD — game says: "…"`. The first
 observation also prints the controls and the order card. `--json` returns the same content as data (`{t, frame,
 player, stats, near[], farther, remembered[], dialogue, goal, notice, dead, won, result, events[], map}`).
+
+## Batch runs (`witness play batch`)
+
+The Agent tool is the normal way to spawn testers, but only a main session has it: a workflow subagent (an engineer
+agent inside a workflow) can't spawn subagents. `witness play batch` launches the testers itself, as headless Claude
+Code processes:
+
+```bash
+witness play batch --goals goals.txt --minutes 3              # one tester per line of goals.txt
+witness play batch --goals goals.json --parallel 1             # [{"goal": "…", "persona": "explorer", "scene": "cave", "params": {…}, "minutes": 2}, …]
+```
+
+* **Goals:** a text file with one goal per line (`#` comments), or a JSON list of strings or
+  `{goal, persona, scene, params, seed, minutes, model, live, name}`. Command-line `--persona`, `--scene`, `--params`,
+  `--seed`, `--minutes` and `--live` are the defaults for every goal.
+* **Each tester** gets the brief `play brief` would print (session names `b<MMDDhhmm>-1`, `-2` …) and runs as
+  `claude -p --model sonnet --effort low --tools Bash,Read --allowedTools "Bash(node \"…/witness.js\" play:*)" …
+  --permission-mode dontAsk --setting-sources project,local --strict-mcp-config --no-session-persistence
+  --output-format json`, with the brief on stdin, in an empty scratch folder. Bash is limited to the witness commands
+  and the session's short command; anything else is denied without a prompt. Read lets it open screenshots. It uses the
+  user's Claude Code login: `ANTHROPIC_API_KEY` is removed from its environment.
+* **At most 2 at once** (`--parallel 1` or `2`; each tester is a claude process plus a game and a daemon).
+* **Nothing is left running:** each tester has a wall-clock timeout (`--timeout` minutes, default
+  max(5, 4 × minutes + 3)); its session is stopped when it exits (the report is written either way); Ctrl-C kills
+  every tester (the whole process tree) and stops its session.
+* **Output:** a line per tester as it finishes, then a summary: outcome, game time, orders, kills, deaths, stuck
+  incidents, notes, fun, and each report path. The same goes to `witness/playtests/batch-<MMDDhhmm>.md` (`--out DIR`
+  changes the folder) with the testers' feedback, notes and final replies. `--dry-run` prints the claude commands
+  without running anything.
 
 ## Live mode and watching
 

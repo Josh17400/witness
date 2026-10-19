@@ -7,6 +7,7 @@ import path from "node:path";
 import { openGame } from "../core/launch.js";
 import { begin, stepTo } from "../core/runner.js";
 import { rawPos } from "./perceive.js";
+import { checkSnapshot, checkLines } from "./check.js";
 
 const DEFAULT_KEYS = ["w", "a", "s", "d", "up", "down", "left", "right", "space", "j", "k", "l", "e", "f", "q", "x", "z", "c", "shift", "enter", "1"];
 
@@ -95,23 +96,13 @@ export async function suggest(opt, { loadConfig }) {
     if (!controls.interact && keys.includes("e")) controls.interact = "e";
     play.controls = controls;
     // ---- conventions report
-    const ents = Array.isArray(idle.entities) ? idle.entities : [];
-    const has = (f) => ents.some((e) => e && typeof e === "object" && f in e);
-    const conv = [
-      ["player (pos/hp)", !!P0 && !!pos0, P0 && (P0.hp ?? P0.health) == null ? "no hp field: retreat/heal/low-hp wakes won't work" : ""],
-      ["entities", ents.length > 0, ents.length ? `${ents.length} now, types: ${[...new Set(ents.map((e) => e.type ?? e.kind))].slice(0, 8).join(", ")}` : "add state.entities = [{id, type, pos}]"],
-      ["hostile/item/talk flags", has("hostile") || has("item") || has("talk"), has("hostile") ? "" : "without them, types are classified by name (Wolf → hostile, Coin → item, Guard → npc)"],
-      ["telegraph (windups)", has("telegraph") || ents.some((e) => /windup|telegraph|charg/i.test(String(e.state || ""))), "expose state: \"windup\" or telegraph: <seconds> on attacking enemies so the reflex layer can block/dodge"],
-      ["dialogue", "dialogue" in idle || "dialogue" in start, "state.dialogue = {speaker, text, options[]} while one is open"],
-      ["goal / notice", "goal" in idle || "objective" in idle || "quest" in idle, "state.goal (text) helps the tester know what to do"],
-      ["map", !!(idle.map && Array.isArray(idle.map.rows)), "state.map = {cell, origin, rows[], solid} makes navigation exact (else walls are learned by bumping)"],
-      ["won / dead", "won" in idle || "dead" in idle, "state.won / state.dead mark the outcome"],
-    ];
+    const conv = checkSnapshot(idle, profile);
     const out = { play };
     console.log(`Suggested "play" config for ${S.hello.name || cfg.name} (probed ${keys.length} keys from seed ${seed}${scene ? `, scene ${scene}` : ""}):\n`);
     console.log(JSON.stringify(out, null, 2));
-    console.log("\nSnapshot conventions:");
-    for (const [name, okk, hint] of conv) console.log(`  ${okk ? "✔" : "·"} ${name}${hint && (!okk || /no hp|types:/.test(hint)) ? ` — ${hint}` : ""}`);
+    console.log("
+Playtest-ready snapshot (docs/PLAYTEST.md):");
+    for (const l of checkLines(conv)) console.log(l);
     if (moves.length) console.log(`\nKeys that moved the player: ${moves.map((m) => `${m.key} (${dirOf(m)})`).join(", ")}`);
     if (Object.keys(flips).length) console.log(`Fields switched on by a key: ${Object.entries(flips).map(([f, ks]) => `${f} ← ${ks.join("/")}`).slice(0, 10).join(", ")}`);
     for (const n of notes) console.log(n);

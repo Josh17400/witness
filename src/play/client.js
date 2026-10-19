@@ -32,6 +32,8 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
   witness play clean [t1] [--all]                 delete a playtest you've acted on (t1), old ones (no name), or all of them
   witness play brief [--goal …] [--persona …] [--minutes 4] [--name t1] [--extra "…"] [--live|--watch]  → the prompt for a tester subagent
   witness play suggest [--write]                  probe the game and propose a "play" config for witness.json
+  witness play check [--scene S] [--params J]     is the snapshot playtest-ready? what each missing convention unlocks
+  witness play batch --goals FILE [--parallel 2]  run tester agents headless (claude -p), one per goal, and summarise
   witness play orders                             the order language
 
 Orders:
@@ -259,6 +261,8 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       return;
     }
     case "suggest": { const { suggest } = await import("./suggest.js"); await suggest(opt, { loadConfig, ROOT }); return; }
+    case "check": { const { playCheck } = await import("./check.js"); await playCheck(opt, { loadConfig }); return; }
+    case "batch": { const { playBatch } = await import("./batch.js"); await playBatch(opt, { loadConfig, ROOT, cli }); return; }
     default: fail(`unknown play command '${sub}'\n\n${PLAY_HELP}`);
   }
 }

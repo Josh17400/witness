@@ -11,6 +11,11 @@ import { observeText } from "../../src/play/observe.js";
 import { makeBrief } from "../../src/play/brief.js";
 import { compass, editDistance, singular } from "../../src/play/util.js";
 import { runFixTests } from "./fixes.mjs";
+import { checkSnapshot, checkLines } from "../../src/play/check.js";
+import { readGoals, testerArgs, batchMarkdown } from "../../src/play/batch.js";
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => { if (cond) pass++; else { fail++; console.log("FAIL", name, extra); } };
@@ -409,6 +414,38 @@ function platWorld() {
   const cfgS = resolvePlayConfig({ profile: "fps", plane: [0, 2], controls: { move: "wasd" } }, { keys: ["w", "a", "s", "d"] });
   const wS = new Perceiver(cfgS, { fps: 60 }).perceive({ frame: 0, time: 0, state: { player: { pos: [0, 0, 0], hp: 50 }, match: { score: { blue: 12, red: 9 }, scoreLimit: 40 }, entities: [] } }, 0);
   ok("team score with its limit is a stat", wS.stats.some((s) => s.label === "score" && s.value === "blue 12 - red 9 (to 40)"), JSON.stringify(wS.stats));
+}
+
+// ---- play check: the playtest-ready checklist
+{
+  const bare = checkSnapshot({ player: { pos: [1, 1] }, entities: [{ id: 2, type: "Wolf", pos: [3, 1] }] });
+  const by = (items, k) => items.find((i) => i.key === k);
+  ok("check: a bare snapshot misses the map, facing, goal pos, doors, dialogue, outcome", ["map", "facing", "goal", "dialogue", "outcome"].every((k) => by(bare, k).ok === false) && by(bare, "player").ok === false && by(bare, "telegraph").ok === null, JSON.stringify(bare.map((i) => [i.key, i.ok])));
+  const full = checkSnapshot({ player: { pos: [212.5, 30.5], hp: 80, facing: "N" }, dialogue: null, won: false, dead: false, goal: { text: "Clear the den", pos: [260, 12] },
+    entities: [{ id: 4, type: "Guard", pos: [215, 28], talk: true }, { id: 76, type: "Wolf", pos: [230, 41], hostile: true, state: "windup" }, { id: 31, type: "Door", leadsTo: "Inn", pos: [220, 25] }, { id: 55, type: "Wolf", pos: [240, 12], hostile: true, objective: true }],
+    map: { id: "w", cell: 1, origin: [192, 10], rows: Array(41).fill(".".repeat(41)), solid: "#" } });
+  ok("check: the README example snapshot is playtest-ready", full.every((i) => i.ok === true), JSON.stringify(full.filter((i) => i.ok !== true).map((i) => i.key)));
+  ok("check: local positions outside the map are flagged", checkSnapshot({ player: { pos: [5, 5], hp: 1 }, entities: [], map: { cell: 1, origin: [200, 200], rows: ["..."] } }).find((i) => i.key === "global").ok === false);
+  ok("check: the text says what each missing item unlocks", /✖ a walkability map .*→ exact navigation/.test(checkLines(bare).join(" ")) && /missing/.test(checkLines(bare).at(-1)));
+  ok("check: profile-specific items", checkSnapshot({}, "platformer").some((i) => i.key === "onGround") && checkSnapshot({}, "fps").some((i) => i.key === "look") && !checkSnapshot({}, "fps").some((i) => i.key === "facing"));
+}
+
+// ---- play batch: goals files, the claude command line, the summary file
+{
+  const tmpB = fs.mkdtempSync(nodePath.join(os.tmpdir(), "witness-batch-test-"));
+  fs.writeFileSync(nodePath.join(tmpB, "g.txt"), ["Talk to the guard", "# skip me", "", "Fight the wolves", ""].join("\n"));
+  fs.writeFileSync(nodePath.join(tmpB, "g.json"), JSON.stringify(["a", { goal: "b", persona: "explorer", minutes: 2 }, { persona: "x" }]));
+  const gt = readGoals(nodePath.join(tmpB, "g.txt")), gj = readGoals(nodePath.join(tmpB, "g.json"));
+  ok("batch: goals from a text file (comments and blanks skipped)", gt.length === 2 && gt[1].goal === "Fight the wolves");
+  ok("batch: goals from JSON (strings or objects; no goal is skipped)", gj.length === 2 && gj[1].persona === "explorer" && gj[1].minutes === 2);
+  const args = testerArgs({ model: "sonnet", effort: "low", cliJs: "C:/w/bin/witness.js", name: "b1-1" });
+  const after = (f) => args[args.indexOf(f) + 1];
+  ok("batch: claude -p with sonnet, low effort, Bash+Read only, dontAsk, no user settings or MCP", args[0] === "-p" && after("--model") === "sonnet" && after("--effort") === "low" && after("--tools") === "Bash,Read" && after("--permission-mode") === "dontAsk" && after("--setting-sources") === "project,local" && args.includes("--strict-mcp-config") && after("--output-format") === "json", args.join(" "));
+  ok("batch: Bash is limited to the witness commands and the session's short command", args.includes('Bash(node "C:/w/bin/witness.js" play:*)') && args.includes("Bash(./b1-1:*)") && !args.some((a) => a === "Bash" || a === "Bash(*)" || /^Bash\(node:/.test(a)), args.join(" "));
+  const md = batchMarkdown([{ i: 1, goal: "win | fast", persona: "newbie", dir: nodePath.join(tmpB, "b1-1"), report: { outcome: "won", gameSeconds: 41.2, stats: { orders: 5, kills: 4, deaths: 0, stuck: 0 }, notes: [{ kind: "bug", t: 3, text: "door" }], feedback: { fun: 3, text: "easy" } }, reply: "won" },
+    { i: 2, goal: "lose", persona: "fighter", report: null, timedOut: true, code: null, stderr: "" }], { base: tmpB, model: "sonnet", effort: "low", minutes: 1 });
+  ok("batch: the summary file has a row per tester, links next to it, feedback and notes", /\| 1 \| win \/ fast \| newbie \| won \| 41\.2 \| 5 \| 4 \| 0 \| 0 \| 1 \| 3 \| \[report\]\(b1-1\/report\.md\) \|/.test(md) && /no report \(timed out\)/.test(md) && /- bug at 3s: door/.test(md), md);
+  fs.rmSync(tmpB, { recursive: true, force: true });
 }
 
 // ---- regressions from a real game's reports (Embervale)
