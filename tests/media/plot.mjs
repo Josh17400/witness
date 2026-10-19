@@ -1,6 +1,6 @@
 // Chart v2 tests: histograms, heat grids, path stats, world plots, A/B overlays on line charts.
 // `node tests/media/plot.mjs` (writes tests/media/out/plot-*.png to look at)
-import { histogram, sharedHistograms, percentile, heatGrid, pathStats, renderWorld, renderHist, heatColor, MARK_COLORS } from "../../src/media/plot.js";
+import { histogram, sharedHistograms, percentile, heatGrid, pathStats, pathSegments, renderWorld, renderHist, heatColor, MARK_COLORS } from "../../src/media/plot.js";
 import { renderChart, lanesFor } from "../../src/media/chart.js";
 import { ok, save, done } from "./harness.mjs";
 
@@ -55,6 +55,13 @@ const close = (c, tol = 10) => (p) => Math.abs(p[0] - c[0]) <= tol && Math.abs(p
   ok("heatGrid: weights add up", w.cells.length === 1 && w.cells[0].count === 2 && w.total === 2);
   const auto = heatGrid([[0, 0], [240, 100]]);
   ok("heatGrid: automatic cell ≈ span / 16, rounded up to a nice number (240 → 20)", auto.cell === 20, auto.cell);
+  const idle = heatGrid([[40, 90], [40, 90], [40, 90]]);
+  ok("heatGrid: a player who never moved gets a 1-unit cell, not ~1e-10", idle.cell === 1 && idle.cells.length === 1 && idle.cells[0].x0 === 40, idle.cell);
+  ok("heatGrid: small normalized worlds keep a fraction of their size (0.5 → 1/32)", heatGrid([[0.5, 0.5]]).cell > 0.01 && heatGrid([[0.5, 0.5]]).cell < 0.1, heatGrid([[0.5, 0.5]]).cell);
+  // more samples than a spread call can take (Math.min(...xs) overflowed the stack near 120k)
+  const big = Array.from({ length: 300000 }, (_, i) => i * 0.37);
+  const hb = histogram(big), sb = sharedHistograms([big.slice(0, 150000), big.slice(150000)]);
+  ok("histogram / sharedHistograms: 300k samples, exact min/max/n", hb.n === 300000 && hb.stats.min === 0 && near(hb.stats.max, 299999 * 0.37) && sb[0].n === 150000 && sb[1].n === 150000 && near(sb[1].stats.max, 299999 * 0.37), [hb.n, hb.stats && hb.stats.max]);
   ok("heatColor: ramp ends", heatColor(0).join() === "59,15,112" && heatColor(1).join() === "252,253,191");
 }
 
@@ -63,6 +70,19 @@ const close = (c, tol = 10) => (p) => Math.abs(p[0] - c[0]) <= tol && Math.abs(p
   const p = pathStats([[0, 0], [3, 4], [3, 10], [null, 2]]);
   ok("pathStats: length 5 + 6 = 11, net (3, 10), bounds", p.length === 11 && p.net.join() === "3,10" && p.bounds.x1 === 3 && p.bounds.y1 === 10 && p.samples === 3, p);
   ok("pathStats: no points → null", pathStats([]) === null);
+  // walk 0 → 110 at 2/frame, die, respawn at 0 (a 110 jump), walk to 40: 150 walked, not 260
+  const walk = [];
+  for (let f = 0; f <= 55; f++) walk.push([2 * f, 0, f]);
+  for (let f = 56; f <= 65; f++) walk.push([110, 0, f]);           // dead, still
+  for (let f = 66; f <= 86; f++) walk.push([2 * (f - 66), 0, f]);  // respawned at 0
+  const brk = pathStats(walk, { breakAt: [66] });
+  ok("pathStats: a respawn (breakAt) is left out of the length: 110 + 40 = 150", near(brk.length, 150) && brk.jumps.length === 1 && brk.jumps[0].f === 66 && brk.jumps[0].d === 110, brk.length);
+  const auto = pathStats(walk);
+  ok("pathStats: a step 55x the usual one is a teleport without breakAt too", near(auto.length, 150) && auto.jumps.length === 1 && auto.jumps[0].f === 66, auto.length);
+  const sg = pathSegments(walk, { breakAt: [66] });
+  ok("pathSegments: two segments split at the respawn", sg.segments.length === 2 && sg.segments[1][0][2] === 66 && sg.segments[0].length === 66, sg.segments.map((x) => x.length));
+  const dash = [[0, 0, 0], [2, 0, 1], [4, 0, 2], [6, 0, 3], [8, 0, 4], [10, 0, 5], [16, 0, 6], [18, 0, 7]];
+  ok("pathStats: a dash 3x the usual step is still walked", pathStats(dash).length === 18 && pathStats(dash).jumps.length === 0);
 }
 
 // ---- world plot: equal scale, markers where they belong, map walls drawn

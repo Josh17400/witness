@@ -64,6 +64,24 @@ export async function backgroundFor(s, snap, points, bg, frame) {
   return { image, note: `background: the screenshot at f${frame}, ${how} (--bg none hides it)`, short: `background: the screenshot at f${frame}, ${how}` };
 }
 
+/**
+ * The path's time dots: for each k*tickEvery (k >= 1) the first sample at or after it, within half a tick (samples
+ * every --every frames rarely land on the exact frame). Never the last point (it has the end marker).
+ */
+export function tickPoints(points, tickEvery) {
+  const out = [];
+  if (!points.length) return out;
+  const lastF = points[points.length - 1][2];
+  let j = 0;
+  for (let t = tickEvery; t < lastF; t += tickEvery) {
+    while (j < points.length && points[j][2] < t) j++;
+    if (j >= points.length) break;
+    const q = points[j];
+    if (q[2] - t <= tickEvery / 2 && q[2] !== lastF && (!out.length || out[out.length - 1] !== q)) out.push(q);
+  }
+  return out;
+}
+
 /** A colour mixed 45% towards white (the A / "before" run of an overlay). */
 const lighten = (hex) => { const h = String(hex).replace("#", ""); return `#${[0, 2, 4].map((i) => Math.round(parseInt(h.slice(i, i + 2), 16) * 0.55 + 255 * 0.45).toString(16).padStart(2, "0")).join("")}`; };
 
@@ -104,16 +122,42 @@ async function runOnce(s, cfg, opt, v, plan, side, q) {
     const vals = sample.values[n + k];
     const pts = [];
     sample.frames.forEach((f, i) => { const p = posOf(vals[i]); if (p) pts.push([p[0], p[1], f]); });
-    const deaths = deathExpr ? eventFrames([{ name: "death", expr: deathExpr }], { ...sample, values: [sample.values[n + k + 1]] }).map((d) => {
-      const i = sample.frames.indexOf(d.f), p = posOf(vals[i]);
-      return { f: d.f, t: tr(d.t), pos: p };
-    }) : [];
-    const evPts = evs.map((e) => { const i = sample.frames.indexOf(e.f); return { ...e, pos: posOf(vals[i]) }; });
-    xy = { points: pts, deaths, deathExpr, events: evPts, error: sample.errors[n + k], bad: vals.filter((x) => x != null && !posOf(x)).length, sampleOf: vals.find((x) => x != null) };
+    const dvals = deathExpr ? sample.values[n + k + 1] : null;
+    const deaths = deathExpr ? eventFrames([{ name: "death", expr: deathExpr }], { ...sample, values: [dvals] }).map((d) => deathAt(sample.frames, vals, d)) : [];
+    const evPts = evs.map((e) => { const w = lastPos(sample.frames, vals, sample.frames.indexOf(e.f)); return { ...e, pos: w ? w.pos : null }; });
+    xy = { points: pts, deaths, deathExpr, events: evPts, breakAt: respawnFrames(sample.frames, vals, dvals), error: sample.errors[n + k], bad: vals.filter((x) => x != null && !posOf(x)).length, sampleOf: vals.find((x) => x != null) };
     if (q.wantBg && side === "A") xy.bg = await backgroundFor(s, last, pts, opt.bg, plan.endF);
   }
   const label = v && v.replay !== undefined && v.label.trim() === `replay=${v.replay}` ? `replay ${path.basename(String(v.replay))}` : v ? v.label : replay ? `replay ${path.basename(replay.file)}` : "(as given)";
   return { label, main, evs, xy, replay, input: run.input, last };
+}
+
+/** The last position at or before sample i (games often null or remove the player while dead): { pos, f } or null. */
+export function lastPos(frames, vals, i) {
+  for (let j = Math.min(i, vals.length - 1); j >= 0; j--) { const p = posOf(vals[j]); if (p) return { pos: p, f: frames[j] }; }
+  return null;
+}
+
+/** A death event with its position: the one at its frame, else the last one seen before it (seenAt), else null. */
+export function deathAt(frames, vals, d) {
+  const w = lastPos(frames, vals, frames.indexOf(d.f));
+  return { f: d.f, t: tr(d.t), pos: w ? w.pos : null, ...(w && w.f !== d.f ? { seenAt: w.f } : {}) };
+}
+
+/**
+ * Frames where the path resumes after the death flag was on (respawns): the first position sampled alive after a
+ * dead sample. The step into such a frame is a teleport, not distance walked.
+ */
+export function respawnFrames(frames, vals, dvals) {
+  if (!dvals) return [];
+  const out = [];
+  let deadSince = false;
+  frames.forEach((f, i) => {
+    const dead = !!dvals[i], p = posOf(vals[i]);
+    if (p && !dead) { if (deadSince) out.push(f); deadSince = false; }
+    if (dead) deadSince = true;
+  });
+  return out;
 }
 
 /** A run rebuilt from a saved trace (--save), aligned to frames. */
@@ -124,7 +168,7 @@ function loadSaved(file, exprs) {
   const missing = exprs.filter((x) => !(x in j.data.series));
   if (missing.length) die(`--against ${file}: it has no series for ${missing.join(", ")} (it has: ${Object.keys(j.data.series).join(", ")})`);
   const byF = exprs.map((x) => new Map(j.data.series[x].map((p) => [p[2], p[1]])));
-  const xy = j.data.xy && j.data.xy.runs && j.data.xy.runs[0] ? { points: j.data.xy.runs[0].points || [], deaths: j.data.xy.runs[0].deaths || [], events: [] } : { points: [], deaths: [], events: [], saved: true };
+  const xy = j.data.xy && j.data.xy.runs && j.data.xy.runs[0] ? { points: j.data.xy.runs[0].points || [], deaths: j.data.xy.runs[0].deaths || [], breakAt: j.data.xy.runs[0].breakAt || [], events: [] } : { points: [], deaths: [], events: [], saved: true };
   return { label: `before (${path.basename(file)})`, byF, xy, fps: j.data.fps, every: j.data.every, saved: j };
 }
 
@@ -222,7 +266,15 @@ export async function traceCommand(pos, opt) {
   // ---- comparisons
   const comps = two ? (() => {
     const fa = flatSeries(exprs, RA.main), fb = flatSeries(exprs, RB.main);
-    return fa.map((s, i) => ({ label: s.label, expr: s.expr, ...compareSeries(frames, s.vals, (fb.find((x) => x.label === s.label) || fb[i] || { vals: [] }).vals) }));
+    const out = fa.map((s, i) => ({ label: s.label, expr: s.expr, ...compareSeries(frames, s.vals, (fb.find((x) => x.label === s.label) || fb[i] || { vals: [] }).vals) }));
+    // --xy: its position per axis is compared too (unless --watch already has the same expression)
+    if (xyExpr && !exprs.includes(xyExpr)) {
+      const at = (r) => { const m2 = new Map(((r.xy && r.xy.points) || []).map((p) => [p[2], p])); return frames.map((f) => m2.get(f) || null); };
+      const pa = at(RA), pb = at(RB);
+      const same = (u, v) => u.length === v.length && u.every((x, i) => x === v[i]);
+      ["x", "y"].forEach((ax, k) => { const va = pa.map((p) => (p ? p[k] : null)), vb = pb.map((p) => (p ? p[k] : null)); if (!fa.some((sa, i) => same(sa.vals, va) && fb[i] && same(fb[i].vals, vb))) out.push({ label: `${xyExpr}.${ax}`, expr: xyExpr, ...compareSeries(frames, va, vb) }); });
+    }
+    return out;
   })() : [];
 
   // ---- pictures
@@ -259,7 +311,8 @@ export async function traceCommand(pos, opt) {
   let xyOut = null;
   if (xyExpr) {
     const per = runs.map((r, i) => ({ label: two ? labelAB(r, i) : xyExpr, xy: r.xy || { points: [], deaths: [], events: [] } }));
-    const stats = per.map((p) => (m ? m.pathStats(p.xy.points) : null));
+    const pm = m || await media();   // the numbers don't need the picture (--no-chart)
+    const stats = per.map((p) => pm.pathStats(p.xy.points, { breakAt: p.xy.breakAt || [] }));
     if (m) {
       const mk = [];
       per.forEach((p, i) => {
@@ -274,13 +327,13 @@ export async function traceCommand(pos, opt) {
       const tickEvery = Math.max(1, Math.round(fps * Math.max(1, Math.ceil(endF / fps / 12))));
       const COL = m.CHART_COLORS;
       const paths = per.map((p, i) => ({
-        label: p.label, points: p.xy.points, color: two ? (i ? COL[0] : "#c9d3ff") : COL[0], dash: two && i === 0,
-        ticks: p.xy.points.filter((q) => q[2] > 0 && q[2] % tickEvery === 0 && q[2] !== p.xy.points.at(-1)[2]).map((q) => ({ x: q[0], y: q[1], label: i === 0 || !two ? `${tr(q[2] / fps)}s` : "" })),
+        label: p.label, points: p.xy.points, breakAt: p.xy.breakAt || [], color: two ? (i ? COL[0] : "#c9d3ff") : COL[0], dash: two && i === 0,
+        ticks: tickPoints(p.xy.points, tickEvery).map((q) => ({ x: q[0], y: q[1], label: i === 0 || !two ? `${tr(q[2] / fps)}s` : "" })),
       }));
       const live = runs.find((r) => r.xy && r.xy.bg) || runs.find((r) => r.xy && r.xy.deathExpr) || RA;
       const bg = live.xy && live.xy.bg ? live.xy.bg : { note: "" };
       const deathNote = live.xy && live.xy.deathExpr ? `deaths: ${live.xy.deathExpr}${q.deaths ? "" : " (found in the snapshot; --deaths to choose)"}` : "";
-      const spec = { title: `${name}: ${xyExpr}`, subtitle: two ? `A dashed: ${RA.label} · B solid: ${RB.label}` : `f0..f${endF} · dots every ${tr(tickEvery / fps)}s`, map: bg.map, image: bg.image, paths, markers: mk, yUp: !!opt["y-up"], notes: [bg.note, deathNote].filter(Boolean) };
+      const spec = { title: `${name}: ${xyExpr}`, subtitle: two ? `A dashed: ${RA.label} · B solid: ${RB.label}` : `f0..f${endF} · dots every ${tr(tickEvery / fps)}s${tickEvery % every ? " (the nearest sample)" : ""}`, map: bg.map, image: bg.image, paths, markers: mk, yUp: !!opt["y-up"], notes: [bg.note, deathNote].filter(Boolean) };
       xyOut = sibling("xy");
       fs.mkdirSync(path.dirname(xyOut), { recursive: true });
       fs.writeFileSync(xyOut, m.worldPNG(spec));
@@ -333,7 +386,7 @@ export async function traceCommand(pos, opt) {
     summary = { ...summary, differs, firstDiffFrame: firstDiff, deltas: Object.fromEntries(comps.filter((c) => c.delta).map((c) => [c.label, c.delta])) };
     data.compare = { a: RA.label, b: RB.label, series: Object.fromEntries(comps.map(({ label, expr, ...c }) => [label, c])) };
     data.seriesB = "__SERIESB__";
-    verdict = differs ? `${differs} of ${comps.length} series differ, first at f${firstDiff}` : `A and B identical on all ${comps.length} series`;
+    verdict = differs ? `${differs} of ${comps.length} series differ, first at f${firstDiff}` : comps.length ? `A and B identical on all ${comps.length} series` : "nothing to compare (no numeric series)";
     lines.push(`compare: A = ${RA.label} · B = ${RB.label}${separate ? " (two game processes)" : ""}`);
     for (const c of comps) lines.push(compareLine(c.label, c, fps));
   } else {
@@ -353,10 +406,11 @@ export async function traceCommand(pos, opt) {
         return;
       }
       const pt = (q2) => `(${tr(q2[0])}, ${tr(q2[1])})`;
-      lines.push(`xy ${tag}${xyExpr}: ${pt(s.start)} f${s.start[2]} → ${pt(s.end)} f${s.end[2]} · path ${tr(s.length)} over ${s.samples} samples · x ${tr(s.bounds.x0)}..${tr(s.bounds.x1)}, y ${tr(s.bounds.y0)}..${tr(s.bounds.y1)} · net (${sg(s.net[0])}, ${sg(s.net[1])})`);
-      if (p.xy.deaths.length) lines.push(`  deaths${p.xy.deathExpr ? ` (${p.xy.deathExpr})` : ""}: ${p.xy.deaths.slice(0, 10).map((d) => `f${d.f} at ${d.pos ? pt(d.pos) : "?"}`).join(", ")}${p.xy.deaths.length > 10 ? ", …" : ""}`);
+      const jumps = s.jumps.length ? ` (${s.jumps.length} teleport${s.jumps.length === 1 ? "" : "s"} left out: ${s.jumps.slice(0, 4).map((j) => `f${j.f}`).join(", ")}${s.jumps.length > 4 ? ", …" : ""})` : "";
+      lines.push(`xy ${tag}${xyExpr}: ${pt(s.start)} f${s.start[2]} → ${pt(s.end)} f${s.end[2]} · path ${tr(s.length)}${jumps} over ${s.samples} samples · x ${tr(s.bounds.x0)}..${tr(s.bounds.x1)}, y ${tr(s.bounds.y0)}..${tr(s.bounds.y1)} · net (${sg(s.net[0])}, ${sg(s.net[1])})`);
+      if (p.xy.deaths.length) lines.push(`  deaths${p.xy.deathExpr ? ` (${p.xy.deathExpr})` : ""}: ${p.xy.deaths.slice(0, 10).map((d) => (d.pos ? `f${d.f} at ${pt(d.pos)}${d.seenAt != null ? ` (last seen f${d.seenAt})` : ""}` : `f${d.f} (no position)`)).join(", ")}${p.xy.deaths.length > 10 ? ", …" : ""}`);
       else if (p.xy.deathExpr) lines.push(`  deaths (${p.xy.deathExpr}): none`);
-      xyData.runs.push({ label: p.label, length: tr(s.length), start: s.start.slice(0, 2), end: s.end.slice(0, 2), bounds: s.bounds, net: s.net.map(tr), deaths: p.xy.deaths, points: "__XY" + i + "__" });
+      xyData.runs.push({ label: p.label, length: tr(s.length), start: s.start.slice(0, 2), end: s.end.slice(0, 2), bounds: s.bounds, net: s.net.map(tr), deaths: p.xy.deaths, jumps: s.jumps.map((j) => ({ f: j.f, from: j.from.map(tr), to: j.to.map(tr) })), breakAt: p.xy.breakAt || [], points: "__XY" + i + "__" });
     });
     if (two && stats[0] && stats[1]) lines.push(`  end B − A: (${sg(stats[1].end[0] - stats[0].end[0])}, ${sg(stats[1].end[1] - stats[0].end[1])}) · path length ${sg(stats[1].length - stats[0].length)}`);
     if (xyOut) lines.push(`xy → ${xyOut}${q.xyResult.bgNote ? `  (${q.xyResult.bgNote})` : ""}`);
@@ -398,7 +452,16 @@ export async function traceCommand(pos, opt) {
   if (opt.save && opt.save !== true) {
     const f = path.resolve(String(opt.save));
     fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, toText(env));
+    let text = toText(env);
+    if (saved) {
+      // --against: A is the loaded baseline; the file gets this run (B) as a plain single-run trace
+      const d = { ...data, events: RB.evs, errors: errorLines(exprs, RB.main), series: "__SERIESNOW__" };
+      delete d.compare; delete d.seriesB;
+      if (d.xy) d.xy = { ...d.xy, runs: d.xy.runs.slice(1) };
+      const one = envelope("trace", { verdict: `${frames.length} samples, f0..f${endF}`, summary: { ...summary.b, ...(summary.xy ? { xy: summary.xy } : {}) }, data: d, files });
+      text = toText(one).replace('"__SERIESNOW__"', indent(compactSeriesJSON(seriesObj(RB.main))));
+    }
+    fs.writeFileSync(f, text);
     lines.push(`saved → ${f}  (compare a later run with --against ${path.basename(f)})`);
   }
   void times;

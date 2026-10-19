@@ -106,10 +106,12 @@ const CMD_HELP = {
                             params={...}, seed=3, input=j@1, cmd=...) plus replay=b.jsonl (two replays:
                             --replay a.jsonl --compare replay=b.jsonl); --a <variant> changes A too
     --save base.json, later --against base.json    before/after a code change: the saved run is A
+                            (--against base.json --save new.json saves this run, the B side)
   --xy "state.player.pos"   the path over the level (state.map, else the last screenshot when it lines up; --bg
                             map|shot|none), start/end markers, a dot every second, deaths as red X (--deaths
                             "state.dead"; state.dead / state.player.dead are found by themselves), --events as dots;
-                            --y-up for y-up worlds. → <out>-xy.png
+                            --y-up for y-up worlds. Path length leaves out teleports (respawns after a death, or a
+                            step over 10x the usual one), drawn as thin dotted hops. → <out>-xy.png
   --hist [--bins 20]        histograms of each series (mean, median, p5, p95, most common value; A/B overlaid)
                             → <out>-hist.png
   --json: data.series { "expr": [[t, value, frame], ...] } one sample per line (+ data.seriesB, data.compare,
@@ -120,8 +122,9 @@ const CMD_HELP = {
   "playtests" = every witness/playtests/*/replay.jsonl), or with none a scripted run (--input, --time 5; --seeds 1,2,3
   runs it once per seed). Each sample counts the frames until the next one, so cells hold time. Prints the cells with
   the most time (seconds and %), deaths grouped by cell with run and frame, and with state.map the open cells never
-  visited. Default position: state.player (pos or x/y); default cell: the map's cell, else about 1/16 of the area;
-  deaths default to state.dead / state.player.dead (rising edges). The picture: the level, the heat (sqrt scale,
+  visited. Default position: state.player (pos or x/y); default cell: the map's cell, else about 1/16 of the longer
+  side of the visited area (at least 1 unit, or 1/64 of the screenshot behind it); deaths default to state.dead /
+  state.player.dead (rising edges), placed at the last position seen if the position is null while dead. The picture: the level, the heat (sqrt scale,
   seconds per cell), deaths as red X. --expect "deaths == 0", "unvisitedOpen < 20", "hottest.share < 0.5".`,
   shot: `witness shot [--at 1,4,90f] [--out shots/s.png] [--scale 0.5] [--json]
   --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)

@@ -4,7 +4,8 @@
 //   sharedHistograms(sets, opts)   -> the same for several value sets on one set of bins (A/B overlays)
 //   percentile(sorted, p)          -> linear interpolation between closest ranks (type 7, like numpy's default)
 //   heatGrid(points, opts)         -> cells of a world grid with a count (or weight) each                (pure numbers)
-//   pathStats(points)              -> { length, bounds, start, end, net }
+//   pathSegments(points, opts)     -> the path cut at teleports (respawns, portals): { segments, jumps }
+//   pathStats(points, opts)        -> { length (teleports left out), bounds, start, end, net, jumps }
 //   renderWorld(spec) / worldPNG   -> an XY map: paths, start/end/death markers, a heat layer, the level behind
 //   renderHist(spec)  / histPNG    -> histogram panels (one per series, A/B overlaid)
 //
@@ -39,8 +40,11 @@ function statsOf(xs) {
 }
 
 /** Bins for the union of value sets: one per integer when the values are small integers, else a nice step. */
+const minOf = (xs) => { let m = Infinity; for (const v of xs) if (v < m) m = v; return m; };
+const maxOf = (xs) => { let m = -Infinity; for (const v of xs) if (v > m) m = v; return m; };
+
 function binsFor(all, { bins = 20, step = null } = {}) {
-  let lo = Math.min(...all), hi = Math.max(...all);
+  const lo = minOf(all), hi = maxOf(all);
   const integer = all.every(Number.isInteger);
   if (step > 0) return { lo: Math.floor(lo / step + 1e-9) * step, step, integer: false };
   if (integer && hi - lo <= 40) return { lo: lo - 0.5, step: 1, integer: true };
@@ -72,14 +76,14 @@ export function histogram(values, opts = {}) {
   const xs = finiteNums(values);
   if (!xs.length) return { n: 0, stats: null, lo: 0, step: 1, integer: false, bins: [], mode: null };
   const b = binsFor(xs, opts);
-  return pack(xs, b, Math.max(1, Math.floor((Math.max(...xs) - b.lo) / b.step + 1e-9) + 1));
+  return pack(xs, b, Math.max(1, Math.floor((maxOf(xs) - b.lo) / b.step + 1e-9) + 1));
 }
 
 /** Histograms of several value sets on the same bins (for overlays). */
 export function sharedHistograms(sets, opts = {}) {
   const lists = sets.map(finiteNums), all = lists.flat();
   if (!all.length) return lists.map(() => histogram([], opts));
-  const b = binsFor(all, opts), nb = Math.max(1, Math.floor((Math.max(...all) - b.lo) / b.step + 1e-9) + 1);
+  const b = binsFor(all, opts), nb = Math.max(1, Math.floor((maxOf(all) - b.lo) / b.step + 1e-9) + 1);
   return lists.map((xs) => (xs.length ? pack(xs, b, nb) : { n: 0, stats: null, lo: b.lo, step: b.step, integer: b.integer, bins: new Array(nb).fill(0).map((_, i) => ({ x0: b.lo + i * b.step, x1: b.lo + (i + 1) * b.step, count: 0 })), mode: null }));
 }
 
@@ -93,7 +97,11 @@ export function heatGrid(points, { cell, origin = [0, 0] } = {}) {
   if (!(cell > 0)) {
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     for (const [x, y] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
-    cell = pts.length ? niceStep(Math.max(x1 - x0, y1 - y0, 1e-9), 16) : 1;
+    // about 1/16 of the longer side of the visited area, but never a speck: at least 1 world unit when the
+    // coordinates are 16+ (pixel-like worlds), else 1/16 of their size (an idle player has no extent at all)
+    const big = Math.max(Math.abs(x0), Math.abs(x1), Math.abs(y0), Math.abs(y1));
+    const floor = big >= 16 ? 1 : big > 0 ? niceStep(big, 16) : 1;
+    cell = pts.length ? Math.max(niceStep(Math.max(x1 - x0, y1 - y0, 1e-9), 16), floor) : 1;
   }
   const [ox, oy] = origin, m = new Map();
   let total = 0;
@@ -110,17 +118,41 @@ export function heatGrid(points, { cell, origin = [0, 0] } = {}) {
   return { cell, ox, oy, cells, total, max: cells.length ? cells[0].count : 0 };
 }
 
-/** Length (sum of steps), bounds, start/end and net displacement of a path [[x, y, ...], ...]. */
-export function pathStats(points) {
+/**
+ * A path cut where the thing teleported: a step into a frame listed in opts.breakAt (respawns), or a step far longer
+ * than the usual one (over 10x the median moving step, both per step and per frame; needs 5+ moving steps).
+ * points: [[x, y, frame?], ...]. Returns { segments: [[points]], jumps: [{ f, from, to, d }] }.
+ */
+export function pathSegments(points, { breakAt = [] } = {}) {
   const pts = (points || []).filter((p) => p && Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (!pts.length) return { segments: [], jumps: [] };
+  const brk = new Set(breakAt);
+  const steps = pts.slice(1).map((p, i) => { const q = pts[i], d = Math.hypot(p[0] - q[0], p[1] - q[1]), df = Number.isFinite(p[2]) && Number.isFinite(q[2]) ? Math.max(1, p[2] - q[2]) : 1; return { d, v: d / df }; });
+  const med = (xs) => { const s = xs.filter((x) => x > 1e-9).sort((a, b) => a - b); return s.length >= 5 ? s[Math.floor((s.length - 1) / 2)] : null; };
+  const md = med(steps.map((s) => s.d)), mv = med(steps.map((s) => s.v));
+  const segments = [[pts[0]]], jumps = [];
+  steps.forEach((st, i) => {
+    const p = pts[i + 1];
+    const far = md != null && st.d > 10 * md && st.v > 10 * mv;
+    if ((brk.has(p[2]) && st.d > 1e-9) || far) { jumps.push({ f: p[2], from: pts[i].slice(0, 2), to: p.slice(0, 2), d: st.d }); segments.push([p]); }
+    else segments[segments.length - 1].push(p);
+  });
+  return { segments, jumps };
+}
+
+/**
+ * Length (sum of steps, teleports left out: see pathSegments), bounds, start/end and net displacement of a path
+ * [[x, y, frame?], ...]. opts.breakAt: frames a teleport lands on (respawns).
+ */
+export function pathStats(points, opts = {}) {
+  const { segments, jumps } = pathSegments(points, opts);
+  const pts = segments.flat();
   if (!pts.length) return null;
   let len = 0, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  pts.forEach((p, i) => {
-    if (i) len += Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]);
-    x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]);
-  });
+  for (const seg of segments) seg.forEach((p, i) => { if (i) len += Math.hypot(p[0] - seg[i - 1][0], p[1] - seg[i - 1][1]); });
+  for (const p of pts) { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); }
   const s = pts[0], e = pts[pts.length - 1];
-  return { length: len, bounds: { x0, x1, y0, y1 }, start: s, end: e, net: [e[0] - s[0], e[1] - s[1]], samples: pts.length };
+  return { length: len, bounds: { x0, x1, y0, y1 }, start: s, end: e, net: [e[0] - s[0], e[1] - s[1]], samples: pts.length, jumps };
 }
 
 /** Ramp colour for t in 0..1. */
@@ -149,7 +181,7 @@ function placeLabel(placed, x, y, w, h, box) {
  *          map?: { cell, origin, rows: ["#..#"], solid: "#" }            the level, solid cells drawn as walls
  *          image?: { img: {width,height,data}, x0, y0, x1, y1 }           a picture covering that world rect
  *          heat?: { grid: heatGrid(), label: "s", value: (count) => number }   a heat layer
- *          paths?: [{ label, points: [[x, y], ...], color, dash, ticks: [{ x, y, label }] }],
+ *          paths?: [{ label, points: [[x, y, frame?], ...], color, dash, ticks: [{ x, y, label }], breakAt: [frame] }],
  *          markers?: [{ x, y, kind: "start"|"end"|"death"|"event", label, color }],
  *          notes?: ["background: …"] (a dim line under the plot) }
  */
@@ -257,11 +289,16 @@ export function renderWorld(spec = {}) {
       g.fillRect(xa, ya, Math.max(1, xb - xa), Math.max(1, yb - ya), [r, gg, b, 0.82]);
     }
   }
-  // paths
+  // paths: one line per segment (cut at teleports: p.breakAt frames or far jumps), each teleport a thin dotted hop
   for (const p of paths) {
-    const pts = p.points.map((q) => [wx(q[0]), wy(q[1])]);
-    g.polyline(pts, [0, 0, 0, 0.55], 4.5, p.dash ? { dash: [7, 5] } : {});
-    g.polyline(pts, p.color, 2.25, p.dash ? { dash: [7, 5] } : {});
+    const { segments, jumps } = pathSegments(p.points, { breakAt: p.breakAt || [] });
+    for (const j of jumps) g.line(wx(j.from[0]), wy(j.from[1]), wx(j.to[0]), wy(j.to[1]), [255, 255, 255, 0.35], 1, { dash: [2, 4] });
+    for (const seg of segments) {
+      const pts = seg.map((q) => [wx(q[0]), wy(q[1])]);
+      if (pts.length < 2) continue;
+      g.polyline(pts, [0, 0, 0, 0.55], 4.5, p.dash ? { dash: [7, 5] } : {});
+      g.polyline(pts, p.color, 2.25, p.dash ? { dash: [7, 5] } : {});
+    }
   }
   g.restore();
   g.strokeRoundRect(px0, py0, px1 - px0, py1 - py0, 6, FRAME, 1);

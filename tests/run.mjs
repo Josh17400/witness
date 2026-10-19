@@ -17,7 +17,7 @@ import { analyzeJump, analyzeMove, frozenSpans, response, lag, stutters, summari
 import { matchSounds, alignSoundEvents, soundFrame } from "../src/core/soundmatch.js";
 import { windowsOf } from "../src/cli/window.js";
 import { parseVariant, compareRect } from "../src/cli/ab.js";
-import { compareSeries, posOf, autoDeathExpr, mapOf } from "../src/cli/trace.js";
+import { compareSeries, posOf, autoDeathExpr, mapOf, tickPoints, respawnFrames, deathAt } from "../src/cli/trace.js";
 import { parseWitnessInput } from "../src/core/input-spec.js";
 import { loadReplay, frameAt } from "../src/core/runner.js";
 import { detect, listAdapters } from "../src/core/init.js";
@@ -72,6 +72,14 @@ ok("keyPaths", keyPaths(snap.state).some((k) => k.startsWith("state.player.hp"))
   ok("posOf: arrays, {x, y}, things with pos", posOf([1, 2]).join() === "1,2" && posOf({ x: 3, y: 4 }).join() === "3,4" && posOf({ pos: [5, 6, 7] }).join() === "5,6" && posOf([1]) === null && posOf("1,2") === null && posOf({ x: 1 }) === null);
   ok("autoDeathExpr: state.dead, then state.player.dead", autoDeathExpr({ dead: false }) === "state.dead" && autoDeathExpr({ player: { dead: false } }) === "state.player.dead" && autoDeathExpr({ dead: 0 }) === null && autoDeathExpr(null) === null);
   ok("mapOf: rows + cell + origin, defaults cell 1", mapOf({ map: { rows: ["#.#"], origin: [8, 4] } }).cell === 1 && mapOf({ map: { rows: ["#.#"], cell: 16 } }).origin.join() === "0,0" && mapOf({ map: { rows: [1, 2] } }) === null);
+  // xy helpers: time dots on samples that don't land on the tick, respawns, deaths while the position is null
+  const pts7 = Array.from({ length: 30 }, (_, i) => [i, 0, i * 7]);   // every 7 frames up to f203
+  ok("tickPoints: --every 7f still gets a dot per 60f tick (first sample at/after it)", tickPoints(pts7, 60).map((q) => q[2]).join() === "63,126,182", tickPoints(pts7, 60).map((q) => q[2]));
+  ok("tickPoints: never the end point", tickPoints([[0, 0, 0], [1, 0, 60]], 60).length === 0);
+  const pv = [[0, 0], [1, 0], null, null, [0, 0], [1, 0]], dv = [false, false, true, true, false, false], fr = [0, 1, 2, 3, 4, 5];
+  ok("respawnFrames: the first alive position after a dead sample", respawnFrames(fr, pv, dv).join() === "4" && respawnFrames(fr, [[0, 0], [1, 0], [2, 0], [2, 0], [0, 0], [1, 0]], dv).join() === "4" && respawnFrames(fr, pv, null).length === 0);
+  const da = deathAt(fr, pv, { f: 2, t: 2 / 60 });
+  ok("deathAt: null position at the death frame → the last one seen before it", da.pos.join() === "1,0" && da.seenAt === 1 && deathAt(fr, [null, null, null, null, null, null], { f: 2, t: 0 }).pos === null);
   ok("parseVariant: replay= is its own key, not an env var", (() => { const v = parseVariant("replay=b.jsonl; seed=2", "compare"); return v.replay === "b.jsonl" && v.seed === 2 && !Object.keys(v.env).length; })());
 }
 
@@ -392,14 +400,14 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   r = cli(["ab", "--a", "replay=x.jsonl", "--b", "seed=2"]);
   ok("ab rejects replay= (it's for trace --compare)", r.status === 1 && /replay= is for 'witness trace --compare'/.test(r.stderr), r.stderr);
   r = cli(["trace", "--xy", "state.player.pos", "--watch", "state.player.pos[0]", "--hist", "--input", "right@0-3", "--time", "2.5", "--out", path.join(work, "hz.png"), "--json"], { MOCK_HAZARD: "1" });
-  ok("trace --xy: the path, deaths found by themselves (state.dead) with their frame and position", (() => { const j = J(r); const x = j && j.data.xy.runs[0]; return x && x.length === 480 && x.start.join() === "40,90" && x.end.join() === "80,90" && x.deaths.map((d) => `${d.f}:${d.pos}`).join(" ") === "55:150,90 120:150,90" && j.summary.xy.deaths === 2 && x.points.length === 151 && x.points[55].join() === "150,90,55" && fs.existsSync(path.join(work, "hz-xy.png")); })(), r.stdout.slice(0, 600) + r.stderr);
+  ok("trace --xy: the path, deaths found by themselves (state.dead) with their frame and position", (() => { const j = J(r); const x = j && j.data.xy.runs[0]; return x && x.length === 260 && x.jumps.map((q) => q.f).join() === "65,130" && x.start.join() === "40,90" && x.end.join() === "80,90" && x.deaths.map((d) => `${d.f}:${d.pos}`).join(" ") === "55:150,90 120:150,90" && j.summary.xy.deaths === 2 && x.points.length === 151 && x.points[55].join() === "150,90,55" && fs.existsSync(path.join(work, "hz-xy.png")); })(), r.stdout.slice(0, 600) + r.stderr);
   ok("trace --hist: exact stats (mean 96.689, median 94, mode 150..160 with 20 samples)", (() => { const j = J(r); const h = j && j.summary.hist["state.player.pos[0]"]; return h && h.n === 151 && h.mean === 96.689 && h.median === 94 && h.min === 40 && h.max === 150 && h.mode.join() === "150,160" && j.data.hist[0].bins[0].at(-1)[2] === 20 && fs.existsSync(path.join(work, "hz-hist.png")); })(), r.stdout.slice(0, 300));
   r = cli(["trace", "--xy", "state.score", "--time", "0.2", "--no-chart"]);
   ok("trace --xy on a non-position says what it got", r.status === 0 && /✖ xy state\.score: got 0, not a position/.test(r.stdout), r.stdout + r.stderr);
   r = cli(["heatmap", "--input", "right@0-3", "--time", "2.5", "--cell", "10", "--out", path.join(work, "heat.png"), "--json"], { MOCK_HAZARD: "1" });
-  ok("heatmap (one scripted run): time per cell and deaths, exact", (() => { const j = J(r); return j && j.summary.samples === 151 && j.summary.seconds === 2.517 && j.summary.cells === 12 && j.summary.deaths === 2 && j.summary.deathCells === 1 && j.summary.hottest.x0 === 150 && j.summary.hottest.y0 === 90 && j.summary.hottest.frames === 20 && j.data.top[1].x0 === 40 && j.data.top[1].frames === 15 && j.data.deaths.map((d) => d.f).join() === "55,120" && fs.existsSync(path.join(work, "heat.png")); })(), r.stdout.slice(0, 600) + r.stderr);
+  ok("heatmap (one scripted run): time per cell and deaths, exact", (() => { const j = J(r); return j && j.summary.samples === 151 && j.summary.seconds === 2.5 && j.summary.cells === 12 && j.summary.deaths === 2 && j.summary.deathCells === 1 && j.summary.hottest.x0 === 150 && j.summary.hottest.y0 === 90 && j.summary.hottest.frames === 20 && j.data.top[1].x0 === 40 && j.data.top[1].frames === 15 && j.data.deaths.map((d) => d.f).join() === "55,120" && fs.existsSync(path.join(work, "heat.png")); })(), r.stdout.slice(0, 600) + r.stderr);
   r = cli(["heatmap", "--input", "right@0-3", "--time", "2.5", "--cell", "10", "--no-chart"], { MOCK_HAZARD: "1" });
-  ok("heatmap text: most time and the death cell", r.status === 0 && /151 samples = 2\.517 s of play · cell 10 · 12 cells visited/.test(r.stdout) && /most time: x 150\.\.160, y 90\.\.100: 0\.333 s \(13%\)/.test(r.stdout) && /deaths \(state\.dead\): 2 in 1 cell — x 150\.\.160, y 90\.\.100 ×2 \[f55, f120\]/.test(r.stdout), r.stdout + r.stderr);
+  ok("heatmap text: most time and the death cell", r.status === 0 && /151 samples = 2\.5 s of play · cell 10 · 12 cells visited/.test(r.stdout) && /most time: x 150\.\.160, y 90\.\.100: 0\.333 s \(13%\)/.test(r.stdout) && /deaths \(state\.dead\): 2 in 1 cell — x 150\.\.160, y 90\.\.100 ×2 \[f55, f120\]/.test(r.stdout), r.stdout + r.stderr);
   {
     // playtests: every witness/playtests/*/replay.jsonl (t1 dies at f55, t2 lets go of right at f30)
     const proj = fs.mkdtempSync(path.join(os.tmpdir(), "witness-heat-"));
@@ -410,6 +418,27 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
     ok("heatmap playtests: every playtest replay, deaths with their run", (() => { const j = J(h); return j && j.summary.runs === 2 && j.data.runs.map((x) => `${x.name}:${x.samples}:${x.deaths}`).join() === "t1:92:1,t2:62:0" && j.summary.samples === 154 && j.summary.deaths === 1 && j.data.deaths[0].run === "t1" && j.data.deaths[0].f === 55; })(), h.stdout.slice(0, 600) + h.stderr);
     fs.rmSync(proj, { recursive: true, force: true });
   }
+
+  // chart v2 regressions (reviewer findings)
+  const xyBase = path.join(work, "xy.json");
+  r = cli(["trace", "--xy", "state.player.pos", "--input", "right@0-3", "--time", "2.5", "--no-chart", "--save", xyBase], { MOCK_HAZARD: "1" });
+  ok("trace --xy --no-chart: still measures the path (260, respawns left out) and saves its points", r.status === 0 && /path 260 \(2 teleports left out: f65, f130\) over 151 samples/.test(r.stdout) && /deaths \(state\.dead\): f55 at \(150, 90\), f120 at \(150, 90\)/.test(r.stdout) && JSON.parse(fs.readFileSync(xyBase, "utf8")).data.xy.runs[0].points.length === 151, r.stdout + r.stderr);
+  r = cli(["trace", "--xy", "state.player.pos", "--input", "right@0-2", "--time", "2.5", "--no-chart", "--against", xyBase, "--json"], { MOCK_HAZARD: "1" });
+  ok("trace --xy --against a saved path: A has its points, B − A compared per axis", (() => { const j = J(r); return j && j.data.xy.runs[0].length === 260 && j.data.xy.runs[1].length === 220 && j.summary.differs === 1 && j.summary.firstDiffFrame === 131 && j.data.compare.series["state.player.pos.x"].differ > 0; })(), r.stdout.slice(0, 400) + r.stderr);
+  const b2 = path.join(work, "b2.json"), n2 = path.join(work, "n2.json");
+  cli(["trace", "--watch", "state.player.pos[0]", "--input", "right@0-1", "--time", "1.5", "--no-chart", "--save", b2]);
+  r = cli(["trace", "--watch", "state.player.pos[0]", "--input", "right@0-0.8", "--time", "1.5", "--no-chart", "--against", b2, "--save", n2]);
+  ok("trace --against --save: the file holds this run (max 136), not the baseline (160)", (() => { const j = JSON.parse(fs.readFileSync(n2, "utf8")); const v = j.data.series["state.player.pos[0]"].map((p) => p[1]); return Math.max(...v) === 136 && v.length === 91 && !j.data.compare && !j.data.seriesB && j.summary["state.player.pos[0]"].max === 136; })(), r.stdout + r.stderr);
+  r = cli(["trace", "--xy", "state.player.pos", "--compare", "input=up@0.5-0.7", "--input", "right@0-1", "--time", "1.2", "--no-chart", "--json"]);
+  ok("trace --compare with only --xy: the paths are compared (y differs from f31), not 'identical on all 0 series'", (() => { const j = J(r); return j && j.summary.differs === 1 && j.summary.firstDiffFrame === 31 && j.summary.deltas["state.player.pos.y"].end === -24 && /1 of 2 series differ/.test(j.verdict); })(), r.stdout.slice(0, 400) + r.stderr);
+  r = cli(["trace", "--xy", "state.dead ? null : state.player.pos", "--deaths", "state.dead", "--input", "right@0-3", "--time", "2.5", "--no-chart"], { MOCK_HAZARD: "1" });
+  ok("trace --xy: a position that is null while dead → deaths at the last position seen", r.status === 0 && /f55 at \(148, 90\) \(last seen f54\), f120 at \(148, 90\) \(last seen f119\)/.test(r.stdout) && /path 256 \(2 teleports left out: f65, f130\)/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["heatmap", "--pos", "state.dead ? null : state.player.pos", "--input", "right@0-3", "--time", "2.5", "--cell", "10", "--no-chart"], { MOCK_HAZARD: "1" });
+  ok("heatmap: a position that is null while dead → deaths still placed (last seen), dead time not counted", r.status === 0 && /2\.167 s of play/.test(r.stdout) && /deaths \(state\.dead\): 2 in 1 cell — x 140\.\.150, y 90\.\.100 ×2 \[f55, f120\]/.test(r.stdout) && /at: f55 \(148, 90\) last seen f54, f120 \(148, 90\) last seen f119/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["heatmap", "--seeds", "1,2", "--input", "right@0-3", "--time", "2.5", "--cell", "10", "--no-chart"], { MOCK_HAZARD: "1" });
+  ok("heatmap: the total time equals the per-run lines (2 × 2.5 s = 5 s)", r.status === 0 && /302 samples = 5 s of play/.test(r.stdout) && /per run: seed 1 2\.5s, 2 deaths · seed 2 2\.5s, 2 deaths/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["heatmap", "--time", "1", "--no-chart", "--json"]);
+  ok("heatmap: an idle player gets a visible cell (1/64 of the screenshot, a power of 2), not 1e-10", (() => { const j = J(r); return j && j.summary.cell === 8 && j.summary.cells === 1 && j.summary.seconds === 1; })(), r.stdout.slice(0, 300) + r.stderr);
 
   // eval: frames, prev, --keys, --summary, --when, --diff
   r = cli(["eval", "--at", "30f", "--input", "right@0-30f", "state.player.pos[0]", "state.player.pos[0] - prev.player.pos[0]", "--json"]);

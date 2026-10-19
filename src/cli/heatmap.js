@@ -1,14 +1,15 @@
 // Witness CLI: heatmap — where the player spent time and where they died, over one or many runs.
 //   witness heatmap [last | file.jsonl ... | playtests | <folder>] [--pos "state.player.pos"] [--deaths "state.dead"]
 //                   [--cell 16] [--every 1f] [--seeds 1,2,3 --input ... --time 10] [--bg map|shot|none] [--out f.png]
-// Each run is sampled every frame (or --every); a sample counts the frames until the next one, so cells hold time.
+// Each run is sampled every frame (or --every); a sample counts the frames until the next one, so cells hold time
+// (the last sample, at the end frame, counts none: a run of --time 2.5 holds exactly 2.5 s).
 import fs from "node:fs";
 import path from "node:path";
 import { begin, loadReplay } from "../core/runner.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { die, say, withGame, runOpts, media, printLogs, framesOf, fmtT, envelope, emit, resolveReplay, timeList } from "./common.js";
 import { eventFrames } from "./ask.js";
-import { posOf, autoDeathExpr, mapOf, backgroundFor } from "./trace.js";
+import { posOf, autoDeathExpr, mapOf, backgroundFor, deathAt } from "./trace.js";
 
 const tr = (x) => +(+x).toFixed(3);
 const MAX_RUNS = 50;
@@ -75,11 +76,12 @@ export async function heatmapCommand(pos, opt) {
       const pts = [];
       sample.frames.forEach((f, i) => {
         const q = posOf(sample.values[0][i]);
-        const w = (i + 1 < sample.frames.length ? sample.frames[i + 1] : f + 1) - f;   // frames this sample stands for
+        const w = (i + 1 < sample.frames.length ? sample.frames[i + 1] : endF) - f;   // frames this sample stands for
         if (q) pts.push([q[0], q[1], w, f]);
       });
       if (!pts.length) die(`--pos ${posUsed} gave ${JSON.stringify(sample.values[0].find((v) => v != null) ?? null)}, not a position [x, y] or {x, y}`);
-      const deaths = deathUsed ? eventFrames([{ name: "death", expr: deathUsed }], { ...sample, values: [sample.values[1]] }).map((d) => ({ f: d.f, t: tr(d.t), pos: posOf(sample.values[0][sample.frames.indexOf(d.f)]) })) : [];
+      // a death's position: at its frame, else the last one seen before it (games often null the player while dead)
+      const deaths = deathUsed ? eventFrames([{ name: "death", expr: deathUsed }], { ...sample, values: [sample.values[1]] }).map((d) => deathAt(sample.frames, sample.values[0], d)) : [];
       runs.push({ name: p.file ? runName(p.file, root) : p.seed != null ? `seed ${p.seed}` : "scripted", file: p.file || null, frames: endF, samples: sample.frames.length, pts, deaths });
       lastSnap = last;
     }
@@ -89,9 +91,15 @@ export async function heatmapCommand(pos, opt) {
     if (opt.cell && !(cell > 0)) die(`--cell wants a positive size in world units (got ${opt.cell})`);
     const origin = map && (!opt.cell || cell === map.cell) ? map.origin : [0, 0];
     const all = runs.flatMap((r) => r.pts);
-    const grid = m.heatGrid(all.map((q) => [q[0], q[1], q[2]]), { cell, origin });
     const bg = files.length > 1 || seeds ? (map && opt.bg !== "none" && opt.bg !== "shot" ? { map, note: `background: state.map of the last run, ${Math.max(...map.rows.map((r) => r.length))}×${map.rows.length} cells of ${map.cell}` } : { note: "" })
       : await backgroundFor(s, lastSnap, all, opt.bg, runs[0].frames);
+    const weighted = all.filter((q) => q[2] > 0).map((q) => [q[0], q[1], q[2]]);
+    let grid = m.heatGrid(weighted, { cell, origin });
+    // an auto cell over a screenshot is at least 1/64 of the picture (a player who barely moved still shows up)
+    if (!cell && bg.image) {
+      const span = Math.max(bg.image.x1 - bg.image.x0, bg.image.y1 - bg.image.y0), floor = span / 64;
+      if (grid.cell < floor) { let c = 1; while (c < floor) c *= 2; grid = m.heatGrid(weighted, { cell: c, origin }); }
+    }
     // open map cells never visited (when the heat cells are the map's cells)
     let unvisited = null;
     if (map && grid.cell === map.cell && grid.ox === map.origin[0] && grid.oy === map.origin[1]) {
@@ -148,8 +156,11 @@ function report({ fps, runs, grid, bg, posUsed, deathUsed, deathAuto, unvisited,
   if (deathUsed) {
     if (!deaths.length) lines.push(`  deaths (${deathUsed}): none`);
     else {
-      lines.push(`  deaths (${deathUsed}): ${deaths.length} in ${deathCells.length} cell${deathCells.length === 1 ? "" : "s"} — ${deathCells.slice(0, 6).map((c) => `${cellTxt(c)} ×${c.list.length} [${c.list.slice(0, 4).map((d) => `${runs.length > 1 ? `${d.run} ` : ""}f${d.f}`).join(", ")}${c.list.length > 4 ? ", …" : ""}]`).join(" · ")}`);
-      const exact = deaths.filter((d) => d.pos).slice(0, 8).map((d) => `${runs.length > 1 ? `${d.run} ` : ""}f${d.f} (${tr(d.pos[0])}, ${tr(d.pos[1])})`);
+      const who = (d) => `${runs.length > 1 ? `${d.run} ` : ""}f${d.f}`;
+      const noPos = deaths.filter((d) => !d.pos);
+      const cellsTxt = deathCells.length ? ` in ${deathCells.length} cell${deathCells.length === 1 ? "" : "s"} — ${deathCells.slice(0, 6).map((c) => `${cellTxt(c)} ×${c.list.length} [${c.list.slice(0, 4).map(who).join(", ")}${c.list.length > 4 ? ", …" : ""}]`).join(" · ")}` : "";
+      lines.push(`  deaths (${deathUsed}): ${deaths.length}${cellsTxt}${noPos.length ? `${cellsTxt ? " ·" : ""} ${noPos.length} with no position [${noPos.slice(0, 4).map(who).join(", ")}${noPos.length > 4 ? ", …" : ""}]` : ""}`);
+      const exact = deaths.slice(0, 8).map((d) => (d.pos ? `${who(d)} (${tr(d.pos[0])}, ${tr(d.pos[1])})${d.seenAt != null ? ` last seen f${d.seenAt}` : ""}` : `${who(d)} (no position)`));
       lines.push(`    at: ${exact.join(", ")}${deaths.length > 8 ? ", …" : ""}`);
     }
   }
@@ -162,7 +173,7 @@ function report({ fps, runs, grid, bg, posUsed, deathUsed, deathAuto, unvisited,
     data: {
       pos: posUsed, deathExpr: deathUsed, fps, top,
       cells: grid.cells.map((c) => [tr(c.x0), tr(c.y0), c.count]),
-      deaths: deaths.map((d) => ({ run: d.run, f: d.f, t: d.t, pos: d.pos })),
+      deaths: deaths.map((d) => ({ run: d.run, f: d.f, t: d.t, pos: d.pos, ...(d.seenAt != null ? { seenAt: d.seenAt } : {}) })),
       runs: runs.map((r) => ({ name: r.name, file: r.file, frames: r.frames, samples: r.samples, deaths: r.deaths.length })),
     },
     files,
