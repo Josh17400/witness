@@ -159,6 +159,19 @@ nw = per3.perceive(mkSnap({ hp: 8, noWolf: true, noCoin: true, dialogue: { speak
 ok("events kill + dialogue", ev.some((e) => e.kind === "kill") && ev.some((e) => e.kind === "dialogue"));
 tr.finish(2);
 ok("fight tracked as won", tr.fights.length === 1 && tr.fights[0].result === "won" && tr.fights[0].taken === 2, JSON.stringify(tr.fights));
+{
+  // a corpse kept as state "dead" and removed seconds later must not count as a second kill or open a phantom fight
+  const perD = new Perceiver(pc, { fps: 60 }), trD = new EventTracker(pc, perD);
+  const snapD = (o2) => { const s = mkSnap({ noCoin: true, ...o2 }); if (o2.corpse) Object.assign(s.state.entities.find((e) => e.id === 5), { hp: 0, state: "dead" }); return s; };
+  let a = perD.perceive(snapD({}), 0); trD.update(null, a, {});
+  let b = perD.perceive(snapD({ wolfHp: 1 }), 10); trD.update(a, b, { lastAttackT: 10 / 60 }); a = b;
+  b = perD.perceive(snapD({ corpse: true }), 20); trD.update(a, b, { lastAttackT: 20 / 60 }); a = b;
+  for (let f = 30; f < 400; f += 30) { b = perD.perceive(snapD({ corpse: true }), f); trD.update(a, b, {}); a = b; }
+  b = perD.perceive(snapD({ noWolf: true }), 420); const evD = trD.update(a, b, { lastAttackT: 420 / 60 }); a = b;
+  trD.finish(8);
+  ok("a corpse removed later is not a second kill", trD.kills.length === 1 && !evD.some((e) => e.kind === "kill"), JSON.stringify(trD.kills));
+  ok("a corpse removed later opens no phantom fight", trD.fights.length === 1 && trD.fights[0].result === "won", JSON.stringify(trD.fights));
+}
 ok("game logs become events", new EventTracker(pc, per3).update(pw, pw, { logs: [{ level: "info", message: "You found a secret" }, { level: "error", message: "boom" }] }).map((e) => e.kind).join() === "log,error");
 
 // ---- observation + brief
@@ -182,7 +195,7 @@ const SIM_MAP = [
   "#.........#.#......#",
   "####################",
 ];
-function simWorld({ wolf = false } = {}) {
+function simWorld({ wolf = false, mortal = false } = {}) {
   const S = { frame: 0, t: 0, p: [24, 24], keys: new Set(), facing: "E", hp: 10, blocking: false, queue: [],
     wolf: wolf ? { pos: [24 + 40, 24], state: "idle", timer: 0, hp: 3 } : null };
   const solid = (x, y) => { const c = Math.floor(x / 16), r = Math.floor(y / 16); return !SIM_MAP[r] || SIM_MAP[r][c] !== "."; };
@@ -192,6 +205,8 @@ function simWorld({ wolf = false } = {}) {
     S.queue = S.queue.filter((e) => e.frame > S.frame);
     const dx = (S.keys.has("d") ? 1 : 0) - (S.keys.has("a") ? 1 : 0), dy = (S.keys.has("s") ? 1 : 0) - (S.keys.has("w") ? 1 : 0);
     S.blocking = S.keys.has("k");
+    if (mortal && S.wolf && S.keys.has("j") && !S.wasJ && Math.hypot(S.wolf.pos[0] - S.p[0], S.wolf.pos[1] - S.p[1]) < 28) { S.wolf.hp--; if (S.wolf.hp <= 0) S.wolf = null; }
+    S.wasJ = S.keys.has("j");
     const l = Math.hypot(dx, dy) || 1, v = (S.blocking ? 40 : 80) / 60;
     if (dx) S.facing = dx > 0 ? "E" : "W"; else if (dy) S.facing = dy > 0 ? "S" : "N";
     const nx = S.p[0] + (dx / l) * v; if (!hits(nx, S.p[1])) S.p[0] = nx;
@@ -238,6 +253,48 @@ ok("autopilot: no unresolved stuck with a map", r.ap.incidents.filter((i) => !i.
 S1 = simWorld(); S1.useMap = false;
 r = drive(S1, { controls: { move: "wasd" }, map: false }, "goto 18,7", 60 * 90);
 ok("autopilot learns walls and still gets through the maze (no map)", r.status === "done" && Math.floor(S1.p[0] / 16) === 18, `${r.status} ${r.msg} at ${S1.p.map((x) => x.toFixed(1))} t=${r.t.toFixed(1)} learned=${r.ap.grid.learned.size}`);
+{
+  // a target that leaves the view (goes indoors) reads as "went out of view (last seen at …)", not "lost track"
+  const SV = simWorld(); SV.useMap = true;
+  const snap0 = SV.snap;
+  SV.snap = () => { const s = snap0(); s.state.entities.push({ id: 8, type: "Sign", pos: [280, 120] }); /* something far stays listed, so a near thing that vanished is known gone */ if (SV.frame < 10) s.state.entities.push({ id: 9, type: "Villager", pos: [24, 120], talk: true, hostile: false }); return s; };
+  const rv = drive(SV, { controls: { move: "wasd" } }, "goto Villager", 60 * 20);
+  ok("a target that went out of view says where it was last seen", rv.status === "fail" && /Villager#9 went out of view \(last seen at cell \(1,7\)/.test(rv.msg), `${rv.status} ${rv.msg}`);
+  const gw = new NavGrid({ cell: 1 });
+  gw.setMap({ cell: 1, origin: [0, 0], rows: ["...", "..."], solid: "#" });
+  const fixed = gw.windowed;
+  gw.setMap({ cell: 1, origin: [1, 0], rows: ["...", "..#"], solid: "#" });
+  ok("a map window that follows the player is flagged (coverage % is then labelled)", !fixed && gw.windowed && gw.openCells() === 7, `${fixed} ${gw.windowed} ${gw.openCells()}`);
+}
+{
+  // autofight: a wolf that comes at you during a goto is fought on the spot, then the goto carries on to its goal
+  const SA = simWorld({ wolf: true, mortal: true }); SA.useMap = true;
+  const ra = drive(SA, { controls: { move: "wasd", attack: "j", block: "k" }, reaction: 0.25 }, "goto 18,7", 60 * 60);
+  const evA = ra.ap.drainEvents().map((e) => e.text).join(" | ");
+  ok("autofight: the goto survives the wolf and still arrives", ra.status === "done" && /arrived at cell \(18,7\)/.test(ra.msg) && !SA.wolf, `${ra.status} ${ra.msg} wolf=${JSON.stringify(SA.wolf)}`);
+  ok("autofight: engaged and resumed the goto (reported as events)", /fighting it, then back to goto 18,7/.test(evA) && /back to goto 18,7/.test(evA.split("fighting it")[1] || ""), evA);
+  ok("autofight: the fight isn't the order's result", ra.ap.results.length === 1 && /goto 18,7/.test(ra.ap.results[0].order), JSON.stringify(ra.ap.results));
+  const SB = simWorld({ wolf: true, mortal: true }); SB.useMap = true;
+  const rb = drive(SB, { controls: { move: "wasd", attack: "j", block: "k" }, reaction: 0.25 }, "set autofight off; goto 18,7", 60 * 60);
+  ok("set autofight off: no autofight events", !/fighting it/.test(rb.ap.drainEvents().map((e) => e.text).join(" ")) && /autofight off/.test(rb.ap.results[0]?.msg || ""), JSON.stringify(rb.ap.results));
+}
+{
+  // live mode's standing behaviour: nothing ordered, a wolf comes at you, the autopilot guards and fights back
+  const SS = simWorld({ wolf: true, mortal: true }); SS.useMap = true;
+  const cfgS = resolvePlayConfig({ controls: { move: "wasd", attack: "j", block: "k" }, reaction: 0.25 }, { keys: ["w", "a", "s", "d", "j", "k", "e"] });
+  const perS = new Perceiver(cfgS, { fps: 60 });
+  let wS = perS.perceive(SS.snap(), 0);
+  const apS = new Autopilot(cfgS, { fps: 60, grid: new NavGrid({ cell: wS.cell, origin: [0, 0] }), perceiver: perS, size: [320, 144] });
+  apS.standingMode = true; apS.observe(wS);
+  const statuses = new Set();
+  while (SS.frame < 60 * 8) {
+    const d = apS.decide(wS); statuses.add(d.status);
+    SS.queue.push(...apS.ctrl.emit(d.want, SS.frame));
+    for (let i = 0; i < Math.max(1, d.k); i++) SS.step();
+    wS = perS.perceive(SS.snap(), SS.frame); apS.observe(wS);
+  }
+  ok("standing (live, no order): keeps running, guards and fights back", [...statuses].join() === "run" && !SS.wolf && SS.hp >= 8 && !apS.busy() && apS.activeOrder() == null, `${[...statuses]} wolf=${JSON.stringify(SS.wolf)} hp=${SS.hp}`);
+}
 S1 = simWorld({ wolf: true }); S1.useMap = true;
 r = drive(S1, { controls: { move: "wasd", attack: "j", block: "k" }, reaction: 0.25 }, "wait 4");
 ok("guard reflex blocks a telegraphed bite after the reaction delay", S1.hp === 10 && S1.wolf.state !== "idle", `hp ${S1.hp} wolf ${S1.wolf.state}`);

@@ -71,7 +71,7 @@ export class EventTracker {
     if (cur.dead && !prev.dead) {
       const cell = P && P.p2 ? cellOf(cur, P.p2) : null;
       // the game's own words beat our guess ("fell into a pit", "hit by Piranha#27")
-      const said = this.recentLogs.slice().reverse().find((l) => /(died|death|killed|fell|pit|lava|drown|slain|you lose|game over)/i.test(l.text));
+      const said = this.recentLogs.slice().reverse().find((l) => /(died|death|killed|fell|pit|lava|drown|slain|you lose|game over)/i.test(l.text) && !/\b(player|you) (killed|defeated|slew)\b/i.test(l.text));   // not "player killed X"
       const cause = said ? clip(oneLine(said.text), 120) : this.lastHurtBy ? `last hit by ${this.lastHurtBy}` : "unknown";
       this.deaths.push({ t, cell, cause });
       push("death", `YOU DIED (${cause})`);
@@ -88,6 +88,8 @@ export class EventTracker {
     const killedNow = [];
     for (const [id, th] of prevById) {
       if (curById.has(id)) continue;
+      // a corpse (kept as dead / state "dead") being cleaned up later isn't a second kill or a new fight
+      if (th.dead) { this.perceiver.forget(id, "killed"); continue; }
       const near = th.dist <= 3.5, far = th.dist > Math.max(cur.maxListed, prev.maxListed) * 0.6 && th.dist > 8;
       if (th.rel === "hostile") {
         if ((th.hp != null && th.hp <= 2 && th.dist <= 6) || near || (!far && th.hp != null && th.maxHp && th.hp < th.maxHp)) {
@@ -95,10 +97,10 @@ export class EventTracker {
           killedNow.push(th);
           if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; if (th.hp != null) dealtNow += th.hp; }
           pushInf("kill", `${th.key} died`, { id }, th.key);
-          this.perceiver.forget(id);
+          this.perceiver.forget(id, "killed");
         } else if (!far) { push("gone", `${th.key} is gone`); this.perceiver.forget(id); }
       } else if (th.rel === "item") {
-        if (th.dist <= 2.2) { this.pickups.push({ t, key: th.key, type: th.type }); pushInf("pickup", `you picked up ${th.key}`, { id }, th.key); this.perceiver.forget(id); }
+        if (th.dist <= 2.2) { this.pickups.push({ t, key: th.key, type: th.type }); pushInf("pickup", `you picked up ${th.key}`, { id }, th.key); this.perceiver.forget(id, "picked up"); }
         else if (!far) { push("gone", `${th.key} is gone`); this.perceiver.forget(id); }
       } else if (!far && th.dist <= 6) { push("gone", `${thingLabel(th)} is gone`); this.perceiver.forget(id); }
     }

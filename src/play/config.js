@@ -111,6 +111,9 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     tick: Math.max(1, Math.round(+(raw.tick ?? 3))),
     combatTick: Math.max(1, Math.round(+(raw.combatTick ?? 1))),
     guard: raw.guard !== false,
+    autofight: raw.autofight != null ? !!raw.autofight : null,   // null: on for topdown and fps, off for platformers
+    autofightLeash: +(raw.autofightLeash ?? 6),    // cells an autofight may chase before it gives up and the move resumes
+    live: { horizon: 4, pauseAfter: 15, speed: 1, ...(raw.live || {}) },   // live mode: check-in horizon (game s), auto-pause after (wall s), pace
     guardMode: ["block", "dodge", "backoff"].includes(raw.guardMode) ? raw.guardMode : null,   // null: block if possible, else dodge, else back off
     radius: raw.radius != null ? +raw.radius : null,     // player collision radius in cells (null: from player.size, else 0.35)
     mirrorCombos: raw.mirrorCombos !== false,

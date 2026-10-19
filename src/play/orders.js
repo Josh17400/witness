@@ -48,7 +48,7 @@ export const ORDER_CARD = [
   "goto <thing|x,y> · go <n|s|e|w|ne…> [cells] · explore [dir] · follow <thing>",
   "fight [thing] [block|dodge|backoff|aggressive] [retreat 30%] · flee",
   "talk <who> · choose <n|words> · pickup [thing] · use <control|item> · interact [thing]",
-  "press <key|control> [xN] · hold <key|control> <s> · wait [s] · stop · respawn · set retreat 30|heal 40|guard on|off",
+  "press <key|control> [xN] · hold <key|control> <s> · wait [s] · stop · respawn · set retreat 30|heal 40|guard on|off|autofight on|off",
   "modifiers: for 8s · careful (wake on anything) · kite 4 (keep distance)",
 ].join("\n");
 export const ORDER_CARD_PLATFORMER = "run <left|right> [to x] · jump [left|right] [short|long|high] · stomp <thing> · wait for <thing>";

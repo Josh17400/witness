@@ -37,7 +37,8 @@ export async function runDaemon(dir) {
 
   let g;
   try {
-    g = await openGame(spec.cfg, spec.root, { quiet: true, timeout: spec.cfg.timeout });
+    // --watch: the game shows its window, presents frames, drops real input (docs/PROTOCOL.md, watch mode)
+    g = await openGame(spec.cfg, spec.root, { quiet: true, timeout: spec.cfg.timeout, env: opts.watch ? { WITNESS_WATCH: "1" } : undefined });
   } catch (e) {
     log(`launch failed: ${e.message}`);
     setStatus({ state: "failed", error: e.message });
@@ -71,12 +72,33 @@ export async function runDaemon(dir) {
   const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name });
   const dts = (k) => Array(k).fill(1 / fps);
 
+  // ---- live mode: one loop owns the game and steps it continuously, paced to real time; commands steer it
+  const liveCfg = cfg.live || {};
+  const live = {
+    on: !!(opts.live || opts.watch), paused: false, stop: false, waiter: null, lastCmd: Date.now(),
+    speed: Math.max(0.05, +(opts.speed ?? liveCfg.speed ?? 1)), horizon: +(opts.horizon ?? liveCfg.horizon ?? 4),
+    pauseAfter: Math.max(2, +(opts.pauseAfter ?? liveCfg.pauseAfter ?? 15)), baseWall: 0, baseFrame: 0,
+    resume: null, exited: null, order: null, pauseReason: null,
+  };
+  // every Session request goes through this lock in live mode (the loop takes it per tick, commands for screenshots)
+  const lock = { p: Promise.resolve(), run(fn) { const r = this.p.then(fn, fn); this.p = r.then(() => {}, () => {}); return r; } };
+  // pace: how long the game sat frozen while the tester thought (turn-taking) or while live mode was paused
+  const pace = { freezes: 0, frozenMs: 0, frozenSince: live.on ? null : Date.now() };
+  const thaw = () => { if (pace.frozenSince != null) { const gap = Date.now() - pace.frozenSince; if (gap > 50) { pace.freezes++; pace.frozenMs += gap; } pace.frozenSince = null; } };
+  const freeze = () => { if (pace.frozenSince == null) pace.frozenSince = Date.now(); };
+
   // ---- start the run
   let grid, ap, tracker;
   try {
     if (S.has("reset")) await S.reset(opts.seed ?? spec.cfg.seed ?? 1, opts.scene || undefined, opts.params || undefined);
-    const snap = await S.snapshot();
-    world = perceiver.perceive(snap, 0);
+    // many games fill their world on the first update: step once (and up to ~1/3 s until something is in view)
+    // before the first look. These frames are recorded like any others, so the replay stays exact.
+    const warm = Math.max(1, Math.round(fps / 3));
+    for (let i = 0; i < warm; i++) {
+      await S.step(1, null, dts(1)); frame++;
+      world = perceiver.perceive(await S.snapshot(), frame);
+      if (world.player && world.things.length) break;
+    }
     grid = new NavGrid({ cell: world.cell, origin: perceiver.geo.origin, northSign: cfg.northSign });
     ap = new Autopilot(cfg, { fps, grid, perceiver, size });
     tracker = new EventTracker(cfg, perceiver);
@@ -122,10 +144,14 @@ export async function runDaemon(dir) {
   // ---- the reflex loop for one `do`
   const wakeFor = (ev, b) => {
     const combat = ap.inCombat(), careful = b && b.careful;
+    // with autofight on, enemies met while moving are the reflex layer's job: only the big things wake the tester
+    const moving = /^(goto|go|explore|follow|pickup|talk|run)$/.test(b?.verb || "") || !!ap.suspended;
+    const reflexes = ap.policy.autofight && (moving || live.on);
     for (const e of ev) {
       if (["death", "goal", "error", "scene", "lowhp"].includes(e.kind)) return e.text;
       if (world.dead && (e.kind === "alert" || e.kind === "hurt")) continue;
       if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return e.text;
+      if (reflexes && (e.kind === "hurt" || e.kind === "alert")) continue;
       if (!combat && e.kind === "hurt" && b?.verb !== "flee") return e.text;
       // platformer runs jump or stomp enemies on their own: an approaching enemy isn't worth a wake there
       const runner = cfg.profile === "platformer" && /^(run|goto|go|explore|pickup|jump)$/.test(b?.verb || "");
@@ -165,6 +191,7 @@ export async function runDaemon(dir) {
     let list;
     try { list = parseOrders(text, { named: cfg.named, combos: cfg.combos }); }
     catch (e) { if (!(e instanceof OrderError)) throw e; parseErrors++; return { code: 2, text: `✖ ${e.message}${e.hint ? `\n  ${e.hint.split("\n").join("\n  ")}` : ""}` }; }
+    thaw();
     const t0 = world.t;
     const cap = forS != null ? +forS : list.every((o) => OPEN_ENDED.has(o.verb) || o.forS) ? Math.max(...list.map((o) => o.forS || 6)) + 0.5 : Math.max(25, ...list.map((o) => (o.forS || 0) + 1));
     ap.setOrders(list);
@@ -207,11 +234,126 @@ export async function runDaemon(dir) {
     if (lateLogs.length) for (const e of tracker.update(world, world, { logs: lateLogs })) { timeline.push({ t: +e.t.toFixed(2), frame: e.frame, kind: e.kind, text: e.text }); pending.push(e); if (e.kind === "error") errors.push({ t: +e.t.toFixed(2), text: e.text }); }
     const line = resultLine({ status: result.status, order: list.length > 1 && (result.status === "interrupted" || result.status === "time") ? text : list.length === 1 ? text : null, msg: result.msg, seconds: world.t - t0 }) + (result.hint && result.status === "fail" ? `\n  hint: ${result.hint.split("\n")[0]}` : "");
     writeProgress();
+    freeze();
     return { code: 0, result: { ...result, line } };
   }
 
+  // ---- live mode ---------------------------------------------------------------------------------------------
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const rebase = () => { live.baseWall = Date.now(); live.baseFrame = frame; };
+  const orderLabel = () => { const b = ap.activeOrder(); return b ? clip(b.label, 50) : null; };
+
+  /** Hand the waiting `do` (or `look --wait`) its answer; the game keeps running either way. */
+  function settle(status, msg, hint) {
+    const wt = live.waiter; if (!wt) return;
+    live.waiter = null;
+    const parts = ap.results.slice(wt.results0).map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}${ap.results.length - wt.results0 > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
+    const running = orderLabel();
+    let m = msg;
+    if ((status === "done" || status === "fail") && parts.length > 1) m = parts.join(" → ");
+    if (status === "event" && running && !world.dead) m = `${msg} — ${running} keeps running`;
+    if (status === "running") m = running ? `${running} is still running; the game keeps going (give a new order to change it, or look --wait)` : "nothing to do: standing by (the game keeps going)";
+    const line = resultLine({ status, order: wt.list && wt.list.length === 1 && status !== "running" ? wt.text : null, msg: m, seconds: world.t - wt.t0 }) + (hint && status === "fail" ? `\n  hint: ${hint.split("\n")[0]}` : "");
+    wt.resolve({ code: 0, result: { status, msg: m, line } });
+  }
+
+  /** The order chain finished (done/fail) during live play: record it, answer the waiter or leave a note for later. */
+  function chainFinished(dec) {
+    const rec = live.order; live.order = null;
+    const st = dec.status === "idle" ? "done" : dec.status;
+    const all = ap.results.map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}`);
+    if (rec) { rec.status = st; rec.msg = all.length > 1 ? all.join(" → ") : dec.message || ""; rec.seconds = +(world.t - rec.t).toFixed(2); }
+    if (live.waiter && live.waiter.rec === rec) settle(st, dec.message, dec.hint);
+    else if (rec) pending.push({ t: world.t, frame, kind: "order", text: `${st === "fail" ? "✖" : "✔"} your order "${clip(rec.text, 40)}" finished: ${clip(rec.msg, 120)}` });
+    writeProgress();
+  }
+
+  async function liveTick() {
+    const dec = ap.decide(world);
+    if (dec.status === "call") {
+      const ev0 = ap.ctrl.emit(dec.want, frame);
+      if (ev0.length) { await S.input(ev0); recorder.add(ev0); }
+      let msg;
+      try { const r = await S.call(dec.name, dec.args); msg = `called ${dec.name}(${dec.args.join(", ")}) → ${clip(JSON.stringify(r.result ?? null), 120)}`; recorder.call(frame, dec.name, dec.args); }
+      catch (e) { msg = `call ${dec.name} failed: ${e.message}`; }
+      if (ap.cur) ap.cur.result = msg;
+      await stepWorld(1);
+      return;
+    }
+    const ev = ap.ctrl.emit(dec.want, frame);
+    if (ev.length) { await S.input(ev); recorder.add(ev); }
+    if ((dec.status === "done" || dec.status === "fail" || dec.status === "idle") && live.order) chainFinished(dec);
+    if (S.closed) return;
+    const b = ap.activeOrder();
+    const bi = b ? { verb: b.o?.verb, careful: !!b.o?.careful, target: b.thingId ?? b.target ?? (b.thing ? b.thing.id : null) } : null;
+    // small steps keep a watched window responsive (the game presents frames as it steps)
+    const k = Math.max(1, Math.min(opts.watch ? 2 : 4, dec.k || cfg.tick));
+    const evs = await stepWorld(k);
+    if (live.waiter) {
+      const wake = wakeFor(evs, bi);
+      if (wake) { if (evs.some((e) => e.kind === "goal")) settle("goal", "the game reports a win"); else settle("event", wake); }
+      else if (world.t - live.waiter.t0 >= live.waiter.cap - 1e-9) settle("running");
+    }
+  }
+
+  async function liveLoop() {
+    rebase();
+    log(`live loop started (speed ${live.speed}, horizon ${live.horizon}s, auto-pause after ${live.pauseAfter}s without orders${opts.watch ? ", watched" : ""})`);
+    while (!finalizing && !live.stop && !S.closed) {
+      if (live.paused) { await new Promise((r) => { live.resume = r; }); rebase(); continue; }
+      if (!live.waiter && Date.now() - live.lastCmd > live.pauseAfter * 1000) { pauseLive(`no orders for ${live.pauseAfter}s`); continue; }
+      try { await lock.run(liveTick); }
+      catch (e) { log(`live tick failed: ${e.stack || e.message}`); if (live.waiter) settle("error", e.message); await sleep(50); }
+      const target = live.baseWall + ((frame - live.baseFrame) / fps / live.speed) * 1000, now = Date.now();
+      if (target > now) await sleep(target - now);
+      else if (now - target > 250) rebase();   // the game steps slower than real time: don't try to catch up
+      else await sleep(0);                     // let HTTP commands in
+    }
+    if (live.waiter) settle("error", S.closed ? "the game disconnected (crashed?)" : "the session is ending");
+    log("live loop stopped");
+  }
+  function pauseLive(why) {
+    if (live.paused) return;
+    live.paused = true; live.pauseReason = why; freeze();
+    const e = { t: world.t, frame, kind: "paused", text: `game paused: ${why} (give an order to resume)` };
+    pending.push(e); timeline.push({ t: +e.t.toFixed(2), frame, kind: e.kind, text: e.text });
+    log(`paused: ${why}`);
+  }
+  function resumeLive() {
+    if (!live.paused) return;
+    live.paused = false; live.pauseReason = null; thaw();
+    const e = { t: world.t, frame, kind: "resumed", text: "game resumed" };
+    timeline.push({ t: +e.t.toFixed(2), frame, kind: e.kind, text: e.text });
+    if (live.resume) { const r = live.resume; live.resume = null; r(); }
+  }
+
+  /** live `do`: replace the plan now and answer at the first of: done/failed, an important event, the horizon. */
+  async function liveDo(text, forS, waitOnly = false) {
+    let list = null;
+    if (!waitOnly) {
+      try { list = parseOrders(text, { named: cfg.named, combos: cfg.combos }); }
+      catch (e) { if (!(e instanceof OrderError)) throw e; parseErrors++; return { code: 2, text: `✖ ${e.message}${e.hint ? `\n  ${e.hint.split("\n").join("\n  ")}` : ""}` }; }
+    }
+    if (live.stop || S.closed) return { code: 0, result: { status: "error", line: "✖ the game isn't running any more" } };
+    const answer = new Promise((resolve) => {
+      lock.run(() => {
+        if (list) {
+          if (live.order && live.order.status === "running") { live.order.status = "replaced"; live.order.msg = `replaced by "${clip(text, 40)}"`; live.order.seconds = +(world.t - live.order.t).toFixed(2); }
+          ap.setOrders(list);
+          const rec = { t: +world.t.toFixed(2), text, status: "running", msg: null, seconds: null };
+          orders.push(rec); live.order = rec;
+        }
+        if (live.waiter) settle("running");   // a newer command supersedes an older wait
+        live.waiter = { t0: world.t, cap: forS != null ? +forS : live.horizon, resolve, text, list, rec: live.order, results0: list ? 0 : ap.results.length };
+      });
+    });
+    resumeLive();
+    return answer;
+  }
+
   function look(result, asJson) {
-    const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: pending.splice(0), first: firstLook, session: { goal: opts.goal, name: spec.name } };
+    const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: pending.splice(0), first: firstLook, session: { goal: opts.goal, name: spec.name },
+      live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null };
     firstLook = false;
     if (asJson) return { data: observeData(world, ctx) };
     return { text: observeText(world, ctx) };
@@ -222,15 +364,22 @@ export async function runDaemon(dir) {
     let seenOpen = 0;
     if (open) for (const k of grid.seen) if (grid.mapSolid.get(k) === false) seenOpen++;
     const b = (() => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const k of grid.visited) { const [x, y] = k.split(",").map(Number); x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); } return Number.isFinite(x0) ? { x0, y0, x1, y1 } : null; })();
-    return { cells: grid.visited.size + (ap.visitedBefore || 0), scenes: ap.visitedBefore ? "all levels (map % is the current one)" : undefined, seen: open ? seenOpen : grid.seen.size, openCells: open || null, percent: open ? Math.round((100 * seenOpen) / open) : null, bounds: b };
+    return { cells: grid.visited.size + (ap.visitedBefore || 0), scenes: ap.visitedBefore ? "all levels (map % is the current one)" : undefined, seen: open ? seenOpen : grid.seen.size, openCells: open || null, percent: open ? Math.round((100 * seenOpen) / open) : null, mapWindow: grid.windowed || undefined, bounds: b };
   }
 
+  function paceStats() {
+    const frozen = pace.frozenMs + (pace.frozenSince != null ? Date.now() - pace.frozenSince : 0), wallS = (Date.now() - wall0) / 1000;
+    const stopped = orders.filter((o) => ["interrupted", "time", "replaced"].includes(o.status)).length;
+    return { mode: live.on ? (opts.watch ? "live (watched)" : "live") : "turns", speed: live.on ? live.speed : null, wallSeconds: +wallS.toFixed(1), gameSeconds: +world.t.toFixed(1),
+      freezes: pace.freezes, frozenWallSeconds: +(frozen / 1000).toFixed(1), frozenShare: wallS ? +(frozen / 1000 / wallS).toFixed(2) : 0,
+      orders: orders.length, ordersPerGameMinute: world.t ? +(orders.length / (world.t / 60)).toFixed(1) : 0, ordersStoppedEarly: stopped };
+  }
   function state(extra = {}) {
     return {
       name: spec.name, game: { name: S.hello.name, engine: S.hello.engine || null }, persona, goal: opts.goal || null, model: opts.model || null,
       seed: recorder.head.seed, scene: opts.scene ?? null, params: opts.params ?? null, startedAt: new Date(wall0).toISOString(),
       wallSeconds: Math.round((Date.now() - wall0) / 1000), gameSeconds: world.t, frames: frame, fps, orders, timeline, tracker,
-      incidents: ap.incidents, coverage: coverage(), shots, errors, notes, parseErrors, profile: cfg.profile,
+      incidents: ap.incidents, coverage: coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
       replay: { file: path.join(dir, "replay.jsonl"), frames: frame, calls: recorder ? [...recorder.frames.values()].reduce((a, x) => a + x.calls.length, 0) : 0 },
       ...extra,
     };
@@ -248,6 +397,10 @@ export async function runDaemon(dir) {
     finalizing = true;
     clearTimeout(idleTimer); clearTimeout(maxTimer);
     log(`finalizing: ${reason}`);
+    // live: stop the loop first, so nothing steps after the final snapshot (the replay must end on the same frame)
+    if (live.on) { live.stop = true; if (live.resume) { const r0 = live.resume; live.resume = null; r0(); } try { await live.loopP; } catch { /* reported */ } }
+    if (live.order && live.order.status === "running") { live.order.status = "ended"; live.order.msg = "still running when the session ended"; live.order.seconds = +(world.t - live.order.t).toFixed(2); }
+    pace.frozenSince = null;   // the final pause (writing feedback) isn't play time
     let endState = null;
     try { if (!S.closed) { const snap = await S.snapshot(); endState = snap.state; for (const l of await S.drainLogs()) if (l.level === "error") errors.push({ t: +world.t.toFixed(2), text: `game error: ${l.message}` }); } } catch (e) { log(`final snapshot failed: ${e.message}`); }
     tracker.finish(world.t);
@@ -263,7 +416,8 @@ export async function runDaemon(dir) {
       const r = reportData(st);
       fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(r, null, 1));
       const rel = (p) => path.relative(spec.root, p).replace(/\\/g, "/");
-      fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, { rel, replayCmd: "witness replay" }));
+      const link = (p) => path.relative(dir, p).replace(/\\/g, "/");
+      fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, { rel, link, replayCmd: "witness replay" }));
       const S2 = r.stats;
       summary = `${outcome.toUpperCase()} after ${r1(world.t)}s game time · ${S2.orders} orders · fights ${r.fights.length} (${S2.fightsWon} won) · deaths ${S2.deaths} · stuck ${S2.stuck} · notes ${notes.length}${errors.length ? ` · ${errors.length} game errors` : ""}`;
     } catch (e) { log(`report failed: ${e.stack || e.message}`); summary = `report failed: ${e.message}`; }
@@ -295,28 +449,31 @@ export async function runDaemon(dir) {
   // ---- the HTTP API
   async function handle(req) {
     touch();
+    live.lastCmd = Date.now();
     const cmd = req.cmd, a = req.args || {};
     if (finalizing) return { ok: false, code: 1, text: "this session has ended" };
+    const shoot = (why, scale) => (live.on ? lock.run(() => screenshot(why, scale)) : screenshot(why, scale));
     switch (cmd) {
       case "ping": return { ok: true, text: "pong" };
       case "look": {
-        let shot = null;
-        if (a.shot) shot = await screenshot("look", a.scale ? +a.scale : 0);
-        const o = look(null, a.json);
+        let shot = null, res = null;
+        if (a.wait && live.on) res = (await liveDo(null, a.for, true)).result;   // keep the plan; answer at the next event or the horizon
+        if (a.shot) shot = await shoot("look", a.scale ? +a.scale : 0);
+        const o = look(res, a.json);
         return { ok: true, ...o, shot };
       }
       case "do": {
-        const r = await runDo(String(a.orders || ""), a.for);
+        const r = live.on ? await liveDo(String(a.orders || ""), a.for) : await runDo(String(a.orders || ""), a.for);
         if (r.code === 2) return { ok: false, code: 2, text: r.text };
         const o = look(r.result, a.json);
         if (S.closed && !finalizing) setTimeout(() => shutdown("the game exited or crashed", "crashed"), 10);
         return { ok: true, ...o };
       }
-      case "shot": { const f = await screenshot(a.why || "shot", a.scale ? +a.scale : 0); return f ? { ok: true, text: f, shot: f } : { ok: false, code: 1, text: "this game can't take screenshots (no 'screenshot' capability)" }; }
+      case "shot": { const f = await shoot(a.why || "shot", a.scale ? +a.scale : 0); return f ? { ok: true, text: f, shot: f } : { ok: false, code: 1, text: "this game can't take screenshots (no 'screenshot' capability)" }; }
       case "note": {
         const kind = ["bug", "confusing", "fun", "idea"].includes(a.kind) ? a.kind : "note";
         const n = { t: +world.t.toFixed(2), frame, kind, text: oneLine(a.text || "").slice(0, 1000), cell: world.player && world.player.p2 ? cellOf(world, world.player.p2) : null };
-        if (a.shot || kind === "bug") n.shot = await keyShot(`${kind}`);
+        if (a.shot || kind === "bug") n.shot = live.on ? await lock.run(() => keyShot(`${kind}`)) : await keyShot(`${kind}`);
         notes.push(n);
         recorder.mark(frame, `${kind}: ${n.text}`.slice(0, 120));
         timeline.push({ t: n.t, frame, kind: "note", text: `${kind}: ${n.text}` });
@@ -349,6 +506,7 @@ export async function runDaemon(dir) {
   server.listen(0, "127.0.0.1", () => {
     const port = server.address().port;
     setStatus({ state: "ready", port, pid: process.pid, gamePid: g.proc ? g.proc.pid : null, fps, profile: cfg.profile, cell: world.cell });
-    log(`ready on port ${port} (game pid ${g.proc ? g.proc.pid : "-"}, ${fps} fps, profile ${cfg.profile}, cell ${world.cell})`);
+    log(`ready on port ${port} (game pid ${g.proc ? g.proc.pid : "-"}, ${fps} fps, profile ${cfg.profile}, cell ${world.cell}${live.on ? ", LIVE" : ""})`);
+    if (live.on) { ap.standingMode = true; live.lastCmd = Date.now(); live.loopP = liveLoop(); }
   });
 }

@@ -38,6 +38,8 @@ export class NavGrid {
     this.bounds = null;            // {x0, y0, x1, y1} of map knowledge
     this.version = 0;              // bumps whenever blocking changes (paths need a replan)
     this.mapKey = null;
+    this.mapOrigin = null;
+    this.windowed = false;         // the game's map is a window that moves with the player (its full size is unknown)
   }
 
   toCell(p) { return [Math.floor((p[0] - this.origin[0]) / this.cell), Math.floor((p[1] - this.origin[1]) / this.cell)]; }
@@ -49,6 +51,9 @@ export class NavGrid {
     const key = map.rows.join("\n") + "|" + map.origin;
     if (key === this.mapKey) return;
     this.mapKey = key;
+    const o = String(map.origin);
+    if (this.mapOrigin != null && this.mapOrigin !== o) this.windowed = true;   // sticky: a property of the game, kept across scenes
+    this.mapOrigin = o;
     // the map's grid must line up with ours; if the cell sizes differ, sample cell centres
     const solid = new Set(map.solid), hazard = new Set(map.hazard || "");
     const cx0 = Math.floor((map.origin[0] - this.origin[0]) / this.cell), cy0 = Math.floor((map.origin[1] - this.origin[1]) / this.cell);
@@ -81,7 +86,7 @@ export class NavGrid {
   /** Forget everything (a new level or scene). */
   reset() {
     this.mapSolid.clear(); this.hazard.clear(); this.learned.clear(); this.temp.clear(); this.visited.clear(); this.seen.clear();
-    this.bounds = null; this.mapKey = null; this.version++;
+    this.bounds = null; this.mapKey = null; this.mapOrigin = null; this.version++;
   }
 
   growBounds(x0, y0, x1, y1) {

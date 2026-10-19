@@ -227,7 +227,8 @@ export class Perceiver {
     return world;
   }
 
-  forget(id) { const m = this.memory.get(id); if (m) m.gone = true; }
+  /** Mark a remembered thing gone; `why` (killed / picked up / removed) lets orders explain what happened to it. */
+  forget(id, why = null) { const m = this.memory.get(id); if (m) { m.gone = true; m.why = why; } }
 
   pickStats(state, pl) {
     const out = [];

@@ -225,13 +225,26 @@ class GoTo extends Behaviour {
   target(w) {
     if (this.thingId != null) {
       const th = w.things.find((x) => x.id === this.thingId) || (w.remembered || []).find((x) => x.id === this.thingId);
-      if (th) { this.goal = th.p2; this.lastThing = th; }
+      if (th) { this.goal = th.p2; this.lastThing = th; this.lastSeenT = th.lastSeen ?? this.ap.t; this.outOfView = false; }
+      else {
+        // it left the view (went indoors, behind something, was removed): head for where it was last seen
+        if (!this.lastThing) { const m = this.ap.perceiver && this.ap.perceiver.memory.get(this.thingId); if (m && m.thing.p2) { this.lastThing = m.thing; this.lastSeenT = m.lastSeen; this.goal ??= m.thing.p2; } }
+        this.outOfView = true;
+      }
     }
     return this.goal;
   }
+  outOfViewMsg() {
+    const th = this.lastThing;
+    const where = th && th.p2 ? ` (last seen at cell ${fmtCell(this.ap.grid.toCell(th.p2))}${this.lastSeenT != null && this.ap.t - this.lastSeenT > 0.5 ? `, ${r1(this.ap.t - this.lastSeenT)}s ago` : ""})` : "";
+    return `${this.desc} went out of view${where}`;
+  }
   tick(w, want) {
     const goal = this.target(w);
-    if (!goal) return this.fail(`lost track of ${this.desc}`);
+    // forgotten (not just out of view): it was killed, picked up or removed near you, e.g. by an autofight on the way
+    const mem = this.outOfView && this.ap.perceiver ? this.ap.perceiver.memory.get(this.thingId) : null;
+    if (mem && mem.gone && (mem.why === "killed" || mem.why === "picked up")) return this.done(`${this.desc} is gone (${mem.why === "killed" ? "it died" : "picked up"} on the way)`);
+    if (!goal) return this.fail(this.outOfViewMsg());
     const reach = this.reach ?? reachW(w, this.thingId != null ? 1.0 : 0.45);
     if (this.ap.platform) {
       const r = this.ap.platform.tick(w, want, { targetX: goal[0], targetY: goal[1], reachX: Math.max(reach, w.cell * 0.4) });
@@ -240,6 +253,7 @@ class GoTo extends Behaviour {
       return this.age > this.maxT ? this.fail(`gave up after ${r1(this.age)}s`) : this.run();
     }
     const r = this.nav.tick(w, goal, reach);
+    if (r.arrived && this.outOfView) return this.fail(`${this.outOfViewMsg()}: reached that spot, but it isn't in view here`);
     if (r.arrived) return this.done(`arrived at ${this.desc}${this.note ? ` — ${this.note}` : ""}`);
     if (r.fail) return this.fail(this.ap.blockerHint(w, r.fail));
     this.ap.moveTo(w, r.dir, want);
@@ -368,7 +382,7 @@ class Fight extends Behaviour {
     }
     if (d > reach * 0.85) {
       // the leash: don't chase a target across the map (out of the village, into another region)
-      if (this.start && cfg.leash > 0 && dist2(p, this.start) > cfg.leash * w.cell && d > reach * 2)
+      if (this.start && (this.leashCells ?? cfg.leash) > 0 && dist2(p, this.start) > (this.leashCells ?? cfg.leash) * w.cell && d > reach * 2)
         return this.done(`stopped chasing ${th.key}: it led you ${r1(dist2(p, this.start) / w.cell)} cells from where the fight started (fight it again to keep going)`);
       const r = this.nav.tick(w, th.p2, reach * 0.8, { stuckLimit: 4 });
       if (r.fail) return this.fail(`can't reach ${th.key}: ${r.fail}`);
@@ -403,10 +417,18 @@ class Fight extends Behaviour {
     const prefer = (this.kite ?? cfg.fps.range ?? 12) * w.cell;
     let mv = null;
     if (th.los === false || d > prefer * 1.4) {
-      const r = this.nav.tick(w, th.p2, prefer * 0.8, { stuckLimit: 5 });
-      if (r.fail) return this.fail(`can't reach ${th.key}: ${r.fail}`);
+      // chasing someone you can't see: not up or down a floor (the ground map can't get you there, you end up in a
+      // pocket under them), not for long without seeing them, and not across the map (the leash)
+      const other = ap.visibleFoe(w, (x) => x.id !== th.id);
+      const swap = (why) => { if (other) { this.target = other.id; this.targetKey = other.key; return null; } return this.done(why); };
+      if (ap.otherFloor(w, th)) return swap(`${th.key} is on another floor: not chasing it`);
+      if (th.los === false) { this.noLosSince ??= ap.t; if (ap.t - this.noLosSince > 4) return swap(`lost ${th.key} behind walls (4s out of sight)`); }
+      else this.noLosSince = null;
+      if (this.start && cfg.leash > 0 && dist2(p, this.start) > cfg.leash * w.cell && th.los === false) return swap(`stopped chasing ${th.key}: ${r1(dist2(p, this.start) / w.cell)} cells from where the fight started`);
+      const r = this.nav.tick(w, th.p2, prefer * 0.8, { stuckLimit: 3.5 });
+      if (r.fail) return other ? swap("") : this.fail(`can't reach ${th.key}: ${r.fail}`);
       mv = r.dir;
-    } else if (d < prefer * 0.4) mv = sub(p, th.p2);
+    } else { this.noLosSince = null; if (d < prefer * 0.4) mv = sub(p, th.p2); }
     if (cfg.fps.strafe && th.los !== false) {
       const phase = Math.floor(ap.t / 0.9) % 2 ? 1 : -1;
       const side = scale(perp(norm(sub(th.p2, p))), phase);
@@ -641,11 +663,40 @@ class Look extends Behaviour {
   }
 }
 
+/**
+ * Live mode: what the player does between orders while the game keeps running. Never finishes on its own.
+ * fps: hold position and shoot enemies in sight; topdown: guard (the guard reflex) and hit back at enemies in reach;
+ * platformer: stand still and jump onto (or away from) enemies about to touch you.
+ */
+class Standing extends Behaviour {
+  constructor(o, ap, w) { super(o, ap, w); this.guardable = true; this.standing = true; this.label = "standing by"; }
+  tick(w, want) {
+    const ap = this.ap, cfg = ap.cfg, c = cfg.controls;
+    if (!w.player || !w.player.p2 || w.dead || w.dialogue) return this.run();
+    if (ap.platform) { ap.platform.guard(w, want); return this.run(); }
+    if (cfg.profile === "fps") {
+      const th = ap.visibleFoe(w);
+      if (th) ap.shootAt(w, want, th);
+      else if (w.player.ammo === 0 && c.reload) want.taps.push({ label: "reload", c: c.reload, frames: 2 });
+      return this.run();
+    }
+    const reach = reachW(w, cfg.reach.attack);
+    const th = w.things.filter((x) => x.rel === "hostile" && !x.dead && dist2(x.p2, w.player.p2) <= reach * 1.6).sort((a, b) => a.dist - b.dist)[0];
+    if (th && ap.profile.face(w, th.p2, want)) ap.attack(want);
+    return this.run();
+  }
+}
+
 // ------------------------------------------------------------------ the autopilot
 export class Autopilot {
   constructor(cfg, { fps = 60, grid, perceiver, size = [640, 360] } = {}) {
     this.cfg = cfg; this.fps = fps; this.grid = grid; this.perceiver = perceiver;
-    this.policy = { retreat: cfg.retreat, heal: cfg.heal, guard: cfg.guard, reaction: cfg.reaction };
+    // autofight: enemies met during a move (goto/explore/follow/go) are fought on the spot and the move then resumes,
+    // instead of waking the tester (fps shoots on the move; topdown stops, fights near, resumes). Platformer runners
+    // already deal with enemies, so it's off there.
+    this.policy = { retreat: cfg.retreat, heal: cfg.heal, guard: cfg.guard, reaction: cfg.reaction, autofight: cfg.autofight ?? cfg.profile !== "platformer" };
+    this.standingMode = false;   // live mode: a Standing behaviour runs whenever no order does
+    this.lastHurtT = -1e9; this.lastHp = null;
     this.ctrl = new Controller(size);
     this.profile = makeProfile(cfg.profile, this);
     this.platform = cfg.profile === "platformer" ? new PlatformRunner(this) : null;
@@ -660,10 +711,33 @@ export class Autopilot {
   emit(kind, text, data) { this.events.push({ kind, text, data }); }
   drainEvents() { const e = this.events; this.events = []; return e; }
 
-  setOrders(orders) { this.queue = orders.slice(); this.cur = null; this.results = []; }
-  clear() { this.queue = []; this.cur = null; }
-  busy() { return !!(this.cur || this.queue.length); }
-  inCombat() { return this.cur instanceof Fight || this.cur instanceof Flee || /^(fight|stomp|flee)$/.test(this.cur?.o?.verb || ""); }
+  setOrders(orders) { this.queue = orders.slice(); this.cur = null; this.suspended = null; this.results = []; }
+  clear() { this.queue = []; this.cur = null; this.suspended = null; }
+  busy() { return !!((this.cur && !this.cur.standing) || this.queue.length); }
+  inCombat() { return this.cur instanceof Fight || this.cur instanceof Flee || /^(fight|stomp|flee)$/.test(this.cur?.o?.verb || "") || !!this.suspended; }
+  /** The order a tester gave that's running now (an autofight's suspended order counts; standing doesn't). */
+  activeOrder() { return this.suspended || (this.cur && !this.cur.standing ? this.cur : null); }
+
+  /** Another floor: a vertical gap bigger than a storey (3D games), so the ground map can't lead there. */
+  otherFloor(w, th) {
+    const p = w.player; if (!p || !p.pos || !th.pos || p.pos.length < 3 || th.pos.length < 3) return false;
+    const [a, b] = this.cfg.plane, up = 3 - a - b;
+    return Math.abs((th.pos[up] ?? 0) - (p.pos[up] ?? 0)) > (this.cfg.fps.floorHeight ?? 2.2);
+  }
+  /** The nearest enemy you could shoot right now (fps): in sight, in range, on your floor. */
+  visibleFoe(w, filter = null) {
+    const range = (this.cfg.fps.range ?? 12) * 2.2;
+    return w.things.filter((x) => x.rel === "hostile" && !x.dead && x.los !== false && x.dist <= range && !this.otherFloor(w, x) && (!filter || filter(x)))
+      .sort((a, b) => a.dist - b.dist)[0] || null;
+  }
+  /** fps: aim at a target and hold the trigger when the crosshair is on it (used while moving and while standing). */
+  shootAt(w, want, th) {
+    const c = this.cfg.controls, d = dist2(th.p2, w.player.p2);
+    if (w.player.ammo === 0 && c.reload) { want.taps.push({ label: "reload", c: c.reload, frames: 2 }); return; }
+    const aim = this.profile.aim(w, th, want);
+    const size = Math.atan2(0.45, Math.max(0.5, d));
+    if (Math.abs(aim.yawErr) < size * this.cfg.fps.aimTolerance + 0.01 && Math.abs(aim.pitchErr) < size * 1.6 + 0.02 && c.attack) { want.held.set("attack", c.attack); this.lastAttackT = this.t; }
+  }
   currentLabel() { return this.cur ? this.cur.label : null; }
   replaceWith(b, why) { this.cur = b; this.emit("reflex", why); }
 
@@ -700,6 +774,14 @@ export class Autopilot {
       }
     }
     this.prevP = p.p2; this.prevT = this.t;
+    if (p.hp != null) {
+      if (this.lastHp != null && p.hp < this.lastHp) {
+        this.lastHurtT = this.t;
+        const src = w.things.filter((th) => th.rel === "hostile" && !th.dead).sort((a, b) => a.dist - b.dist)[0];
+        this.lastHurtBy = src ? src.id : null;
+      }
+      this.lastHp = p.hp;
+    }
     for (const th of w.things) {
       if (th.rel !== "hostile") continue;
       if (th.telegraph) { if (!this.windupSeen.has(th.id)) this.windupSeen.set(th.id, this.t); }
@@ -755,9 +837,46 @@ export class Autopilot {
   moveTo(w, dir, want) {
     if (!dir || len(dir) < 1e-9) return;
     this.wantedMoveNow = true;
-    if (this.cfg.profile === "fps") { const r = this.profile.move(w, dir, want); this.moveAligned = r.aligned; return; }
+    if (this.cfg.profile === "fps") {
+      // shooting on the move: the mouse aims at the enemy while the keys keep walking the path (relative to the look)
+      const r = this.profile.move(w, dir, want, { turn: !this.aimTarget });
+      this.moveAligned = this.aimTarget ? true : r.aligned;
+      return;
+    }
     moveControls(this.cfg, dir, w.northSign, want, w.cell);
     this.moveAligned = true;
+  }
+
+  /**
+   * Autofight, checked before a movement order ticks. fps: pick an enemy in sight to shoot while the order keeps moving
+   * (sets aimTarget). topdown: an enemy that hit us, or is right on us, suspends the order for a short fight; the order
+   * resumes when it's over. Returns a Fight to run instead, or null.
+   */
+  autofight(w, b) {
+    this.aimTarget = null;
+    if (!this.policy.autofight || this.platform || !w.player || !w.player.p2 || w.dead || w.dialogue) return null;
+    if (!(b instanceof GoTo || b instanceof Explore || b instanceof Follow || b instanceof Pickup || b instanceof Talk)) return null;
+    if (this.cfg.profile === "fps") {
+      const th = this.visibleFoe(w);
+      if (th) {
+        this.aimTarget = th;
+        if (this.lastAutoAim !== th.id) { this.lastAutoAim = th.id; this.emit("autofight", `shooting at ${thingLabel(th)} on the move (${r1(th.dist)} cells ${th.dir}); ${clip(b.label, 40)} continues`); }
+      }
+      return null;
+    }
+    const reach = reachW(w, this.cfg.reach.attack);
+    const hurtBy = this.t - this.lastHurtT < 1.5 ? w.things.find((x) => x.id === this.lastHurtBy && !x.dead) : null;
+    const close = w.things.filter((x) => x.rel === "hostile" && !x.dead && dist2(x.p2, w.player.p2) <= reach * 2.2 && (x.telegraph || /chase|attack|strike|aggro|hunt/i.test(x.state || "") || x.raw?.aggro === true))
+      .sort((a, c) => a.dist - c.dist)[0];
+    const th = hurtBy && hurtBy.dist <= this.cfg.alert ? hurtBy : close;
+    if (!th) return null;
+    let fight;
+    try { fight = new Fight({ verb: "fight", text: `autofight ${th.key}`, target: { raw: th.key, words: [], id: String(th.id), category: null, plural: false } }, this, w); }
+    catch { return null; }
+    fight.auto = true;
+    fight.leashCells = this.cfg.autofightLeash ?? 6;
+    this.emit("autofight", `${thingLabel(th)} ${hurtBy === th ? "hit you" : "came at you"}: fighting it, then back to ${clip(b.label, 40)}`);
+    return fight;
   }
 
   /** Add "next to X (locked)" to a stuck message when a door-like thing is right there. */
@@ -884,7 +1003,8 @@ export class Autopilot {
         if (/^(heal|potion)$/.test(k)) { if (!c.heal) return { status: "fail", msg: "no heal control is configured (play.controls.heal)" }; this.policy.heal = v === false ? 0 : +v || 0; return { status: "done", msg: `heal below ${this.policy.heal}% hp` }; }
         if (/^(guard|block|defend|defense|defence)$/.test(k)) { this.policy.guard = !!v; return { status: "done", msg: `guard ${this.policy.guard ? "on" : "off"}` }; }
         if (/^(reaction|react)$/.test(k)) { this.policy.reaction = Math.max(0, Math.min(1, +v || 0)); return { status: "done", msg: `reaction ${this.policy.reaction}s` }; }
-        return { status: "fail", msg: `unknown setting "${k}" (retreat, heal, guard, reaction)` };
+        if (/^(autofight|auto-fight|fightback|fight-back|engage)$/.test(k)) { this.policy.autofight = !!v; return { status: "done", msg: `autofight ${this.policy.autofight ? "on: enemies met while moving are fought, then the move resumes" : "off: enemies met while moving stop the order"}` }; }
+        return { status: "fail", msg: `unknown setting "${k}" (retreat, heal, guard, reaction, autofight)` };
       });
       case "call": if (!cfg.allowCalls) throw new OrderError("calls are disabled in playtests (start with --allow-calls to enable them)"); return new CallOrder(o, this, w);
       case "combo": return new Combo(o, this, w);
@@ -933,7 +1053,11 @@ export class Autopilot {
     this.k = k;
     for (let guard = 0; guard < 12; guard++) {
       if (!this.cur) {
-        if (!this.queue.length) { this.wantedMove = false; return { want, k: 0, status: this.results.length ? "done" : "idle", message: this.results.at(-1)?.msg }; }
+        if (!this.queue.length) {
+          // live mode: nothing ordered, so the standing behaviour plays on (hold/guard/shoot back)
+          if (this.standingMode) { this.cur = new Standing({ verb: "stand", text: "standing by" }, this, w); this.cur.t0 = this.t; continue; }
+          this.wantedMove = false; return { want, k: 0, status: this.results.length ? "done" : "idle", message: this.results.at(-1)?.msg };
+        }
         const o = this.queue.shift();
         try { this.cur = this.make(o, w); }
         catch (e) {
@@ -945,9 +1069,24 @@ export class Autopilot {
         }
         this.cur.t0 = this.t;
       }
-      const b = this.cur;
+      let b = this.cur;
+      // ---- an autofight that ended: back to the order it interrupted
+      if (b.autoDone) {
+        const back = this.suspended; this.suspended = null; this.cur = back;
+        if (back) { for (const n of [back.nav, back.go && back.go.nav]) if (n) { n.bestT = this.t; n.reset?.(); } this.emit("autofight", `${b.autoDone}; back to ${clip(back.label, 50)}`); continue; }
+        continue;
+      }
       // ---- reflexes that come before the order
-      if (w.dead && !(b instanceof Tap || b instanceof Wait || b instanceof Instant || b instanceof Choose || b instanceof Hold || b instanceof CallOrder)) return this.finish(b, { status: "fail", msg: "you died" }, want);
+      if (w.dead && b.standing) return { want, k: this.cfg.tick, status: "run" };
+      if (w.dead && b.auto) { this.cur = this.suspended || b; this.suspended = null; b = this.cur; }
+      const stillOk = b instanceof Tap || b instanceof Wait || b instanceof Instant || b instanceof Choose || b instanceof Hold || b instanceof CallOrder;
+      // live mode: an order given (or running) while dead waits for the respawn (up to 12 s) instead of failing
+      if (w.dead && !stillOk && this.standingMode) {
+        b.deadSince ??= this.t;
+        if (this.t - b.deadSince < 12) { for (const n of [b.nav, b.go && b.go.nav]) if (n) n.bestT = this.t; b.t0 = Math.max(b.t0, this.t - 0.01); return { want, k: this.cfg.tick, status: "run" }; }
+      }
+      if (!w.dead && b.deadSince != null) { b.deadSince = null; if (b.start && w.player && w.player.p2) b.start = w.player.p2.slice(); for (const n of [b.nav, b.go && b.go.nav]) if (n) n.reset(); }
+      if (w.dead && !stillOk) return this.finish(b, { status: "fail", msg: "you died" }, want);
       if (w.dialogue && (b instanceof GoTo || b instanceof Explore || b instanceof Fight || b instanceof Pickup || b instanceof Follow || b instanceof Flee) && !(b instanceof Talk))
         return this.finish(b, { status: "fail", msg: `a dialogue is open (${w.dialogue.speaker || "someone"}: "${clip(w.dialogue.text, 60)}") — choose an option or press cancel first` }, want);
       // no player in the snapshot (a cutscene, an intro, a title screen): only orders that don't move can run
@@ -983,10 +1122,22 @@ export class Autopilot {
         this.k = this.cfg.combatTick; this.wantedMove = true;
         return { want, k: this.cfg.combatTick, status: "run" };
       }
+      // ---- autofight: an enemy met during a move gets dealt with, then the move goes on
+      if (!b.auto && !b.standing) {
+        const af = this.autofight(w, b);
+        if (af) { this.suspended = b; this.cur = af; af.t0 = this.t; b = af; this.k = this.cfg.combatTick; }
+      } else this.aimTarget = null;
       // ---- the order
       const res = b.tick(w, want);
+      if (this.aimTarget && this.cfg.profile === "fps") this.shootAt(w, want, this.aimTarget);
       if (res.status === "call") { this.wantedMove = false; return { want, k: 1, status: "call", name: res.name, args: res.args }; }
       if (res.status === "run") { this.wantedMove = this.wantedMoveNow; return { want, k: b.fast ? 1 : this.k, status: "run" }; }
+      if (b.auto) {
+        // an autofight is the reflex layer's business: it isn't a result of the tester's order, just an event
+        if (res.status === "fail" && /you died/.test(res.msg || "")) { const o0 = this.suspended || b; this.suspended = null; return this.finish(o0, res, want); }
+        b.autoDone = res.msg || "fight over"; this.cur = b;
+        return { want, k: this.k, status: "run" };
+      }
       const out = this.finish(b, res, want);
       if (out.status === "fail") return out;
       if (!this.queue.length) return out;

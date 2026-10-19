@@ -101,7 +101,7 @@ function platformWindow(w, marks) {
 /** The text a tester reads. */
 export function observeText(w, ctx) {
   const d = observeData(w, ctx), cfg = ctx.cfg, L = [];
-  const head = [`[t ${fmtT(w.t)}]`];
+  const head = [`[t ${fmtT(w.t)}${ctx.live ? ` · ${ctx.live}` : ""}]`];
   if (d.player) {
     if (d.player.hp != null) head.push(`hp ${r1(d.player.hp)}${d.player.maxHp ? `/${r1(d.player.maxHp)}` : ""}`);
     for (const [k, v] of Object.entries(d.stats)) head.push(`${k} ${typeof v === "number" ? r1(v) : typeof v === "boolean" ? (v ? "yes" : "no") : clip(String(v), 20)}`);
@@ -115,6 +115,8 @@ export function observeText(w, ctx) {
   if (ctx.first && ctx.session && ctx.session.goal) L.push(`your goal: ${ctx.session.goal}`);
   if (d.goal) L.push(`goal: ${clip(oneLine(d.goal), 140)}`);
   if (d.result) L.push(d.result.line);
+  if (ctx.live && ctx.order && !(d.result && /^(✔|✖)/.test(d.result.line || ""))) L.push(`your order (still running): ${ctx.order}`);
+  else if (ctx.live && !ctx.order) L.push("no order running: standing by (holding, guarding, shooting back) while the game plays on");
   if (w.dead) L.push(`YOU ARE DEAD${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}${cfg.controls.confirm ? ` (to continue: "respawn", or press the key the game names)` : ""}`);
   else if (w.won) L.push("★ GOAL REACHED (the game reports a win) — keep exploring or end the session");
   if (d.near.length) {
@@ -153,7 +155,7 @@ export function observeText(w, ctx) {
 /** The one-line summary of how a `do` ended. */
 export function resultLine(r) {
   if (!r) return null;
-  const icon = { done: "✔ done", fail: "✖ failed", interrupted: "⚠ interrupted", time: "⏱ time", idle: "· idle", error: "✖ error", goal: "★ GOAL REACHED" }[r.status] || r.status;
+  const icon = { done: "✔ done", fail: "✖ failed", interrupted: "⚠ interrupted", time: "⏱ time", idle: "· idle", error: "✖ error", goal: "★ GOAL REACHED", running: "⏩ running", event: "⚠" }[r.status] || r.status;
   return `${icon}: ${r.order ? `${clip(r.order, 60)} — ` : ""}${r.msg || ""}${r.seconds != null ? ` (${r1(r.seconds)}s)` : ""}`.replace(/ — $/, "");
 }
 export { thingLabel, len };

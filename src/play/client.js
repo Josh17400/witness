@@ -16,14 +16,18 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
   witness play start [--name t1] [--goal "…"] [--persona newbie|explorer|speedrunner|breaker|fighter]
                      [--seed N] [--scene S] [--params JSON] [--minutes 20] [--idle 300] [--allow-calls] [--no-map]
                      [--model sonnet] [--out DIR] [--force] [--json] [--cmd "<launch>"]
+                     [--live] [--watch] [--speed 1] [--horizon 4] [--pause-after 15]
                      → launches the game + a background session daemon, prints the first observation
+                     --live: the game keeps running (paced to real time) while the tester thinks; orders steer it
+                     --watch: live, and the game shows its window for a human to watch (WITNESS_WATCH=1)
   witness play do "<orders>" [-s t1] [--for S]  run orders ("fight wolf block; then talk guard") until done/interrupted
-  witness play look [-s t1] [--shot] [--json]    the observation now (no game time passes)
+                     (live: replaces the plan now, answers at done / an important event / the horizon; play goes on)
+  witness play look [-s t1] [--shot] [--json] [--wait]   the observation now (live --wait: at the next event or horizon)
   witness play shot [-s t1] [--scale 2]          screenshot → PNG path (open it with the Read tool)
   witness play note "<text>" [--bug|--confusing|--fun|--idea] [--shot] [-s t1]
   witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback "…"]   → report.md/json + replay, stops everything
   witness play status|stop [-s t1|--all]|list [--clean]|report [t1|dir] [--json]
-  witness play brief [--goal …] [--persona …] [--minutes 4] [--name t1] [--extra "…"]  → the prompt for a tester subagent
+  witness play brief [--goal …] [--persona …] [--minutes 4] [--name t1] [--extra "…"] [--live|--watch]  → the prompt for a tester subagent
   witness play suggest [--write]                  probe the game and propose a "play" config for witness.json
   witness play orders                             the order language
 
@@ -119,6 +123,8 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         goal: opt.goal && opt.goal !== true ? String(opt.goal) : null, persona: opt.persona && opt.persona !== true ? String(opt.persona) : null,
         seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : cfg.seed ?? 1, scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params: params ?? null,
         minutes: opt.minutes ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], model: opt.model && opt.model !== true ? String(opt.model) : null,
+        live: !!(opt.live || opt.watch), watch: !!opt.watch, speed: opt.speed && opt.speed !== true ? +opt.speed : undefined,
+        horizon: opt.horizon && opt.horizon !== true ? +opt.horizon : undefined, pauseAfter: opt["pause-after"] && opt["pause-after"] !== true ? +opt["pause-after"] : undefined,
       };
       const spec = { name, token, root, cfg, opts, state: "starting", created: new Date().toISOString() };
       fs.writeFileSync(path.join(dir, "session.json"), JSON.stringify(spec, null, 1));
@@ -149,7 +155,12 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       return;
     }
 
-    case "look": { const e = findSession(opt); print(await request(e, "look", { shot: !!opt.shot, json: !!opt.json, scale: opt.scale }).catch((err) => fail(err.message)), opt); return; }
+    case "look": case "next": {
+      const e = findSession(opt);
+      const wait = sub === "next" || !!opt.wait;
+      print(await request(e, "look", { shot: !!opt.shot, json: !!opt.json, scale: opt.scale, wait, for: opt.for !== undefined && opt.for !== true ? +opt.for : undefined }).catch((err) => fail(err.message)), opt);
+      return;
+    }
     case "do": {
       const e = findSession(opt);
       const text = pos.join(" ").trim();
@@ -216,7 +227,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         cli, configDir: root.replace(/\\/g, "/"), name: opt.name && opt.name !== true ? String(opt.name) : "t1", goal: opt.goal && opt.goal !== true ? String(opt.goal) : null,
         persona: opt.persona && opt.persona !== true ? String(opt.persona) : "newbie", minutes: opt.minutes ? +opt.minutes : 4, game: `"${cfg.name || "the game"}"`,
         profile: pc.profile, controls: cfg.play && cfg.play.controls ? describeControls(pc) : "", seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : null,
-        scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params, model: opt.model && opt.model !== true ? String(opt.model) : null, extra: opt.extra && opt.extra !== true ? String(opt.extra) : (cfg.play && cfg.play.brief) || null,
+        scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params, model: opt.model && opt.model !== true ? String(opt.model) : null, live: !!opt.live, watch: !!opt.watch, extra: opt.extra && opt.extra !== true ? String(opt.extra) : (cfg.play && cfg.play.brief) || null,
       }));
       return;
     }

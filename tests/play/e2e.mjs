@@ -74,8 +74,64 @@ ok("arena daemon exited", !pidAlive(sessionJson(fakeDir).pid) && !pidAlive(sessi
 // ---- arena without the map: walls are learned by bumping into them, and the maze still gets solved
 const nm = playSession({ dir: arena, name: "nomap", env, startArgs: ["--no-map", "--out", adir], orders: ["goto Wolf#3"] });
 const nmOut = (nm.steps[0] || { out: "" }).out;
-ok("no-map: reaches the courtyard through the maze", nm.start.code === 0 && /(✔ done: goto Wolf#3 — arrived|⚠ interrupted: goto Wolf#3)/.test(nmOut), nmOut);
+ok("no-map: reaches the courtyard through the maze", nm.start.code === 0 && /(✔ done: goto Wolf#3 — (arrived|Wolf#3 is gone)|⚠ interrupted: goto Wolf#3)/.test(nmOut), nmOut);
 ok("no-map: walls were learned", /#/.test(nmOut.split("map (")[1] || ""), nmOut);
+
+// ---- live mode (mock): the game runs while the client is silent; do answers at the horizon; auto-pause; exact replay
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const tOf = (out) => { const m = /\[t (\d+(?:\.\d+)?)s/.exec(out || ""); return m ? +m[1] : NaN; };
+const ldir = path.join(tmp, "live"); fs.mkdirSync(ldir);
+const lw = (args) => witness(args, { cwd: ldir, env });
+r = lw(["play", "start", "--name", "lv", "--live", "--pause-after", "3", "--horizon", "1.5", "--cmd", mockCmd]);
+ok("live: start says LIVE", r.code === 0 && /· LIVE\]/.test(r.out), r.out);
+const lt0 = tOf(r.out);
+sleepMs(1200);
+r = lw(["play", "look", "-s", "lv"]);
+const lt1 = tOf(r.out);
+ok("live: game time advances while the client is silent", lt1 - lt0 >= 0.6, `${lt0} → ${lt1}\n${r.out}`);
+r = lw(["play", "do", "wait 20", "-s", "lv"]);
+const lt2 = tOf(r.out);
+ok("live do: answers at the horizon while the order keeps running", r.code === 0 && /⏩ running: .*still running/.test(r.out) && /your order \(still running\): wait/.test(r.out) && lt2 - lt1 >= 1.4, r.out);
+sleepMs(800);
+r = lw(["play", "look", "-s", "lv"]);
+ok("live: play went on after do returned", tOf(r.out) - lt2 >= 0.4 && /your order \(still running\)/.test(r.out), r.out);
+r = lw(["play", "next", "-s", "lv"]);
+ok("live next: waits for the horizon, plan unchanged", /⏩ running/.test(r.out) && /your order \(still running\): wait/.test(r.out), r.out);
+r = lw(["play", "do", "wait 0.5", "-s", "lv"]);
+ok("live do: a short order answers done (and replaces the long one)", /✔ done: wait 0\.5/.test(r.out) && /no order running: standing by/.test(r.out), r.out);
+sleepMs(4500);
+r = lw(["play", "look", "-s", "lv"]);
+ok("live: auto-pause after the silence", /PAUSED: no orders for 3s/.test(r.out), r.out);
+const ltp = tOf(r.out);
+sleepMs(700);
+r = lw(["play", "look", "-s", "lv"]);
+ok("live: a paused game's time stands still", tOf(r.out) === ltp, `${ltp} → ${tOf(r.out)}`);
+r = lw(["play", "do", "pickup coin", "-s", "lv"]);
+ok("live: an order resumes the game", /· LIVE\]/.test(r.out) && /(✔ done: pickup coin|⏩ running)/.test(r.out), r.out);
+const liveDir = findDir(ldir, "lv");
+r = lw(["play", "end", "-s", "lv"]);
+ok("live: end", r.code === 0 && /ENDED after/.test(r.out), r.out);
+const lrep = report(liveDir);
+ok("live: report has pace stats (live, orders, no freezes before the pause)", lrep.pace && lrep.pace.mode === "live" && lrep.pace.orders === 3 && lrep.pace.freezes === 1, JSON.stringify(lrep.pace));
+const lorders = lrep.orders.map((o) => o.status).join(",");
+ok("live: the replaced order is marked replaced", /^replaced,done,/.test(lorders), lorders);
+r = lw(["replay", path.join(liveDir, "replay.jsonl"), "--cmd", mockCmd]);
+ok("live: the replay ends in exactly the recorded state", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out.split("\n").slice(-6).join("\n"));
+ok("live: daemon and game exited", !pidAlive(sessionJson(liveDir).pid) && !pidAlive(sessionJson(liveDir).gamePid));
+
+// ---- live mode (arena): a goto runs across several check-ins, autofight deals with wolves on the way, exact replay
+r = witness(["play", "start", "--name", "alive", "--live", "--speed", "3", "--out", adir], { cwd: arena, env });
+ok("live arena: start", r.code === 0 && /· LIVE\]/.test(r.out), r.out);
+r = witness(["play", "do", "goto Wolf#3", "-s", "alive"], { cwd: arena, env });
+let liveOut = r.out;
+for (let i = 0; i < 12 && /⏩ running|⚠/.test(liveOut) && !/✔|✖/.test(liveOut.split("\n").slice(0, 3).join("\n")); i++) liveOut = witness(["play", "next", "-s", "alive"], { cwd: arena, env }).out;
+ok("live arena: the goto finishes across check-ins", /✔ done: (goto Wolf#3 — )?(arrived|Wolf#3 is gone)/.test(liveOut) || /✔ your order "goto Wolf#3" finished/.test(liveOut), liveOut);
+const aliveDir = path.join(adir, "alive");
+r = witness(["play", "end", "-s", "alive"], { cwd: arena, env });
+const arep = report(aliveDir);
+ok("live arena: autofight engaged and resumed the goto", (arep.timeline || []).some((e) => /fighting it, then back to goto Wolf#3/.test(e.text)) || arep.stats.kills > 0, JSON.stringify((arep.timeline || []).filter((e) => /autofight|fighting|back to/.test(e.text)).slice(0, 6)));
+r = witness(["replay", path.join(aliveDir, "replay.jsonl")], { cwd: arena, env });
+ok("live arena: the replay ends in exactly the recorded state", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out.split("\n").slice(-6).join("\n"));
 
 // ---- the process cap and cleanup
 const regFiles = fs.existsSync(env.WITNESS_PLAY_REGISTRY) ? fs.readdirSync(env.WITNESS_PLAY_REGISTRY) : [];

@@ -19,7 +19,7 @@ export function reportData(s) {
     fights, telegraphs: tele,
     stuck: s.incidents, deaths: tr.deaths, kills: tr.kills, pickups: tr.pickups, dialogues: tr.dialogues,
     coverage: s.coverage, shots: s.shots, errors: s.errors, notes: s.notes, feedback: s.feedback || null,
-    replay: s.replay, profile: s.profile,
+    replay: s.replay, profile: s.profile, pace: s.pace || null,
     stats: {
       orders: s.orders.length, ordersFailed: s.orders.filter((o) => o.status === "fail").length, parseErrors: s.parseErrors || 0,
       fightsWon: fights.filter((f) => f.result === "won").length, fightsLost: fights.filter((f) => f.result === "lost").length,
@@ -31,7 +31,8 @@ export function reportData(s) {
 }
 
 /** report.md: readable, most useful first. `rel` makes paths relative to the project root. */
-export function reportMarkdown(r, { rel = (p) => p, replayCmd = "witness replay" } = {}) {
+export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay" } = {}) {
+  // link: paths for markdown links (relative to report.md itself); rel: paths for shell commands (relative to the project)
   const L = [];
   const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped" }[r.outcome] || r.outcome || "in progress";
   L.push(`# Playtest ${r.session}: ${r.game?.name || "game"} — ${outcome}`);
@@ -45,8 +46,9 @@ export function reportMarkdown(r, { rel = (p) => p, replayCmd = "witness replay"
   bits.push(`fights ${r.fights.length} (${S.fightsWon} won, ${S.fightsLost} lost)`);
   if (S.windups) bits.push(`enemy windups ${S.windups}: ${S.windupsAvoided} avoided, ${S.windupsHit} hit (${pct(S.windupsAvoided, S.windupsAvoided + S.windupsHit)} avoided)`);
   bits.push(`kills ${S.kills}`, `deaths ${S.deaths}`, `pickups ${S.pickups}`, `stuck incidents ${S.stuck}${S.stuckUnresolved ? ` (${S.stuckUnresolved} unresolved)` : ""}`);
-  if (r.coverage) bits.push(`coverage ${r.coverage.cells} cells${r.coverage.percent != null ? ` (${r.coverage.percent}% of the open map)` : ""}`);
+  if (r.coverage) bits.push(`coverage ${r.coverage.cells} cells${r.coverage.percent != null ? ` (${r.coverage.percent}% of ${r.coverage.mapWindow ? "the open cells the moving map window revealed" : "the open map"})` : ""}`);
   if (r.errors.length) bits.push(`**${r.errors.length} game error(s)**`);
+  if (r.pace) bits.push(`pace: ${r.pace.mode}; ${r.pace.orders} orders (${r.pace.ordersPerGameMinute} per game minute, ${r.pace.ordersStoppedEarly} stopped early); game frozen ${r.pace.freezes}× for ${r.pace.frozenWallSeconds}s of ${r.pace.wallSeconds}s wall (${Math.round(100 * r.pace.frozenShare)}%)`);
   L.push(`- ${bits.join("\n- ")}`);
   L.push("");
   // tester feedback first: it's the part nothing else can produce
@@ -61,7 +63,7 @@ export function reportMarkdown(r, { rel = (p) => p, replayCmd = "witness replay"
     const ns = byKind(k);
     if (!ns.length) continue;
     L.push("", `**${title}**`);
-    for (const n of ns) L.push(`- [${r1(n.t)}s, cell ${n.cell ? `(${n.cell})` : "?"}] ${oneLine(n.text)}${n.shot ? ` ([shot](${rel(n.shot)}))` : ""}`);
+    for (const n of ns) L.push(`- [${r1(n.t)}s, cell ${n.cell ? `(${n.cell})` : "?"}] ${oneLine(n.text)}${n.shot ? ` ([shot](${link(n.shot)}))` : ""}`);
   }
   L.push("");
   if (r.errors.length) {
@@ -79,7 +81,7 @@ export function reportMarkdown(r, { rel = (p) => p, replayCmd = "witness replay"
   if (r.stuck.length) {
     L.push("## Stuck incidents");
     L.push("Detected automatically: the autopilot pushed toward a target and didn't move. Repeated incidents at the same cell can mean a collision bug (a snag on a corner, an invisible wall) or a confusing layout.");
-    for (const s of r.stuck.slice(0, 20)) L.push(`- [${r1(s.t)}s] cell (${s.cell}) heading ${s.heading}, ${r1(s.seconds)}s, ${s.resolved ? "resolved" : "**unresolved**"}: ${s.how}${s.shot ? ` ([shot](${rel(s.shot)}))` : ""}`);
+    for (const s of r.stuck.slice(0, 20)) L.push(`- [${r1(s.t)}s] cell (${s.cell}) heading ${s.heading}, ${r1(s.seconds)}s, ${s.resolved ? "resolved" : "**unresolved**"}: ${s.how}${s.shot ? ` ([shot](${link(s.shot)}))` : ""}`);
     L.push("");
   }
   if (r.deaths.length) {
@@ -94,12 +96,12 @@ export function reportMarkdown(r, { rel = (p) => p, replayCmd = "witness replay"
   }
   if (r.coverage) {
     L.push("## Coverage");
-    L.push(`${r.coverage.cells} cells visited${r.coverage.seen != null ? `, ${r.coverage.seen} seen` : ""}${r.coverage.openCells ? ` of ${r.coverage.openCells} open map cells (${r.coverage.percent}%)` : ""}; bounds x ${r.coverage.bounds?.x0}..${r.coverage.bounds?.x1}, y ${r.coverage.bounds?.y0}..${r.coverage.bounds?.y1}.${r.coverage.png ? ` Map: [coverage.png](${rel(r.coverage.png)}) (path in blue, deaths red ✕, stuck points orange).` : ""}`);
+    L.push(`${r.coverage.cells} cells visited${r.coverage.seen != null ? `, ${r.coverage.seen} seen` : ""}${r.coverage.openCells ? (r.coverage.mapWindow ? ` of ${r.coverage.openCells} open cells revealed so far (${r.coverage.percent}%; the game's map is a window that follows the player, so this grows as you walk and the full map size is unknown)` : ` of ${r.coverage.openCells} open map cells (${r.coverage.percent}%)`) : ""}; bounds x ${r.coverage.bounds?.x0}..${r.coverage.bounds?.x1}, y ${r.coverage.bounds?.y0}..${r.coverage.bounds?.y1}.${r.coverage.png ? ` Map: [coverage.png](${link(r.coverage.png)}) (path in blue, deaths red ✕, stuck points orange).` : ""}`);
     L.push("");
   }
   if (r.shots.length) {
     L.push("## Key moments (screenshots)");
-    for (const s of r.shots) L.push(`- [${r1(s.t)}s] ${s.why}: [${path.basename(s.file)}](${rel(s.file)})`);
+    for (const s of r.shots) L.push(`- [${r1(s.t)}s] ${s.why}: [${path.basename(s.file)}](${link(s.file)})`);
     L.push("");
   }
   L.push("## Orders");
