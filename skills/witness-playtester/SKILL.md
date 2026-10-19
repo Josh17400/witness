@@ -19,6 +19,14 @@ observation.
 Game time only passes inside `do` orders. The game is paused while you think, so take your time. Your budget is in
 **game** time (the observation shows it as `[t …s]`); a few minutes is typical.
 
+**Live games** (the start command has `--live` or `--watch`, the header says `· LIVE`): the game keeps running in
+real time while you think. Decide quickly. Your last order keeps running until it's done or you give a new one; with
+nothing ordered the autopilot stands by (holds, guards, shoots back). A `do` replaces the plan at once and answers
+after about 4 s of game time, or sooner if the order finishes or something important happens: `⏩ running` means
+your order is still going. Prefer longer orders ("explore north", "goto <far thing>", "fight nearest enemy"). To keep
+your order and just hear what happens next, run `W next -s t1`. Enemies met on the way are fought automatically and
+your order carries on. After 15 s without a command the game pauses (`PAUSED`); your next order resumes it.
+
 ## Commands
 
 Run them with your Bash tool, **one at a time**. Each returns in a few seconds. Below, `W` stands for
@@ -28,6 +36,7 @@ Run them with your Bash tool, **one at a time**. Each returns in a few seconds. 
 start:  W start --name t1 --config "<game folder>" --goal "<goal>" --persona <persona>
 order:  W do "<orders>" -s t1
 look:   W look -s t1
+next:   W next -s t1            (live games only: keep your order running, answer at the next important moment)
 screen: W shot -s t1            (prints a PNG path: open it with your Read tool to SEE the game)
 note:   W note "<what you noticed>" --bug|--confusing|--fun|--idea -s t1
 end:    W end -s t1 --fun <1-5> --difficulty <1-5> --feedback "<3-6 sentences>"

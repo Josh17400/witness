@@ -194,3 +194,23 @@ the child's stdin and stdout. Protocol lines must start with the two characters 
 `hello.protocol` is the integer version. The CLI supports v1. Future versions will be
 additive: unknown fields must be ignored, and unknown commands must answer with
 `ok: false`.
+
+## 9. Watch mode (`WITNESS_WATCH=1`)
+
+`witness play start --watch` launches the game with `WITNESS_WATCH=1` (and `WITNESS_ADDR` as always) so a person can
+watch an agent play it live. It's optional: a game that ignores it still works, it just stays hidden. A game that
+supports it:
+
+* **shows its window** (headless runs keep it hidden or offscreen; on Windows the CLI starts processes with the first
+  window hidden, so show it explicitly);
+* **presents frames** as it steps: render and flip after each `step` (every 2nd frame is fine), so the window shows
+  what the simulation is doing;
+* **drops real input**: only Witness-injected input reaches gameplay, so a viewer's stray key or click can't change a
+  run whose replay must stay exact;
+* **stays responsive while idle**: between commands keep pumping window events (so the OS doesn't mark it "not
+  responding" and the window can be moved); the Python adapter's `witness.run(..., idle=fn)` calls `fn` about every
+  30 ms while it waits;
+* **does not pace itself**: the daemon paces live play to real time and sends small steps; the game steps as fast as
+  it's asked, exactly as in headless runs, and never reads the wall clock for gameplay.
+
+Watch mode must not change the simulation: the same seed and inputs give the same state with or without it.

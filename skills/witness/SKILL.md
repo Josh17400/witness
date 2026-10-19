@@ -126,7 +126,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 2. **Sanity-check it yourself:** `witness play start --name check --goal "smoke"`, `witness play do "explore for 3s"
    -s check`, `witness play end -s check`. Fix the config until orders work and things are classified right.
 3. **Brief:** `witness play brief --goal "<what to achieve>" --persona newbie --minutes 4 --name t1` prints the
-   complete tester prompt (commands with the absolute CLI path, the order card, the rules).
+   complete tester prompt (commands with the absolute CLI path, the order card, the rules). For real-time games
+   (shooters, action) add `--live`: the game keeps running while the tester thinks instead of freezing after every
+   order. `--watch` also shows the game window (only when the user wants to watch; one visible game at a time).
 4. **Spawn the tester** with the Agent tool: `model: "sonnet"`, `effort: "low"` and the brief as the prompt (the
    best play at nearly Haiku's speed; `model: "haiku"` is cheaper but plays shallowly, so keep it for simple games).
    The tester runs the commands itself; don't play for it.

@@ -56,6 +56,10 @@ reflex layer:
 6. **Reproduce** anything marked: `witness replay witness/playtests/t1/replay.jsonl --at 12.40 --shot` (report.md
    lists the exact commands). Fix the bug, then turn it into a `witness test`.
 
+For real-time games (shooters, action games) prefer **live mode**: add `--live` to the brief (`witness play brief
+… --live`) and the game keeps running while the tester thinks, instead of freezing after every order. Add `--watch`
+to let a person watch the window as it plays. See [Live mode and watching](#live-mode-and-watching).
+
 Never leave sessions running: `witness play list` shows them, `witness play stop --all` ends them.
 
 ## Commands
@@ -65,9 +69,10 @@ of a second. `--config DIR` (or `--cmd "<launch>"`) works as in every Witness co
 
 | command | options | what it does |
 |---|---|---|
-| `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--minutes 20` `--idle 300` `--allow-calls` `--no-map` `--model NAME` `--out DIR` `--force` `--json` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). |
-| `play do "<orders>"` | `-s t1` `--for S` `--json` | Runs an order chain until it's done, failed, interrupted by a wake event, or hits the time cap. Prints the observation. |
-| `play look` | `-s t1` `--shot` `--scale K` `--json` | The observation now. No game time passes. |
+| `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--minutes 20` `--idle 300` `--allow-calls` `--no-map` `--model NAME` `--out DIR` `--force` `--json` `--live` `--watch` `--speed 1` `--horizon 4` `--pause-after 15` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). `--live` / `--watch`: see [Live mode](#live-mode-and-watching). |
+| `play do "<orders>"` | `-s t1` `--for S` `--json` | Turn-based: runs an order chain until it's done, failed, interrupted by a wake event, or hits the time cap. Live: replaces the plan at once and answers at the first of done/failed, an important event, or the horizon (`--for S`, default 4 s); the game keeps going. Prints the observation. |
+| `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. |
+| `play next` | `-s t1` `--for S` | Live mode: the same as `look --wait`. |
 | `play shot` | `-s t1` `--scale K` | Screenshot → PNG path (open it with the Read tool). Frames narrower than 600 px are upscaled 2× (nearest). |
 | `play note "<text>"` | `--bug` `--confusing` `--fun` `--idea` `--shot` `-s t1` | Adds a note to the timeline and a mark to the replay. `--bug` notes always take a screenshot. |
 | `play end` | `-s t1` `--fun 1-5` `--difficulty 1-5` `--feedback "…"` `--all` | Writes report.md/report.json/coverage.png and the final replay, stops the game and the daemon. |
@@ -75,7 +80,7 @@ of a second. `--config DIR` (or `--cmd "<launch>"`) works as in every Witness co
 | `play status` | `-s t1` | Game time, frame, orders and notes of a live session; state and summary of an ended one. |
 | `play list` | `--clean` | All sessions in the registry (● live, ○ ended). `--clean` kills unresponsive sessions (daemon and game), marks dead ones ended, and drops entries older than 7 days or whose folder was deleted. |
 | `play report` | `[name\|dir]` `--json` | Prints report.md (or report.json). report.json is also updated after every order while a session runs. |
-| `play brief` | `--goal` `--persona` (newbie) `--minutes` (4) `--name` (t1) `--seed` `--scene` `--params` `--model` `--extra "…"` | Prints the tester prompt. `--extra` (or `play.brief` in witness.json) adds a "notes from the developer" paragraph. |
+| `play brief` | `--goal` `--persona` (newbie) `--minutes` (4) `--name` (t1) `--seed` `--scene` `--params` `--model` `--extra "…"` `--live` `--watch` | Prints the tester prompt. `--extra` (or `play.brief` in witness.json) adds a "notes from the developer" paragraph. `--live` / `--watch` print the live-mode variant (decide quickly, prefer longer orders, `play next`) and put the flag in its start command. |
 | `play suggest` | `--seed` `--scene` `--params` `--write` | Probes the game (holds each key for 0.35 s from a fresh reset) and proposes a `"play"` config, plus which snapshot conventions the game follows. `--write` merges it into witness.json. It runs one game process. |
 | `play orders` | | The order card. |
 
@@ -194,6 +199,54 @@ Other lines you'll see: `✔ done: fight wolves block — 3 enemies defeated (7.
 observation also prints the controls and the order card. `--json` returns the same content as data (`{t, frame,
 player, stats, near[], farther, remembered[], dialogue, goal, notice, dead, won, result, events[], map}`).
 
+## Live mode and watching
+
+By default a session is **turn-based**: game time passes only inside `do`, and the game is frozen while the tester
+thinks. That's ideal for puzzles and RPG dialogue, and it gives the slowest model all the time it wants. In a shooter
+it feels stop-start: in four watched 4v4 runs the game sat frozen for 30–40% of the wall time, about one freeze per
+order.
+
+**`play start --live`** makes the daemon own one stepping loop paced to real time (`--speed 2` runs at twice real
+time). The game never pauses between orders:
+
+* The current order keeps running while the tester thinks. When it's done, a per-profile **standing behaviour** takes
+  over: fps holds position and shoots enemies in sight (and reloads); topdown guards and fights back at enemies in
+  reach; platformer stands with the platform guard (it doesn't walk into anything).
+* A new `do` **replaces the plan immediately**, then answers at the first of: the order chain finishing or failing,
+  an important event (death, low hp, goal, scene change, dialogue, a game error), or the **check-in horizon**
+  (`--horizon`, default 4 s game time; `do … --for S` per order). Play goes on after it answers. A result that came
+  back at the horizon says `⏩ running: … is still running`, and every live observation says
+  `your order (still running): …` or `no order running: standing by …`.
+* `play next` (= `look --wait`) keeps the plan and answers at the next important moment or the horizon. `look`,
+  `shot` and `note` work any time; all game access goes through one lock, so a screenshot is taken between two ticks.
+* An order that finishes while nobody is waiting is reported in the next observation's events
+  (`✔ your order "goto Exit" finished: arrived at Exit`).
+* Orders given or running while dead wait for the respawn (up to 12 s) instead of failing.
+* **Auto-pause:** with no command for `--pause-after` seconds (15) the game pauses (`[t 41.2s · PAUSED: no orders
+  for 15s]`); the next `do` resumes it. `look`/`next`/`shot` don't resume a paused game.
+* The observation header says `· LIVE` or `· PAUSED: …`. Replays stay frame-exact: every frame the loop steps is
+  recorded exactly as in turn-based mode, and `end` stops the loop before the final snapshot.
+
+**`play start --watch`** implies `--live` and launches the game with `WITNESS_WATCH=1`, so a game that follows the
+watch convention ([PROTOCOL.md](PROTOCOL.md) §9) shows its window and presents frames while it plays. The daemon steps
+in 1–2 frame chunks so the window stays smooth. Use `--watch` only when a person is actually watching: it opens a
+visible window, and only one GL game should run at a time.
+
+**Choosing.** Turn-based for puzzles, menus, dialogue-heavy RPGs and very slow testers. Live for shooters, action
+and anything where freezing after every order distorts the feel; tell the tester with `play brief --live` (the
+brief's live variant asks it to decide quickly, prefer longer orders and use `play next`). Sonnet at low effort is
+the recommended live tester (about 1.4 s think time per command); Haiku is faster but plays shallowly.
+
+**Pace stats.** Both modes record `pace` in report.json and a summary line in report.md: mode, orders, orders per
+game minute, orders stopped early, and how often and how long the game sat frozen (turn-based: between orders; live:
+while auto-paused).
+
+| config (`play.live`) | default | meaning |
+|---|---|---|
+| `horizon` | 4 | game seconds before a live `do` / `next` checks in |
+| `pauseAfter` | 15 | wall seconds without a command before the game pauses |
+| `speed` | 1 | pace: game seconds per wall second |
+
 ## The reflex layer
 
 Each tick the daemon reads a snapshot, updates the world model and the nav grid, runs the reflexes, lets the current
@@ -208,7 +261,7 @@ A `do` returns when its chain is done or failed, at the time cap, or on a **wake
 |---|---|
 | always | death, goal reached (`won`), a game error log, a scene change, low hp (first drop below 35% or the retreat level; re-armed after healing above 45%) |
 | dialogue | a dialogue opens or changes, unless the order is talk / interact / choose / press / use |
-| outside fights | being hurt; a hostile entering the alert range (`play.alert`, 6 cells), unless it's the order's own target. `flee` ignores both. In the platformer profile, an approaching enemy doesn't wake run / goto / go / explore / pickup / jump (the runner jumps or stomps on its own). |
+| outside fights | being hurt; a hostile entering the alert range (`play.alert`, 6 cells), unless it's the order's own target. `flee` ignores both. In the platformer profile, an approaching enemy doesn't wake run / goto / go / explore / pickup / jump (the runner jumps or stomps on its own). With **autofight** on (below), neither wakes a movement order (goto, go, explore, follow, pickup, talk) or anything in live mode: the reflex layer deals with it and reports it as an event. |
 | `careful` | also items or NPCs appearing, notices, pickups, kills |
 
 **Time cap** (game seconds): `--for S` if given. Otherwise, if every order is open-ended (explore, wait, follow,
@@ -234,6 +287,26 @@ order except taps/waits fails if you're dead.
 
 The report's telegraph stats ("9 windups: 7 avoided, 2 hit") show whether windups are readable at human reaction
 speed.
+
+### Autofight
+
+On by default for topdown and fps, off for platformers (`set autofight on|off`, `play.autofight`). An enemy met
+during goto / explore / follow / go / pickup / talk doesn't end the order:
+
+* **topdown**: an enemy that just hurt you, or a close aggressive one (winding up, chasing, aggro), is fought on the
+  spot (`autofight Wolf#5`, with the guard), at most `play.autofightLeash` (6) cells from where it started; then the
+  order resumes. Events: `Wolf#5 came at you: fighting it, then back to goto Exit` … `Wolf#5 defeated; back to
+  goto Exit`. Dying during an autofight fails the order as usual.
+* **fps**: the move goes on while the aim tracks the nearest visible enemy on the same floor and fires when on target
+  (`shooting at Soldier#7 "Red 4" on the move …; explore n continues`).
+* The fight is the reflex layer's business: it's an event, not the order's result.
+
+Only death, low hp, the goal, a scene change, dialogue and game errors still wake the tester. With autofight off,
+being hurt or an enemy coming close interrupts movement orders as before.
+
+`fight` itself was tightened for fps: it won't chase a target on another floor (vertical gap over
+`play.fps.floorHeight`, 2.2), gives up a target out of sight for 4 s, and respects the leash when the target is behind
+walls. If another enemy is visible it switches to that one instead of ending the order.
 
 ### Navigation, stuck detection and recovery
 
@@ -342,6 +415,9 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `reaction` | 0.25 (or the persona's) | seconds before the guard reacts to a windup |
 | `tick`, `combatTick` | 3, 1 | frames per decision normally / near hostiles |
 | `guard` | `true` | the telegraph reflex |
+| `autofight` | on (topdown, fps), off (platformer) | fight enemies met during movement orders, then resume |
+| `autofightLeash` | 6 | cells an autofight may chase before the move resumes |
+| `live` | `{horizon: 4, pauseAfter: 15, speed: 1}` | live-mode defaults (the start flags override them) |
 | `guardMode` | none: block if a block control exists, else dodge, else back off | force `block`, `dodge` or `backoff` for the guard and default fights |
 | `radius` | the player's `size`, else 0.35 | the player's collision radius in cells (path look-ahead keeps this much clearance from walls) |
 | `retreat`, `heal` | 0, 0 | standing hp % policies (0 = off) |
@@ -352,7 +428,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `logs` | `true` | which game info logs become events: `true`, `false`, or a regex |
 | `maxShots` | 24 | cap on automatic key-moment screenshots |
 | `platformer` | `{jumpFrames: 18, runJumpFrames: 22, stomp: true}` | also `run` (false: never hold run), `stuckLimit` (7 s), `airAccel` (air control per frame, default 0.005 cells) |
-| `fps` | `{sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2}` | also `range` (12 cells), `degrees`, `yawSign`, `maxTurn` (0.5 rad per tick) |
+| `fps` | `{sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2}` | also `range` (12 cells), `degrees`, `yawSign`, `maxTurn` (0.5 rad per tick), `floorHeight` (2.2 world units: a bigger vertical gap is another floor) |
 | `module` | none | see below |
 | `brief` | none | default `--extra` text for `play brief` |
 
@@ -421,7 +497,7 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 1. headline (session, game, outcome: `WON` / `DIED` / ended / `GAME CRASHED` / timed out / abandoned (idle timeout) /
    stopped), tester model, persona, goal, seed, game time, wall time, order counts;
 2. **Summary**: fights won/lost, enemy windups avoided/hit, kills, deaths, pickups, stuck incidents, coverage, game
-   errors;
+   errors, pace (mode, orders per game minute, frozen time);
 3. **Tester feedback**: fun and difficulty (1–5), the feedback text, then notes grouped as Bugs suspected, Confusing
    moments, Ideas, Fun moments, Notes (time, cell, screenshot link);
 4. Game errors · Fights (table: against, start, length, result, dealt, taken, windups avoided/hit) · Stuck incidents ·
@@ -433,9 +509,14 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 gameSeconds, frames, fps, status, outcome, endReason, orders[{t, text, status, msg, seconds}], timeline[{t, frame,
 kind, text}], fights[{n, targets, start, seconds, result, dealt, taken, kills, windups, avoided, hits}],
 telegraphs{windups, avoided, hits}, stuck[{t, cell, heading, seconds, resolved, how, blocks, shot?}], deaths[{t, cell,
-cause}], kills[], pickups[], dialogues[{t, speaker, text, options}], coverage{cells, seen, openCells, percent, bounds,
-png}, shots[{t, why, file}], errors[{t, text}], notes[{t, frame, kind, text, cell, shot?}], feedback{fun, difficulty,
-text}, replay{file, frames, calls}, profile, stats{…counts…}`. While a session runs it has `status: "in progress"`
+cause}], kills[], pickups[], dialogues[{t, speaker, text, options}], coverage{cells, seen, openCells, percent,
+mapWindow?, bounds, png}, shots[{t, why, file}], errors[{t, text}], notes[{t, frame, kind, text, cell, shot?}],
+feedback{fun, difficulty, text}, replay{file, frames, calls}, profile, pace{mode, speed, wallSeconds, gameSeconds,
+freezes, frozenWallSeconds, frozenShare, orders, ordersPerGameMinute, ordersStoppedEarly}, stats{…counts…}`. Live
+orders can also end as `replaced` (a newer `do` replaced them) or `ended` (still running at the end).
+`coverage.mapWindow` is true when the game's `state.map` is a window that follows the player: then `openCells` only
+counts the open cells the window has revealed so far, and the percentage is labelled that way. Links in report.md are
+relative to report.md itself; the replay commands are relative to the project. While a session runs it has `status: "in progress"`
 and is rewritten after every order and note.
 
 **coverage.png**: the known map (walls grey, learned walls brown), seen cells, visited cells (blue), the path (light
