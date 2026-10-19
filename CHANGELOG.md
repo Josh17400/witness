@@ -3,7 +3,7 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
-## 0.7.1 (unreleased)
+## 0.7.1 (2026-10-19)
 
 Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web builds).
 
