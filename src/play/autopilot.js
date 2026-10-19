@@ -74,7 +74,7 @@ export class Navigator {
   constructor(ap) { this.ap = ap; this.reset(); }
   reset() {
     this.path = null; this.goalCell = null; this.planVersion = -1; this.planT = -1e9; this.samples = []; this.blocks = 0;
-    this.escape = null; this.best = Infinity; this.bestT = this.ap.t; this.incident = null; this.lastDir = null; this.bestRem = Infinity;
+    this.escape = null; this.best = Infinity; this.bestT = this.ap.t; this.incident = null; this.lastDir = null; this.bestRem = Infinity; this.cellsDone = new Set();
   }
   /** One tick toward goal (plane point) within reach (world units). Returns {dir, arrived, fail}. */
   tick(w, goal, reach, { stuckLimit = 3.2, direct = false } = {}) {
@@ -82,12 +82,18 @@ export class Navigator {
     const d = dist2(p, goal);
     if (d <= reach) { this.closeIncident(w, true, "arrived"); return { dir: null, arrived: true }; }
     if (d < this.best - 0.4 * cell) { this.best = d; this.bestT = t; }
+    // walking into ground it hasn't stood on yet counts as progress too: going round a long wall takes you away from
+    // the target for a while (and its path keeps growing as the map reveals more of the wall)
+    const ck = grid.toCell(p).join(",");
+    if (!this.cellsDone.has(ck)) { this.cellsDone.add(ck); if (this.cellsDone.size > 1) this.bestT = t; }
     if (t - this.bestT > stuckLimit) {
       let msg = `stuck at cell ${fmtCell(grid.toCell(p))} heading ${compass(sub(goal, p), w.northSign)} for ${r1(t - this.bestT)}s (no progress toward the target)`;
       if (this.partial) {   // the planner found no open way at all: say so, and point at a locked door/gate if there is one
         const locked = w.things.filter((th) => th.locked && !th.dead).sort((a, b) => dist2(p, a.p2) - dist2(p, b.p2))[0];
-        msg += locked ? ` — the map shows no open way there; ${locked.key} is locked (${r1(dist2(p, locked.p2) / cell)} cells ${compass(sub(locked.p2, p), w.northSign)}): try "goto ${locked.key}; interact ${locked.key}"` : " — the map shows no open way there from here";
+        const shown = grid.windowed ? "the map shows no open way there (in the ground its window has shown so far)" : "the map shows no open way there";
+        msg += locked ? ` — ${shown}; ${locked.key} is locked (${r1(dist2(p, locked.p2) / cell)} cells ${compass(sub(locked.p2, p), w.northSign)}): try "goto ${locked.key}; interact ${locked.key}"` : ` — ${shown} from here`;
       }
+      grid.addDeadEnd(grid.toCell(p));   // the next plan (this order again, or another) tries a different way
       this.closeIncident(w, false, "gave up");
       return { dir: null, fail: msg };
     }
@@ -104,7 +110,7 @@ export class Navigator {
       const offPath = this.path && !this.path.some((c) => Math.abs(c[0] - pc[0]) <= 1 && Math.abs(c[1] - pc[1]) <= 1);
       if (!this.path || this.planVersion !== grid.version || !this.goalCell || this.goalCell[0] !== gc[0] || this.goalCell[1] !== gc[1] || offPath || t - this.planT > 1.5) {
         const reachCells = reach / cell;
-        const full = grid.astar(pc, gc, { t, goalOk: (x, y) => dist2(grid.center([x, y]), goal) <= Math.max(reach, cell * 0.5) && !(x === pc[0] && y === pc[1]) || (Math.hypot(x - gc[0], y - gc[1]) <= Math.max(0, reachCells - 0.5)) });
+        const full = grid.astar(pc, gc, { t, exempt: this.exempt, goalOk: (x, y) => dist2(grid.center([x, y]), goal) <= Math.max(reach, cell * 0.5) && !(x === pc[0] && y === pc[1]) || (Math.hypot(x - gc[0], y - gc[1]) <= Math.max(0, reachCells - 0.5)) });
         this.path = full || grid.lastPartial || null;
         this.partial = !full;
         this.planVersion = grid.version; this.goalCell = gc; this.planT = t;
@@ -115,13 +121,22 @@ export class Navigator {
         let i = this.path.findIndex((c) => c[0] === pc[0] && c[1] === pc[1]);
         if (i < 0) { let bd = Infinity; this.path.forEach((c, j) => { const dd = Math.hypot(c[0] - pc[0], c[1] - pc[1]); if (dd < bd) { bd = dd; i = j; } }); }
         const rem = this.path.length - 1 - i;
+        // the end of a partial path (as close as the known map lets us get): a dead end. Record it and replan, so the
+        // planner tries another way instead of coming back here
+        if (this.partial && rem <= 1) {
+          const end = this.path[this.path.length - 1], ek = `${end[0]},${end[1]}`;
+          this.deadMarked ??= new Set();
+          if (!this.deadMarked.has(ek)) { this.deadMarked.add(ek); grid.addDeadEnd(end); ap.emit("nav", `a dead end at ${fmtCell(end)}: trying another way`, { cell: end }); }
+        }
         // (a partial path ends short of the target: only real closing-in counts, or backing off and re-walking it loops forever)
         if (rem < this.bestRem - 0.5) { if (this.bestRem !== Infinity && !this.partial) this.bestT = t; this.bestRem = rem; }
         // look ahead along the path as far as the body fits through in a straight line (no clipping wall corners)
         let j = Math.min(i + 1, this.path.length - 1);
-        for (let k = j + 1; k < Math.min(this.path.length, i + 6); k++) { if (grid.clearLine(p, grid.center(this.path[k]), rb, t)) j = k; else break; }
+        // (and never cutting across a door, stairs or an exit the path goes round)
+        const keepOff = grid.isAvoid(pc[0], pc[1]) ? null : (x, y) => grid.isAvoid(x, y) && !(this.exempt && this.exempt(x, y)) && !this.path.some((c) => c[0] === x && c[1] === y);
+        for (let k = j + 1; k < Math.min(this.path.length, i + 6); k++) { if (grid.clearLine(p, grid.center(this.path[k]), rb, t, keepOff)) j = k; else break; }
         const last = j === this.path.length - 1;
-        const wp = last && grid.clearLine(p, goal, rb, t) ? goal : grid.center(this.path[j]);
+        const wp = last && grid.clearLine(p, goal, rb, t, keepOff) ? goal : grid.center(this.path[j]);
         dir = sub(wp, p);
         if (len(dir) < cell * 0.05) dir = sub(goal, p);
       } else dir = sub(goal, p);
@@ -212,6 +227,8 @@ function hpPct(w) { const p = w.player; return p && p.hp != null && p.maxHp ? (1
 const reachW = (w, cells) => cells * w.cell;
 
 /** Moves toward a plane point or a thing (re-resolved every tick by id), with walls handled. */
+const BUILDING = /(inn|tavern|house|home|shop|store|hall|church|temple|chapel|smithy|forge|barn|mill|castle|keep|tower|building|hut|cabin|manor|guild|bank|library|stable|cottage|lodge)/i;
+
 class GoTo extends Behaviour {
   constructor(o, ap, w, { goal = null, thing = null, reach = null, label = null } = {}) {
     super(o, ap, w);
@@ -221,10 +238,34 @@ class GoTo extends Behaviour {
     this.goal = goal; this.reach = reach;
     this.desc = label || (thing ? thing.key : goal ? `cell ${fmtCell(ap.grid.toCell(goal))}` : "?");
     this.maxT = o.forS ?? 30;
+    this.spec = null;   // set for "goto <Type>": another one that's listed can stand in when this one leaves the view
+    // doors, stairs and exits are kept off unless they're where we're going (or lead to it)
+    this.nav.exempt = (x, y) => this.exemptCell(x, y);
+  }
+  /** May the path cross this door/stairs/exit cell? Only on the goal itself, a door leading to the target, or a building's own doors. */
+  exemptCell(x, y) {
+    const grid = this.ap.grid, g = this.goal;
+    if (!g) return false;
+    const gc = grid.toCell(g), d = Math.max(Math.abs(x - gc[0]), Math.abs(y - gc[1]));
+    if (d === 0) return true;
+    const th = this.lastThing;
+    if (!th) return false;
+    const door = grid.avoidThings.get(`${x},${y}`);
+    const words = [th.name, th.type].filter(Boolean).map((s) => String(s).toLowerCase());
+    if (door && door.leadsTo != null && words.some((wd) => String(door.leadsTo).toLowerCase().includes(wd) || wd.includes(String(door.leadsTo).toLowerCase()))) return true;
+    // a building (an inn, a shop) that isn't a door itself: its doors are the way in
+    return !th.avoid && th.rel === "neutral" && BUILDING.test(`${th.type} ${th.name || ""}`) && d <= 4;
   }
   target(w) {
     if (this.thingId != null) {
-      const th = w.things.find((x) => x.id === this.thingId) || (w.remembered || []).find((x) => x.id === this.thingId);
+      let th = w.things.find((x) => x.id === this.thingId);
+      // "goto Wolf" and the wolf we picked left the view: another one that's listed beats a stale remembered spot
+      if (!th && this.spec) {
+        let alt = null;
+        try { alt = resolveTarget(this.spec, w, { allowRemembered: false }).things[0]; } catch { /* none listed */ }
+        if (alt) { this.ap.emit("nav", `${this.desc} left the view: heading for ${alt.key} instead`); this.thingId = alt.id; this.desc = alt.key; this.thingKey = thingLabel(alt); this.nav.reset(); th = alt; }
+      }
+      th ??= (w.remembered || []).find((x) => x.id === this.thingId);
       if (th) { this.goal = th.p2; this.lastThing = th; this.lastSeenT = th.lastSeen ?? this.ap.t; this.outOfView = false; }
       else {
         // it left the view (went indoors, behind something, was removed): head for where it was last seen
@@ -240,6 +281,8 @@ class GoTo extends Behaviour {
     return `${this.desc} went out of view${where}`;
   }
   tick(w, want) {
+    // entering the target (a building, a door, an exit) changed the scene: that was the point of the order
+    if (this.sceneDone) return this.done(this.sceneDone);
     const goal = this.target(w);
     // forgotten (not just out of view): it was killed, picked up or removed near you, e.g. by an autofight on the way
     const mem = this.outOfView && this.ap.perceiver ? this.ap.perceiver.memory.get(this.thingId) : null;
@@ -460,19 +503,56 @@ class Flee extends Behaviour {
 }
 
 class Talk extends Behaviour {
-  constructor(o, ap, w, thing) { super(o, ap, w); this.guardable = true; this.thing = thing; this.go = new GoTo(o, ap, w, { thing, reach: reachW(w, ap.cfg.reach.interact) * 0.8 }); this.phase = "go"; this.tries = 0; this.maxT = o.forS ?? 30; }
+  constructor(o, ap, w, thing) { super(o, ap, w); this.guardable = true; this.thing = thing; this.go = new GoTo(o, ap, w, { thing, reach: reachW(w, ap.cfg.reach.interact) * 0.8 }); this.phase = "go"; this.tries = 0; this.maxT = o.forS ?? 30; this.wrong = []; }
+  /**
+   * Did the right one answer? When the game names the speaker, it must match the target's name or type. A speaker that
+   * matches neither only counts as someone else when the target has a name, or another listed thing matches it
+   * (a game whose people have no names in the snapshot can't be checked).
+   */
+  whoAnswered(w, th) {
+    const d = w.dialogue, sp = d && d.speaker != null ? String(d.speaker).trim().toLowerCase() : "";
+    if (!sp) return { ok: true };
+    const fits = (x) => [x.name, x.type].filter(Boolean).map((s) => String(s).toLowerCase()).some((n) => n.length > 1 && (sp === n || sp.includes(n) || n.includes(sp)));
+    if (fits(th)) return { ok: true };
+    const other = w.things.filter((x) => x.id !== th.id && !x.dead && fits(x)).sort((a, b) => a.dist - b.dist)[0] || null;
+    if (!th.name && !other) return { ok: true };
+    return { ok: false, speaker: d.speaker, other };
+  }
   tick(w, want) {
     const ap = this.ap, c = ap.cfg.controls;
-    if (w.dialogue) return this.done(`dialogue: ${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 90)}"`);
-    if (this.age > this.maxT) return this.fail(`couldn't talk to ${this.thing.key}`);
+    const th = w.things.find((x) => x.id === this.thing.id) || this.thing;
+    if (w.dialogue && this.phase !== "cancel") {
+      const who = this.whoAnswered(w, th);
+      if (who.ok) return this.done(`dialogue: ${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 90)}"`);
+      // someone else answered (a child standing closer than the guard): close it, step closer, face the right one, retry
+      const who2 = `${who.speaker}${who.other ? ` (${who.other.key})` : ""}`;
+      if (!this.wrong.includes(who2)) this.wrong.push(who2);
+      ap.emit("note", `${who2} answered instead of ${th.key}${c.cancel && this.tries < 2 ? ": closing it and trying again closer" : ""}`);
+      if (!c.cancel || this.tries >= 2) return this.fail(`${who2} answered instead of ${th.key} — that dialogue is open: choose an option or press cancel, then get right next to ${th.key} (or name who answered)`);
+      this.tries++;
+      want.taps.push({ label: "cancel", c: c.cancel, frames: c.tapFrames });
+      this.phase = "cancel"; this.cancelT = ap.t;
+      return this.run();
+    }
+    if (this.age > this.maxT) return this.fail(`couldn't talk to ${this.thing.key}${this.wrong.length ? ` (${this.wrong.join(", ")} answered instead)` : ""}`);
     if (!c.interact) return this.fail("no interact control is configured (play.controls.interact)");
+    if (this.phase === "cancel") {
+      if (w.dialogue) {
+        if (ap.t - this.cancelT > 1.2) return this.fail(`${this.wrong.at(-1)} answered instead of ${th.key}, and cancel didn't close that dialogue — choose an option to end it`);
+        if (ap.t - this.cancelT > 0.4 && !this.cancelAgain) { this.cancelAgain = true; want.taps.push({ label: "cancel", c: c.cancel, frames: c.tapFrames }); }
+        return this.run();
+      }
+      this.cancelAgain = false;
+      this.go = new GoTo(this.o, ap, w, { thing: th, reach: reachW(w, ap.cfg.reach.interact) * (this.tries === 1 ? 0.45 : 0.25) });
+      this.phase = "go";
+      return this.run();
+    }
     if (this.phase === "go") {
       const r = this.go.tick(w, want);
       if (r.status === "fail") return r;
       if (r.status === "done") { this.phase = "face"; this.faceT = ap.t; }
       return this.run();
     }
-    const th = w.things.find((x) => x.id === this.thing.id) || this.thing;
     if (this.phase === "face") {
       if (ap.profile.face(w, th.p2, want) || ap.t - this.faceT > 0.3) { this.phase = "press"; }
       return this.run();
@@ -480,7 +560,7 @@ class Talk extends Behaviour {
     if (this.phase === "press") { want.taps.push({ label: "interact", c: c.interact, frames: c.tapFrames }); this.phase = "wait"; this.waitT = ap.t; return this.run(); }
     if (this.phase === "wait" && ap.t - this.waitT > 0.6) {
       this.tries++;
-      if (this.tries >= 3) return this.fail(`pressed interact next to ${th.key} ${this.tries}× but no dialogue opened`);
+      if (this.tries >= 3) return this.fail(`pressed interact next to ${th.key} ${this.tries}× but no dialogue opened${this.wrong.length ? ` (${this.wrong.join(", ")} answered earlier)` : ""}`);
       this.go = new GoTo(this.o, ap, w, { thing: th, reach: reachW(w, ap.cfg.reach.interact) * (this.tries === 1 ? 0.5 : 0.3) });
       this.phase = "go";
     }
@@ -748,12 +828,20 @@ export class Autopilot {
   observe(w) {
     this.t = w.t; this.frame = w.frame;
     const p = w.player;
+    // a scene change the running order caused on purpose (it walked into the inn it was sent to) finishes that order
+    // instead of interrupting the chain
+    const sceneChanged = w.newScene || (this.lastScene != null && w.scene !== this.lastScene);
+    this.lastScene = w.scene;
+    this.sceneArrival = sceneChanged ? this.arrivedByScene(w) : null;
     if (w.newScene) {   // a new level or scene: the old map knowledge and what we remembered no longer apply
       this.visitedBefore = (this.visitedBefore || 0) + this.grid.visited.size;   // coverage adds up across levels
       this.grid.reset(); this.windupSeen.clear(); this.prevP = null;
       if (this.platform) this.platform.reset();
-      this.emit("scene", `new scene/level (${w.sceneKey}): map knowledge reset`);
+      this.emit("scene", `${this.sceneArrival ? `entered ${this.sceneArrival}: ` : ""}new scene/level (${w.sceneKey}): map knowledge reset`);
     }
+    this.prevW = w;
+    if (this.cfg.mapWindow) this.grid.windowed = true;
+    this.grid.setAvoidThings(w.things);
     if (!p || !p.p2) return;
     if (this.grid.cell !== w.cell || this.grid.origin[0] !== w.origin[0] || this.grid.origin[1] !== w.origin[1]) {
       // the cell size was only decided now (the session started on a title screen): start the grid in the right units
@@ -790,6 +878,29 @@ export class Autopilot {
       if (th.telegraph) { if (!this.windupSeen.has(th.id)) this.windupSeen.set(th.id, this.t); }
       else this.windupSeen.delete(th.id);
     }
+  }
+
+  /**
+   * The scene changed while an order was walking somewhere. Was that the point? A goto finishes when, just before the
+   * change, the player was next to its goal or stood by a door that leads to it. Any walking order (goto, talk,
+   * interact, pickup) whose target is still listed in the new scene carries on toward it.
+   * Returns what was entered (the scene event then doesn't interrupt the chain), or null.
+   */
+  arrivedByScene(w) {
+    const b = this.activeOrder(), pw = this.prevW, p0 = this.prevP;
+    if (!b || !pw || !p0) return null;
+    const go = b instanceof GoTo ? b : null, inner = !go && b.go instanceof GoTo && b.phase === "go" ? b.go : null;
+    const g = go || inner;
+    if (!g) return null;
+    // the target is still listed in the new scene (a region label changed, or it's inside too): carry on toward it
+    const listed = g.thingId != null && w.things.some((x) => x.id === g.thingId);
+    const cell = pw.cell || w.cell;
+    const near = g.goal && dist2(p0, g.goal) <= Math.max((g.reach || 0) + 2 * cell, 3 * cell);
+    const th = g.lastThing, words = th ? [th.name, th.type].filter(Boolean).map((x) => String(x).toLowerCase()) : [];
+    const door = th && pw.things.find((x) => x.avoid && x.leadsTo != null && dist2(x.p2, p0) <= 2 * cell && words.some((wd) => String(x.leadsTo).toLowerCase().includes(wd)));
+    if (inner || (!near && !door)) { if (!listed) return null; g.nav.reset(); return g.desc; }
+    g.sceneDone = `entered ${g.desc}${door && door.id !== g.thingId ? ` through ${door.key}` : ""} (the scene changed${w.scene ? ` to ${w.scene}` : ""})`;
+    return g.desc;
   }
 
   /** The nearest hostile winding up within `range` whose windup we've had time to notice (reaction delay). */
@@ -954,6 +1065,7 @@ export class Autopilot {
         const tc = this.grid.toCell(th.p2), inWall = this.grid.isBlocked(tc[0], tc[1], this.t);
         if (inWall) rc = Math.max(rc, 1.15);
         const b = new GoTo(o, this, w, { thing: th, reach: reachW(w, rc) });
+        if (o.target && o.target.id == null && !r.remembered) b.spec = o.target;
         if (inWall) b.note = `${th.key} is solid${th.locked ? " and locked" : ""}: you're next to it now (try "interact ${th.key}")`;
         return b;
       }

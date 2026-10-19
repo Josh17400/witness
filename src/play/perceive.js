@@ -7,6 +7,8 @@ const HOSTILE_NAMES = /(enemy|monster|wolf|bandit|skeleton|zombie|goblin|orc|sli
 const ITEM_NAMES = /(coin|gem|potion|key|item|pickup|heart|ammo|loot|gold|mushroom|flower|star|1up|oneup|medkit|health|chest|crystal|shard)/i;
 const NPC_NAMES = /(npc|guard|villager|merchant|shopkeeper|king|queen|innkeeper|elder|farmer|smith|priest|jarl|trader|citizen|princess)/i;
 
+const AVOID_TYPES = /^(door|doorway|entrance|entry|stairs?|staircase|stairway|ladder|portal|exit|trapdoor|hatch)$/i;
+
 const num = (v) => (v == null || v === "" || !Number.isFinite(+v) ? null : +v);
 
 /** Position of a thing: array, {x,y,z}, or x/y fields. */
@@ -55,12 +57,13 @@ export class Perceiver {
       player: c(cfg.player), entities: c(cfg.entities), pos: c(cfg.pos), hostile: c(cfg.hostile), item: c(cfg.item), npc: c(cfg.npc),
       friend: c(cfg.friend), telegraph: c(cfg.telegraph), ignore: c(cfg.ignore), dialogue: c(cfg.dialogue), menu: c(cfg.menu),
       goal: c(cfg.goal), notice: c(cfg.notice), scene: c(cfg.scene), won: c(cfg.won), dead: c(cfg.dead), map: cfg.map ? c(cfg.map) : null,
-      ammo: c(cfg.ammo),
+      ammo: c(cfg.ammo), avoid: c(cfg.avoid),
     };
     this.statFns = null;          // decided on the first snapshot (stable observation lines)
     this.memory = new Map();      // id → {thing, lastSeen, gone}
     this.geo = { cell: cfg.cell, origin: [0, 0], fromMap: false };
     this.mapCache = { key: null, map: null };
+    this.sceneMap = { id: null, map: null };   // the map id that names the current scene, and the last map seen in it
     this.prev = null;
   }
 
@@ -141,25 +144,31 @@ export class Perceiver {
       else if (typeof e.state === "string" && TELEGRAPH_STATES.test(e.state)) telegraph = true;
       if (typeof e.telegraph === "number" && e.telegraph > 0 && tele == null) tele = e.telegraph;
       const id = e.id ?? `${type}@${i}`;
+      // places the path should keep off unless they're the goal: doors, stairs, exits (entering a building by accident)
+      const avoid = this.fx.avoid ? !!this.fx.avoid(scope) : e.avoid != null ? !!e.avoid : !!(e.door || AVOID_TYPES.test(type));
       things.push({
         raw: e, id, type, name: e.name && String(e.name).toLowerCase() !== type.toLowerCase() ? String(e.name) : null, key: `${type}#${id}`,
         pos, p2: this.planeOf(pos), rel, hp, maxHp: num(e.maxHp ?? e.hpMax ?? e.max_hp ?? e.maxHealth), dead,
         state: typeof e.state === "string" ? e.state : null, telegraph, tele,
         los: e.los ?? e.visible ?? e.inSight ?? e.in_sight ?? null, team: e.team ?? null,
         locked: e.locked ?? null, stompable: e.stompable ?? null, size: Array.isArray(e.size) ? e.size.map(Number) : null,
+        avoid, leadsTo: e.leadsTo ?? e.leads_to ?? e.to ?? e.building ?? e.destination ?? null,
       });
     }
 
     // ---- map (optional): {cell, origin, rows, solid}
-    let map = null;
+    let map = null, mapId = null;
     if (cfg.map !== false) {
       const m = this.fx.map ? this.fx.map(S) : state.map;
       if (m && typeof m === "object" && Array.isArray(m.rows) && m.rows.length) {
+        mapId = m.id != null ? String(m.id) : null;   // from the configured map expression, so a config can drop or fix it
         const key = `${m.cell}|${m.origin}|${m.rows.length}|${m.rows[0].length}|${m.rows.join("").length}|${m.rows.join("\n")}`;
         if (this.mapCache.key === key) map = this.mapCache.map;
         else {
           map = { cell: +(m.cell || 1), origin: (m.origin || [0, 0]).map(Number), rows: m.rows.map(String), solid: String(m.solid ?? "#"),
-            hazard: String(m.hazard ?? "^~"), oneway: String(m.oneway ?? "="), legend: m.legend || null };
+            hazard: String(m.hazard ?? "^~"), oneway: String(m.oneway ?? "="), legend: m.legend || null,
+            avoid: String(m.door ?? "+") + String(m.avoid ?? ""),   // doors and cells to keep off unless they're the goal
+            window: m.window ?? m.moving ?? m.follows ?? null };
           this.mapCache = { key, map };
         }
       }
@@ -213,8 +222,19 @@ export class Perceiver {
       remembered.push({ ...m.thing, lastSeen: m.lastSeen, remembered: true });
     }
 
-    // scene/level identity: when it changes, what we remembered (and the nav grid) belongs to another place
-    const sceneKey = JSON.stringify([state.scene ?? null, state.level ?? null, state.stage ?? null, state.area ?? null, state.world ?? null, state.chapter ?? null, state.map && state.map.id != null ? state.map.id : null]);
+    // scene/level identity: when it changes, what we remembered (and the nav grid) belongs to another place.
+    // A configured `scene` expression replaces the built-in fields. The map's id (from the configured map expression)
+    // counts too, except when the map is a window that moved over the same ground (the same cell size and the cells
+    // both windows show agree): a window that follows the player isn't a new place, and its id may change as it moves.
+    const base = this.fx.scene ? [scene] : [state.scene ?? null, state.level ?? null, state.stage ?? null, state.area ?? null, state.world ?? null, state.chapter ?? null];
+    const baseKey = JSON.stringify(base);
+    if (map && mapId !== this.sceneMap.id) {
+      const shifted = this.sceneMap.map && this.sceneBase === baseKey && sameGround(this.sceneMap.map, map);
+      if (!shifted) this.sceneMap.id = mapId;
+    }
+    if (map) this.sceneMap.map = map;
+    this.sceneBase = baseKey;
+    const sceneKey = JSON.stringify([...base, this.sceneMap.id]);
     let newScene = false;
     if (this.sceneKey !== undefined && sceneKey !== this.sceneKey) {
       newScene = true;
@@ -263,6 +283,24 @@ export class Perceiver {
     }
     return out;
   }
+}
+
+/** Two maps over the same ground: same cell size, overlapping, and the overlap agrees on what's solid (≥ 90%). */
+export function sameGround(a, b) {
+  if (!a || !b || Math.abs(a.cell - b.cell) > 1e-9) return false;
+  const solidA = new Set(a.solid), solidB = new Set(b.solid);
+  const dx = Math.round((b.origin[0] - a.origin[0]) / a.cell), dy = Math.round((b.origin[1] - a.origin[1]) / a.cell);
+  let both = 0, agree = 0;
+  for (let r = 0; r < b.rows.length; r++) {
+    const ra = a.rows[r + dy]; if (ra == null) continue;
+    const rb = b.rows[r];
+    for (let c = 0; c < rb.length; c++) {
+      const ca = ra[c + dx]; if (ca == null) continue;
+      both++; if (solidA.has(ca) === solidB.has(rb[c])) agree++;
+    }
+  }
+  const smaller = Math.min(a.rows.length * (a.rows[0]?.length || 0), b.rows.length * (b.rows[0]?.length || 0));
+  return both > 0 && both >= smaller * 0.2 && agree >= both * 0.9;
 }
 
 /** Find things matching a category or type/name/id spec. Used by orders (resolution) and observations. */

@@ -10,6 +10,7 @@ import { Autopilot } from "../../src/play/autopilot.js";
 import { observeText } from "../../src/play/observe.js";
 import { makeBrief } from "../../src/play/brief.js";
 import { compass, editDistance, singular } from "../../src/play/util.js";
+import { runFixTests } from "./fixes.mjs";
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => { if (cond) pass++; else { fail++; console.log("FAIL", name, extra); } };
@@ -409,6 +410,9 @@ function platWorld() {
   const wS = new Perceiver(cfgS, { fps: 60 }).perceive({ frame: 0, time: 0, state: { player: { pos: [0, 0, 0], hp: 50 }, match: { score: { blue: 12, red: 9 }, scoreLimit: 40 }, entities: [] } }, 0);
   ok("team score with its limit is a stat", wS.stats.some((s) => s.label === "score" && s.value === "blue 12 - red 9 (to 40)"), JSON.stringify(wS.stats));
 }
+
+// ---- regressions from a real game's reports (Embervale)
+runFixTests(ok);
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

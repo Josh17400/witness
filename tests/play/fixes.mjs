@@ -1,0 +1,257 @@
+// Witness play: regression tests for harness bugs a real game (Embervale, a C++ RPG) reported. Synthetic tile worlds,
+// no processes. Each block reproduces one report: a moving map window, regen spam, the wrong NPC answering, a wall
+// longer than the window, paths through doors, entering a building ending a goto, stale remembered targets, and
+// duplicate "is gone" lines. Run from unit.mjs.
+import { parseOrders } from "../../src/play/orders.js";
+import { NavGrid } from "../../src/play/grid.js";
+import { resolvePlayConfig } from "../../src/play/config.js";
+import { Perceiver } from "../../src/play/perceive.js";
+import { EventTracker, coalesceEvents } from "../../src/play/events.js";
+import { Autopilot } from "../../src/play/autopilot.js";
+import { wakeFor } from "../../src/play/wake.js";
+
+const KEYS = ["w", "a", "s", "d", "j", "k", "e", "escape", "enter"];
+
+/**
+ * A top-down world in tile units (cell 1, like Embervale): `solid(x, y)` says which global tiles are walls; the player
+ * walks 5 tiles/s with a 0.3-tile body. `snapState(S)` builds the snapshot state; `onStep(S)` runs game rules.
+ */
+function tileWorld({ start, solid, snapState, onStep = null }) {
+  const S = { frame: 0, t: 0, p: start.slice(), keys: new Set(), facing: "E", hp: 10, queue: [], dialogue: null, scene: "outside", trail: [] };
+  const hits = (x, y) => [[-0.3, -0.3], [0.3, -0.3], [-0.3, 0.3], [0.3, 0.3]].some(([ox, oy]) => S.solidAt(Math.floor(x + ox), Math.floor(y + oy)));
+  S.solidAt = solid;
+  S.pressed = new Set();
+  S.step = () => {
+    S.pressed.clear();
+    for (const e of S.queue.filter((e) => e.frame <= S.frame)) if (e.type === "key") { if (e.down && !S.keys.has(e.key)) S.pressed.add(e.key); e.down ? S.keys.add(e.key) : S.keys.delete(e.key); }
+    S.queue = S.queue.filter((e) => e.frame > S.frame);
+    const dx = (S.keys.has("d") ? 1 : 0) - (S.keys.has("a") ? 1 : 0), dy = (S.keys.has("s") ? 1 : 0) - (S.keys.has("w") ? 1 : 0);
+    if (!S.dialogue) {
+      const l = Math.hypot(dx, dy) || 1, v = 5 / 60;
+      if (dx) S.facing = dx > 0 ? "E" : "W"; else if (dy) S.facing = dy > 0 ? "S" : "N";
+      const nx = S.p[0] + (dx / l) * v; if (!hits(nx, S.p[1])) S.p[0] = nx;
+      const ny = S.p[1] + (dy / l) * v; if (!hits(S.p[0], ny)) S.p[1] = ny;
+    }
+    if (onStep) onStep(S);
+    const c = [Math.floor(S.p[0]), Math.floor(S.p[1])], last = S.trail.at(-1);
+    if (!last || last[0] !== c[0] || last[1] !== c[1]) S.trail.push(c);
+    S.frame++; S.t = S.frame / 60;
+  };
+  S.snap = () => ({ frame: S.frame, time: S.t, state: { scene: S.scene, dialogue: S.dialogue, player: { id: 1, type: "Player", pos: [...S.p], hp: S.hp, maxHp: 10, facing: S.facing }, ...snapState(S) } });
+  return S;
+}
+
+/** Like the daemon's turn-based `do`: the reflex loop plus the event tracker and the wake rules. */
+function driveDo(S, cfgRaw, orderText, { maxFrames = 3600, cell = 1 } = {}) {
+  const cfg = resolvePlayConfig({ cell, controls: { move: "wasd", interact: "e", cancel: "escape" }, ...cfgRaw }, { keys: KEYS });
+  const per = new Perceiver(cfg, { fps: 60 });
+  let w = per.perceive(S.snap(), S.frame);
+  const grid = new NavGrid({ cell: w.cell, origin: [0, 0] });
+  const ap = new Autopilot(cfg, { fps: 60, grid, perceiver: per, size: [320, 180] });
+  const tr = new EventTracker(cfg, per);
+  ap.observe(w); tr.update(null, w, {});
+  ap.setOrders(parseOrders(orderText, { named: cfg.named }));
+  const events = [];
+  let status = "run", msg = "", wake = null;
+  while (S.frame < maxFrames) {
+    const d = ap.decide(w);
+    S.queue.push(...ap.ctrl.emit(d.want, S.frame));
+    if (d.status !== "run") { status = d.status; msg = d.message; break; }
+    for (let i = 0; i < Math.max(1, d.k); i++) S.step();
+    const nw = per.perceive(S.snap(), S.frame);
+    ap.observe(nw);
+    const ev = tr.update(w, nw, {});
+    for (const e of ap.drainEvents()) ev.push({ t: nw.t, frame: S.frame, ...e });
+    w = nw;
+    events.push(...ev);
+    const b = ap.cur ? { verb: ap.cur.o?.verb, careful: false, target: ap.cur.thingId ?? null } : null;
+    wake = wakeFor(ev, b, { ap, world: w, cfg });
+    if (wake) { status = "interrupted"; msg = wake; break; }
+  }
+  return { status, msg, ap, grid, events, results: ap.results, world: w };
+}
+
+export function runFixTests(ok) {
+  // ---- 1. the scene key comes from the configured map, and a window moving over the same ground isn't a new scene
+  {
+    const rowsAt = (ox) => Array.from({ length: 5 }, (_, r) => Array.from({ length: 9 }, (_, c) => ((ox + c) % 4 === 0 && r === 2 ? "#" : ".")).join(""));
+    const snap = (ox, extra = {}) => ({ frame: ox, state: { player: { pos: [ox + 4.5, 2.5] }, entities: [], map: { id: `win@${ox}`, cell: 1, origin: [ox, 0], rows: rowsAt(ox), solid: "#" }, ...extra } });
+    // (a) a config whose map expression points somewhere stable: a changing raw state.map.id must not count
+    const cfgA = resolvePlayConfig({ cell: 1, map: "state.walk" }, {});
+    const pa = new Perceiver(cfgA, { fps: 60 });
+    const walk = { id: "overworld", cell: 1, origin: [0, 0], rows: ["....."], solid: "#" };
+    pa.perceive(snap(0, { walk }), 0);
+    const wa = pa.perceive(snap(1, { walk }), 1);
+    ok("bug 1: the scene key uses the configured map expression, not the raw state.map.id", !wa.newScene, wa.sceneKey);
+    // (b) default config: the window's id changes as it moves, but it shows the same ground
+    const pb = new Perceiver(resolvePlayConfig({ cell: 1 }, {}), { fps: 60 });
+    pb.perceive(snap(0), 0);
+    const shifts = [1, 2, 5, 9].map((ox, i) => pb.perceive(snap(ox), i + 1).newScene);
+    ok("bug 1: a moving map window (same ground, new id each step) is the same scene", shifts.every((x) => !x), JSON.stringify(shifts));
+    // (c) a different place (an interior that doesn't match) with a new id is a new scene
+    const inside = { frame: 20, state: { player: { pos: [4.5, 2.5] }, entities: [], map: { id: "inn", cell: 1, origin: [5, 0], rows: ["#########", "#.......#", "#.......#", "#.......#", "#########"], solid: "#" } } };
+    ok("bug 1: a different map with a new id is still a new scene", pb.perceive(inside, 20).newScene);
+  }
+
+  // ---- 2. regen: no "healed +0" per tick, and one merged line per observation
+  {
+    const cfg = resolvePlayConfig({ cell: 1 }, {});
+    const per = new Perceiver(cfg, { fps: 60 }), tr = new EventTracker(cfg, per);
+    const snap = (f, hp) => ({ frame: f, state: { player: { pos: [0, 0], hp, maxHp: 100 }, entities: [{ id: 3, type: "Sign", pos: [30, 0] }] } });
+    let prev = per.perceive(snap(0, 50), 0); tr.update(null, prev, {});
+    const all = [];
+    let hp = 50;
+    for (let f = 1; f <= 300; f++) { hp += 0.02 + (f % 3 === 0 ? 0.01 : 0); const cur = per.perceive(snap(f, hp), f); all.push(...tr.update(prev, cur, {})); prev = cur; }
+    const heals = all.filter((e) => e.kind === "heal");
+    ok("bug 2: no zero-amount heal events while regenerating (wait 5)", heals.length > 0 && heals.length <= 20 && !heals.some((e) => /\+0 /.test(e.text)), `${heals.length}: ${heals.slice(0, 3).map((e) => e.text).join(" | ")}`);
+    const shown = coalesceEvents(all).filter((e) => e.kind === "heal");
+    ok("bug 2: an observation shows regen as one line (regenerated +N over Ss)", shown.length === 1 && /regenerated \+\d+(\.\d)? over \d+(\.\d)?s \(hp 50→/.test(shown[0].text), shown.map((e) => e.text).join(" | "));
+    // big heals (a potion) keep their own line
+    const potion = { t: 6, kind: "heal", text: "healed +40 (hp 60→100)", data: { amount: 40, from: 60, to: 100 } };
+    const withPotion = coalesceEvents([...all, potion]).filter((e) => e.kind === "heal");
+    ok("bug 2: a potion among regen ticks keeps its own line", withPotion.length === 2 && withPotion.some((e) => /healed \+40/.test(e.text)), withPotion.map((e) => e.text).join(" | "));
+    // damage over time with no attacker: merged too
+    const per2 = new Perceiver(cfg, { fps: 60 }), tr2 = new EventTracker(cfg, per2);
+    let p2 = per2.perceive(snap(0, 50), 0); tr2.update(null, p2, {});
+    const dot = [];
+    for (let f = 1; f <= 120; f++) { const cur = per2.perceive(snap(f, 50 - Math.floor(f / 20)), f); dot.push(...tr2.update(p2, cur, {})); p2 = cur; }
+    const dotShown = coalesceEvents(dot).filter((e) => e.kind === "hurt");
+    ok("bug 2: damage over time shows as one line", dotShown.length === 1 && /took 6 damage over/.test(dotShown[0].text) && !dot.some((e) => /took 0 damage/.test(e.text)), dotShown.map((e) => e.text).join(" | "));
+  }
+
+  // ---- 3. talk checks who answered: a child standing closer than the guard isn't the guard
+  {
+    const open = () => false;
+    const npcs = [{ id: 4, type: "Guard", name: "Hrolf", pos: [10.5, 5.5], talk: true }, { id: 7, type: "Child", name: "Quaquanas", pos: [9.6, 5.5], talk: true }];
+    const mk = () => tileWorld({
+      start: [3.5, 5.5], solid: open,
+      snapState: () => ({ entities: npcs }),
+      onStep: (S) => {
+        if (S.pressed.has("escape")) S.dialogue = null;
+        if (S.pressed.has("e") && !S.dialogue) {   // the game answers with the nearest person within 1.5 tiles
+          const near = npcs.map((n) => [Math.hypot(n.pos[0] - S.p[0], n.pos[1] - S.p[1]), n]).filter(([d]) => d < 1.5).sort((a, b) => a[0] - b[0])[0];
+          if (near) S.dialogue = { speaker: near[1].name.toUpperCase(), text: near[1].id === 4 ? "Halt." : "Hi mister!", options: ["Bye"] };
+        }
+      },
+    });
+    const S = mk();
+    const r = driveDo(S, {}, "talk Guard#4", { maxFrames: 60 * 30 });
+    ok("bug 3: talk Guard#4 ends talking to the guard, not the child who answered first", r.status === "done" && /HROLF/.test(r.msg) && S.dialogue && S.dialogue.speaker === "HROLF", `${r.status} ${r.msg} dialogue=${JSON.stringify(S.dialogue)}`);
+    ok("bug 3: the wrong answer is reported", r.events.some((e) => /QUAQUANAS \(Child#7\) answered instead of Guard#4/.test(e.text)), r.events.map((e) => e.text).filter((x) => /answer/.test(x)).join(" | "));
+    // no cancel control: it can't retry, so it fails and says who answered (instead of reporting success)
+    const S2 = mk();
+    const r2 = driveDo(S2, { controls: { move: "wasd", interact: "e", cancel: null } }, "talk Guard#4", { maxFrames: 60 * 30 });
+    ok("bug 3: without a cancel control, talk fails with 'X answered instead'", r2.status === "fail" && /QUAQUANAS \(Child#7\) answered instead of Guard#4/.test(r2.msg), `${r2.status} ${r2.msg}`);
+  }
+
+  // ---- 4. a wall longer than a 41-tile moving window: go round it, keep what earlier windows showed
+  {
+    const W = 220, H = 60;
+    const solid = (x, y) => x <= 0 || y <= 0 || x >= W - 1 || y >= H - 1 || (y === 30 && x >= 100 && x <= 165) || (x === 100 && y >= 30);
+    const windowAt = (S) => {
+      const ox = Math.floor(S.p[0]) - 20, oy = Math.floor(S.p[1]) - 20, rows = [];
+      for (let r = 0; r < 41; r++) { let row = ""; for (let c = 0; c < 41; c++) row += solid(ox + c, oy + r) ? "#" : "."; rows.push(row); }
+      return { id: `win@${ox},${oy}`, cell: 1, origin: [ox, oy], rows, solid: "#" };
+    };
+    // the west end is closed by a wall going south to the world's edge: west is a dead end; the way is east, 40 tiles off
+    const S = tileWorld({ start: [125.5, 40.5], solid, snapState: (S2) => ({ entities: [], map: windowAt(S2) }) });
+    const r = driveDo(S, {}, "goto 125,20 for 90s", { maxFrames: 60 * 120 });
+    ok("bug 4: goto goes round a wall longer than the moving map window", r.status === "done" && Math.floor(S.p[1]) === 20, `${r.status} ${r.msg} at ${S.p.map((x) => x.toFixed(1))} t=${S.t.toFixed(1)}`);
+    ok("bug 4: the windows were merged, not reset on every move", r.grid.windowed && r.grid.mapSolid.size > 41 * 41 * 2 && !r.events.some((e) => /map knowledge reset/.test(e.text)), `${r.grid.mapSolid.size} ${r.events.filter((e) => e.kind === "scene").length}`);
+    const back = S.trail.filter(([x, y]) => x >= 99 && x <= 103 && y >= 31 && y <= 34).length;
+    ok("bug 4: it didn't keep returning to the west dead end", back <= 6, `${back} visits near the dead end`);
+    // the planner itself: with a dead end recorded, the partial path ends somewhere else
+    const g = new NavGrid({ cell: 1 });
+    g.setMap({ cell: 1, origin: [0, 0], rows: ["###########", "#.........#", "#.#######.#", "#.#.....#.#", "#.#.....#.#", "#.#######.#", "#.........#", "###########"], solid: "#" });
+    g.astar([1, 1], [5, 4]);   // (5,4) is inside a closed room: no way in
+    const end1 = g.lastPartial && g.lastPartial.at(-1);
+    if (end1) g.addDeadEnd(end1);
+    g.astar([1, 1], [5, 4]);
+    const end2 = g.lastPartial && g.lastPartial.at(-1);
+    ok("bug 4: after a dead end, the planner tries another spot instead of the same one", end1 && end2 && Math.max(Math.abs(end1[0] - end2[0]), Math.abs(end1[1] - end2[1])) > 2, `${end1} → ${end2}`);
+    // a moving window: cells outside it are unknown ground (plannable), not the edge of the world
+    const gw = new NavGrid({ cell: 1 });
+    gw.setMap({ cell: 1, origin: [0, 0], window: true, rows: ["#####", ".....", "....."], solid: "#" });
+    ok("bug 4: outside a map window is unknown ground, not the end of the world", !!gw.astar([2, 2], [2, -3]), JSON.stringify(gw.lastPartial));
+  }
+
+  // ---- 5. doors: paths keep off them unless the door (or the building) is the goal
+  {
+    const MAP = [
+      "####################",
+      "#..................#",
+      "#.######+#######...#",
+      "#.#............#...#",
+      "#.######+#######...#",
+      "#..................#",
+      "####################",
+    ];
+    const solid = (x, y) => !MAP[y] || MAP[y][x] === undefined || MAP[y][x] === "#";
+    const S = tileWorld({ start: [8.5, 1.5], solid, snapState: () => ({ entities: [], map: { cell: 1, origin: [0, 0], rows: MAP, solid: "#", door: "+" } }) });
+    const r = driveDo(S, {}, "goto 8,5", { maxFrames: 60 * 30 });
+    const crossed = S.trail.filter(([x, y]) => MAP[y][x] === "+");
+    ok("bug 5: a path goes round a building instead of through its doors", r.status === "done" && crossed.length === 0, `${r.status} ${r.msg} crossed ${JSON.stringify(crossed)}`);
+    const S2 = tileWorld({ start: [8.5, 1.5], solid, snapState: () => ({ entities: [{ id: 9, type: "Door", name: "Hall", pos: [8.5, 2.5] }], map: { cell: 1, origin: [0, 0], rows: MAP, solid: "#", door: "+" } }) });
+    const r2 = driveDo(S2, {}, "goto Door", { maxFrames: 60 * 10 });
+    ok("bug 5: goto Door still walks onto the door", r2.status === "done" && /arrived at Door#9/.test(r2.msg), `${r2.status} ${r2.msg}`);
+    // things marked avoid (no map characters): same costs
+    const g = new NavGrid({ cell: 1 });
+    g.setMap({ cell: 1, origin: [0, 0], rows: MAP.map((row) => row.replace(/\+/g, ".")), solid: "#" });
+    g.setAvoidThings([{ avoid: true, p2: [8.5, 2.5] }, { avoid: true, p2: [8.5, 4.5] }]);
+    const path = g.astar([8, 1], [8, 5]);
+    ok("bug 5: entities with avoid: true are kept off too", path && !path.some(([x, y]) => x === 8 && (y === 2 || y === 4)), JSON.stringify(path));
+    const inside = g.astar([8, 1], [8, 3], { exempt: (x, y) => Math.abs(y - 3) <= 1 });
+    ok("bug 5: going into the building, its door is the way", inside && inside.some(([x, y]) => x === 8 && y === 2) && inside.length <= 4, JSON.stringify(inside));
+  }
+
+  // ---- 6. entering the building a goto was sent to finishes the goto, and the chain goes on
+  {
+    const OUT = ["##########", "#........#", "#........#", "#...###+##", "#...#...##", "##########"];
+    const INN = ["#######", "#.....#", "#.....#", "#.....#", "#######"];
+    const S = tileWorld({
+      start: [2.5, 1.5],
+      solid: (x, y) => { const m = S.scene === "inn" ? INN : OUT; return !m[y] || m[y][x] === undefined || m[y][x] === "#"; },
+      snapState: (S2) => S2.scene === "inn"
+        ? { entities: [{ id: 21, type: "Innkeeper", name: "Innkeeper", pos: [4.5, 1.5], talk: true }], map: { id: "inn", cell: 1, origin: [0, 0], rows: INN, solid: "#" } }
+        : { entities: [{ id: 30, type: "Door", name: "Inn", leadsTo: "Inn", pos: [7.5, 3.5] }, { id: 31, type: "Sign", pos: [1.5, 4.5] }], map: { id: "town", cell: 1, origin: [0, 0], rows: OUT, solid: "#" } },
+      onStep: (S2) => {
+        if (S2.scene === "outside" && Math.floor(S2.p[0]) === 7 && Math.floor(S2.p[1]) === 3) { S2.scene = "inn"; S2.p = [3.5, 3.4]; }
+        if (S2.pressed.has("e") && S2.scene === "inn" && !S2.dialogue && Math.hypot(S2.p[0] - 4.5, S2.p[1] - 1.5) < 1.6) S2.dialogue = { speaker: "Innkeeper", text: "A room?", options: ["Yes", "No"] };
+      },
+    });
+    S.scene = "outside";
+    const r = driveDo(S, {}, "goto Inn; talk Innkeeper", { maxFrames: 60 * 30 });
+    ok("bug 6: goto Inn; talk Innkeeper — entering the inn finishes the goto and the talk runs", r.status === "done" && r.results.length === 2 && /entered Door#30/.test(r.results[0].msg) && /Innkeeper/.test(r.results[1].msg), `${r.status} ${r.msg} ${JSON.stringify(r.results)}`);
+    // a scene change far from the goal, with the target gone from the list, still interrupts
+    const S2 = tileWorld({ start: [2.5, 1.5], solid: () => false, snapState: (S3) => ({ scene: S3.frame > 30 ? "cave" : "outside", entities: S3.frame > 30 ? [{ id: 6, type: "Bat", pos: [9.5, 9.5] }] : [{ id: 5, type: "Well", pos: [40.5, 1.5] }] }) });
+    const r2 = driveDo(S2, {}, "goto Well", { maxFrames: 60 * 10 });
+    ok("bug 6: an unrelated scene change still interrupts", r2.status === "interrupted" && /scene/.test(r2.msg), `${r2.status} ${r2.msg}`);
+    // the target is still listed after the change (a region label changed): the goto carries on to it
+    const S3 = tileWorld({ start: [2.5, 1.5], solid: () => false, snapState: (S4) => ({ scene: S4.frame > 30 ? "east fields" : "outside", entities: [{ id: 5, type: "Well", pos: [12.5, 1.5] }] }) });
+    const r3 = driveDo(S3, {}, "goto Well", { maxFrames: 60 * 10 });
+    ok("bug 6: a scene change with the target still listed lets the goto carry on", r3.status === "done" && /arrived at Well#5/.test(r3.msg), `${r3.status} ${r3.msg}`);
+  }
+
+  // ---- 7. goto <Type>: one still listed beats the stale remembered spot of one that vanished
+  {
+    const S = tileWorld({ start: [2.5, 2.5], solid: () => false, snapState: (S2) => ({ entities: [
+      ...(S2.frame < 10 ? [{ id: 9, type: "Villager", pos: [12.5, 2.5], talk: true }] : []),
+      { id: 10, type: "Villager", pos: [2.5, 14.5], talk: true }, { id: 11, type: "Sign", pos: [40.5, 40.5] }] }) });
+    const r = driveDo(S, {}, "goto Villager", { maxFrames: 60 * 15 });
+    ok("bug 7: goto Villager switches to the listed one when its pick vanishes", r.status === "done" && /arrived at Villager#10/.test(r.msg), `${r.status} ${r.msg}`);
+  }
+
+  // ---- 8. a thing flickering at the edge of the list is gone once
+  {
+    const cfg = resolvePlayConfig({ cell: 1 }, {});
+    const per = new Perceiver(cfg, { fps: 60 }), tr = new EventTracker(cfg, per);
+    const snap = (f, wolf) => ({ frame: f, state: { player: { pos: [0, 0], hp: 10 }, entities: [{ id: 3, type: "Sign", pos: [9, 0] }, ...(wolf ? [{ id: 76, type: "Wolf", pos: [5, 0], hp: 3, maxHp: 3, hostile: true }] : [])] } });
+    let prev = per.perceive(snap(0, true), 0); tr.update(null, prev, {});
+    const all = [];
+    [false, true, false, true, false].forEach((wolf, i) => { const cur = per.perceive(snap(i + 1, wolf), i + 1); all.push(...tr.update(prev, cur, {})); prev = cur; });
+    const gone = coalesceEvents(all).filter((e) => /Wolf#76 is gone/.test(e.text));
+    ok("bug 8: one 'Wolf#76 is gone', not one per flicker", gone.length === 1, all.map((e) => `${e.t.toFixed(3)} ${e.text}`).join(" | "));
+    const dup = coalesceEvents([{ t: 49.8, kind: "gone", text: "Wolf#76 is gone" }, { t: 49.8, kind: "gone", text: "Wolf#76 is gone" }]);
+    ok("bug 8: identical events at the same time show once", dup.length === 1);
+  }
+}

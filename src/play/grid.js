@@ -1,6 +1,9 @@
 // Witness play: a navigation grid over the ground plane. Cells are blocked because the game's map says so
 // (state.map), because walking into them failed (learned), or temporarily (something stood there). Unknown cells
 // are optimistic: A* plans through them and replans when the player bumps into a wall ("free-space assumption").
+// Cells to keep off (doors, stairs, exits: the map's door/avoid characters or things marked avoid) cost extra, so paths
+// go round them unless the goal is there. When the game's map is a window that follows the player, everything outside
+// the windows seen so far is unknown ground, not the edge of the world, and the windows are merged as they move.
 
 const K = (x, y) => `${x},${y}`;
 const unK = (k) => k.split(",").map(Number);
@@ -40,6 +43,9 @@ export class NavGrid {
     this.mapKey = null;
     this.mapOrigin = null;
     this.windowed = false;         // the game's map is a window that moves with the player (its full size is unknown)
+    this.avoidMap = new Set();     // cells the map marks as doors / to avoid (cost extra, never blocked)
+    this.avoidThings = new Map();  // key -> thing: doors, stairs, exits listed this tick
+    this.deadEnds = new Map();     // key -> times a path ended there without getting through (planned around next time)
   }
 
   toCell(p) { return [Math.floor((p[0] - this.origin[0]) / this.cell), Math.floor((p[1] - this.origin[1]) / this.cell)]; }
@@ -55,7 +61,8 @@ export class NavGrid {
     if (this.mapOrigin != null && this.mapOrigin !== o) this.windowed = true;   // sticky: a property of the game, kept across scenes
     this.mapOrigin = o;
     // the map's grid must line up with ours; if the cell sizes differ, sample cell centres
-    const solid = new Set(map.solid), hazard = new Set(map.hazard || "");
+    const solid = new Set(map.solid), hazard = new Set(map.hazard || ""), avoid = new Set(map.avoid || "");
+    if (map.window) this.windowed = true;
     const cx0 = Math.floor((map.origin[0] - this.origin[0]) / this.cell), cy0 = Math.floor((map.origin[1] - this.origin[1]) / this.cell);
     const same = Math.abs(map.cell - this.cell) < 1e-9;
     let changed = false;
@@ -63,6 +70,8 @@ export class NavGrid {
       const k = K(x, y), s = solid.has(ch), h = hazard.has(ch);
       if (this.mapSolid.get(k) !== s) { this.mapSolid.set(k, s); changed = true; }
       if (h && !this.hazard.has(k)) { this.hazard.add(k); changed = true; } else if (!h && this.hazard.delete(k)) changed = true;
+      const a = avoid.has(ch) && !s;
+      if (a && !this.avoidMap.has(k)) { this.avoidMap.add(k); changed = true; } else if (!a && this.avoidMap.delete(k)) changed = true;
       if (!s && this.learned.delete(k)) changed = true;     // the map is the truth: a learned wall here was a moving thing
       if (!s && this.temp.delete(k)) changed = true;
     };
@@ -86,12 +95,32 @@ export class NavGrid {
   /** Forget everything (a new level or scene). */
   reset() {
     this.mapSolid.clear(); this.hazard.clear(); this.learned.clear(); this.temp.clear(); this.visited.clear(); this.seen.clear();
+    this.avoidMap.clear(); this.avoidThings.clear(); this.deadEnds.clear();
     this.bounds = null; this.mapKey = null; this.mapOrigin = null; this.version++;
   }
 
   growBounds(x0, y0, x1, y1) {
     const b = this.bounds;
     this.bounds = b ? { x0: Math.min(b.x0, x0), y0: Math.min(b.y0, y0), x1: Math.max(b.x1, x1), y1: Math.max(b.y1, y1) } : { x0, y0, x1, y1 };
+  }
+
+  /** Doors, stairs and exits listed now (things with `avoid`): replaces last tick's set. */
+  setAvoidThings(things) {
+    const m = new Map();
+    for (const th of things) if (th.avoid && !th.dead && th.p2) { const c = this.toCell(th.p2); m.set(K(c[0], c[1]), th); }
+    const same = m.size === this.avoidThings.size && [...m.keys()].every((k) => this.avoidThings.has(k));
+    this.avoidThings = m;
+    if (!same) this.version++;
+  }
+  /** Is this a cell to keep off (a door, stairs, an exit)? */
+  isAvoid(x, y) { const k = K(x, y); return this.avoidMap.has(k) || this.avoidThings.has(k); }
+  /** A path ended here without getting through: plan around it next time (an alternative instead of the same dead end). */
+  addDeadEnd(c) { const k = K(c[0], c[1]); this.deadEnds.set(k, (this.deadEnds.get(k) || 0) + 1); this.version++; }
+  deadEndPenalty(x, y) {
+    if (!this.deadEnds.size) return 0;
+    let p = 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const n = this.deadEnds.get(K(x + dx, y + dy)); if (n) p += n * (3 - Math.max(Math.abs(dx), Math.abs(dy))); }
+    return p;
   }
 
   /** 'map' | 'hazard' | 'learned' | 'temp' | null (free or unknown). */
@@ -153,53 +182,73 @@ export class NavGrid {
   }
   los(a, b, t = 0) { return this.line(a, b).every(([x, y]) => !this.isBlocked(x, y, t)); }
 
-  /** Can a body of radius r (world units) move in a straight line from p to q (world points) without touching a blocked cell? */
-  clearLine(p, q, r, t = 0) {
+  /** Can a body of radius r (world units) move in a straight line from p to q (world points) without touching a blocked cell? `avoid(x, y)` adds cells to keep off. */
+  clearLine(p, q, r, t = 0, avoid = null) {
     const d = Math.hypot(q[0] - p[0], q[1] - p[1]);
     const n = Math.max(1, Math.ceil(d / (this.cell * 0.25)));
     const rr = r * 0.95;
     for (let i = 0; i <= n; i++) {
       const x = p[0] + ((q[0] - p[0]) * i) / n, y = p[1] + ((q[1] - p[1]) * i) / n;
-      for (const [ox, oy] of [[-rr, -rr], [rr, -rr], [-rr, rr], [rr, rr]]) { const c = this.toCell([x + ox, y + oy]); if (this.isBlocked(c[0], c[1], t)) return false; }
+      for (const [ox, oy] of [[-rr, -rr], [rr, -rr], [-rr, rr], [rr, rr]]) { const c = this.toCell([x + ox, y + oy]); if (this.isBlocked(c[0], c[1], t) || (avoid && avoid(c[0], c[1]))) return false; }
     }
     return true;
   }
 
   /**
-   * A* from cell a to cell b (8-connected, no corner cutting). Unknown cells cost a little more than known open ones.
-   * Returns the cell path (including a and b) or null. `goalOk(x, y)` can accept a nearby goal (e.g. within reach).
+   * A* from cell a to cell b (8-connected, no corner cutting). Unknown cells cost a little more than known open ones,
+   * avoided cells (doors, stairs, exits) a lot more unless `exempt(x, y)` says they're the goal, and cells near a
+   * recorded dead end more too. Returns the cell path (including a and b) or null (then `lastPartial` is the path to
+   * the closest reachable cell). `goalOk(x, y)` can accept a nearby goal (e.g. within reach). The search box grows when
+   * it was too small for the way round.
    */
-  astar(a, b, { t = 0, maxNodes = 40000, margin = 14, goalOk = null, unknownCost = 1.15 } = {}) {
+  astar(a, b, { t = 0, maxNodes = 40000, margin = 14, goalOk = null, unknownCost = null, avoidCost = 12, exempt = null } = {}) {
     if (a[0] === b[0] && a[1] === b[1]) return [a];
+    const uc = unknownCost ?? (this.windowed ? 1.3 : 1.15);
+    let partial = null;
+    for (const m of [margin, margin * 3, margin * 8]) {
+      const r = this.astar1(a, b, { t, maxNodes, margin: m, goalOk, unknownCost: uc, avoidCost, exempt });
+      if (r.path) { this.lastPartial = null; return r.path; }
+      partial = r.partial;
+      if (!r.boxLimited || r.outOfNodes) break;
+    }
+    this.lastPartial = partial;
+    return null;
+  }
+  astar1(a, b, { t, maxNodes, margin, goalOk, unknownCost, avoidCost, exempt }) {
     const box = { x0: Math.min(a[0], b[0]) - margin, y0: Math.min(a[1], b[1]) - margin, x1: Math.max(a[0], b[0]) + margin, y1: Math.max(a[1], b[1]) + margin };
-    // with the game's map, the world ends at its edge: never plan around the outside of the level
-    if (this.bounds) { box.x0 = Math.max(box.x0, this.bounds.x0); box.y0 = Math.max(box.y0, this.bounds.y0); box.x1 = Math.min(box.x1, this.bounds.x1); box.y1 = Math.min(box.y1, this.bounds.y1); }
+    // with the game's whole map, the world ends at its edge: never plan around the outside of the level. A window that
+    // follows the player isn't the whole map, and neither is a map the goal lies outside of: beyond it is unknown ground.
+    const bd = this.bounds, goalIn = bd && b[0] >= bd.x0 && b[0] <= bd.x1 && b[1] >= bd.y0 && b[1] <= bd.y1;
+    let clipped = false;
+    if (bd && !this.windowed && goalIn) { box.x0 = Math.max(box.x0, bd.x0); box.y0 = Math.max(box.y0, bd.y0); box.x1 = Math.min(box.x1, bd.x1); box.y1 = Math.min(box.y1, bd.y1); clipped = true; }
     const inBox = (x, y) => x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1;
     const h = (x, y) => { const dx = Math.abs(x - b[0]), dy = Math.abs(y - b[1]); return Math.max(dx, dy) + 0.414 * Math.min(dx, dy); };
     const open = new MinHeap(), g = new Map(), from = new Map();
     const sk = K(a[0], a[1]);
     g.set(sk, 0); open.push(sk, h(a[0], a[1]));
-    let nodes = 0, best = sk, bestH = h(a[0], a[1]);
+    let nodes = 0, best = sk, bestH = h(a[0], a[1]) + this.deadEndPenalty(a[0], a[1]), boxLimited = false;
     while (open.size && nodes < maxNodes) {
       const k = open.pop(); nodes++;
       const [x, y] = unK(k);
-      if ((x === b[0] && y === b[1]) || (goalOk && goalOk(x, y))) return this.trace(from, k);
-      const hk = h(x, y);
+      if ((x === b[0] && y === b[1]) || (goalOk && goalOk(x, y))) return { path: this.trace(from, k) };
+      // the closest cell we can reach, but not one where a path already ended without getting through
+      const hk = h(x, y) + this.deadEndPenalty(x, y);
       if (hk < bestH) { bestH = hk; best = k; }
       const gk = g.get(k);
       for (const [dx, dy] of N8) {
         const nx = x + dx, ny = y + dy;
-        if (!inBox(nx, ny)) continue;
+        if (!inBox(nx, ny)) { if (!clipped || !(nx < bd.x0 || ny < bd.y0 || nx > bd.x1 || ny > bd.y1)) boxLimited = true; continue; }
         const isGoal = nx === b[0] && ny === b[1];
         if (this.isBlocked(nx, ny, t) && !isGoal) continue;
         if (dx && dy && (this.isBlocked(x + dx, y, t) || this.isBlocked(x, y + dy, t))) continue;   // no corner cutting
-        const step = (dx && dy ? 1.4142 : 1) * (this.known(nx, ny) ? 1 : unknownCost);
+        let step = (dx && dy ? 1.4142 : 1) * (this.known(nx, ny) ? 1 : unknownCost);
+        if (avoidCost && !isGoal && this.isAvoid(nx, ny) && !(exempt && exempt(nx, ny))) step += avoidCost;
+        if (this.deadEnds.size) step += this.deadEndPenalty(nx, ny);
         const nk = K(nx, ny), ng = gk + step;
         if (ng < (g.get(nk) ?? Infinity)) { g.set(nk, ng); from.set(nk, k); open.push(nk, ng + h(nx, ny)); }
       }
     }
-    this.lastPartial = best !== sk ? this.trace(from, best) : null;
-    return null;
+    return { path: null, partial: best !== sk ? this.trace(from, best) : null, boxLimited, outOfNodes: nodes >= maxNodes };
   }
   trace(from, k) { const out = [unK(k)]; while (from.has(k)) { k = from.get(k); out.push(unK(k)); } return out.reverse(); }
 
@@ -214,7 +263,7 @@ export class NavGrid {
       const [x, y, d] = q.shift(); nodes++;
       const k = K(x, y);
       const unseen = !this.seen.has(k);
-      const outside = this.bounds && (x < this.bounds.x0 || y < this.bounds.y0 || x > this.bounds.x1 || y > this.bounds.y1);
+      const outside = this.bounds && !this.windowed && (x < this.bounds.x0 || y < this.bounds.y0 || x > this.bounds.x1 || y > this.bounds.y1);
       if (unseen && !outside && !(avoid && avoid.has(k))) {
         let score = -d;
         if (dir) score += 2.5 * ((x - start[0]) * dir[0] + (y - start[1]) * dir[1]) / Math.max(1, Math.hypot(x - start[0], y - start[1])) * Math.min(d, 12);
@@ -225,7 +274,7 @@ export class NavGrid {
       for (const [dx, dy] of N8.slice(0, 4)) {
         const nx = x + dx, ny = y + dy, nk = K(nx, ny);
         if (seenQ.has(nk) || this.isBlocked(nx, ny, t)) continue;
-        if (this.bounds && (nx < this.bounds.x0 || ny < this.bounds.y0 || nx > this.bounds.x1 || ny > this.bounds.y1)) continue;
+        if (this.bounds && !this.windowed && (nx < this.bounds.x0 || ny < this.bounds.y0 || nx > this.bounds.x1 || ny > this.bounds.y1)) continue;
         seenQ.add(nk); q.push([nx, ny, d + 1]);
       }
     }

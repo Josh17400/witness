@@ -22,6 +22,8 @@ export class EventTracker {
     this.seenTypes = new Set();
     this.firstSight = [];       // {t, type, key} first time each hostile type is seen (for key-moment shots)
     this.recentLogs = [];       // game log lines of the last 1.5 s (death causes)
+    this.drift = null;          // hp changes too small to show (regen ticks of 0.02): added up until they're worth a line
+    this.goneAt = new Map();    // id -> t of its last "is gone" (a thing flickering at the edge of the list is gone once)
   }
 
   /** prev may be null (the first snapshot). `ctx` = {lastAttackT, logs: [{frame, level, message}], fps}. Returns events. */
@@ -50,19 +52,26 @@ export class EventTracker {
 
     // ---- player hp / death / respawn / goal
     if (P && PP && P.hp != null && PP.hp != null && P.hp !== PP.hp) {
-      const d = P.hp - PP.hp;
+      let d = P.hp - PP.hp, from = PP.hp;
+      // regeneration and damage over time change hp by a sliver every tick: add those up (no "healed +0" lines) and
+      // report them once they amount to something
+      if (Math.abs(d) < 0.05) {
+        if (!this.drift || Math.sign(this.drift.d) !== Math.sign(d)) this.drift = { d: 0, from: PP.hp };
+        this.drift.d += d;
+        if (Math.abs(this.drift.d) < 0.5) d = 0; else { d = this.drift.d; from = this.drift.from; this.drift = null; }
+      } else this.drift = null;
       if (d < 0) {
         const src = cur.things.concat(prev.things).filter((th) => th.rel === "hostile" && th.dist <= reach * 2.6)
           .sort((a, b) => (b.telegraph || /strike|attack|bite|hit/i.test(b.state || "") ? 1 : 0) - (a.telegraph || /strike|attack|bite|hit/i.test(a.state || "") ? 1 : 0) || a.dist - b.dist)[0];
         this.lastHurtBy = src ? src.key : null;
         this.hurtTimes.push(t);
-        ev.push({ t, frame, kind: "hurt", text: `you took ${r1(-d)} damage${src ? ` from ${src.key}` : ""} (hp ${r1(PP.hp)}→${r1(P.hp)})`, data: { amount: -d, by: src ? src.key : null } });
+        ev.push({ t, frame, kind: "hurt", text: `you took ${r1(-d)} damage${src ? ` from ${src.key}` : ""} (hp ${r1(from)}→${r1(P.hp)})`, data: { amount: -d, by: src ? src.key : null, from, to: P.hp } });
         const pct = P.maxHp ? (100 * P.hp) / P.maxHp : null;
         const lowAt = Math.max(LOW_HP, ctx.retreat || 0);
         if (pct != null && pct < lowAt && pct > 0 && !this.lowWarned) { this.lowWarned = true; push("lowhp", `hp low: ${r1(P.hp)}/${r1(P.maxHp)}`); }
         if (this.active) this.active.taken += -d;
-      } else {
-        push("heal", `healed +${r1(d)} (hp ${r1(PP.hp)}→${r1(P.hp)})`);
+      } else if (d > 0) {
+        push("heal", `healed +${r1(d)} (hp ${r1(from)}→${r1(P.hp)})`, { amount: d, from, to: P.hp });
         if (P.maxHp && (100 * P.hp) / P.maxHp >= LOW_HP + 10) this.lowWarned = false;
       }
     }
@@ -86,6 +95,13 @@ export class EventTracker {
     const teamGame = !!(P && P.team != null);   // teammates shoot too: only count damage/kills while you were firing
     let dealtNow = 0;
     const killedNow = [];
+    // a thing that flickers at the edge of the list (in, out, in, out) is gone once, not once per flicker
+    const gone = (th, label) => {
+      const last = this.goneAt.get(th.id);
+      this.goneAt.set(th.id, t);
+      this.perceiver.forget(th.id);
+      if (last == null || t - last > 2) push("gone", `${label} is gone`, { id: th.id });
+    };
     for (const [id, th] of prevById) {
       if (curById.has(id)) continue;
       // a corpse (kept as dead / state "dead") being cleaned up later isn't a second kill or a new fight
@@ -98,11 +114,11 @@ export class EventTracker {
           if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; if (th.hp != null) dealtNow += th.hp; }
           pushInf("kill", `${th.key} died`, { id }, th.key);
           this.perceiver.forget(id, "killed");
-        } else if (!far) { push("gone", `${th.key} is gone`); this.perceiver.forget(id); }
+        } else if (!far) { gone(th, th.key); }
       } else if (th.rel === "item") {
         if (th.dist <= 2.2) { this.pickups.push({ t, key: th.key, type: th.type }); pushInf("pickup", `you picked up ${th.key}`, { id }, th.key); this.perceiver.forget(id, "picked up"); }
-        else if (!far) { push("gone", `${th.key} is gone`); this.perceiver.forget(id); }
-      } else if (!far && th.dist <= 6) { push("gone", `${thingLabel(th)} is gone`); this.perceiver.forget(id); }
+        else if (!far) { gone(th, th.key); }
+      } else if (!far && th.dist <= 6) { gone(th, thingLabel(th)); }
     }
     for (const [id, th] of curById) {
       const was = prevById.get(id);
@@ -217,3 +233,34 @@ export class EventTracker {
 const fmtV = (v) => (typeof v === "number" ? r1(v) : JSON.stringify(v));
 export function cellOf(w, p2) { return [Math.floor((p2[0] - (w.origin?.[0] || 0)) / w.cell), Math.floor((p2[1] - (w.origin?.[1] || 0)) / w.cell)]; }
 export { dist2 };
+
+/**
+ * Merge an observation's events for the reader: repeated heals become one "regenerated +12 over 5s" line, repeated
+ * damage with no attacker one "took 6 damage over 3s" line, and the same text twice in half a second shows once.
+ */
+export function coalesceEvents(events) {
+  const out = [], seen = new Map();
+  // (a big heal among regen ticks, a potion, keeps its own line)
+  const healsAll = events.filter((e) => e.kind === "heal" && e.data && e.data.amount != null);
+  const med = healsAll.length ? healsAll.map((e) => e.data.amount).sort((x, y) => x - y)[Math.floor(healsAll.length / 2)] : 0;
+  const heals = healsAll.filter((e) => e.data.amount <= Math.max(med * 3, 1));
+  const dots = events.filter((e) => e.kind === "hurt" && e.data && e.data.amount != null && !e.data.by);
+  const merged = new Set();
+  const mergeOf = (list, fmt) => {
+    if (list.length < 2) return;
+    const sum = list.reduce((a, e) => a + e.data.amount, 0), a = list[0], z = list.at(-1);
+    for (const e of list) merged.add(e);
+    z.merged = { ...z, text: fmt(sum, z.t - a.t, a.data.from, z.data.to, list.length), data: { ...z.data, amount: sum, from: a.data.from, count: list.length } };
+  };
+  mergeOf(heals, (n, s2, a, b) => `regenerated +${r1(n)} over ${r1(Math.max(s2, 0.1))}s (hp ${r1(a)}→${r1(b)})`);
+  mergeOf(dots, (n, s2, a, b, k) => `took ${r1(n)} damage over ${r1(Math.max(s2, 0.1))}s in ${k} hits, no attacker near (hp ${r1(a)}→${r1(b)})`);
+  for (const e of events) {
+    let x = e;
+    if (merged.has(e)) { if (!e.merged) continue; x = e.merged; delete e.merged; }
+    const prevT = seen.get(x.text);
+    if (prevT != null && Math.abs(x.t - prevT) < 0.5) continue;
+    seen.set(x.text, x.t);
+    out.push(x);
+  }
+  return out;
+}
