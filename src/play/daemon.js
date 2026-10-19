@@ -10,7 +10,8 @@ import { resolvePlayConfig } from "./config.js";
 import { Perceiver } from "./perceive.js";
 import { NavGrid } from "./grid.js";
 import { Autopilot } from "./autopilot.js";
-import { EventTracker, cellOf } from "./events.js";
+import { EventTracker, cellOf, coalesceEvents } from "./events.js";
+import { wakeFor as wakeRule } from "./wake.js";
 import { observeText, observeData, resultLine } from "./observe.js";
 import { parseOrders, OrderError } from "./orders.js";
 import { ReplayRecorder } from "./recorder.js";
@@ -141,25 +142,28 @@ export async function runDaemon(dir) {
   }
   await keyShot("start");
 
-  // ---- the reflex loop for one `do`
-  const wakeFor = (ev, b) => {
-    const combat = ap.inCombat(), careful = b && b.careful;
-    // with autofight on, enemies met while moving are the reflex layer's job: only the big things wake the tester
-    const moving = /^(goto|go|explore|follow|pickup|talk|run)$/.test(b?.verb || "") || !!ap.suspended;
-    const reflexes = ap.policy.autofight && (moving || live.on);
-    for (const e of ev) {
-      if (["death", "goal", "error", "scene", "lowhp"].includes(e.kind)) return e.text;
-      if (world.dead && (e.kind === "alert" || e.kind === "hurt")) continue;
-      if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return e.text;
-      if (reflexes && (e.kind === "hurt" || e.kind === "alert")) continue;
-      if (!combat && e.kind === "hurt" && b?.verb !== "flee") return e.text;
-      // platformer runs jump or stomp enemies on their own: an approaching enemy isn't worth a wake there
-      const runner = cfg.profile === "platformer" && /^(run|goto|go|explore|pickup|jump)$/.test(b?.verb || "");
-      if (!combat && !runner && e.kind === "alert" && b?.verb !== "flee" && !(b?.target != null && e.data && String(e.data.id) === String(b.target))) return e.text;
-      if (careful && ["appear", "notice", "pickup", "kill"].includes(e.kind)) return e.text;
+  // the timeline keeps one line per run of regen ticks (or damage over time with no attacker), not one per tick
+  let regenRun = null;
+  function timelinePush(e) {
+    const dot = e.kind === "hurt" && e.data && !e.data.by;
+    if ((e.kind === "heal" || dot) && e.data && e.data.amount != null) {
+      const last = timeline.at(-1);
+      if (regenRun && last === regenRun.entry && regenRun.kind === e.kind && e.t - regenRun.tEnd < 1.5) {
+        regenRun.sum += e.data.amount; regenRun.tEnd = e.t; regenRun.n++;
+        last.text = e.kind === "heal" ? `regenerated +${r1(regenRun.sum)} over ${r1(e.t - regenRun.t0)}s (hp ${r1(regenRun.from)}→${r1(e.data.to)})`
+          : `took ${r1(regenRun.sum)} damage over ${r1(e.t - regenRun.t0)}s in ${regenRun.n} hits, no attacker near (hp ${r1(regenRun.from)}→${r1(e.data.to)})`;
+        return;
+      }
+      const entry = { t: +e.t.toFixed(2), frame: e.frame, kind: e.kind, text: e.text };
+      timeline.push(entry);
+      regenRun = { entry, kind: e.kind, t0: e.t, tEnd: e.t, sum: e.data.amount, from: e.data.from ?? null, n: 1 };
+      return;
     }
-    return null;
-  };
+    timeline.push({ t: +e.t.toFixed(2), frame: e.frame, kind: e.kind, text: e.text });
+  }
+
+  // ---- the reflex loop for one `do`
+  const wakeFor = (ev, b) => wakeRule(ev, b, { ap, world, cfg, live: live.on });
   // watched turn-taking (--watch --turns): an order plays at real-time speed, the game waits while the tester thinks
   const turnPace = { wall: 0, frame: 0 };
   async function stepWorld(k) {
@@ -177,7 +181,7 @@ export async function runDaemon(dir) {
     world.remembered = world.remembered.filter((th) => !(perceiver.memory.get(th.id) || {}).gone);
     if (world.player && world.player.p2) { const c = cellOf(world, world.player.p2); const last = trail.at(-1); if (!last || last[0] !== c[0] || last[1] !== c[1]) trail.push(c); }
     for (const e of ev) {
-      timeline.push({ t: +e.t.toFixed(2), frame: e.frame, kind: e.kind, text: e.text });
+      timelinePush(e);
       if (e.kind === "error") errors.push({ t: +e.t.toFixed(2), text: e.text });
       if (e.kind === "death") await keyShot("death");
       if (e.kind === "goal") await keyShot("goal reached");
@@ -360,7 +364,7 @@ export async function runDaemon(dir) {
   }
 
   function look(result, asJson) {
-    const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: pending.splice(0), first: firstLook, session: { goal: opts.goal, name: spec.name },
+    const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: coalesceEvents(pending.splice(0)), first: firstLook, session: { goal: opts.goal, name: spec.name },
       live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null };
     firstLook = false;
     if (asJson) return { data: observeData(world, ctx) };

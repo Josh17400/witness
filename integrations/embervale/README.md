@@ -20,12 +20,30 @@ here as a worked example of wiring Witness into a custom C++/SDL3 engine. Emberv
 - the play config is merged, with people found by a `talk` entity flag (`npc: e.talk`);
 - `state.map` is a 41-row walkability window around the player (`{id, cell: 1, origin, rows, solid: "#"}`);
 - animals are typed (Hen, Rooster, Dog; kind `animal`), and `scene` is set in every in-world mode;
-- recordings set `params.recorded`, so window-dependent fields stay out of the replay end-state check. Witness 0.4.0
-  adds `replay.ignore` for exactly that.
+- window-dependent fields stay out of the replay end-state check through witness.json's `replay.ignore` (Witness 0.4.0).
+  This replaced the earlier workaround, where recordings set `params.recorded`.
 
-Results: doctor's A/B/A determinism passes, `witness test --repeat 2` is 84/84, and play smoke runs work. One talked
-to a real villager and explored with 0 stuck incidents on the map. Another won against 3 wolves in 3.9 s, avoiding 4 of
-5 windups. Each replayed exactly.
+**Embervale on Witness 0.5.0:**
+- `witness doctor` passes every check, including watch mode (`WITNESS_WATCH` is supported: the window shows and
+  presents frames while a watched playtest plays);
+- `witness test --repeat 2` is 90/90;
+- FINGER_CANCELED is recorded through `witness_record_touch_ex`;
+- five headless turn-based playtests each replayed exactly;
+- the snapshot now has global tile positions, quest objectives listed as things, public doors, exits and stairs as
+  things, `facing`, and a goal with a position. `state.map` is a 41-tile window that moves with the player
+  (`{id, cell: 1, origin, rows, solid: "#"}`).
+
+Those playtests found harness bugs, now fixed in Witness: a moving map window used to count as a new scene and wipe
+map memory; regen printed one `healed +0` line per tick; `talk Guard#4` reported success when a child answered;
+a wall longer than the window gave "no open way" and goto kept returning to the same dead end; paths went through
+doors into buildings; entering the inn interrupted `goto Inn; talk Innkeeper`; `goto <Type>` could prefer a stale
+remembered spot; and "Wolf#76 is gone" showed twice. To have paths keep off doors, mark them in the map rows (`+`, or
+the characters in `map.door` / `map.avoid`) or list them as things (type Door / Stairs / Exit, or `avoid: true`), with
+`leadsTo` naming the building (see docs/PLAYTEST.md, Snapshot conventions).
+
+Earlier results (0.3.0): doctor's A/B/A determinism passed, `witness test --repeat 2` was 84/84, and play smoke runs
+worked. One talked to a real villager and explored with 0 stuck incidents on the map. Another won against 3 wolves in
+3.9 s, avoiding 4 of 5 windups. Each replayed exactly.
 
 ## Use it
 
@@ -81,7 +99,8 @@ witness call goto town --at 0.5
 * people as NPCs (`kind == 'person'`).
 
 When this config was written there was no `state.map`, so walls were learned by bumping into them. Embervale has exposed a
-walkability window since its 0.3.0 adoption (see above).
+walkability window since its 0.3.0 adoption (see above). Witness merges the window as it moves and treats ground
+outside it as unknown, so no config is needed for it.
 
 ```
 witness play start --scene village --params "{\"fight\":\"wolf\",\"count\":3}" --goal "survive the wolves"

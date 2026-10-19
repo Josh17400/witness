@@ -28,11 +28,68 @@ reflex layer:
 | a 4v4 first-person shooter (OpenGL) | Haiku 5.5, fighter | its team won 40–17; the tester had 28 kills and 6 deaths; feedback: the line-of-sight flag doesn't match who can shoot you (bullets penetrate walls), shotgun one-shots, cheap deaths |
 | the same shooter | Sonnet 5.5 (low effort), fighter | a short run that found two harness gaps (`fight` chased away from the team, `respawn` gave up early), both fixed |
 
+## Playtest-ready snapshots
+
+Without these, a tester plays half blind. Your snapshot is **playtest-ready** when it has:
+
+| # | the snapshot has | it unlocks |
+|---|---|---|
+| 1 | `state.map`: a walkability grid (rows of characters), the whole level or a window that follows the player | exact paths around walls and coverage %; without it, walls are learned by bumping into them |
+| 2 | global positions: the player, the entities and `map.origin` in one world frame | distances, remembered things and paths stay right as the player (and a map window) moves |
+| 3 | entities with `id`, `type`, `pos`, and `hostile` / `talk` / `item` flags | targets by name, the near list, kills and pickups; exact enemy / NPC / item classification instead of name guesses |
+| 4 | quest objectives as things (`objective: true` or `quest: "<title>"` on the entity, or a marker thing) | `goto`, `fight` and `talk` straight to what the quest asks for |
+| 5 | doors, exits and stairs as things (type Door / Exit / Stairs, `leadsTo: "Inn"`), or `+` door cells in map rows | `goto Inn`, `goto Exit`; paths keep off doors unless they're the goal ([`avoid`](#snapshot-conventions)); entering the target finishes the goto |
+| 6 | player `facing` | attacks land the first time, talking faces the right person |
+| 7 | `state.goal = {text, pos}` | the goal line, and `goto goal` |
+| 8 | telegraph states: enemy `state: "windup"` or `telegraph: <seconds left>` | blocking and dodging at human reaction speed, windup stats in the report |
+| 9 | `state.dialogue = {speaker, text, options[]}` (null when closed) | `talk` / `choose`, and `talk` checks the right person answered |
+| 10 | `state.won` / `state.dead` | the outcome, goal and death wakes, respawn |
+
+**`witness play check`** starts the game once, takes a snapshot after a fresh reset (like a playtest start) and lists
+each item as ✔ present, ✖ missing (with what to add and what it unlocks) or ? (not visible at this moment: no enemy
+is winding up, no dialogue is open; check those with `--scene` / `--params` or `--at S`). `--json` gives the same
+as data. `witness play suggest` prints the same checklist after its config.
+
+Minimal examples (all fields optional; each line adds what the table says):
+
+```json
+{ "player": { "pos": [212.5, 30.5], "hp": 80, "maxHp": 100, "facing": "N" },
+  "entities": [ { "id": 4, "type": "Guard", "name": "Hrolf", "pos": [215, 28], "talk": true },
+                { "id": 76, "type": "Wolf", "pos": [230, 41], "hp": 12, "maxHp": 12, "hostile": true, "state": "windup", "telegraph": 0.3 },
+                { "id": 90, "type": "Potion", "pos": [210, 33], "item": true },
+                { "id": 31, "type": "Door", "name": "Inn door", "leadsTo": "Inn", "pos": [220, 25] },
+                { "id": 55, "type": "Wolf", "pos": [260, 12], "hostile": true, "objective": true, "quest": "The den" } ],
+  "map": { "id": "overworld", "cell": 1, "origin": [192, 10], "rows": ["#####...", "#..+...."], "solid": "#" },
+  "goal": { "text": "Clear the wolf den", "pos": [260, 12] },
+  "dialogue": null, "won": false, "dead": false }
+```
+top-down / RPG (positions in tiles, `cell: 1`; the map here is a window around the player).
+
+```json
+{ "player": { "pos": [120, 88], "size": [12, 16], "vel": [1.5, 0], "onGround": true, "hp": 1 },
+  "entities": [ { "id": 7, "type": "Goomba", "pos": [180, 88], "size": [14, 14], "hostile": true },
+                { "id": 8, "type": "Piranha", "pos": [260, 72], "hostile": true, "stompable": false, "state": "hidden" },
+                { "id": 9, "type": "Flag", "pos": [3100, 40] } ],
+  "map": { "cell": 16, "origin": [0, 0], "rows": ["........", "..==..^.", "########"], "solid": "#" },
+  "goal": { "text": "Reach the flag", "pos": [3100, 40] }, "won": false, "dead": false }
+```
+platformer (`onGround`, `size` and `vel` drive jump planning; `=` one-way, `^` hazard; rows below the map are a pit).
+
+```json
+{ "player": { "pos": [4.2, 0, -7.5], "yaw": 1.57, "pitch": 0, "hp": 100, "maxHp": 100, "ammo": 24, "team": "blue" },
+  "entities": [ { "id": 12, "type": "Soldier", "name": "Red 3", "team": "red", "pos": [10, 0, -2], "hp": 100, "los": true },
+                { "id": 20, "type": "Stairs", "pos": [6, 0, -12] } ],
+  "map": { "cell": 1, "origin": [-20, -20], "rows": ["####", "#..#", "####"], "solid": "#" },
+  "goal": { "text": "Capture point B", "pos": [18, 0, 3] }, "won": false, "dead": false }
+```
+fps (the ground plane is x/z; `yaw`/`pitch` or a `look` vector, `ammo`, `team` and entity `los` drive aiming).
+
 ## Quick start (for the main agent)
 
 1. **Write or adjust the `"play"` section of `witness.json`** (reference below). For a game that follows the
    snapshot conventions, `{"controls": {...}}` is often all it needs. `witness play suggest` probes the game and
-   proposes one (`--write` merges it into witness.json).
+   proposes one (`--write` merges it into witness.json). `witness play check` says what the snapshot still lacks
+   ([Playtest-ready snapshots](#playtest-ready-snapshots)).
 2. **Sanity-check it yourself** before spending a subagent on it:
    ```bash
    witness play start --name check --goal "smoke test"
@@ -51,6 +108,8 @@ reflex layer:
    That's the default: in a side-by-side on the 4v4 shooter it played the smartest at nearly Haiku's speed. Haiku is
    cheaper and fast, but it plays shallowly (it trailed the nearest teammate and ignored its weapons), and Haiku at
    medium effort wasn't better. Use Haiku for simple games or quick smoke runs. Run at most 2 testers at once.
+   **No Agent tool** (a workflow subagent can't spawn subagents)? `witness play batch` launches the testers itself:
+   see [Batch runs](#batch-runs-witness-play-batch).
 5. **Read `witness/playtests/t1/report.md`** when it returns: the tester's feedback and bug notes first, then fights,
    stuck incidents, deaths, coverage. Open the key screenshots and `coverage.png`.
 6. **Reproduce** anything marked: `witness replay witness/playtests/t1/replay.jsonl --at 12.40 --shot` (report.md
@@ -82,6 +141,8 @@ of a second. `--config DIR` (or `--cmd "<launch>"`) works as in every Witness co
 | `play report` | `[name\|dir]` `--json` | Prints report.md (or report.json). report.json is also updated after every order while a session runs. |
 | `play brief` | `--goal` `--persona` (newbie) `--minutes` (4) `--name` (t1) `--seed` `--scene` `--params` `--model` `--extra "…"` `--live` `--watch` | Prints the tester prompt. `--extra` (or `play.brief` in witness.json) adds a "notes from the developer" paragraph. `--live` / `--watch` print the live-mode variant (decide quickly, prefer longer orders, `play next`) and put the flag in its start command. |
 | `play suggest` | `--seed` `--scene` `--params` `--write` | Probes the game (holds each key for 0.35 s from a fresh reset) and proposes a `"play"` config, plus which snapshot conventions the game follows. `--write` merges it into witness.json. It runs one game process. |
+| `play check` | `--seed` `--scene` `--params` `--at S` `--json` | Is the snapshot playtest-ready? One snapshot from a fresh reset, checked against [the list](#playtest-ready-snapshots): ✔ / ✖ (what to add, what it unlocks) / ? (not visible now). Runs one game process. |
+| `play batch` | `--goals FILE` `--persona P` `--model sonnet` `--effort low` `--parallel 2` `--minutes 3` `--timeout M` `--seed` `--scene` `--params` `--live` `--out DIR` `--dry-run` | Runs one headless tester (`claude -p`) per goal, at most 2 at once, and prints a combined summary. See [Batch runs](#batch-runs-witness-play-batch). |
 | `play orders` | | The order card. |
 
 **Personas** (`--persona`): `newbie` (follows hints, reports confusion), `explorer` (coverage, talks to everyone,
@@ -102,13 +163,13 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 
 | order | synonyms | meaning |
 |---|---|---|
-| `goto <thing>` · `goto x,y` · `goto goal` | go to, walk to, move to, run to, head to, travel to, navigate to, get to, return to, go back to, approach, reach | Path there around walls; stop in reach (items: pickup reach; NPCs: talk reach; enemies: attack reach; places: step onto them; a solid door: stand next to it). `x,y` is a map cell. `goto goal` needs a goal position in the snapshot. |
+| `goto <thing>` · `goto x,y` · `goto goal` | go to, walk to, move to, run to, head to, travel to, navigate to, get to, return to, go back to, approach, reach | Path there around walls, keeping off doors, stairs and exits that aren't the goal; stop in reach (items: pickup reach; NPCs: talk reach; enemies: attack reach; places: step onto them; a solid door: stand next to it). Entering the target (a building, a door, an exit) finishes the goto, and a chain like `goto Inn; talk Innkeeper` goes on in the new scene. `goto <Type>` switches to another listed one of that type if its pick leaves the view. `x,y` is a map cell. `goto goal` needs a goal position in the snapshot. |
 | `go <dir> [n]` | walk, move, head, step; a bare direction (`north 3`) | n cells (default 5) that way. Directions: n s e w ne nw se sw, north…, up/down/left/right, up-right…; fps: forward/back/left/right. |
 | `explore [dir]` | wander, scout, search, roam | Frontier exploration of unvisited ground, biased toward dir. Runs until the time cap or nothing is left. |
 | `follow <thing>` | | Stay near it (teammates, NPCs). |
 | `fight [thing] [mode]` | attack, kill, engage, hit, slay, defeat, battle, strike, shoot, destroy | Approach, face, attack, react to telegraphs. No target: nearest hostiles. A plural (`wolves`, `all enemies`) fights until none is near. |
 | `flee [from thing]` | retreat, escape, evade, run away, back off, get away | Move to the reachable spot farthest from hostiles; done when none is within 1.6 × alert. |
-| `talk <who>` | talk to/with, speak to/with, chat, greet, ask | Walk up, face, press interact, wait for `dialogue`; retries closer, fails after 3 tries. No target: nearest NPC. |
+| `talk <who>` | talk to/with, speak to/with, chat, greet, ask | Walk up, face, press interact, wait for `dialogue`; retries closer, fails after 3 tries. When the dialogue names a `speaker` that isn't the target (by name or type), it says `X answered instead of Guard#4`, presses cancel, steps closer and tries again; without a cancel control, or after 2 wrong answers, it fails with that message and leaves the dialogue open. No target: nearest NPC. |
 | `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). |
 | `pickup [thing]` | pick up, get, grab, collect, take, loot, fetch | Walk onto the item; press interact if it's still there. No target: nearest item. Plural: collects them all nearby. |
 | `use <control\|item>` | drink, quaff, eat, heal | Tap a control. `use potion` / `heal` / `drink` → the heal control. An unknown word becomes `interact <it>`. |
@@ -192,12 +253,41 @@ events: 0.6 dialogue — Old Guard: "Take this potion…" [1) Thanks.] · 0.6 go
 | `dialogue` | speaker, text and numbered options with the exact `choose` orders |
 | `game says:` | the game's `notice` |
 | `map` | a 19×9 window around you (fps 17×11; platformer: the map rows ahead): `#` wall (the game's map or learned by bumping), `.` open, `?` unknown, one letter per type (uppercase = hostile; a type on both sides gets two letters, marked enemy/ally in the legend). Shown only when walls are known. |
-| `events` | the last 9 notable events since the previous observation: damage, hits, kills, pickups, dialogue, notices, stat changes, game logs, reflexes, bumps and stuck incidents. Game logs that say the same thing as an inferred event replace it. |
+| `events` | the last 9 notable events since the previous observation: damage, hits, kills, pickups, dialogue, notices, stat changes, game logs, reflexes, bumps and stuck incidents. Game logs that say the same thing as an inferred event replace it. Regeneration is one line per observation (`regenerated +12 over 5s (hp 40→52)`), and so is damage over time with no attacker near; hp changes too small to print (0.02 a tick) are added up first. A thing flickering at the edge of the list is `gone` once, and the same text twice within half a second shows once. |
 
 Other lines you'll see: `✔ done: fight wolves block — 3 enemies defeated (7.2s)`, `Wolf#6   3.1 E   hp 3/3  WINDUP
 0.2s`, `★ GOAL REACHED: goto Exit#13 — the game reports a win (1.3s)`, `YOU ARE DEAD — game says: "…"`. The first
 observation also prints the controls and the order card. `--json` returns the same content as data (`{t, frame,
 player, stats, near[], farther, remembered[], dialogue, goal, notice, dead, won, result, events[], map}`).
+
+## Batch runs (`witness play batch`)
+
+The Agent tool is the normal way to spawn testers, but only a main session has it: a workflow subagent (an engineer
+agent inside a workflow) can't spawn subagents. `witness play batch` launches the testers itself, as headless Claude
+Code processes:
+
+```bash
+witness play batch --goals goals.txt --minutes 3              # one tester per line of goals.txt
+witness play batch --goals goals.json --parallel 1             # [{"goal": "…", "persona": "explorer", "scene": "cave", "params": {…}, "minutes": 2}, …]
+```
+
+* **Goals:** a text file with one goal per line (`#` comments), or a JSON list of strings or
+  `{goal, persona, scene, params, seed, minutes, model, live, name}`. Command-line `--persona`, `--scene`, `--params`,
+  `--seed`, `--minutes` and `--live` are the defaults for every goal.
+* **Each tester** gets the brief `play brief` would print (session names `b<MMDDhhmm>-1`, `-2` …) and runs as
+  `claude -p --model sonnet --effort low --tools Bash,Read --allowedTools "Bash(node \"…/witness.js\" play:*)" …
+  --permission-mode dontAsk --setting-sources project,local --strict-mcp-config --no-session-persistence
+  --output-format json`, with the brief on stdin, in an empty scratch folder. Bash is limited to the witness commands
+  and the session's short command; anything else is denied without a prompt. Read lets it open screenshots. It uses the
+  user's Claude Code login: `ANTHROPIC_API_KEY` is removed from its environment.
+* **At most 2 at once** (`--parallel 1` or `2`; each tester is a claude process plus a game and a daemon).
+* **Nothing is left running:** each tester has a wall-clock timeout (`--timeout` minutes, default
+  max(5, 4 × minutes + 3)); its session is stopped when it exits (the report is written either way); Ctrl-C kills
+  every tester (the whole process tree) and stops its session.
+* **Output:** a line per tester as it finishes, then a summary: outcome, game time, orders, kills, deaths, stuck
+  incidents, notes, fun, and each report path. The same goes to `witness/playtests/batch-<MMDDhhmm>.md` (`--out DIR`
+  changes the folder) with the testers' feedback, notes and final replies. `--dry-run` prints the claude commands
+  without running anything.
 
 ## Live mode and watching
 
@@ -266,7 +356,7 @@ A `do` returns when its chain is done or failed, at the time cap, or on a **wake
 
 | when | wakes on |
 |---|---|
-| always | death, goal reached (`won`), a game error log, a scene change, low hp (first drop below 35% or the retreat level; re-armed after healing above 45%) |
+| always | death, goal reached (`won`), a game error log, a scene change, low hp (first drop below 35% or the retreat level; re-armed after healing above 45%). A scene change the order caused on purpose doesn't wake: a goto that was next to its goal (or by a door leading to it) is done, and any walking order whose target is still listed in the new scene carries on. |
 | dialogue | a dialogue opens or changes, unless the order is talk / interact / choose / press / use |
 | outside fights | being hurt; a hostile entering the alert range (`play.alert`, 6 cells), unless it's the order's own target. `flee` ignores both. In the platformer profile, an approaching enemy doesn't wake run / goto / go / explore / pickup / jump (the runner jumps or stomps on its own). With **autofight** on (below), neither wakes a movement order (goto, go, explore, follow, pickup, talk) or anything in live mode: the reflex layer deals with it and reports it as an event. |
 | `careful` | also items or NPCs appearing, notices, pickups, kills |
@@ -319,6 +409,20 @@ walls. If another enemy is visible it switches to that one instead of ending the
 
 * **Pathing:** A* over the nav grid (8-connected, no corner cutting). Unknown cells are assumed free and the path is
   replanned as walls are learned. Steering heads for the farthest path cell the body fits through in a straight line.
+  The search area grows when the way round is longer than the first box allows.
+* **Cells to keep off.** Doors, stairs and exits (the map's door/avoid characters, or things with `avoid: true`,
+  `door: true` or a type like Door, Stairs, Exit, Portal; see [Snapshot conventions](#snapshot-conventions)) cost 12
+  extra steps each, so paths go round buildings instead of through them, and steering never cuts across one. A path
+  crosses one only when it's the goal itself, a door whose `leadsTo` names the target, or a door of the building the
+  goto is for (`goto Inn`: doors within 4 cells of a thing typed or named like a building). With no other way, the
+  path still goes through: it's a cost, not a wall.
+* **Map windows.** When `state.map` is a window that follows the player (its origin moves, or `map.window: true`, or
+  `play.mapWindow: true`), the windows are merged into one grid as they move, and everything outside the ground seen
+  so far is unknown (passable at a small extra cost), not the edge of the world. With a whole-level map, plans stay
+  inside it unless the goal lies outside.
+* **Dead ends.** When a plan can only get partway (the known map has no way through) and the player reaches the end of
+  that partial path, or a goto gives up stuck, the spot is recorded as a dead end. Later plans pay extra near it, so the
+  planner tries another way instead of walking back to the same place.
 * **The game's map vs learned walls.** With `state.map`, walls are known up front and the map is always right: a
   learned wall on a cell the map says is open is dropped. Without a map (or with `--no-map`), walls are **learned**
   from failed movement and stay for the session. A learned wall is removed when the player stands in that cell. A cell
@@ -328,8 +432,10 @@ walls. If another enemy is visible it switches to that one instead of ending the
   window; speed is measured on the fly, or `play.speed`). Then the **recovery ladder**: a newly learned wall just
   triggers a replan (twice); after that it cycles re-centre on the cell (0.35 s) → sidestep to a free side (0.28 s) →
   re-centre → back off (0.3 s).
-* **Stuck:** no progress toward the target for 3.2 s (goto, talk, pickup), 4 s (fight approach, follow), 2 s (flee)
-  fails the order with the position, heading and duration. If a door-like thing is right there, the message says so
+* **Stuck:** no progress for 3.2 s (goto, talk, pickup), 4 s (fight approach, follow), 2 s (flee). Progress is getting
+  closer to the target, shortening the planned path, or stepping onto a cell this order hasn't stood on yet (going round
+  a long wall leads away from the target for a while). Being stuck fails the order with the position, heading and
+  duration. If a door-like thing is right there, the message says so
   (`Gate#9 (locked) is right there: try "interact Gate#9"`). `explore` doesn't fail: it abandons that frontier after
   2.5 s and picks another.
 * **Incidents** (several blocks, ≥ 0.8 s, or unresolved) go to the report with cell, heading, duration and how they
@@ -348,8 +454,11 @@ walls. If another enemy is visible it switches to that one instead of ending the
 The plane is `[0,1]` (x/y) by default and `[0,2]` (x/z) for fps. North is screen up: `-y` by default, `-z` for fps;
 set `play.north: "+y"` for y-up worlds. The platformer's guard reflex is jumping (above), not blocking.
 
-**Levels and scenes.** When the snapshot's `scene`, `level`, `stage`, `area`, `world`, `chapter` or `map.id` changes,
-the harness forgets the old map knowledge and remembered things (a new level is a new place). Every thing also gets a
+**Levels and scenes.** When the snapshot's `scene`, `level`, `stage`, `area`, `world` or `chapter` (or the value of
+`play.scene`, when it's configured), or the map's `id` changes, the harness forgets the old map knowledge and remembered
+things (a new level is a new place). The map id is read from the `play.map` expression, so a config can drop or fix
+it. A map whose id changes while it shows the same ground (same cell size, the overlap agrees on at least 90% of its
+cells) is a window that moved, not a new scene. Every thing also gets a
 measured velocity (world units per frame) from consecutive snapshots, used for time-to-contact and landing plans.
 
 ## The `"play"` config
@@ -400,6 +509,8 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `hostile`, `item`, `npc`, `friend` | entity flags `hostile`/`enemy`, `item`/`pickup`/`collectible`, `talk`/`npc`/`talkable`; teams; else type names (Wolf → hostile, Coin → item, Guard → npc) | per-thing classification expressions |
 | `telegraph` | `e.telegraph` (seconds or true) or `e.state` like `windup`/`charging`/`telegraph`/`aiming`… | per-thing "about to strike" expression; a number is seconds left |
 | `ignore` | none | per-thing expression: skip these things |
+| `avoid` | `e.avoid`, else `e.door`, else a type like Door, Doorway, Entrance, Stairs, Ladder, Portal, Exit, Trapdoor | per-thing expression: paths keep off it unless it's the goal (or leads to it) |
+| `mapWindow` | detected (the map's origin moves) | `true`: `state.map` is a window that follows the player from the start, so outside it is unknown ground |
 | `dialogue`, `menu`, `goal`, `notice`, `scene` | `state.dialogue` (or `dialog`, `conversation`), `state.menu`, `state.goal`/`objective`/`quest`, `state.notice`/`message`/`toast`/`hint`, `state.scene`/`level`/`location` | expressions |
 | `won`, `dead` | `state.won`/`victory`/`win`/`complete`; `state.dead`/`gameOver`, or player hp ≤ 0 | outcome expressions |
 | `map` | `state.map` | expression for the map; `false` disables it (same as `--no-map`) |
@@ -458,6 +569,8 @@ ones.
 | `state.dialogue = {speaker, text, options[], selected?}` (null when closed) | talk/choose, dialogues in the report |
 | `state.goal` (text or `{text, pos}`), `state.notice` | goal and "game says" lines; `goto goal` with a pos |
 | `state.map = {cell, origin, rows[], solid?}` | walls known up front (rows of characters; `#` solid unless `solid` lists others), coverage % of the open map |
+| map `door` (default `"+"`) and `avoid` (default none): characters for cells to keep off; map `window: true` | paths go round doors and the like unless the goal is there; a window that follows the player is merged as it moves, and outside it is unknown ground |
+| entity `avoid: true` (or `door: true`, or type Door / Stairs / Exit / Portal …), `leadsTo: "Inn"` | the same for things: doors are kept off unless they're the goal or lead to it; a door leading to the goto target counts as arriving when the scene changes there |
 | `state.won` / `state.dead` | outcome, goal and death wakes |
 | game logs (info level) | the game's own words in the timeline ("You block Wolf#3's bite. It staggers!"); error logs wake the tester and go to the report |
 | platformer: player `onGround`, `vel`, `size`; map `=` one-way, `^` hazard; entity `stompable: false` and a harmless `state` (`hidden`…) | jump planning; stopping before enemies it can't jump on |

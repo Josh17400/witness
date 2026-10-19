@@ -94,6 +94,8 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     pos: raw.pos || null,                    // per-thing position expression with `e`; null: e.pos / e.position / [e.x, e.y(, e.z)]
     hostile: raw.hostile || null, item: raw.item || null, npc: raw.npc || null, friend: raw.friend || null,
     telegraph: raw.telegraph || null, ignore: raw.ignore || null,
+    avoid: raw.avoid || null,               // per-thing: keep paths off it unless it's the goal (null: e.avoid / e.door / Door, Stairs, Exit… types)
+    mapWindow: raw.mapWindow != null ? !!raw.mapWindow : null,   // true: state.map is a window that follows the player (else detected when it moves)
     dialogue: raw.dialogue || null, menu: raw.menu || null, goal: raw.goal || null, notice: raw.notice || null,
     scene: raw.scene || null, won: raw.won || null, dead: raw.dead || null, map: raw.map === false ? false : raw.map || null,
     stats: Array.isArray(raw.stats) ? raw.stats : null,
