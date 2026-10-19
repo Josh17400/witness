@@ -132,6 +132,10 @@ const LAYOUT = [
   // iPhone 15 Pro Max at @3x (1290×2796): the Max preset gives 177 px; the 393 pt preset says it doesn't fit
   const mx = safePreset("iphone-max-portrait", 1290, 2796);
   ok("iphone-max-portrait at 1290×2796: top 59 pt = 177 px, bottom 34 pt = 102 px", mx.px.top === 177 && mx.px.bottom === 102 && !mx.sizeNote, mx);
+  // the game's own logical canvas (639×295, the device's aspect): no "not a whole multiple" warning, one line on the
+  // mapping: contain = min(852/639, 393/295) = 1.3322 pt per px, (852 − 639 × 1.3322)/2 = 0.36 pt bars left and right
+  const cv = safePreset("iphone-landscape", 639, 295, { canvas: true }), cf = safePreset("iphone-landscape", 639, 295);
+  ok("a game canvas 639×295: no size warning, the mapping said once; insets (59 − 0.36)/1.3322 = 44.02 px, 21/1.3322 = 15.76 px", !cv.sizeNote && cv.canvasNote === "the game's 639×295 canvas, scaled to the 852×393 pt screen (contain, 1.3322 pt per canvas px, 0.36 pt bars left and right): canvas px = (inset pt − bar) ÷ 1.3322" && cv.px.left === 44.02 && cv.px.bottom === 15.76 && /0.75 px per pt/.test(cf.sizeNote) && /game's own canvas/.test(cf.sizeNote), [cv.canvasNote, cv.px, cf.sizeNote]);
   const mw = safePreset("iphone-portrait", 1290, 2796);
   ok("iphone-portrait on a 1290 px wide shot: warned (3.28 px per pt) and pointed at iphone-max-portrait", /3\.28 px per pt/.test(mw.sizeNote) && /--safe iphone-max-portrait/.test(mw.sizeNote), mw);
   const p16 = safePreset("iphone-16-pro-portrait", 1206, 2622);

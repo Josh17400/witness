@@ -143,7 +143,8 @@ async function uiMeasure(m, files, opt) {
     const { img } = fr, W = img.width, H = img.height;
     let safe, safeM, preset = null;
     if (safeName) {
-      try { preset = ui.safePreset(safeName, W, H, { fit: val(opt.fit) || "contain" }); } catch (e) { die(`--safe: ${e.message}`); }
+      // a frame from the game is its canvas (logical px), not a device screenshot: any size is fine
+      try { preset = ui.safePreset(safeName, W, H, { fit: val(opt.fit) || "contain", canvas: !!fr.snap }); } catch (e) { die(`--safe: ${e.message}`); }
       safe = { px: null, pct: null }; safeM = preset.px;
     } else {
       safe = pctOrPx(opt.safe, 1, "5%");
@@ -249,6 +250,7 @@ async function uiMeasure(m, files, opt) {
       lines.push(`  safe area ${p.name}: ${p.device}, ${p.orientation} ${p.pt.join("×")} pt @${p.dpr}x · env(safe-area-inset-*) ${["top", "bottom", "left", "right"].filter((k) => p.insetsPt[k]).map(side).join(" · ") || "none"}${p.mismatch ? "" : ` (${p.scale.x} px/pt${p.fit === "stretch" && p.scale.x !== p.scale.y ? ` across, ${p.scale.y} down` : ""})`}`);
       if (p.mismatch) lines.push(`  ${p.demote ? "⚠" : "·"} ${p.mismatch}`);
       if (p.sizeNote) lines.push(`  ⚠ ${p.sizeNote}`);
+      if (p.canvasNote) lines.push(`  · ${p.canvasNote}`);
     }
     lines.push(`  ${r.preset ? "" : `safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · `}min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? "4.5 (3 for 24 px+)"} · edges within ${alignTol} px`);
     lines.push(r.F.length ? `  ${r.fails ? "✖" : "⚠"} ${r.fails} problem${r.fails === 1 ? "" : "s"}, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : r.els.length ? `  ✔ no layout problems` : "  nothing to check: no UI elements found");

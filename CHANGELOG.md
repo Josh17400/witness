@@ -38,6 +38,13 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   (a swing read 605 ms long). A chord's beating (or tremolo) is no longer reported as a double trigger.
 - Mock game: `MOCK_SOUNDS=overlap`; sounds now start at the current time even when an earlier one wrote past it.
 
+**measure ui --safe on a game canvas**
+- A frame from the game is its own (logical) canvas, so its size needn't be a whole number of the preset's points:
+  the "639 px wide is 0.75 px per pt … insets scaled" warning is gone there, replaced by one line on the mapping:
+  `· the game's 639×295 canvas, scaled to the 852×393 pt screen (contain, 1.3322 pt per canvas px, 0.36 pt bars left
+  and right): canvas px = (inset pt − bar) ÷ 1.3322` (`data.safe.canvasNote`). A PNG file still gets the warning,
+  which now says a game canvas is fine.
+
 **Adoption steps**
 1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
    `--config witness.web.json`.

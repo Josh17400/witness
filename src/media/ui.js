@@ -301,7 +301,7 @@ const FITS = ["contain", "cover", "stretch"];
  * bottom}, insetsPt, zones, fit, ptPerPx, bars: {x, y} (pt), mismatch, sizeNote, demote } — demote: stretched over a
  * different aspect, the numbers are a guess (callers warn instead of failing).
  */
-export function safePreset(name, W, H, { fit = "contain" } = {}) {
+export function safePreset(name, W, H, { fit = "contain", canvas = false } = {}) {
   const p = SAFE_PRESETS[name];
   if (!p) throw new RangeError(`safe-area preset is ${Object.keys(SAFE_PRESETS).join(", ")} or a percentage (got ${name})`);
   if (!FITS.includes(fit)) throw new RangeError(`--fit is ${FITS.join(", ")} (got ${fit})`);
@@ -323,7 +323,7 @@ export function safePreset(name, W, H, { fit = "contain" } = {}) {
     ptPerPx = { x: f, y: f };
     scale = { x: r2(1 / f), y: r2(1 / f) };
   }
-  let mismatch = null, sizeNote = null;
+  let mismatch = null, sizeNote = null, canvasNote = null;
   if (p.only && (W > H) !== (orientation === "landscape")) mismatch = `the screenshot is ${W > H ? "landscape" : "portrait"} (${W}×${H}) but ${name} is ${orientation}`;
   else if (aspectOff) {
     mismatch = fit === "stretch"
@@ -334,14 +334,20 @@ export function safePreset(name, W, H, { fit = "contain" } = {}) {
   } else {
     // the device's own aspect: a full-screen capture. Its px per pt should be a whole number (1 CSS px, or the DPR)
     const k = W / PW;
-    if (Math.abs(k - Math.round(k)) > 0.01 * k) {
+    if (canvas) {
+      // the game's own (logical) canvas: any size is fine, the browser scales it to the screen
+      if (Math.abs(k - Math.round(k)) > 0.01 * k) {
+        const bar = fit === "stretch" ? null : bars.x > 0.005 ? ["left and right", bars.x] : bars.y > 0.005 ? ["top and bottom", bars.y] : null;
+        canvasNote = `the game's ${W}×${H} canvas, scaled to the ${PW}×${PH} pt screen (${fit}${fit === "stretch" ? "" : `, ${r4(ptPerPx.x)} pt per canvas px${bar ? `, ${r2(bar[1])} pt bars ${bar[0]}` : ""}`}): canvas px = ${bar ? "(inset pt − bar)" : "inset pt"} ÷ ${fit === "stretch" ? "pt per px on that axis" : r4(ptPerPx.x)}`;
+      }
+    } else if (Math.abs(k - Math.round(k)) > 0.01 * k) {
       const other = Object.entries(SAFE_PRESETS).filter(([n]) => n !== name).map(([n, q]) => [n, q[orientation] || null]).find(([, q]) => q && [1, 2, 3].some((d) => W === q.pt[0] * d && Math.abs(H - q.pt[1] * d) <= d));
-      sizeNote = `${W} px wide is ${r2(k)} px per pt: not a whole multiple of ${PW} pt, so this isn't a ${PW}×${PH} pt screen${other ? ` (it is ${other[1].pt.join("×")} pt at @${W / other[1].pt[0]}x: --safe ${other[0]})` : ""}; insets scaled to fit`;
+      sizeNote = `${W} px wide is ${r2(k)} px per pt: not a whole multiple of ${PW} pt, so this isn't a ${PW}×${PH} pt screen${other ? ` (it is ${other[1].pt.join("×")} pt at @${W / other[1].pt[0]}x: --safe ${other[0]})` : ""}; insets scaled to fit (fine if this is the game's own canvas, not a phone screenshot)`;
     }
   }
   const zones = Object.fromEntries(["top", "bottom", "left", "right"].filter((k) => I[k] > 0 && px[k] > 0).map((k) => [k, zoneName(name, k)]));
   return { name, device: p.device, orientation, pt: o.pt, dpr: p.dpr, fit, insetsPt: { ...I }, devicePx: Object.fromEntries(Object.entries(I).map(([k, v]) => [k, v * p.dpr])),
-    scale, ptPerPx: { x: r4(ptPerPx.x), y: r4(ptPerPx.y) }, bars: { x: r2(bars.x), y: r2(bars.y) }, px: Object.fromEntries(Object.entries(px).map(([k, v]) => [k, r2(v)])), zones, mismatch, sizeNote, demote: fit === "stretch" && aspectOff };
+    scale, ptPerPx: { x: r4(ptPerPx.x), y: r4(ptPerPx.y) }, bars: { x: r2(bars.x), y: r2(bars.y) }, px: Object.fromEntries(Object.entries(px).map(([k, v]) => [k, r2(v)])), zones, mismatch, sizeNote, canvasNote, demote: fit === "stretch" && aspectOff };
 }
 
 // ---------------------------------------------------------------------------

@@ -252,7 +252,8 @@ const CMD_HELP = {
       (430×932 pt), the same insets. iphone-16-pro-* (402×874) and iphone-16-pro-max-* (440×956): 62 instead of 59.
       iphone-safari-portrait/-landscape: an iPhone 15 Safari tab (393×659 / 734×343 pt): no insets. iphone-se: portrait
       top 20 (status bar), landscape none. ipad (10th gen/Air 11"): top 24, bottom 20. A full-screen shot whose width
-      isn't a whole number of points for the preset is warned about, with the preset that fits.
+      isn't a whole number of points for the preset is warned about, with the preset that fits; a frame from the game
+      is its own canvas (any size): one line says how insets map onto it instead.
   ui --from 0 --to 30 [--every 1f] [--within 10] [--input ...]
       sweep state.ui: ⚠ an element (by id) that hid and came back with the same text within --within s (a repeated
       toast or prompt: both times, how long it was hidden, its rect; values that change while it stays, like HP 10 →
