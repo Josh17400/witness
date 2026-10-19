@@ -59,6 +59,22 @@ ok("brief --game-hours without play.clock: the same error", r.code === 1 && /nee
 r = w(arena, ["play", "brief", "--game-hours", "4", "--wall-minutes", "15", "--name", "t9"]);
 ok("brief --game-hours: start line, budget in in-game hours, hard wall stop", r.code === 0 && /--game-hours 4 --wall-minutes 15/.test(r.out) && /BUDGET: play until 4h of in-game time have passed/.test(r.out) && /after 15 real \(wall-clock\) minutes/.test(r.out), r.out.slice(0, 1500));
 
+// ---- play.clock in witness.json that can't be read at the start (an RPG's title screen has no day/hour): a plain
+//      session still starts; --game-hours anchors at the first reading
+const arenaDayClock = proj("arena-dayclock", { ...arenaCfg, launch: { command: process.execPath, args: [arenaJs] }, play: { ...arenaCfg.play, clock: "state.day*24 + state.hour" } });
+r = w(arenaDayClock, ["play", "start", "--name", "c1"]);
+ok("play.clock unreadable at the start: a plain session starts anyway (no clock line)", r.code === 0 && !/didn't start/.test(r.out) && !/⏲/.test(r.out), r.out);
+w(arenaDayClock, ["play", "stop", "-s", "c1"]);
+r = w(arenaDayClock, ["play", "start", "--name", "c2", "--game-hours", "1"]);
+ok("--game-hours with an unreadable clock: starts and says it isn't readable yet", r.code === 0 && /⏲ .*not readable yet/.test(r.out), r.out);
+w(arenaDayClock, ["play", "stop", "-s", "c2"]);
+// ---- a clock that goes backwards (wraps): the ⏲ line warns instead of counting down forever
+r = w(arenaNoClock, ["play", "start", "--name", "wr", "--clock", "((state.time+2.5)/10) % 0.3", "--game-hours", "0.1"]);
+r = w(arenaNoClock, ["play", "do", "wait 6", "-s", "wr"]);
+ok("a wrapping clock: the ⏲ line warns that it went backwards", /⏲ .*went backwards.*include the day/.test(r.out), r.out);
+w(arenaNoClock, ["play", "end", "-s", "wr"]);
+ok("a wrapping clock: report.json until.warning", /went backwards/.test((report(dirOf(arenaNoClock, "wr")).until || {}).warning || ""), JSON.stringify(report(dirOf(arenaNoClock, "wr")).until));
+
 // ---- --until on the state, turn-based (mock): stops mid-chain the moment it's true
 r = w(mock, ["play", "start", "--name", "un", "--until", "state.score >= 2"]);
 ok("until: start shows the condition", r.code === 0 && /⏲ playing until: state\.score >= 2 \(not yet\)/.test(r.out), r.out);
@@ -91,8 +107,12 @@ const hasSh = spawnSync("sh", ["-c", "echo ok"], { encoding: "utf8", windowsHide
 if (!hasSh) console.log("  batch with a fake tester: skipped (no sh)");
 else {
   fs.writeFileSync(path.join(mock, "goals.json"), JSON.stringify([{ goal: "collect a coin block-once", name: "fb1" }, { goal: "collect a coin block-always", name: "fb2" }]));
-  const b = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "play", "batch", "--goals", "goals.json", "--parallel", "1", "--wall-minutes", "2"], { cwd: mock, encoding: "utf8", timeout: 300000, env: { ...process.env, ...env, WITNESS_CLAUDE: path.join(here, "fake-claude.mjs") } });
+  const tB = Date.now();
+  const b = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "play", "batch", "--goals", "goals.json", "--parallel", "1", "--wall-minutes", "50"], { cwd: mock, encoding: "utf8", timeout: 300000, env: { ...process.env, ...env, WITNESS_CLAUDE: path.join(here, "fake-claude.mjs") } });
+  const batchSec = (Date.now() - tB) / 1000;
   const bo = (b.stdout || "") + (b.stderr || "");
+  const walls = [...bo.matchAll(/· (\d+)s wall/g)].map((m) => +m[1]);
+  ok("batch: 'Ns wall' is the elapsed time, not the --wall-minutes cap added on", walls.length >= 2 && walls.every((s) => s <= batchSec + 1), `${walls} vs ${batchSec}s\n${bo}`);
   ok("batch: a blocked tester is reported with the denied command and retried once", /#1 fb1: blocked: permission denied \(cd ".*" && \.\/fb1 "goto Coin"\), 0 orders; retrying once with the exact allowed command/.test(bo), bo);
   ok("batch: the retry played through the brief's own short command (absolute path, no cd)", /#1 fb1: ENDED · [\d.]+s game · 1 orders .*retried after: blocked: permission denied/.test(bo), bo);
   ok("batch: blocked twice → a distinct outcome", /#2 fb2: BLOCKED: permission denied \(cd .*\) · 0 orders · also blocked on the retry/.test(bo), bo);
@@ -100,7 +120,7 @@ else {
   const bm = bmd ? fs.readFileSync(path.join(dirOf(mock, ""), bmd), "utf8") : "";
   ok("batch md: the blocked row and the retry note", /\| 2 \| collect a coin block-always \| newbie \| blocked: permission denied \(cd /.test(bm) && /\| 1 \| .* \| ended \(after a retry\) \|/.test(bm) && /retried once with the exact allowed command, which worked/.test(bm), bm);
   ok("batch: the blocked attempt's empty session folder was removed", fs.readdirSync(path.join(mock, "witness", "playtests")).filter((f) => f.startsWith("fb1")).length === 1, fs.readdirSync(path.join(mock, "witness", "playtests")).join(","));
-  ok("batch: the header names the units", /about 3 game minutes \(hard stop after 2 wall min\) each, tester timeout 5 wall min/.test(bo), bo.split("\n")[0]);
+  ok("batch: the header names the units", /about 3 game minutes \(hard stop after 50 wall min\) each, tester timeout 53 wall min/.test(bo), bo.split("\n")[0]);
 }
 
 // ---- nothing left running

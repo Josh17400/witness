@@ -293,7 +293,7 @@ export class PlatformRunner {
   }
 
   recordIncident(w, b, dir, how) {
-    this.ap.incidents.push({ t: this.ap.t, cell: [Math.floor(b.x / w.cell), Math.floor(b.y / w.cell)], heading: dir > 0 ? "E" : "W", seconds: 0.45 * (this.stuckN || 1), resolved: true, how, blocks: this.stuckN || 1 });
+    this.ap.incidents.push({ t: this.ap.t, cell: [Math.floor(b.x / w.cell), Math.floor(b.y / w.cell)], heading: dir > 0 ? "E" : "W", seconds: 0.45 * (this.stuckN || 1), resolved: true, how, blocks: this.stuckN || 1, scene: w.scene ?? null, sceneKey: w.sceneKey ?? null });
   }
 
   /** fight in a platformer: shoot if allowed and asked for, else stomp. */

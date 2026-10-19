@@ -41,9 +41,10 @@ order:  W do "<orders>" -s t1
 look:   W look -s t1
 next:   W next -s t1            (live games only: keep your order running, answer at the next important moment)
 screen: W shot -s t1            (prints a PNG path: open it with your Read tool to SEE the game)
-note:   W note "<what you noticed>" --bug|--confusing|--fun|--idea -s t1
-end:    W end -s t1 --fun <1-5> --difficulty <1-5> --feedback "<3-6 sentences>"
+note:   W note '<what you noticed>' --bug|--confusing|--fun|--idea -s t1
+end:    W end -s t1 --fun <1-5> --difficulty <1-5> --feedback '<3-6 sentences>'
 ```
+Note and feedback text: single quotes, plain words, no backticks, `$` or apostrophes inside (a backtick gets the command denied).
 
 The main agent usually gives you the exact `start` command: run it as given. It prints the first observation with
 your goal, the game's controls and the order card. `W orders` prints the order card again.

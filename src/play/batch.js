@@ -36,7 +36,9 @@ export function readGoals(file) {
 export function testerArgs({ model = "sonnet", effort = "low", cliJs, name }) {
   const wit = `node "${cliJs}" play`;
   const abs = shimPath(name).replace(/\\/g, "/");
-  const forms = [abs, `"${abs}"`, `./${name}`];
+  // Git Bash's /c/... form of the same path (a tester that rewrites it, or copies `pwd`): dontAsk matches rules textually
+  const msys = /^[A-Za-z]:\//.test(abs) ? `/${abs[0].toLowerCase()}${abs.slice(2)}` : null;
+  const forms = [abs, `"${abs}"`, ...(msys ? [msys, `"${msys}"`] : []), `./${name}`];
   const allow = [`Bash(${wit}:*)`, `Bash(${wit} *)`, ...forms.flatMap((f) => [`Bash(${f}:*)`, `Bash(${f} *)`, `Bash(${f})`]), "Bash(cd:*)", "Read"];
   return ["-p", "--model", model, "--effort", effort, "--tools", "Bash,Read", "--allowedTools", ...allow, "--add-dir", path.dirname(shimPath(name)), "--permission-mode", "dontAsk",
     "--setting-sources", "project,local", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--output-format", "json"];
@@ -66,7 +68,7 @@ const clip1 = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 /** The retry prompt after a permission block: the brief plus the exact allowed form. */
 export function nudge(brief, b, name) {
   const S = shimCommand(name);
-  return `${brief}\n\nIMPORTANT, A PREVIOUS ATTEMPT WAS BLOCKED: ${b.command ? `\`${b.command}\` was denied` : "a command was denied"} (there is no permission prompt here, so a denied command just fails). Only the exact command forms listed under COMMANDS are allowed. Run each one on its own, starting with the full path, for example:\n  ${S} "explore"\n  ${S} look\nNo cd, no && or ;, no other programs. That attempt's session was stopped: begin again with the start command.`;
+  return `${brief}\n\nIMPORTANT, A PREVIOUS ATTEMPT WAS BLOCKED: ${b.command ? `\`${b.command}\` was denied` : "a command was denied"} (there is no permission prompt here, so a denied command just fails). Only the exact command forms listed under COMMANDS are allowed. Run each one on its own, starting with the full path, for example:\n  ${S} "explore"\n  ${S} look\nUse the path exactly as shown (not a /c/... form), no cd, no && or ;, no other programs; note and feedback text in single quotes with no backticks. That attempt's session was stopped: begin again with the start command.`;
 }
 
 /** The claude binary: `claude`, or WITNESS_CLAUDE (a path; a .js/.mjs file runs with node — tests use a fake tester). */
@@ -147,7 +149,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
     ch.on("close", (code) => {
       clearTimeout(timer); children.delete(r);
       stopSession(r.name);   // the tester forgot END, or was killed: the session still writes its report
-      r.code = code; r.timedOut = timedOut; r.wall = (r.wall || 0) + (Date.now() - t0) / 1000; r.denials = null;
+      r.code = code; r.timedOut = timedOut; r.wallSec = (r.wallSec || 0) + (Date.now() - t0) / 1000;   // elapsed (r.wall is the --wall-minutes cap) r.denials = null;
       try { const j = JSON.parse(out.trim().split(/\r?\n/).filter((l) => l.startsWith("{")).pop() || "{}"); r.reply = j.result ?? null; r.cost = (r.cost || 0) + (j.total_cost_usd || 0); r.turns = j.num_turns ?? null; r.isError = !!j.is_error; r.denials = j.permission_denials || null; } catch { r.reply = out.trim().slice(-600) || null; }
       r.stderr = err.trim().slice(-800);
       const e = readEntry(r.name);
@@ -170,7 +172,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
       b = !r.timedOut && !interrupted ? blockedBy({ denials: r.denials, reply: r.reply, report: r.report }) : null;
     }
     r.blocked = b;
-    console.log(`  #${r.i} ${r.name}: ${line(r)}`);
+    console.log(`  #${r.i} ${r.name}: ${batchLine(r)}`);
   };
   const queue = runs.slice();
   await Promise.all(Array.from({ length: Math.min(parallel, runs.length) }, async () => { while (queue.length && !interrupted) await runOne(queue.shift()); }));
@@ -182,7 +184,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
   const mdFile = path.join(base, `batch-${stamp}.md`);
   fs.writeFileSync(mdFile, batchMarkdown(runs, { base, model: runs[0].model, effort: opt.effort || "low", minutes, budget }));
   console.log(`\nSummary:`);
-  for (const r of runs) console.log(`  #${r.i} ${r.goal}\n     ${line(r)}${r.dir ? `\n     report: ${path.join(r.dir, "report.md")}` : ""}`);
+  for (const r of runs) console.log(`  #${r.i} ${r.goal}\n     ${batchLine(r)}${r.dir ? `\n     report: ${path.join(r.dir, "report.md")}` : ""}`);
   const cost = runs.reduce((a, r) => a + (r.cost || 0), 0);
   console.log(`\n${runs.filter((r) => r.report).length}/${runs.length} reports${cost ? ` · tester cost $${cost.toFixed(2)} (shown by claude; covered by a subscription login)` : ""} · ${mdFile}`);
 }
@@ -193,13 +195,25 @@ export function budgetText(r) {
   return `${b}${r.wall != null ? ` (hard stop after ${r.wall} wall min)` : ""}`;
 }
 
+/**
+ * The commands claude denied in a tester's (last) attempt. A tester that played can still lose a note or its END (a
+ * backtick in the text reads as command substitution; a cd; the /c/... path form). {n, cmds, first, endDenied} or null.
+ */
+export function deniedInfo(r) {
+  const cmds = (Array.isArray(r.denials) ? r.denials : []).filter(Boolean).map((d) => { const i = d.tool_input || {}; return String(i.command || i.file_path || d.tool_name || "?"); });
+  if (!cmds.length) return null;
+  const R = r.report, fed = R && R.feedback && (R.feedback.text || R.feedback.fun != null);
+  const endDenied = !fed && cmds.some((c) => /(^|\s)end(\s|$)/.test(c.replace(/"[^"]*"|'[^']*'|`[^`]*`/g, " ")));
+  return { n: cmds.length, cmds, first: cmds[0], endDenied };
+}
+const deniedText = (d) => `${d.n} command${d.n > 1 ? "s" : ""} denied (${clip1(d.first, 80)})${d.endDenied ? " · END was denied (no feedback recorded)" : ""}`;
 const spots = (R) => (R.stuckSpots && R.stuckSpots.length && R.stats.stuck > R.stuckSpots.length ? ` in ${R.stuckSpots.length} spot${R.stuckSpots.length > 1 ? "s" : ""}` : "");
-function line(r) {
+export function batchLine(r) {
   const R = r.report, S = R && R.stats;
   const retried = r.firstBlock ? ` · retried after: ${blockedText(r.firstBlock)}` : "";
-  if (r.blocked) return `${blockedText(r.blocked).replace(/^blocked/, "BLOCKED")} · 0 orders${r.firstBlock ? " · also blocked on the retry" : ""} · ${Math.round(r.wall)}s wall`;
+  if (r.blocked) return `${blockedText(r.blocked).replace(/^blocked/, "BLOCKED")} · 0 orders${r.firstBlock ? " · also blocked on the retry" : ""} · ${Math.round(r.wallSec || 0)}s wall`;
   if (!R) return `no report — ${r.timedOut ? `the tester timed out after ${r.timeoutMin} min` : `the tester exited (code ${r.code})`}${r.stderr ? `: ${r.stderr.split("\n").slice(-2).join(" ")}` : r.reply ? `: ${String(r.reply).split("\n")[0].slice(0, 160)}` : ""}${retried}`;
-  return `${String(R.outcome || R.status).toUpperCase()} · ${r1(R.gameSeconds)}s game · ${S.orders} orders · kills ${S.kills} · deaths ${S.deaths} · stuck ${S.stuck}${spots(R)} · notes ${(R.notes || []).length}${R.feedback && R.feedback.fun != null ? ` · fun ${R.feedback.fun}/5` : ""}${r.timedOut ? " · tester timed out" : ""}${retried} · ${Math.round(r.wall)}s wall`;
+  return `${String(R.outcome || R.status).toUpperCase()} · ${r1(R.gameSeconds)}s game · ${S.orders} orders · kills ${S.kills} · deaths ${S.deaths} · stuck ${S.stuck}${spots(R)} · notes ${(R.notes || []).length}${R.feedback && R.feedback.fun != null ? ` · fun ${R.feedback.fun}/5` : ""}${r.timedOut ? " · tester timed out" : ""}${retried}${deniedInfo(r) ? ` · ${deniedText(deniedInfo(r))}` : ""} · ${Math.round(r.wallSec || 0)}s wall`;
 }
 
 export function batchMarkdown(runs, { base, model, effort, minutes, budget = `about ${minutes} game minutes` }) {
@@ -217,6 +231,8 @@ export function batchMarkdown(runs, { base, model, effort, minutes, budget = `ab
     L.push("", `## ${r.i}. ${r.goal}`, "");
     const R = r.report;
     for (const b of [r.firstBlock, r.blocked].filter(Boolean)) L.push(`**${blockedText(b)}**${b === r.firstBlock && !r.blocked ? ": retried once with the exact allowed command, which worked" : b === r.blocked ? ": the tester stopped instead of working around it (correct). Check that the brief's commands match \`claude -p --allowedTools\` (\`witness play batch --dry-run\` prints both)." : ""}`, "");
+    const dn = !r.blocked && deniedInfo(r);
+    if (dn) L.push(`**${deniedText(dn).replace(/ \(.*$/, "")}** (a batch has no permission prompt, so they just failed)${dn.endDenied ? ": **END was denied, so no feedback was recorded** (the batch stopped the session)" : ""}:`, "", ...dn.cmds.slice(0, 6).map((c) => `- \`${clip1(c.replace(/`/g, "'"), 160)}\``), "");
     if (R && R.feedback && R.feedback.text) L.push(`Feedback: ${R.feedback.text}`, "");
     if (R && R.notes && R.notes.length) { for (const n of R.notes.slice(0, 12)) L.push(`- ${n.kind} at ${r1(n.t)}s: ${n.text}`); L.push(""); }
     if (r.reply) L.push("Tester's reply:", "", ...String(r.reply).trim().split("\n").map((l) => `> ${l}`), "");

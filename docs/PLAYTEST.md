@@ -135,7 +135,7 @@ of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` bes
 | `play next` | `-s t1` `--for S` | Live mode: the same as `look --wait`. |
 | `play shot` | `-s t1` `--scale K` | Screenshot → PNG path (open it with the Read tool). Frames narrower than 600 px are upscaled 2× (nearest). |
 | `play note "<text>"` | `--bug` `--confusing` `--fun` `--idea` `--shot` `-s t1` | Adds a note to the timeline and a mark to the replay. `--bug` notes always take a screenshot. |
-| `play end` | `-s t1` `--fun 1-5` `--difficulty 1-5` `--feedback "…"` `--all` | Writes report.md/report.json/coverage.png and the final replay, stops the game and the daemon. |
+| `play end` | `-s t1` `--fun 1-5` `--difficulty 1-5` `--feedback '…'` `--all` | Writes report.md/report.json/coverage.png and the final replay, stops the game and the daemon. |
 | `play stop` | `-s t1` or `--all` | Same as `end`, without feedback (reason "stopped by the main agent"). Kills the daemon and game if they don't exit within 15 s. |
 | `play status` | `-s t1` | Game time, frame, orders and notes of a live session; state and summary of an ended one. |
 | `play list` | `--clean` | All sessions in the registry (● live, ○ ended). `--clean` kills unresponsive sessions (daemon and game), marks dead ones ended, and drops entries older than 7 days or whose folder was deleted. |
@@ -292,13 +292,17 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   absolute path (`C:/Users/me/AppData/Local/Temp/witness-play/b10191200-1 "goto Inn"`, quoted when the path has
   spaces): no `cd`. In dontAsk mode Claude Code denies a `cd` outside the tester's working folder even when
   `Bash(cd:*)` is allowed, so 0.7.1's `cd <registry>` then `./name` left a tester with 0 orders. The allowed rules
-  cover the long `node "…/witness.js" play …` form, the short command bare and quoted, and `./name`; `--add-dir`
-  makes a `cd` to the registry legal too. Checked with real `claude -p` runs: every brief command is allowed, other
+  cover the long `node "…/witness.js" play …` form, the short command bare and quoted (also in Git Bash's `/c/…`
+  form on Windows), and `./name`; `--add-dir` makes a `cd` to the registry legal too. Checked with real `claude -p` runs: every brief command is allowed, other
   commands (`ls /`) are denied.
 * **Blocked testers:** a tester that ends with 0 orders and a permission denial (claude's `permission_denials`, or
   its reply saying so) is reported as `blocked: permission denied (<the command>)`, its empty session folder is
   removed, and it is run once more with a note naming the exact allowed form. Blocked again: the outcome stays
   `blocked: …` in the summary and the batch file.
+* **Denials after playing:** a tester that played can still have commands denied (Claude Code treats a backtick in
+  note or feedback text as command substitution, so the brief asks for that text in single quotes, with no backticks or
+  `$`). The tester's line and its batch-file section then say `· N commands denied (<first>)` and list them, plus
+  `END was denied (no feedback recorded)` when the END itself was (the batch then stopped the session).
 * **At most 2 at once** (`--parallel 1` or `2`; each tester is a claude process plus a game and a daemon).
 * **Nothing is left running:** each tester has a wall-clock timeout (`--timeout` minutes, default
   above); its session is stopped when it exits (the report is written either way); Ctrl-C kills
@@ -318,10 +322,20 @@ unit. `play start`, `play brief` and `play batch` take:
   `state.quest == 'done'`). Checked after every step.
 * `--game-hours N`: needs `"play": {"clock": "<expr>"}` in witness.json (or `--clock "<expr>"`), an expression giving
   in-game hours, e.g. `"state.day*24 + state.hour + state.minute/60"`. The session plays until the clock has advanced
-  N hours from its value at the start.
+  N hours from its first reading.
 
-A bad expression (a missing path), `--game-hours` without a clock, or a condition already true at the start fails the
-start before any play. While it runs, a line under the header shows the clock and what is left:
+**The clock must keep increasing: include the day.** `state.hour + state.minute/60` wraps at midnight, so 22:00 plus
+4 hours (26) is never reached. A wrap from the evening to the morning is counted as the next day (+24h), and any other
+jump backwards is warned about in the `⏲` line and report.json `until.warning`: `⚠ play.clock went backwards (0.3h →
+0h): include the day so it keeps increasing, e.g. state.day*24 + state.hour`. The same goes for `--until`: started at
+20:00, `state.hour >= 18` is already true, and the error suggests `--until "state.day*24 + state.hour >= <hours>"`.
+
+**A clock that can't be read yet** (a title screen or menu without `day`/`hour`) doesn't stop a session: with only
+`play.clock` set, the `⏲` line appears once the clock can be read; with `--game-hours` the line says `game clock not
+readable yet (…)` and the hours count from the first reading.
+
+A bad `--until` expression (a missing path), `--game-hours` without a clock, or a condition already true at the start
+fails the start before any play. While it runs, a line under the header shows the clock and what is left:
 `⏲ clock 33h (+1h30m since the start) · 3h of in-game time to go (until clock 37.5h)` (or `playing until: <expr> (not
 yet)`). The moment it is reached the running order stops with `★ UNTIL REACHED: the game clock reached 37.5h (4h30m
 of in-game time): the playtest is over, run END now with your feedback`; later orders are refused without stepping
@@ -588,7 +602,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `platformer` | `{jumpFrames: 18, runJumpFrames: 22, stomp: true}` | also `run` (false: never hold run), `stuckLimit` (7 s), `airAccel` (air control per frame, default 0.005 cells) |
 | `fps` | `{sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2}` | also `range` (12 cells), `degrees`, `yawSign`, `maxTurn` (0.5 rad per tick), `floorHeight` (2.2 world units: a bigger vertical gap is another floor) |
 | `module` | none | see below |
-| `clock` | none | an expression giving in-game hours (`"state.day*24 + state.hour"`): enables `--game-hours N` and shows `⏲ clock …` under the observation header |
+| `clock` | none | an expression giving in-game hours that keeps increasing, so include the day (`"state.day*24 + state.hour"`, not `state.hour`): enables `--game-hours N` and shows `⏲ clock …` under the observation header (once it can be read: a title screen may have no clock) |
 | `brief` | none | default `--extra` text for `play brief` |
 
 **`play.module`** (advanced): an ES module path relative to witness.json. If it exports `perceive(world, snap)`, that
@@ -668,7 +682,8 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 3. **Tester feedback**: fun and difficulty (1–5), the feedback text, then notes grouped as Bugs suspected, Confusing
    moments, Ideas, Fun moments, Notes (time, cell, screenshot link);
 4. Game errors · Fights (table: against, start, length, result, dealt, taken, windups avoided/hit) · Stuck incidents
-   (grouped into **spots**: incidents within 2 cells of each other, most incidents first, a table row per spot with its
+   (grouped into **spots**: incidents within 2 cells of each other in the same scene, the scene named when there are
+   several, most incidents first, a table row per spot with its
    count, unresolved count, total stuck time, first–last time, headings and one `witness replay … --at <t> --shot`
    command at its first unresolved (else longest) incident; each incident is listed too only when there are 10 or
    fewer, so a long run's 63 incidents read as the 3-4 places that matter) ·

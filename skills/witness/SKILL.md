@@ -199,7 +199,7 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    `witness/playtests/batch-<time>.md`). Use `--parallel 1` when the machine is busy. A tester stopped by a permission
    denial shows as `blocked: permission denied (<command>)` (it is retried once).
    **Games with a day clock:** `--game-hours 4` (brief, batch, start) plays 4 in-game hours, given `play.clock` in
-   witness.json (an expression giving in-game hours, e.g. `"state.day*24 + state.hour"`); `--until "<expr>"` plays
+   witness.json (an expression giving in-game hours that keeps increasing: include the day, `"state.day*24 + state.hour"`); `--until "<expr>"` plays
    until any state condition. Orders stop there and the tester ENDs (outcome `until reached`).
 5. **Read `witness/playtests/t1/report.md`**: tester feedback and bug notes first, then fights (windups avoided vs
    hit), stuck spots (incidents grouped by place, most first, one replay command each), deaths, coverage. Open the

@@ -59,9 +59,10 @@ COMMANDS (run with your Bash tool, one at a time, exactly as written: the full p
   look:   ${S} look${live ? `
   next:   ${S} next         (keep your order running; returns at the next important moment or after ~4 s)` : ""}
   screen: ${S} shot          (prints a PNG path: open it with your Read tool to SEE the game)
-  note:   ${S} note "<what you noticed>" --bug|--confusing|--fun|--idea
-  end:    ${S} end --fun <1-5> --difficulty <1-5> --feedback "<3-6 sentences>"
+  note:   ${S} note '<what you noticed>' --bug|--confusing|--fun|--idea
+  end:    ${S} end --fun <1-5> --difficulty <1-5> --feedback '<3-6 sentences>'
   (if ${S} isn't found, the long form works the same: ${W} do "<orders>" -s ${name}, ${W} next -s ${name}, …)
+  Note and feedback text goes in single quotes, written plainly: no backticks, no $, no apostrophes inside (say "do not", "the guards sword"). A backtick makes the command fail.
 ${live ? "SPEED: every turn, send ONLY the next command. No text before or after it, no plans written out: typing costs you time while the game plays on. Think briefly, act." : `TURNS: send only the next command each turn (no commentary), but think it through first: the game waits for you${watch ? " (a person is watching, and each order plays at real speed)" : ""}, so use that time to pick the best move: weapon for the range, cover, when to back off.`}
 
 ORDERS (chain several with ";"):

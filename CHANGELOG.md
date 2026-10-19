@@ -75,6 +75,32 @@ around it, and the batch said `STOPPED · 0s game · 0 orders`)
   `stuckSpots[]`; the batch line says "stuck 63 in 4 spots".
 - Adoption steps: none.
 
+**play: review fixes for the clock, batch and stuck spots** (from a review of the entries above)
+- `play.clock` in witness.json no longer stops a session that starts where the clock can't be read (a title screen
+  with no `day`/`hour`). Before: every `play start` and batch tester failed with `play.clock "…" isn't a number here
+  (got null)`. Now a plain session starts and the `⏲ clock` line appears once the clock can be read. With
+  `--game-hours`, the line says `game clock not readable yet (…)` and the hours count from the first reading. The
+  error now says `got NaN` or `got undefined` instead of `got null`.
+- A clock that goes backwards is no longer silent. Before: `state.hour` started at 22:00 with `--game-hours 4` aimed
+  at 26h, which it could never reach, and ran until the wall cap. Now a wrap from the evening to the morning counts as
+  the next day (+24h), and any other drop adds `⚠ play.clock went backwards (…): include the day so it keeps
+  increasing, e.g. state.day*24 + state.hour` to the `⏲` line and report.json `until.warning`. An `--until
+  "state.hour >= 18"` that is already true at the start suggests `--until "state.day*24 + state.hour >= 66"`.
+- Batch denials after the first order are shown. Before: Claude Code denies a command with a backtick in it (it reads
+  as command substitution), so a tester's `end --feedback "… \`goto Inn\` …"` was lost and the batch showed a normal
+  ENDED line. Now briefs and the playtester skill put note and feedback text in single quotes, with no backticks or
+  `$`. Every tester's line and batch-file section show `· N commands denied (<first>)`, with `END was denied (no
+  feedback recorded)` when the END was one of them. A real `claude -p` probe in dontAsk mode allowed single-quoted
+  note and END text and denied the backtick form.
+- The batch `Ns wall` figure is the elapsed time. Before: with `--wall-minutes 15` it was 15 too high, because
+  `r.wall` held both the cap and the elapsed seconds.
+- Stuck spots are grouped by scene as well as cell. Each incident records `scene`/`sceneKey`, so a stuck point at the
+  Inn's (3,4) and one at the overworld's (4,5) are now two spots. The spot table names the scene when there is more
+  than one.
+- On Windows, batch `--allowedTools` also allow Git Bash's `/c/…` form of the session command, bare and quoted. A real
+  probe ran it without a denial.
+- Adoption steps: none. *Optional:* make `play.clock` include the day (`state.day*24 + state.hour`).
+
 ## 0.7.1 (2026-10-19)
 
 Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web builds).

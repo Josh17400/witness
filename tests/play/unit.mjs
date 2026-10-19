@@ -12,7 +12,7 @@ import { makeBrief } from "../../src/play/brief.js";
 import { compass, editDistance, singular } from "../../src/play/util.js";
 import { runFixTests } from "./fixes.mjs";
 import { checkSnapshot, checkLines } from "../../src/play/check.js";
-import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, budgetText } from "../../src/play/batch.js";
+import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, budgetText, batchLine } from "../../src/play/batch.js";
 import { shimCommand } from "../../src/play/registry.js";
 import { stuckSpots, reportMarkdown as reportMd } from "../../src/play/report.js";
 import { UntilWatch, fmtHours } from "../../src/play/until.js";
@@ -279,6 +279,7 @@ ok("autopilot: no unresolved stuck with a map", r.ap.incidents.filter((i) => !i.
 S1 = simWorld(); S1.useMap = false;
 r = drive(S1, { controls: { move: "wasd" }, map: false }, "goto 18,7", 60 * 90);
 ok("autopilot learns walls and still gets through the maze (no map)", r.status === "done" && Math.floor(S1.p[0] / 16) === 18, `${r.status} ${r.msg} at ${S1.p.map((x) => x.toFixed(1))} t=${r.t.toFixed(1)} learned=${r.ap.grid.learned.size}`);
+ok("autopilot: stuck incidents record the scene they happened in", r.ap.incidents.length > 0 && r.ap.incidents.every((i) => typeof i.sceneKey === "string" && "scene" in i), JSON.stringify(r.ap.incidents.slice(0, 2)));
 {
   // a target that leaves the view (goes indoors) reads as "went out of view (last seen at …)", not "lost track"
   const SV = simWorld(); SV.useMap = true;
@@ -522,6 +523,64 @@ ok("help: units named", /brief .*--minutes 4 \(GAME minutes\)/.test(PLAY_HELP) &
   ok("report.md: the summary says how many spots, Reproduce lists the top 3", /stuck incidents 63 in 4 spots/.test(md63) && (md63.split("## Reproduce")[1].match(/# stuck spot/g) || []).length === 3, md63.split("## Reproduce")[1]);
   const md3 = reportMd({ ...rep63, stats: { ...rep63.stats, stuck: 3 }, stuck: inc.slice(0, 3), stuckSpots: stuckSpots(inc.slice(0, 3)) });
   ok("report.md: a few incidents are still listed one by one", (md3.split("## Stuck incidents")[1].split("\n## ")[0].match(/^- \[/gm) || []).length === 3);
+}
+
+// ---- 0.7.2 reviewer findings
+{
+  const sn = (snapState, time = 1) => ({ frame: 60, time, state: snapState });
+  // play.clock set in witness.json, the game starts on a title screen without day/hour: a plain session still starts
+  const pc = new UntilWatch({ clock: "state.day*24 + state.hour" });
+  let err = null; try { pc.start(sn({ menu: "title" })); } catch (e) { err = e.message; }
+  ok("until: play.clock alone doesn't fail the start when the clock can't be read yet", err === null && pc.line() === null, err);
+  ok("until: the clock shows once it can be read", pc.check(sn({ day: 1, hour: 9 })) === false && pc.line() === "⏲ clock 33h", pc.line());
+  // --game-hours: anchored lazily at the first finite reading
+  const gl = new UntilWatch({ gameHours: 2, clock: "state.day*24 + state.hour" });
+  err = null; try { gl.start(sn({ menu: "title" })); } catch (e) { err = e.message; }
+  ok("until: --game-hours on a title screen starts; the line says the clock isn't readable yet", err === null && /not readable yet/.test(gl.line() || ""), `${err} ${gl.line()}`);
+  ok("until: --game-hours anchors at the first reading", gl.check(sn({ day: 1, hour: 9 })) === false && gl.clock0 === 33 && gl.target === 35 && /2h of in-game time to go \(until clock 35h\)/.test(gl.line()), gl.line());
+  ok("until: … and is reached 2 hours later", gl.check(sn({ day: 1, hour: 11 })) === true);
+  ok("until: a non-number names NaN / undefined, not null", (() => { try { new UntilWatch({ clock: "state.hour" }).clockOf(sn({ hour: undefined })); return false; } catch (e) { return /got undefined/.test(e.message) && !/null/.test(e.message); } })()
+    && (() => { try { new UntilWatch({ clock: "state.day*24" }).clockOf(sn({ day: "x" })); return false; } catch (e) { return /got NaN/.test(e.message); } })());
+  // a clock that wraps at midnight: unwrapped (+24h), with a warning; any other backwards jump warns
+  const wr = new UntilWatch({ gameHours: 4, clock: "state.hour" });
+  wr.start(sn({ hour: 22 }));
+  wr.check(sn({ hour: 23.5 })); wr.check(sn({ hour: 0.5 }));
+  ok("until: a clock wrapping at midnight is unwrapped and warned about", wr.now === 24.5 && /went backwards|wrapped/.test(wr.line()) && /state\.day\*24/.test(wr.line()) && /1h30m of in-game time to go/.test(wr.line()), wr.line());
+  ok("until: … --game-hours then finishes", wr.check(sn({ hour: 2 })) === true && wr.report().warning);
+  const bk = new UntilWatch({ gameHours: 0.1, clock: "state.c" });
+  bk.start(sn({ c: 0.25 })); bk.check(sn({ c: 0.29 })); bk.check(sn({ c: 0.01 }));
+  ok("until: a clock dropping below its start warns", /went backwards/.test(bk.line()) && /include the day/.test(bk.line()), bk.line());
+  ok("until: already reached suggests a day-based --until", (() => { try { new UntilWatch({ until: "state.hour >= 18" }).start(sn({ day: 1, hour: 20 })); return false; } catch (e) { return /already reached/.test(e.message) && /state\.day\*24 \+ state\.hour >= 66/.test(e.message); } })());
+
+  // batch: the brief tells testers to single-quote note/feedback text (backticks and $ are denied or expand)
+  const bq = makeBrief({ cli: 'node "C:/w/bin/witness.js"', configDir: "C:/game", name: "b1-1", goal: "win" });
+  ok("brief: note and end feedback in single quotes, no backticks or $", /note:\s+\S+ note '<what you noticed>'/.test(bq) && /--feedback '<3-6 sentences>'/.test(bq) && /single quotes/.test(bq) && /backticks/.test(bq), bq.split("COMMANDS")[1].slice(0, 900));
+  // batch: denials after the first order are still shown; a denied END is named
+  const played = { i: 1, goal: "g", persona: "newbie", wallSec: 42, wall: 15, dir: "x", reply: "done",
+    report: { outcome: "ended", gameSeconds: 30, stats: { orders: 4, kills: 0, deaths: 0, stuck: 0 }, notes: [], feedback: null },
+    denials: [{ tool_name: "Bash", tool_input: { command: "/t/b1-1 note \"I liked `goto Inn`\" --fun" } }, { tool_name: "Bash", tool_input: { command: "/t/b1-1 end --fun 4 --feedback \"`goto` was great\"" } }] };
+  const ln = batchLine(played);
+  ok("batch line: denials shown even after orders; END denied named", /· 2 commands denied \(\/t\/b1-1 note/.test(ln) && /END was denied \(no feedback recorded\)/.test(ln), ln);
+  ok("batch line: elapsed wall seconds, not the --wall-minutes cap", /· 42s wall$/.test(ln), ln);
+  const mdD = batchMarkdown([played], { base: os.tmpdir(), model: "sonnet", effort: "low", minutes: 3 });
+  ok("batch md: the denials are listed in the tester's section", /2 commands denied/.test(mdD) && /END was denied/.test(mdD), mdD);
+
+  // stuck spots: the same cells in different scenes are different spots
+  const sc = [{ t: 1, cell: [3, 4], heading: "N", seconds: 1, resolved: true, how: "x", scene: "Inn", sceneKey: '["Inn"]' }, { t: 5, cell: [4, 5], heading: "N", seconds: 1, resolved: true, how: "x", scene: "Overworld", sceneKey: '["Overworld"]' },
+    { t: 9, cell: [3, 5], heading: "E", seconds: 1, resolved: true, how: "x", scene: "Inn", sceneKey: '["Inn"]' }];
+  const spS = stuckSpots(sc);
+  ok("stuck spots: grouped by scene and cell", spS.length === 2 && spS[0].scene === "Inn" && spS[0].count === 2 && spS[1].scene === "Overworld", JSON.stringify(spS));
+  const mdS = reportMd({ session: "s", outcome: "ended", seed: 1, frames: 60, gameSeconds: 60, wallSeconds: 2, stats: { orders: 0, ordersFailed: 0, stuck: 3 }, stuckSpots: spS, replay: { file: "r.jsonl" }, notes: [], timeline: [], orders: [], errors: [], shots: [], deaths: [], dialogues: [], fights: [], stuck: sc });
+  ok("report.md: the spot table names the scene", /\| Inn \(3,4\)/.test(mdS) && /\| Overworld \(4,5\)/.test(mdS), mdS.split("## Stuck incidents")[1]);
+
+  // allowedTools: the Git Bash /c/... form of the shim path
+  if (process.platform === "win32") {
+    const aw = testerArgs({ model: "sonnet", effort: "low", cliJs: "C:/w/bin/witness.js", name: "b1-1" });
+    const rl = aw.slice(aw.indexOf("--allowedTools") + 1, aw.indexOf("--add-dir")).filter((a) => a.startsWith("Bash(")).map((a) => a.slice(5, -1));
+    const al = (cmd) => rl.some((x) => (x.endsWith(":*") ? cmd.startsWith(x.slice(0, -2)) : x.endsWith(" *") ? cmd.startsWith(x.slice(0, -1)) : cmd === x));
+    const msys = shimCommand("b1-1").replace(/"/g, "").replace(/^([A-Za-z]):/, (m, d) => `/${d.toLowerCase()}`);
+    ok("batch: the MSYS /c/... form of the shim is allowed (bare and quoted)", al(`${msys} look`) && al(`"${msys}" look`), `${msys}\n${rl.join("\n")}`);
+  }
 }
 
 // ---- regressions from a real game's reports (Embervale)

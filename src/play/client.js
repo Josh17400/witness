@@ -32,8 +32,8 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
                      (live: replaces the plan now, answers at done / an important event / the horizon; play goes on)
   witness play look [-s t1] [--shot] [--json] [--wait]   the observation now (live --wait: at the next event or horizon)
   witness play shot [-s t1] [--scale 2]          screenshot → PNG path (open it with the Read tool)
-  witness play note "<text>" [--bug|--confusing|--fun|--idea] [--shot] [-s t1]
-  witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback "…"]   → report.md/json + replay, stops everything
+  witness play note '<text>' [--bug|--confusing|--fun|--idea] [--shot] [-s t1]
+  witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback '…']   → report.md/json + replay, stops everything
   witness play status|stop [-s t1|--all]|list [--clean]|report [t1|dir] [--json]
   witness play clean [t1] [--all]                 delete a playtest you've acted on (t1), old ones (no name), or all of them
   witness play brief [--goal …] [--persona …] [--minutes 4 (GAME minutes)] [--until …|--game-hours N] [--wall-minutes M]

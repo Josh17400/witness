@@ -7,23 +7,24 @@ import { r1, clip, oneLine } from "./util.js";
 const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "?");
 
 /**
- * Stuck incidents grouped into spots: incidents within `radius` cells (Chebyshev) of a spot's first one join it. A long
+ * Stuck incidents grouped into spots: incidents in the same scene (sceneKey: an interior and the overworld can share
+ * cell numbers) within `radius` cells (Chebyshev) of a spot's first one join it. A long
  * run snags on the same few corners again and again (63 incidents, mostly at a few doorways); the spots, most incidents
  * first, point at those places. Each spot names one moment to replay: its first unresolved incident, else the longest.
  */
 export function stuckSpots(incidents = [], radius = 2) {
   const spots = [];
   for (const s of [...incidents].filter((x) => x && x.cell).sort((a, b) => a.t - b.t)) {
-    let sp = spots.find((q) => Math.max(Math.abs(q.anchor[0] - s.cell[0]), Math.abs(q.anchor[1] - s.cell[1])) <= radius);
-    if (!sp) spots.push(sp = { anchor: s.cell, list: [] });
+    let sp = spots.find((q) => q.sceneKey === (s.sceneKey ?? null) && Math.max(Math.abs(q.anchor[0] - s.cell[0]), Math.abs(q.anchor[1] - s.cell[1])) <= radius);
+    if (!sp) spots.push(sp = { anchor: s.cell, sceneKey: s.sceneKey ?? null, scene: s.scene ?? null, list: [] });
     sp.list.push(s);
   }
-  return spots.map(({ list }) => {
+  return spots.map(({ list, scene, sceneKey }) => {
     const cells = new Map(), heads = new Map();
     for (const s of list) { const k = s.cell.join(","); cells.set(k, (cells.get(k) || 0) + 1); heads.set(s.heading, (heads.get(s.heading) || 0) + 1); }
     const cell = [...cells.entries()].sort((a, b) => b[1] - a[1])[0][0].split(",").map(Number);
     const rep = list.find((s) => !s.resolved) || [...list].sort((a, b) => b.seconds - a.seconds)[0];
-    return { cell, cells: cells.size, count: list.length, unresolved: list.filter((s) => !s.resolved).length, seconds: +list.reduce((a, s) => a + (s.seconds || 0), 0).toFixed(2),
+    return { scene, sceneKey, cell, cells: cells.size, count: list.length, unresolved: list.filter((s) => !s.resolved).length, seconds: +list.reduce((a, s) => a + (s.seconds || 0), 0).toFixed(2),
       first: list[0].t, last: list.at(-1).t, headings: Object.fromEntries([...heads.entries()].sort((a, b) => b[1] - a[1])),
       replayAt: +(rep.t + Math.min(0.5, rep.seconds || 0)).toFixed(2), shot: (list.find((s) => s.shot) || {}).shot || null };
   }).sort((a, b) => b.count - a.count || b.seconds - a.seconds);
@@ -112,14 +113,16 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     L.push("");
   }
   const spots = r.stuckSpots || stuckSpots(r.stuck || []);
+  // the scene is named when the spots are in more than one (an interior's (3,4) isn't the overworld's (3,4))
+  const where = new Set(spots.map((s) => s.sceneKey ?? null)).size > 1 ? (sp) => `${sp.scene ?? (sp.sceneKey ? clip(sp.sceneKey, 30) : "?")} ` : () => "";
   const replayFile = r.replay && r.replay.file ? sh(rel(r.replay.file)) : "replay.jsonl";
   if (r.stuck.length) {
     L.push("## Stuck incidents");
-    L.push(`Detected automatically: the autopilot pushed toward a target and didn't move. ${r.stuck.length} incident${r.stuck.length > 1 ? "s" : ""} in **${spots.length} spot${spots.length > 1 ? "s" : ""}** (incidents within 2 cells of each other), most first. A spot with many incidents is a real problem place: a collision bug (a snag on a corner, an invisible wall) or a confusing layout.`);
+    L.push(`Detected automatically: the autopilot pushed toward a target and didn't move. ${r.stuck.length} incident${r.stuck.length > 1 ? "s" : ""} in **${spots.length} spot${spots.length > 1 ? "s" : ""}** (incidents within 2 cells of each other, in the same scene), most first. A spot with many incidents is a real problem place: a collision bug (a snag on a corner, an invisible wall) or a confusing layout.`);
     L.push("", "| spot (cell) | incidents | unresolved | stuck for | between | heading | see it |", "|---|---|---|---|---|---|---|");
     for (const sp of spots.slice(0, 12)) {
       const heads = Object.entries(sp.headings).map(([h, n]) => (n > 1 ? `${h}×${n}` : h)).join(" ");
-      L.push(`| (${sp.cell})${sp.cells > 1 ? ` +${sp.cells - 1} near` : ""} | ${sp.count} | ${sp.unresolved || "–"} | ${r1(sp.seconds)}s | ${r1(sp.first)}s${sp.count > 1 ? `–${r1(sp.last)}s` : ""} | ${heads} | \`${replayCmd} ${replayFile} --at ${sp.replayAt.toFixed(2)} --shot\`${sp.shot ? ` · [shot](${link(sp.shot)})` : ""} |`);
+      L.push(`| ${where(sp)}(${sp.cell})${sp.cells > 1 ? ` +${sp.cells - 1} near` : ""} | ${sp.count} | ${sp.unresolved || "–"} | ${r1(sp.seconds)}s | ${r1(sp.first)}s${sp.count > 1 ? `–${r1(sp.last)}s` : ""} | ${heads} | \`${replayCmd} ${replayFile} --at ${sp.replayAt.toFixed(2)} --shot\`${sp.shot ? ` · [shot](${link(sp.shot)})` : ""} |`);
     }
     if (spots.length > 12) L.push("", `… ${spots.length - 12} more spots with fewer incidents in report.json (stuckSpots).`);
     if (r.stuck.length <= 10) { L.push(""); for (const s of r.stuck) L.push(`- [${r1(s.t)}s] cell (${s.cell}) heading ${s.heading}, ${r1(s.seconds)}s, ${s.resolved ? "resolved" : "**unresolved**"}: ${s.how}${s.shot ? ` ([shot](${link(s.shot)}))` : ""}`); }
@@ -163,7 +166,7 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     L.push(`${replayCmd} ${sh(rel(r.replay.file))}                      # checks the end state matches`);
     const marks = r.notes.filter((n) => n.t != null).slice(0, 6);
     for (const n of marks) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${n.t.toFixed(2)} --shot     # ${clip(oneLine(n.text), 50)}`);
-    for (const sp of spots.slice(0, 3)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${sp.replayAt.toFixed(2)} --shot     # stuck spot (${sp.cell}): ${sp.count} incident${sp.count > 1 ? "s" : ""}`);
+    for (const sp of spots.slice(0, 3)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${sp.replayAt.toFixed(2)} --shot     # stuck spot ${where(sp)}(${sp.cell}): ${sp.count} incident${sp.count > 1 ? "s" : ""}`);
     for (const d of r.deaths.slice(0, 2)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${Math.max(0, d.t - 1).toFixed(2)} --shot     # just before death`);
     L.push("```");
   }

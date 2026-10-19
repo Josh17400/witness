@@ -185,7 +185,7 @@ export class Navigator {
     this.blocks++;
     this.samples = [];
     if (!this.incident) {
-      this.incident = { t0: t, p, cell: pc, heading: compass(dir, w.northSign), how: [], blocks: 0 };
+      this.incident = { t0: t, p, cell: pc, heading: compass(dir, w.northSign), how: [], blocks: 0, scene: w.scene ?? null, sceneKey: w.sceneKey ?? null };
       ap.emit("bump", `bumped into ${occupied ? "something" : mapOpen ? "a corner" : "a wall"} at ${fmtCell(c)} heading ${compass(dir, w.northSign)}`, { cell: c });
     }
     this.incident.blocks++;
@@ -206,7 +206,7 @@ export class Navigator {
     this.incident = null;
     const secs = this.ap.t - inc.t0;
     if (inc.blocks >= 2 || secs >= 0.8 || !resolved) {
-      this.ap.incidents.push({ t: inc.t0, cell: inc.cell, heading: inc.heading, seconds: +secs.toFixed(2), resolved, how: resolved ? how : `${inc.how.join(" → ")} → ${how}`.replace(/^ → /, ""), blocks: inc.blocks });
+      this.ap.incidents.push({ t: inc.t0, cell: inc.cell, heading: inc.heading, seconds: +secs.toFixed(2), resolved, how: resolved ? how : `${inc.how.join(" → ")} → ${how}`.replace(/^ → /, ""), blocks: inc.blocks, scene: inc.scene, sceneKey: inc.sceneKey });
       this.ap.emit("stuck", `${resolved ? "got unstuck" : "stuck"} at ${fmtCell(inc.cell)} heading ${inc.heading} (${r1(secs)}s, ${resolved ? how : "unresolved"})`, { cell: inc.cell, resolved, seconds: secs });
     }
     this.blocks = 0;
