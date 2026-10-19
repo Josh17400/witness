@@ -3,12 +3,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findConfig, openGame, runBuild, CONFIG_NAME } from "../src/core/launch.js";
+import { CONFIG_NAME } from "../src/core/launch.js";
 import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay } from "../src/core/runner.js";
-import { evaluate, check, fmt, keyPaths, ExprError } from "../src/core/expr.js";
+import { evaluate, fmt, keyPaths, ExprError, usesPrev } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
 import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
 import { prune, pruneRegistry, fmtBytes } from "../src/core/clean.js";
+import { CLI, die, nums, fmtT, timeList, framesOf, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay } from "../src/cli/common.js";
+import { evalCommand, traceCommand } from "../src/cli/ask.js";
+import { shotCommand } from "../src/cli/see.js";
+import { measureCommand } from "../src/cli/measure.js";
+import { effectCommand } from "../src/cli/effect.js";
+import { listenCommand } from "../src/cli/listen.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -18,11 +24,12 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness init [--lang <id>]          detect the project, add the right adapter + witness.json + Claude skill
   witness doctor                      connect, list capabilities, check determinism/screens/audio
   witness test [files] [--name x]     run *.witness.json / *.witness.mjs test files (--repeat 2: prove determinism)
-  witness eval --at 2 "expr" ...      evaluate expressions on the game's state at given times
-  witness trace --watch "a, b"        values over time: summary, table and a chart PNG
-  witness shot --at 1,4               screenshots (PNG); --diff ref.png highlights changes
-  witness listen --time 8             hear the game: audio report + spectrogram PNGs
-  witness measure <what> ...          pixel measurements: scale, box, contrast, motion (see help measure)
+  witness eval --at 2 "expr" ...      state at given times; --keys (what's there), --when "cond", --diff 1,3
+  witness trace --watch "a, b"        values over time: per-series table (frames, per-frame steps) + chart PNG
+  witness effect --input "space@1"    what an input causes and how many frames later (state, pixels, audio)
+  witness shot --at 1,4               screenshots; --sheet/--auto filmstrips, --crop/--follow/--zoom, --diff ref.png
+  witness listen --time 8             hear the game: sounds tied to their causes, audio report + PNGs
+  witness measure <what> ...          numbers: jump, move, hitstop, curve (state) · scale, box, contrast, motion (pixels)
   witness replay [file|last]          play back a recorded human session (WITNESS_RECORD)
   witness call <name> [args] --at 1   run a game-specific command, then show the state
   witness raw '<json command>'        send one raw protocol command (for adapter authors)
@@ -31,11 +38,12 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness clean [--all]               delete old playtests, recordings and screenshots (see help clean)
 
 Common options:
-  --input "right@0-2, space@1, click:640,360@1.5, action:jump@2"   scripted input (times in s)
+  --input "right@0-2, space@1, click:640,360@1.5, action:jump@2"   scripted input
   --seed 7  --scene <name>  --params '{"level":2}'  --build (run witness.json "build" first)
   --window 1920x1080  --dpi 2   (sent as reset params "window"/"dpi" for games that support them)
   --attach (wait for an already-running game)  --cmd "<launch command>" (no witness.json needed)
   --json (machine-readable)   --timeout 60
+Times are seconds, or frames with an "f": --at 90f, --every 1f, space@60f. "+2f" = 2 frames after the input's frame.
 
 Run 'witness help <command>' for details. Protocol: docs/PROTOCOL.md`;
 
@@ -52,19 +60,53 @@ const CMD_HELP = {
        "steps": [ { "at": 2, "expect": ["state.score == 1", "count('Coin') == 4"] },
                   { "at": 2.5, "call": ["teleport", 10, 20], "expect": "state.player.pos[0] == 10", "shot": "after.png" } ] }]
   Expressions are JavaScript over the snapshot: state.*, count(type), first(type), all(type), near(pos, type),
-  dist(a, b), len(x), approx(a, b), frame, time, prev. Each step runs: call → input → expect → probe → shot → match.
+  dist(a, b), len(x), approx(a, b), frame, time, prev (the previous step), rose(x)/fell(x) (became true/false since
+  the previous frame), changed(x), since(x) (frames since x became true; ranges only).
+  Each point step runs: call → input → expect → probe → shot → match. "at" may be seconds or frames ("90f").
+  Range steps are checked on EVERY frame from "from" to "to" (or "from" + "within"), prev = the previous frame:
+    { "from": 0, "to": 3, "always": "state.player.hp >= 0", "never": "count('Coin') > 5", "eventually": "state.score == 1" }
+    { "from": 1, "within": "30f", "eventually": "rose(state.player.grounded)" }
+  A failure names the first bad frame: always state.player.hp >= 0 — failed at frame 212 (t=3.533s): got -1 >= 0
   "match": "label" — the first capture of a label (state, digest, screenshot, audio) is the reference; every later
   capture of that label in this run must be identical (e.g. the same fight run twice, or a plain start after other tests).
   --repeat N   run the whole selection N times in one game process; every step must equal the same step of pass 1
                (state, digest, screenshot and audio): the strongest determinism check. --no-shots / --no-audio skip those.`,
-  eval: `witness eval [--at 0.5,2] "expr" ["expr2" ...] [--keys] [--input ...] [--json]
-  --keys lists every path in the snapshot (start here to learn what the game exposes).`,
-  trace: `witness trace --watch "state.player.pos[1], state.score" [--time 5] [--every 0.05] [--out chart.png]
-  Prints start/end/min/max per series and a table, and writes a chart PNG (view it with your image tool).`,
-  shot: `witness shot [--at 1,4] [--out shots/s.png] [--diff ref.png] [--scale 0.5]`,
-  listen: `witness listen [--time 8] [--input ...] [--out dir] [--wav]
-  Captures the game's audio (adapter 'audio' capability) and prints an analysis: sounds found (pitch, length,
-  brightness, loudness), music tempo/key/chords, mix problems; writes timeline.png + sounds.png (+ mix.wav).`,
+  eval: `witness eval [--at 0.5,2,90f] "expr" ["expr2" ...] [--input ...] [--json]
+  --keys      every path in the snapshot: vectors inline, long arrays elided, entities grouped by type with the union
+              of their fields (Wolf ×3: hp ∈ 1..3, state ∈ {idle, chase}); "~" marks paths that changed since frame 0
+  --summary   a one-screen summary of the state at each time
+  Expressions may use prev (the previous frame) and rose(x) / fell(x) / changed(x).
+  --when "cond[, cond2]" [--time 5] [--every 1f]
+              samples every frame: the first frame each condition is true, how long, and its spans
+  --diff 1,3  what changed in the state between two moments (entities matched by id: removed Coin#12, …)`,
+  trace: `witness trace --watch "state.player.pos, state.score" [--time 5] [--every 1f] [--out chart.png]
+  Samples every frame (long runs thin out to <= 600 samples) with prev = the previous frame, so per-frame velocity
+  is exact ("state.player.pos[0] - prev.player.pos[0]"). Per series: start → end, min/max with their frames, the
+  per-frame step range (vectors per axis); for flags and strings, each change with its frame. Expressions that fail
+  are reported once with the number of samples. --events "land: rose(state.player.grounded)" marks state events;
+  the chart PNG also draws the --input keys as bars under the plot. --replay last traces a recording.
+  --json: { "expr": [[t, value, frame], ...] }, one sample per line.`,
+  shot: `witness shot [--at 1,4,90f] [--out shots/s.png] [--scale 0.5] [--json]
+  --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)
+  --zoom 3                     crisp nearest-neighbour enlargement (small sprites)
+  --diff ref.png [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16]      changed % and every changed region's box
+  Filmstrips (one picture, read it with your image tool):
+  --from 1 --to 1.5 [--every 3f] --sheet [--cols 6]    a labelled grid of frames (max 48; with --crop/--follow/--zoom)
+  --from 0 --to 4 --auto 9                             the 9 frames where the picture changes most (key moments)`,
+  listen: `witness listen [--time 8] [--input ...] [--events "name: expr, ..."] [--within 6f] [--out dir] [--wav]
+  Captures the game's audio (adapter 'audio' capability), then:
+  * events vs sounds: each input press (unless --no-input-events) and each --events state change gets the sound it
+    caused within the window: ✔ "+1f" (an input's sound can come +1f at the earliest; a state change's +0f),
+    ✖ no sound (with a hint when the same input played one before), ⚠ played twice; then sounds with no event;
+  * sounds found (pitch, length, brightness, loudness), music tempo/key/chords, mix problems;
+  * timeline.png + sounds.png (+ mix.wav).
+  Games that announce sounds ({"event": "sound"}, e.g. witness.sound("jump")) get them named and checked against the
+  audio (announced but silent, audible but unannounced).`,
+  effect: `witness effect --input "space@1" [--base "right@0-3"] [--time 0.5] [--paths "player, camera"] [--shot]
+  Runs the same seed twice in one process, with the input and without it (both with --base), and reports the first
+  frame where the state, the picture and the audio differ: "+1f" = the next frame (immediate). Lists the state paths
+  that changed first, the changed screen regions, what the new sound is, and how much differs at the end of the
+  window. --shot writes a two-row filmstrip (with / without) around the first visible change. --no-pixels / --no-audio.`,
   replay: `witness replay [file.jsonl | last] [--at 5,10] [--shot] [--watch "expr, ..."] [--ignore "path, ..."]
   Replays are recorded when a human plays with WITNESS_RECORD=<file.jsonl> set (F8 adds a marker). The header's seed,
   scene and params go to reset. If <file.jsonl>.state.json exists (the state the recording ended in), the replay's
@@ -72,7 +114,19 @@ const CMD_HELP = {
   out with --ignore or witness.json "replay": {"ignore": [...]}: "player.px" skips that field and everything under it,
   "entities[*].dist" any index, "view.*" any key.`,
   init: `witness init [--lang <id>] [--force]   (ids: witness adapters)`,
-  measure: `witness measure <what> ...   exact pixel measurements (no eyeballing); add --json for machine output
+  measure: `witness measure <what> ...   numbers instead of eyeballing; --json (jump/move/hitstop/curve/motion print { ok, verdict, summary, data })
+  From the state, sampled every frame of a scripted run (--input, --time, --from/--to):
+  jump --y "state.player.pos[1]" --input "space@1" [--x expr] [--up -1|1] [--key space]
+      takeoff, apex height and frame, hang (frames within 10% of the apex), airtime, rise/fall, gravity rising vs
+      falling (fast-fall?), horizontal distance. Landing = holds still for 3 frames.
+  move --x "state.player.pos[0]" --input "right@1-2" [--key right]
+      top speed (px/f and px/s), frames to reach it, and after the release: when it stops, how far it slides, overshoot
+  hitstop --paths "state.player.pos, state.enemy.pos" --input "right@0-2, j@1"
+      freezes: frames where every path holds still between motion (with their length and the input before them)
+  curve --of "state.camera.pos[0]" [--vs "state.player.pos[0]"] --input "d@1-3"
+      start/end/min/max with frames, per-frame steps, rise 10–90%, settle (2%), overshoot, still spans, stutter
+      (single steps that break a smooth motion), lag behind --vs (frames, by cross-correlation of the steps)
+  From pixels:
   scale <shot.png> [--k 3] [--region x,y,w,h] [--tolerance 0]
       integer-scale test: is every k×k cell one colour? Finds k and the grid offset; reports blur/fractional scaling.
   box <with.png> <without.png> [--threshold 16]
@@ -81,9 +135,11 @@ const CMD_HELP = {
       WCAG ratio and ΔE between two pixel sets. A mask is x,y,w,h | #rrggbb[~tolerance] | diff:<without.png>,
       and --b may be ring[:radius] (the pixels just outside --a, e.g. outline vs the ground around it).
   motion [frame.png ...]  |  motion --at 1 --time 0.5 [--input ...] [--region x,y,w,h]
-      per-frame box/centroid of what moves, step sizes, path length, jitter, and the lowest row's span (foot slide:
-      compare its change with the centroid's). Without files it drives the game and screenshots every frame.
-      --background first|median|<file.png>  (first: frame 0 must not contain the object; median: it moves its width)`,
+      per-frame box/centroid of what moves, step sizes, path length, jitter (px off a smooth path: steady motion and
+      smooth acceleration give 0), and the lowest row's span (foot slide: compare its change with the centroid's).
+      Without files it drives the game and screenshots every frame (streamed: only the background is kept).
+      --background auto|first|median|<file.png>  (auto: median for 8+ frames; first: frame 0 must not contain the
+      object; median: it must move its own size). One object at a time: use --region to keep other movers out.`,
   doctor: `witness doctor [--time 3]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
@@ -104,102 +160,6 @@ function parseArgs(argv) {
   }
   return { pos, opt };
 }
-const die = (msg, code = 1) => { console.error(`✖ ${msg}`); process.exit(code); };
-const nums = (s, def) => (s === undefined || s === true ? def : String(s).split(",").map(Number));
-const fmtT = (t) => `${+(+t).toFixed(2)}s`;
-
-function loadConfig(opt) {
-  if (opt.cmd) {
-    // ad-hoc launch: the whole command line goes to the shell as one string
-    return { cfg: { name: "game", launch: { command: String(opt.cmd), args: [], shell: true }, tests: "witness", seed: 1, timeout: +(opt.timeout || 60), shots: "witness/shots", replays: "witness/replays" }, root: process.cwd() };
-  }
-  const found = findConfig(opt.config ? path.resolve(opt.config) : process.cwd());
-  if (!found) die(`no ${CONFIG_NAME} found here or in any parent folder — run 'witness init' (or pass --cmd "<how to start the game>")`);
-  return { cfg: found.config, root: found.root, file: found.file };
-}
-function splitCmd(s) { return (s.match(/"[^"]*"|\S+/g) || []).map((x) => x.replace(/^"|"$/g, "")); }
-
-async function withGame(opt, fn) {
-  const { cfg, root } = loadConfig(opt);
-  if (opt.build) runBuild(cfg, root, { quiet: !!opt.json });
-  let g;
-  try {
-    g = await openGame(cfg, root, { attach: !!opt.attach, port: opt.port ? +opt.port : undefined, timeout: opt.timeout ? +opt.timeout : undefined, quiet: !!opt.json });
-  } catch (e) {
-    die(e.message);
-  }
-  try {
-    return await fn(g.session, cfg, root, g);
-  } catch (e) {
-    if (e instanceof WitnessError || e instanceof ExprError) {
-      const tail = g.output().trim().split("\n").slice(-15).join("\n");
-      die(`${e.message}${tail ? `\n--- last game output ---\n${tail}` : ""}`);
-    }
-    throw e;
-  } finally {
-    await g.stop();
-  }
-}
-
-function runOpts(opt, cfg) {
-  let params = opt.params && opt.params !== true ? JSON.parse(opt.params) : undefined;
-  // reserved params (docs/PROTOCOL.md): window size and pixel density for games that can vary them per run
-  if (opt.window && opt.window !== true) {
-    const m = /^(\d+)[x×,](\d+)$/.exec(String(opt.window));
-    if (!m) die(`--window wants WIDTHxHEIGHT, e.g. 1920x1080 (got ${opt.window})`);
-    params = { ...params, window: [+m[1], +m[2]] };
-  }
-  if (opt.dpi && opt.dpi !== true) params = { ...params, dpi: +opt.dpi };
-  return {
-    seed: opt.seed !== undefined ? +opt.seed : cfg.seed ?? 1,
-    scene: opt.scene && opt.scene !== true ? String(opt.scene) : undefined,
-    params,
-    input: opt.input && opt.input !== true ? String(opt.input) : undefined,
-  };
-}
-
-async function media() {
-  try { return await import("../src/media/index.js"); }
-  catch (e) { die(`the media module isn't available (${e.message})`); }
-}
-
-async function writeShot(shot, file, scale) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  if (shot.path) { fs.copyFileSync(path.resolve(shot.path), file); return file; }
-  const buf = Buffer.from(shot.data, "base64");
-  if (shot.format === "png") { fs.writeFileSync(file, buf); return file; }
-  const m = await media();
-  fs.writeFileSync(file, m.encodePNG(shot.width, shot.height, new Uint8Array(buf.buffer, buf.byteOffset, buf.length)));
-  return file;
-}
-
-let JSON_MODE = false;   // with --json, human-readable extras go to stderr so stdout stays valid JSON
-function printLogs(logs) {
-  const say = JSON_MODE ? console.error : console.log;
-  const errs = logs.filter((l) => l.level === "error"), other = logs.filter((l) => l.level !== "error");
-  for (const l of errs) say(`✖ game error${l.frame != null ? ` (frame ${l.frame})` : ""}: ${l.message}`);
-  if (other.length) {
-    say(`— game log (${other.length > 30 ? `last 30 of ${other.length}` : other.length}) —`);
-    for (const l of other.slice(-30)) say(`  ${l.frame != null ? `[f${l.frame}] ` : ""}${l.level === "warn" ? "⚠ " : ""}${l.message}`);
-  }
-  return errs.length;
-}
-
-function summarizeState(snap) {
-  const s = snap.state || {};
-  const ents = Array.isArray(s.entities) ? s.entities : [];
-  const counts = {};
-  for (const e of ents) { const t = e.type ?? e.kind ?? "?"; counts[t] = (counts[t] || 0) + 1; }
-  const top = Object.entries(s).filter(([k, v]) => k !== "entities" && (v === null || typeof v !== "object")).map(([k, v]) => `${k}=${fmt(v, 30)}`);
-  const lines = [`— frame ${snap.frame}  t=${fmtT(snap.time ?? 0)}${ents.length ? `  [${Object.entries(counts).map(([k, v]) => `${k}×${v}`).join(", ")}]` : ""}`];
-  if (top.length) lines.push(`   ${top.slice(0, 14).join("  ")}`);
-  for (const e of ents.filter((e) => (counts[e.type ?? e.kind ?? "?"] || 0) <= 3).slice(0, 12)) {
-    const extra = Object.entries(e).filter(([k]) => !["id", "type", "kind", "pos"].includes(k)).map(([k, v]) => `${k}=${fmt(v, 24)}`).join(" ");
-    lines.push(`   #${e.id ?? "?"} ${e.type ?? e.kind ?? "?"}${e.pos ? ` pos=${fmt(e.pos.map ? e.pos.map((x) => +(+x).toFixed(2)) : e.pos, 40)}` : ""} ${extra}`);
-  }
-  return lines.join("\n");
-}
-
 // ------------------------------------------------------------------ commands
 const commands = {
   async doctor(pos, opt) {
@@ -336,217 +296,35 @@ const commands = {
     process.exit(failed ? 1 : 0);
   },
 
-  async eval(pos, opt) {
-    const exprs = pos;
-    const times = nums(opt.at, [opt.time ? +opt.time : 0.5]);
-    const out = [];
-    await withGame(opt, async (s, cfg) => {
-      const st = await begin(s, runOpts(opt, cfg));
-      for (const t of [...times].sort((a, b) => a - b)) {
-        await stepTo(s, st, frameAt(t, s.fps));
-        const snap = await s.snapshot();
-        if (opt.keys || !exprs.length) {
-          console.log(`— snapshot paths at t=${fmtT(t)} (use these in expressions) —`);
-          for (const k of keyPaths(snap.state || {})) console.log(`  ${k}`);
-          if (!exprs.length) continue;
-        }
-        const row = { t, values: {} };
-        for (const x of exprs) {
-          let v;
-          try { v = evaluate(x, snap); } catch (e) { v = { error: e.message }; }
-          row.values[x] = v;
-        }
-        out.push(row);
-        if (!opt.json) {
-          console.log(`— t=${fmtT(t)} (frame ${snap.frame})`);
-          for (const x of exprs) { const v = row.values[x]; console.log(`   ${x}  =  ${v && v.error ? `✖ ${v.error}` : fmt(v, 200)}`); }
-        }
-      }
-      const errs = printLogs(await s.drainLogs());
-      if (errs && !opt.json) console.log("(the game logged errors — values may be affected)");
-    });
-    if (opt.json) console.log(JSON.stringify(out, null, 1));
-  },
+  eval: evalCommand,
+  trace: traceCommand,
 
-  async trace(pos, opt) {
-    if (!opt.watch || opt.watch === true) die('usage: witness trace --watch "state.player.pos[1], state.score" [--time 5]');
-    const exprs = splitTop(String(opt.watch));
-    const time = +(opt.time || 5);
-    const every = Math.max(1 / 240, +(opt.every || Math.max(time / 120, 1 / 60)));
-    const series = exprs.map(() => []);
-    let replay = null;
-    await withGame(opt, async (s, cfg, root) => {
-      if (opt.replay) replay = loadReplay(resolveReplay(opt.replay, cfg, root));
-      const st = await begin(s, { ...runOpts(opt, cfg), replay });
-      for (let t = 0; t <= time + 1e-9; t += every) {
-        await stepTo(s, st, frameAt(t, s.fps, st.dts), st.dts);
-        const snap = await s.snapshot();
-        exprs.forEach((x, i) => { let v; try { v = evaluate(x, snap); } catch (e) { v = null; } series[i].push([+t.toFixed(4), v]); });
-      }
-      printLogs(await s.drainLogs());
-      const outFile = path.resolve(opt.out || path.join(root, cfg.shots, "trace.png"));
-      const chartSeries = [];
-      exprs.forEach((x, i) => {
-        const sample = series[i].find((p) => p[1] != null)?.[1];
-        if (Array.isArray(sample)) ["x", "y", "z", "w"].slice(0, sample.length).forEach((ax, k) => chartSeries.push({ label: `${x}.${ax}`, points: series[i].filter((p) => Array.isArray(p[1])).map((p) => [p[0], +p[1][k]]) }));
-        else chartSeries.push({ label: x, points: series[i].map((p) => [p[0], typeof p[1] === "boolean" ? +p[1] : p[1]]).filter((p) => typeof p[1] === "number") });
-      });
-      try {
-        const m = await media();
-        fs.mkdirSync(path.dirname(outFile), { recursive: true });
-        fs.writeFileSync(outFile, m.lineChart({ title: `${s.hello.name}: ${exprs.join(", ")}`, series: chartSeries, markers: replay ? replay.marks : undefined }));
-        if (!opt.json) console.log(`chart → ${outFile}  (view it with your image tool)`);
-      } catch (e) { if (!opt.json) console.log(`(no chart: ${e.message})`); }
-    });
-    if (opt.json) { console.log(JSON.stringify(Object.fromEntries(exprs.map((x, i) => [x, series[i]])), null, 1)); return; }
-    exprs.forEach((x, i) => {
-      const pts = series[i], numsOnly = pts.filter((p) => typeof p[1] === "number");
-      if (numsOnly.length === pts.length && pts.length) {
-        let lo = numsOnly[0], hi = numsOnly[0];
-        for (const p of numsOnly) { if (p[1] < lo[1]) lo = p; if (p[1] > hi[1]) hi = p; }
-        console.log(`  ${x}: start ${fmt(pts[0][1])} → end ${fmt(pts[pts.length - 1][1])} · min ${fmt(lo[1])} @${fmtT(lo[0])} · max ${fmt(hi[1])} @${fmtT(hi[0])}`);
-      } else {
-        const changes = pts.filter((p, k) => k === 0 || JSON.stringify(p[1]) !== JSON.stringify(pts[k - 1][1]));
-        console.log(`  ${x}: ${changes.length} distinct value(s)`);
-        for (const p of changes.slice(0, 10)) console.log(`     @${fmtT(p[0])}  ${fmt(p[1], 60)}`);
-      }
-    });
-  },
+  shot: shotCommand,
 
-  async shot(pos, opt) {
-    const times = nums(opt.at, [opt.time ? +opt.time : 1]);
-    await withGame(opt, async (s, cfg, root) => {
-      if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-      const st = await begin(s, runOpts(opt, cfg));
-      for (const t of [...times].sort((a, b) => a - b)) {
-        await stepTo(s, st, frameAt(t, s.fps));
-        let file = path.resolve(opt.out || path.join(root, cfg.shots, times.length > 1 ? "shot-{t}.png" : "shot.png"));
-        if (times.length > 1 && !file.includes("{t}")) file = file.replace(/\.png$/i, "-{t}.png");
-        file = file.replace("{t}", String(t).replace(".", "_"));
-        await writeShot(await s.screenshot(opt.scale ? +opt.scale : undefined), file);
-        console.log(`✔ t=${fmtT(t)} → ${file}`);
-        if (opt.diff) {
-          const m = await media();
-          const d = m.diffImages(fs.readFileSync(path.resolve(opt.diff)), fs.readFileSync(file), { threshold: +(opt.threshold || 16) });
-          const dfile = file.replace(/\.png$/i, "-diff.png");
-          fs.writeFileSync(dfile, d.png);
-          console.log(`  diff vs ${opt.diff}: ${(+d.changedPercent).toFixed(2)}% changed${d.boxes.length ? ` in ${d.boxes.length} region(s)` : ""} → ${dfile}`);
-        }
-      }
-      printLogs(await s.drainLogs());
-    });
-  },
+  listen: listenCommand,
 
-  async listen(pos, opt) {
-    const time = +(opt.time || 5);
-    await withGame(opt, async (s, cfg, root) => {
-      if (!s.has("audio")) die("this game's adapter doesn't support 'audio' (the mixer must write into a capture buffer in witness mode)");
-      const st = await begin(s, runOpts(opt, cfg));
-      await s.audio(); // discard anything mixed during reset
-      const replies = [];
-      for (let t = 0; t < time - 1e-9;) {
-        t = Math.min(time, t + 1);
-        await stepTo(s, st, frameAt(t, s.fps));
-        const a = await s.audio();
-        if (a.data) replies.push({ sampleRate: a.sampleRate, channels: a.channels || 1, format: a.format || "f32", data: a.data });
-      }
-      printLogs(await s.drainLogs());
-      const m = await media();
-      if (!replies.length) die("the game returned no audio samples");
-      const pcm = m.concatPCM(replies);
-      const outDir = path.resolve(opt.out || path.join(root, cfg.shots, "listen"));
-      if (!replies.length) die("the game returned no audio samples");
-      const rep = m.analyzePCM(pcm, { title: `${s.hello.name} — ${time}s` });
-      if (opt.json) { console.log(JSON.stringify(rep.report ?? rep, null, 1)); }
-      else console.log(rep.text ?? JSON.stringify(rep, null, 1));
-      fs.mkdirSync(outDir, { recursive: true });
-      try {
-        fs.writeFileSync(path.join(outDir, "timeline.png"), m.timelinePNG(null, { analysis: rep, title: s.hello.name }));
-        if (rep.segments && rep.segments.length) fs.writeFileSync(path.join(outDir, "sounds.png"), m.soundSheetPNG(rep.segments, { title: s.hello.name }));
-        if (opt.wav) fs.writeFileSync(path.join(outDir, "mix.wav"), m.pcmToWav(pcm));
-        if (!opt.json) console.log(`wrote ${path.join(outDir, "timeline.png")}${rep.segments && rep.segments.length ? ", sounds.png" : ""}${opt.wav ? ", mix.wav" : ""}  (view the PNGs with your image tool)`);
-      } catch (e) { if (!opt.json) console.log(`(no pictures: ${e.message})`); }
-    });
-  },
-
-  async measure(pos, opt) {
-    const m = await media();
-    const what = pos[0], files = pos.slice(1);
-    const read = (f) => { const p = path.resolve(String(f)); if (!fs.existsSync(p)) die(`no such image: ${f}`); return fs.readFileSync(p); };
-    const rect = (s) => { const v = String(s).split(",").map(Number); if (v.length !== 4 || v.some((x) => !Number.isFinite(x))) die(`a region is x,y,w,h (got ${s})`); return { x: v[0], y: v[1], w: v[2], h: v[3] }; };
-    const region = opt.region && opt.region !== true ? rect(opt.region) : undefined;
-    const out = (obj, lines) => { if (opt.json) console.log(JSON.stringify(obj, (k, v) => (v instanceof Uint8Array ? undefined : v), 1)); else console.log(lines.filter(Boolean).join("\n")); };
-    const box = (b) => (b ? `x=${b.x} y=${b.y} ${b.w}×${b.h}` : "none");
-    if (what === "scale") {
-      if (!files[0]) die("usage: witness measure scale <shot.png> [--k 3]");
-      const img = m.decodePNG(read(files[0]));
-      const k = opt.k && opt.k !== true ? +opt.k : m.detectScale(img, { region, tolerance: +(opt.tolerance || 0) });
-      const r = m.blockScale(img, k, { region, tolerance: +(opt.tolerance || 0) });
-      out(r, [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
-        `  ${r.cells} cells, ${r.nonUniform} not one colour (${r.nonUniformPercent}%) → ${r.blurry ? "✖ BLURRY or fractionally scaled" : r.k > 1 ? "✔ exact integer scaling" : "no pixel grid larger than 1"}`,
-        ...r.worst.slice(0, 5).map((c) => `  worst cell ${box(c)}: ${c.colors} colours, spread ${c.spread}`)]);
-    } else if (what === "box") {
-      if (files.length < 2) die("usage: witness measure box <with.png> <without.png>");
-      const r = m.maskDiff(read(files[0]), read(files[1]), { threshold: +(opt.threshold || 16), region });
-      out({ count: r.count, bbox: r.bbox, centroid: r.centroid }, [r.count ? `✔ ${r.count} px differ: box ${box(r.bbox)} (height ${r.bbox.h} px, width ${r.bbox.w} px), centroid [${r.centroid}]` : "the two images are the same (nothing to measure)"]);
-    } else if (what === "contrast") {
-      if (!files[0] || !opt.a || !opt.b) die("usage: witness measure contrast <shot.png> --a <mask> --b <mask|ring[:r]>");
-      const img = m.decodePNG(read(files[0]));
-      const mask = (spec) => {
-        const s = String(spec);
-        if (s.startsWith("#") || s.startsWith("rgb")) { const [c, tol] = s.split("~"); return m.maskFromColor(img, c, +(tol || 0)); }
-        if (s.startsWith("diff:")) return m.maskDiff(img, read(s.slice(5)), { threshold: +(opt.threshold || 16) }).mask;
-        return m.maskFromRect(img.width, img.height, rect(s));
-      };
-      const A = mask(opt.a);
-      const B = /^ring(:\d+)?$/.test(String(opt.b)) ? m.ringMask(A, img.width, img.height, +(String(opt.b).split(":")[1] || 2)) : mask(opt.b);
-      const r = m.contrast(img, A, B);
-      out(r, [`contrast ${r.ratio.toFixed(2)}:1 (WCAG: 3 for large shapes, 4.5 for text) · ΔE ${r.deltaE.toFixed(1)} · luminance ${r.lumA.toFixed(3)} vs ${r.lumB.toFixed(3)} · ${r.countA} vs ${r.countB} px`]);
-    } else if (what === "motion") {
-      const bg = opt.background && opt.background !== true ? String(opt.background) : "first";
-      const background = bg === "first" || bg === "median" ? bg : read(bg);
-      let frames = files.map(read);
-      let t0 = 0, dt = 0;
-      if (!frames.length) {
-        const at = +(opt.at || 0), time = +(opt.time || 0.5);
-        await withGame(opt, async (s, cfg) => {
-          if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-          const st = await begin(s, runOpts(opt, cfg));
-          const f0 = frameAt(at, s.fps), f1 = frameAt(at + time, s.fps);
-          if (f1 - f0 > 600) die("motion captures every frame: keep --time under 10 s");
-          for (let f = f0; f <= f1; f++) {
-            await stepTo(s, st, f);
-            const sh = await s.screenshot();
-            if (sh.format !== "rgba8") die("measure motion needs rgba8 screenshots from the game");
-            frames.push({ width: sh.width, height: sh.height, data: new Uint8Array(Buffer.from(sh.data, "base64")) });
-          }
-          t0 = at; dt = 1 / s.fps;
-          printLogs(await s.drainLogs());
-        });
-      }
-      if (frames.length < 2) die("motion needs at least 2 frames");
-      const r = m.motion(frames, { region, threshold: +(opt.threshold || 16), background });
-      const sm = r.summary;
-      out(r, [bg === "first" && r.frames[1] && r.frames[0].count === 0 && r.frames[1].count > 0 ? "note: compared with frame 0; if the object is already visible there, boxes/centroids cover its old and new position (use --background median or a clean <file.png>)" : "",
-        `${frames.length} frames${dt ? ` from t=${fmtT(t0)}` : ""}: object in ${sm.framesWithObject}, path ${sm.pathLength} px, net [${sm.net}] (${sm.netDistance} px), step mean ${sm.meanStep} / max ${sm.maxStep}, jitter ${sm.jitter}`,
-        ...r.frames.slice(0, 40).map((f, i) => `  #${i}${dt ? ` t=${fmtT(t0 + i * dt)}` : ""}  box ${box(f.bbox)}  centroid ${f.centroid ? `[${f.centroid}]` : "-"}  lowest row ${f.lowestRowSpan ? `y=${f.lowestRowSpan.y} x=${f.lowestRowSpan.x0}..${f.lowestRowSpan.x1}` : "-"}${r.steps[i - 1] ? `  step [${r.steps[i - 1]}]` : ""}`)]);
-    } else die("usage: witness measure scale|box|contrast|motion ...  (witness help measure)");
-  },
+  measure: measureCommand,
+  effect: effectCommand,
 
   async replay(pos, opt) {
     await withGame(opt, async (s, cfg, root) => {
       const r = loadReplay(resolveReplay(pos[0] || "last", cfg, root));
       console.log(`▶ replay ${path.basename(r.file)}: ${r.frames} frames, ${fmtT(r.duration)}, seed ${r.seed}${r.marks.length ? `, marks: ${r.marks.map((m) => `${m.label}@${fmtT(m.t)}`).join(" ")}` : ""}`);
       const st = await begin(s, { replay: r });
-      const times = opt.at ? nums(opt.at) : [...r.marks.map((m) => m.t), r.duration];
+      const frames = opt.at ? timeList(opt.at, []).map((t) => framesOf(t, s.fps, r.dts)) : [...r.marks.map((m) => m.frame), r.frames];
+      const watch = opt.watch ? splitTop(String(opt.watch)) : [];
+      const needPrev = watch.some(usesPrev);
       const endFile = `${r.file}.state.json`;   // written by adapters/games at the end of a recording (optional)
       // state paths left out of the end-state check (window-dependent fields and the like): witness.json replay.ignore + --ignore
       const ignore = [...(cfg.replay && Array.isArray(cfg.replay.ignore) ? cfg.replay.ignore : []), ...(opt.ignore && opt.ignore !== true ? splitTop(String(opt.ignore)) : [])];
       const skip = ignore.length ? pathFilter(ignore) : null;
       let endChecked = false;
-      for (const t of [...new Set(times)].sort((a, b) => a - b)) {
-        await stepTo(s, st, frameAt(t, s.fps, r.dts), r.dts);
+      for (const f of [...new Set(frames)].sort((a, b) => a - b)) {
+        let prev = null;
+        if (needPrev && f > 0) { await stepTo(s, st, f - 1, r.dts); prev = await s.snapshot(); }
+        await stepTo(s, st, f, r.dts);
         const snap = await s.snapshot();
+        const t = snap.time ?? st.time;
         if (st.frame >= r.frames && !endChecked && fs.existsSync(endFile)) {
           endChecked = true;
           let want;
@@ -564,9 +342,9 @@ const commands = {
           }
         }
         console.log(summarizeState(snap));
-        if (opt.watch) for (const x of splitTop(String(opt.watch))) { let v; try { v = fmt(evaluate(x, snap), 120); } catch (e) { v = `✖ ${e.message}`; } console.log(`   ${x} = ${v}`); }
+        for (const x of watch) { let v; try { v = fmt(evaluate(x, snap, prev), 120); } catch (e) { v = `✖ ${e.message}`; } console.log(`   ${x} = ${v}`); }
         if (opt.shot && s.has("screenshot")) {
-          const file = path.resolve(root, cfg.shots, `replay-${String(t.toFixed(2)).replace(".", "_")}.png`);
+          const file = path.resolve(root, cfg.shots, `replay-${String((+t).toFixed(2)).replace(".", "_")}.png`);
           await writeShot(await s.screenshot(), file);
           console.log(`   → ${file}`);
         }
@@ -589,7 +367,7 @@ const commands = {
     await withGame(opt, async (s, cfg) => {
       if (!s.has("call")) die("this game's adapter doesn't support 'call'");
       const st = await begin(s, runOpts(opt, cfg));
-      await stepTo(s, st, frameAt(+(opt.at || 0.5), s.fps));
+      await stepTo(s, st, framesOf(opt.at && opt.at !== true ? String(opt.at) : "0.5", s.fps));
       const r = await s.call(name, args.map((a) => (/^-?\d+(\.\d+)?$/.test(a) ? +a : a)));
       console.log(`✔ ${name}(${args.join(", ")}) → ${fmt(r.result, 300)}`);
       await stepTo(s, st, st.frame + 1);
@@ -639,40 +417,14 @@ function printTest(res, root) {
   console.log(`${res.ok ? "✔ pass" : "✖ FAIL"}  ${res.name}  (${ex.passed} expect${ex.passed === 1 ? "" : "s"} passed${ex.failed ? `, ${ex.failed} failed` : ""})${rel ? `  ${rel}` : ""}`);
   for (const f of res.failures || []) {
     if (f.kind === "warn") console.log(`    ⚠ ${f.message}`);
-    else console.log(`    ${f.kind === "expect" ? `expect failed at ${f.at}s:` : "✖"} ${f.message}`);
+    else console.log(`    ${f.kind === "expect" ? `expect failed at ${f.at}${/^-?[\d.]+$/.test(String(f.at)) ? "s" : ""}:` : "✖"} ${f.message}`);
   }
   for (const [p, vals] of Object.entries(res.probes || {})) console.log(`    probe ${p}: ${vals.map(([t, v]) => `${fmtT(t)}=${fmt(v, 40)}`).join("  ")}`);
 }
 
-function splitTop(s) {
-  const out = []; let depth = 0, q = null, cur = "";
-  for (const c of s) {
-    if (q) { cur += c; if (c === q) q = null; continue; }
-    if (c === '"' || c === "'" || c === "`") { q = c; cur += c; continue; }
-    if ("([{".includes(c)) depth++;
-    if (")]}".includes(c)) depth--;
-    if (c === "," && depth === 0) { if (cur.trim()) out.push(cur.trim()); cur = ""; continue; }
-    cur += c;
-  }
-  if (cur.trim()) out.push(cur.trim());
-  return out;
-}
-
-function resolveReplay(spec, cfg, root) {
-  if (spec && spec !== "last" && spec !== true) {
-    const f = path.resolve(String(spec));
-    if (!fs.existsSync(f)) die(`no such replay: ${spec}`);
-    return f;
-  }
-  const dir = path.resolve(root, cfg.replays);
-  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => path.join(dir, f)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs) : [];
-  if (!files.length) die(`no replays in ${dir} — record one by playing with WITNESS_RECORD=<file.jsonl>`);
-  return files[0];
-}
-
 const [cmd, ...rest] = process.argv.slice(2);
 const { pos, opt } = parseArgs(rest);
-JSON_MODE = !!opt.json;
+CLI.json = !!opt.json;
 try {
   if (!cmd || cmd === "-h" || cmd === "--help") commands.help([]);
   else if (cmd === "-v" || cmd === "--version") commands.version();

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseWitnessInput } from "./input-spec.js";
-import { check, evaluate, fmt, ExprError } from "./expr.js";
+import { check, evaluate, fmt, ExprError, TimeContext, usesPrev } from "./expr.js";
 import { WitnessError } from "./session.js";
 
 const MAX_CHUNK = 600; // frames per step request (keeps requests short and responsive)
@@ -73,8 +73,26 @@ export function loadReplay(file) {
   return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length };
 }
 
-/** Frame index for time t, honoring replay dts. */
+/**
+ * A time as given by a user: a number of seconds, or a string "1.5" / "1.5s" (seconds) / "90f" (frames).
+ * Returns { frames } or { seconds }. Throws on anything else.
+ */
+export function parseTime(t) {
+  if (typeof t === "number") return { seconds: t };
+  const s = String(t).trim();
+  let m = /^(-?\d+(?:\.\d+)?)f$/i.exec(s);
+  if (m) return { frames: Math.round(+m[1]) };
+  m = /^(-?\d+(?:\.\d+)?|-?\.\d+)s?$/i.exec(s);
+  if (m) return { seconds: +m[1] };
+  throw new WitnessError(`bad time '${t}': use seconds (1.5) or frames (90f)`);
+}
+
+/** Seconds for a user time (frames / fps for "90f"). */
+export function secondsOf(t, fps) { const p = parseTime(t); return p.frames != null ? p.frames / fps : p.seconds; }
+
+/** Frame index for time t (seconds, or "90f"), honoring replay dts. */
 export function frameAt(t, fps, dts) {
+  if (typeof t !== "number") { const p = parseTime(t); if (p.frames != null) return p.frames; t = p.seconds; }
   if (!dts) return Math.round(t * fps);
   let acc = 0;
   for (let i = 0; i < dts.length; i++) { if (acc >= t - 1e-9) return i; acc += dts[i]; }
@@ -111,9 +129,12 @@ export async function loadTests(file) {
 /**
  * Run one test on a session. Test shape:
  *  { name, seed?, scene?, params?, input?: "spec" | [events],
- *    steps: [ { at: seconds, call?: [name, ...args] | [[...], ...], input?: "spec", expect?: "expr" | [...],
- *               probe?: "expr" | [...], shot?: "file.png", match?: "label" | [...] } ] }
- * Within a step: call → input → expect → probe → shot → match.
+ *    steps: [ { at: seconds | "90f", call?: [name, ...args] | [[...], ...], input?: "spec", expect?: "expr" | [...],
+ *               probe?: "expr" | [...], shot?: "file.png", match?: "label" | [...] },
+ *             { from, to?, within?, always?: "expr" | [...], never?: ..., eventually?: ... } ] }
+ * Within a point step: call → input → expect → probe → shot → match. `prev` there is the previous step's snapshot.
+ * Range steps are checked on every frame from `from` to `to` (inclusive), with `prev` = the previous frame:
+ * `always` must hold on every frame, `never` on none, `eventually` on at least one (by `from + within` when given).
  * `match`: the first capture of a label (state, digest, and screenshot/audio when the adapter has them) is the
  * reference; every later capture of that label in the same `witness test` run must equal it exactly.
  * `matcher` + `matchAll`: `witness test --repeat N` matches every step against the same step of pass 1.
@@ -122,17 +143,59 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
   const fps = session.fps;
   const res = { name: test.name, file: test.file, ok: true, expects: { passed: 0, failed: 0 }, failures: [], probes: {}, shots: [] };
   const state = await begin(session, test);
-  let snap = null, lastSnap = null;   // lastSnap = the snapshot taken at the previous step (exposed as `prev`)
-  const steps = [...(test.steps || [])].map((st, i) => ({ ...st, _i: i })).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
-  if (!steps.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
+  const F = (t) => frameAt(t, fps, state.dts);
+  const isRange = (st) => st.always != null || st.never != null || st.eventually != null;
+  const all = (test.steps || []).map((st, i) => ({ ...st, _i: i }));
+  const steps = all.filter((st) => !isRange(st)).map((st) => ({ ...st, _f: F(st.at ?? 0) })).sort((a, b) => a._f - b._f);
+  const ranges = [];
+  for (const st of all.filter(isRange)) {
+    const fromF = F(st.from ?? st.at ?? 0);
+    const within = st.within != null ? F(st.within) : null;
+    const toF = st.to != null ? F(st.to) : within != null ? fromF + within : null;
+    if (toF == null) { res.failures.push({ kind: "error", message: `step ${st._i + 1}: a range step needs "to" (or "within")` }); continue; }
+    if (toF < fromF) { res.failures.push({ kind: "error", message: `step ${st._i + 1}: "to" is before "from"` }); continue; }
+    const asserts = [];
+    for (const kind of ["always", "never", "eventually"]) for (const expr of [].concat(st[kind] ?? [])) asserts.push({ kind, expr, done: false, failed: false, met: null, last: null });
+    ranges.push({ st, fromF, toF, deadline: within != null ? Math.min(toF, fromF + within) : toF, ctx: new TimeContext(), asserts, label: `${st.from ?? st.at ?? 0}..${st.to ?? `+${st.within}`}` });
+  }
+  if (!steps.length && !ranges.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
   const matching = matcher && (matchAll || steps.some((st) => st.match));
   // hello "audio_exact": false — the adapter can only capture audio in real time, so it isn't compared
   const useAudio = matching && matchMedia.audio && session.has("audio") && session.hello?.audio_exact !== false;
   const useShot = matching && matchMedia.shot && session.has("screenshot");
+  // when a point step reads prev (or rose/changed...), every step keeps its snapshot so prev is the previous step
+  const pointUsesPrev = steps.some((st) => [].concat(st.expect || [], st.probe || []).some(usesPrev));
   if (useAudio) await session.audio();   // drop anything mixed before this test's reset: audio is compared per test
-  for (const st of steps) {
-    await stepTo(session, state, frameAt(st.at ?? 0, fps, state.dts), state.dts);
-    snap = null;
+  let lastSnap = null;      // the snapshot of the previous point step (exposed as `prev` there)
+  let frameSnap = null, frameSnapF = -1;   // the previous frame's snapshot inside range windows
+
+  const tAt = (snap, f) => +(snap && snap.time != null ? snap.time : f / fps).toFixed(3);
+  const checkRanges = (f, snap, prev) => {
+    for (const r of ranges) {
+      if (f < r.fromF || f > r.toF) continue;
+      for (const a of r.asserts) {
+        if (a.done) continue;
+        if (a.kind === "eventually" && f > r.deadline) continue;
+        let c;
+        try { c = check(a.expr, snap, prev, r.ctx); }
+        catch (e) {
+          if (!(e instanceof ExprError)) throw e;
+          a.done = true; a.failed = true;
+          res.failures.push({ kind: "expect", at: r.label, expr: a.expr, message: `${a.kind} ${e.message} (frame ${f})` });
+          continue;
+        }
+        a.last = c.detail;
+        if (a.kind === "always" && !c.ok) { a.done = true; a.failed = true; res.failures.push({ kind: "expect", at: r.label, expr: a.expr, message: `always ${a.expr} — failed at frame ${f} (t=${tAt(snap, f)}s): ${c.detail}` }); }
+        else if (a.kind === "never" && c.ok) { a.done = true; a.failed = true; res.failures.push({ kind: "expect", at: r.label, expr: a.expr, message: `never ${a.expr} — true at frame ${f} (t=${tAt(snap, f)}s): ${c.detail}` }); }
+        else if (a.kind === "eventually" && c.ok) { a.done = true; a.met = f; }
+      }
+    }
+  };
+  // range windows start one frame early, so the first checked frame has its prev
+  const inWindow = (f) => ranges.some((r) => f >= Math.max(0, r.fromF - 1) && f <= r.toF);
+
+  const runPoint = async (st, rangeSnap) => {
+    let snap = rangeSnap || null;
     const prev = lastSnap;
     const getSnap = async () => { if (!snap) snap = await session.snapshot(); return snap; };
     const where = `at ${st.at ?? 0}s`;
@@ -190,11 +253,48 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
           }
         }
       }
+      if (!snap && pointUsesPrev) snap = await session.snapshot();
     } catch (e) {
       res.failures.push({ kind: "error", at: st.at, message: `${where}: ${e.message}` });
-      if (session.closed) break;
     }
     if (snap) lastSnap = snap;
+  };
+
+  // walk the timeline: every frame inside a range window, plus each point step's frame
+  let pi = 0;
+  try {
+    for (;;) {
+      const f = state.frame;
+      let rangeSnap = null;
+      if (inWindow(f)) {
+        rangeSnap = await session.snapshot();
+        checkRanges(f, rangeSnap, frameSnapF === f - 1 ? frameSnap : null);
+        frameSnap = rangeSnap; frameSnapF = f;
+      }
+      while (pi < steps.length && steps[pi]._f <= f) {
+        await runPoint(steps[pi++], rangeSnap);
+        rangeSnap = null;   // a later point step at the same frame may follow a call: fetch afresh
+        if (session.closed) break;
+      }
+      if (session.closed) break;
+      const nextPoint = pi < steps.length ? steps[pi]._f : Infinity;
+      const starts = ranges.map((r) => Math.max(0, r.fromF - 1)).filter((x) => x > f);
+      const nextRange = inWindow(f + 1) ? f + 1 : starts.length ? Math.min(...starts) : Infinity;
+      const next = Math.min(nextPoint, nextRange);
+      if (next === Infinity) break;
+      await stepTo(session, state, next, state.dts);
+    }
+  } catch (e) {
+    res.failures.push({ kind: "error", message: `at frame ${state.frame}: ${e.message}` });
+  }
+  for (const r of ranges) {
+    for (const a of r.asserts) {
+      if (a.kind === "eventually" && a.met == null && !a.done) {
+        a.failed = true;
+        res.failures.push({ kind: "expect", at: r.label, expr: a.expr, message: `eventually ${a.expr} — never true in frames ${r.fromF}..${r.deadline} (${(r.fromF / fps).toFixed(3)}–${(r.deadline / fps).toFixed(3)}s)${a.last ? `; last ${a.last}` : ""}` });
+      }
+      if (a.failed) res.expects.failed++; else res.expects.passed++;
+    }
   }
   for (const l of await session.drainLogs()) {
     if (l.level === "error") res.failures.push({ kind: "error", message: `game error${l.frame != null ? ` (frame ${l.frame})` : ""}: ${l.message}` });

@@ -34,6 +34,52 @@ export function diffValues(a, b, at = "", out = [], limit = 12, skip = null) {
 }
 
 /**
+ * Differences between two game states for a human/AI reader: like diffValues, but arrays of objects that all have
+ * an `id` are matched by id (so one coin disappearing reads "removed Coin#12", not 5 shifted entries), and added /
+ * removed entries are reported once. Returns [{ path, kind: "changed" | "added" | "removed", a, b }].
+ */
+export function diffStates(a, b, at = "state", out = [], limit = 500) {
+  if (out.length >= limit || a === b) return out;
+  const ta = Array.isArray(a) ? "array" : a === null ? "null" : typeof a;
+  const tb = Array.isArray(b) ? "array" : b === null ? "null" : typeof b;
+  if (ta !== tb || (ta !== "object" && ta !== "array")) {
+    if (ta === "number" && tb === "number" && Number.isNaN(a) && Number.isNaN(b)) return out;
+    out.push({ path: at, kind: "changed", a, b });
+    return out;
+  }
+  if (ta === "array") {
+    const byId = (arr) => arr.length && arr.every((e) => e && typeof e === "object" && !Array.isArray(e) && e.id != null);
+    if (byId(a) && byId(b)) {
+      const ma = new Map(a.map((e) => [e.id, e])), mb = new Map(b.map((e) => [e.id, e]));
+      const tag = (e) => `${e.type ?? e.kind ?? ""}#${e.id}`;
+      for (const [id, e] of ma) if (!mb.has(id) && out.length < limit) out.push({ path: `${at}[${tag(e)}]`, kind: "removed", a: e, b: undefined });
+      for (const [id, e] of mb) if (!ma.has(id) && out.length < limit) out.push({ path: `${at}[${tag(e)}]`, kind: "added", a: undefined, b: e });
+      for (const [id, e] of ma) if (mb.has(id)) diffStates(e, mb.get(id), `${at}[${tag(e)}]`, out, limit);
+      return out;
+    }
+    if (a.length !== b.length && (a.every((x) => x === null || typeof x !== "object") || b.every((x) => x === null || typeof x !== "object"))) {
+      out.push({ path: at, kind: "changed", a, b });   // a list of values changed length: show it whole
+      return out;
+    }
+    if (a.every((x) => x === null || typeof x !== "object") && b.every((x) => x === null || typeof x !== "object")) {
+      if (JSON.stringify(a) !== JSON.stringify(b)) out.push({ path: at, kind: "changed", a, b });   // vectors read best whole
+      return out;
+    }
+    if (a.length !== b.length) out.push({ path: `${at}.length`, kind: "changed", a: a.length, b: b.length });
+    for (let i = 0; i < Math.min(a.length, b.length) && out.length < limit; i++) diffStates(a[i], b[i], `${at}[${i}]`, out, limit);
+    return out;
+  }
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (out.length >= limit) break;
+    const p = /^[A-Za-z_$][\w$]*$/.test(k) ? `${at}.${k}` : `${at}[${JSON.stringify(k)}]`;
+    if (!(k in a)) out.push({ path: p, kind: "added", a: undefined, b: b[k] });
+    else if (!(k in b)) out.push({ path: p, kind: "removed", a: a[k], b: undefined });
+    else diffStates(a[k], b[k], p, out, limit);
+  }
+  return out;
+}
+
+/**
  * A skip test for diffValues from path patterns like "player.px", "entities[*].dist" or "view.*": a diff path is
  * skipped when it is a pattern or lies under one. `*` matches one key, `[*]` any index; the leading "state." is optional.
  */

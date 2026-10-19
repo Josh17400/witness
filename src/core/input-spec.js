@@ -12,17 +12,20 @@
 //   touch2:x,y@t       the same with finger 1 (touchN = finger N-1, so touch1 == touch)
 //   swipe:x1,y1->x2,y2@a-b  finger 0 down at a, one interpolated move per frame, up at b (swipeN too)
 //
+// Times are seconds, or frames with an "f" suffix: space@60f, right@0-120f (mixing is fine: right@0.5-90f).
+//
 // Items are separated by "," or ";". Anything not understood throws an Error naming the item.
 // Events: {t, key, down} | {t, mouse:[x,y], down?, button, world?} | {t, wheel}
 // (touch:/swipe:, like action:/pad:/text:, are frame-exact and handled by parseWitnessInput.)
 
 const NUM = "-?\\d+(?:\\.\\d+)?";
-const TIME = `@(${NUM})(?:-(${NUM}))?`;
+const TNUM = "-?\\d+(?:\\.\\d+)?f?";   // a time: seconds, or frames with an "f" suffix
+const TIME = `@(${TNUM})(?:-(${TNUM}))?`;
 const RE = {
   key: new RegExp(`^([a-z0-9_]+)${TIME}$`, "i"),
   point: new RegExp(`^(click|rclick|mouse):(world:)?(${NUM}),(${NUM})${TIME}$`, "i"),
   drag: new RegExp(`^drag:(world:)?(${NUM}),(${NUM})->(${NUM}),(${NUM})${TIME}$`, "i"),
-  wheel: new RegExp(`^wheel:([+-]?\\d+(?:\\.\\d+)?)@(${NUM})$`, "i"),
+  wheel: new RegExp(`^wheel:([+-]?\\d+(?:\\.\\d+)?)@(${TNUM})$`, "i"),
 };
 const EXAMPLES = "examples: right@0-2 (hold), space@1 (tap), click:640,360@1.5, mouse:100,200@2, drag:600,300->800,300@1-2, wheel:+3@1, touch:160,90@1, swipe:40,90->200,90@1-1.5";
 const TOUCH_RE = new RegExp(`^touch(\\d*):(${NUM}),(${NUM})${TIME}$`, "i");
@@ -47,20 +50,24 @@ export function splitItems(spec) {
   return items.map((s) => s.trim()).filter(Boolean);
 }
 
-export function parseInputSpec(spec) {
+/** A time token in seconds: "1.5" -> 1.5, "90f" -> 90 / fps. */
+export const tsec = (x, fps = 60) => (x === undefined ? undefined : /f$/i.test(String(x)) ? parseFloat(x) / fps : +x);
+
+export function parseInputSpec(spec, fps = 60) {
   if (spec == null || spec === true || spec === "") return [];
   const ev = [];
+  const T = (x) => tsec(x, fps);
   for (const item of splitItems(String(spec))) {
     let m;
     if ((m = RE.point.exec(item))) {
       const [, kind, world, x, y, a, b] = m;
-      const t0 = +a, button = kind.toLowerCase() === "rclick" ? 2 : 0;
+      const t0 = T(a), button = kind.toLowerCase() === "rclick" ? 2 : 0;
       const base = { mouse: [+x, +y], world: !!world, button };
       if (kind.toLowerCase() === "mouse") {
         if (b !== undefined) throw new Error(`'${item}': mouse: moves at one time; use drag: to move over a range`);
         ev.push({ t: t0, ...base });
       } else {
-        const t1 = b !== undefined ? +b : t0 + 1 / 30;
+        const t1 = b !== undefined ? T(b) : t0 + 1 / 30;
         if (t1 <= t0) throw new Error(`'${item}': hold must end after it starts`);
         ev.push({ t: t0, ...base, down: true });
         ev.push({ t: t1, ...base, down: false });
@@ -68,7 +75,7 @@ export function parseInputSpec(spec) {
     } else if ((m = RE.drag.exec(item))) {
       const [, world, x1, y1, x2, y2, a, b] = m;
       if (b === undefined) throw new Error(`'${item}': drag needs a time range, e.g. drag:600,300->800,300@1-2`);
-      const t0 = +a, t1 = +b;
+      const t0 = T(a), t1 = T(b);
       if (t1 <= t0) throw new Error(`'${item}': drag must end after it starts`);
       const steps = Math.max(2, Math.round((t1 - t0) * 30));
       ev.push({ t: t0, mouse: [+x1, +y1], world: !!world, button: 0, down: true });
@@ -78,11 +85,11 @@ export function parseInputSpec(spec) {
       }
       ev.push({ t: t1, mouse: [+x2, +y2], world: !!world, button: 0, down: false });
     } else if ((m = RE.wheel.exec(item))) {
-      ev.push({ t: +m[2], wheel: +m[1] });
+      ev.push({ t: T(m[2]), wheel: +m[1] });
     } else if ((m = RE.key.exec(item))) {
       const [, name, a, b] = m;
       if (/^(click|rclick|mouse|drag|wheel|touch\d*|swipe\d*)$/i.test(name)) throw new Error(`'${item}': ${name} needs a position — ${EXAMPLES}`);
-      const t0 = +a, t1 = b !== undefined ? +b : t0 + 0.1;
+      const t0 = T(a), t1 = b !== undefined ? T(b) : t0 + 0.1;
       if (t1 <= t0) throw new Error(`'${item}': hold must end after it starts`);
       ev.push({ t: t0, key: name.toLowerCase(), down: true });
       ev.push({ t: t1, key: name.toLowerCase(), down: false });
@@ -122,22 +129,22 @@ function fingerId(digits, item) {
 
 /** touch:/touchN:/swipe:/swipeN: items as protocol touch events (frame-exact, so they need fps). */
 function parseTouch(item, fps) {
-  const F = (t) => Math.max(0, Math.round(t * fps));
+  const F = (t) => Math.max(0, Math.round(tsec(t, fps) * fps));
   const ev = (frame, id, x, y, phase) => ({ frame, type: "touch", id, x, y, phase });
   let m;
   if ((m = TOUCH_RE.exec(item))) {
     const [, digits, x, y, a, b] = m;
     const id = fingerId(digits, item);
-    if (b !== undefined && +b <= +a) throw new Error(`'${item}': hold must end after it starts`);
-    const f0 = F(+a), f1 = b !== undefined ? Math.max(F(+b), f0 + 1) : f0 + 1;   // a tap lifts one frame later
+    if (b !== undefined && tsec(b, fps) <= tsec(a, fps)) throw new Error(`'${item}': hold must end after it starts`);
+    const f0 = F(a), f1 = b !== undefined ? Math.max(F(b), f0 + 1) : f0 + 1;   // a tap lifts one frame later
     return [ev(f0, id, +x, +y, "down"), ev(f1, id, +x, +y, "up")];
   }
   if ((m = SWIPE_RE.exec(item))) {
     const [, digits, x1, y1, x2, y2, a, b] = m;
     const id = fingerId(digits, item);
     if (b === undefined) throw new Error(`'${item}': swipe needs a time range, e.g. swipe:40,90->200,90@1-1.5`);
-    if (+b <= +a) throw new Error(`'${item}': swipe must end after it starts`);
-    const f0 = F(+a), f1 = Math.max(F(+b), f0 + 1), out = [ev(f0, id, +x1, +y1, "down")];
+    if (tsec(b, fps) <= tsec(a, fps)) throw new Error(`'${item}': swipe must end after it starts`);
+    const f0 = F(a), f1 = Math.max(F(b), f0 + 1), out = [ev(f0, id, +x1, +y1, "down")];
     // one move per frame after the down; the last one lands exactly on the end point, then the finger lifts there
     for (let f = f0 + 1; f <= f1; f++) {
       const k = (f - f0) / (f1 - f0);
@@ -157,15 +164,15 @@ export function parseWitnessInput(spec, fps) {
   for (const item of splitItems(String(spec))) {
     const touch = parseTouch(item.trim(), fps);
     if (touch) { extra.push(...touch); continue; }
-    const m = /^(action|pad|text):([^@]+)@(-?\d+(?:\.\d+)?)(?:-(-?\d+(?:\.\d+)?))?$/.exec(item.trim());
+    const m = /^(action|pad|text):([^@]+)@(-?\d+(?:\.\d+)?f?)(?:-(-?\d+(?:\.\d+)?f?))?$/i.exec(item.trim());
     if (!m) { rest.push(item); continue; }
     const [, kind, name, a, b] = m;
-    const t0 = +a, t1 = b !== undefined ? +b : t0 + 0.1;
+    const t0 = tsec(a, fps), t1 = b !== undefined ? tsec(b, fps) : t0 + 0.1;
     if (kind === "text") { extra.push({ frame: Math.round(t0 * fps), type: "text", text: name }); continue; }
     const field = kind === "action" ? "action" : "button";
     extra.push({ frame: Math.round(t0 * fps), type: kind, [field]: name, down: true });
     extra.push({ frame: Math.round(t1 * fps), type: kind, [field]: name, down: false });
   }
-  const base = rest.length ? toProtocolEvents(parseInputSpec(rest.join("; ")), fps) : [];
+  const base = rest.length ? toProtocolEvents(parseInputSpec(rest.join("; "), fps), fps) : [];
   return [...base, ...extra].sort((p, q) => p.frame - q.frame);
 }

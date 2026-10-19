@@ -2,7 +2,20 @@
 // Player moves with arrows/WASD at 120 px/s, collects coins (+1 score, a "ding" sound).
 // Pointer: dragging with the left button (or finger 0: touch id 0 is treated like the mouse) drags the
 // player by the pointer's movement; state.pointer and state.touches (fingers down) make input observable.
+//
+// Opt-in mechanics with exact, planted numbers (for testing Witness's measurements):
+//   MOCK_JUMP=1    platformer: no up/down walking; space jumps (vy0 = -7 px/f, gravity 0.4 px/f², explicit Euler:
+//                  apex 64.8 px at +18f, lands at +36f); left/right accelerate 0.5 px/f per frame up to 3 px/f and
+//                  brake 1 px/f per frame; h = hitstop (all motion frozen for exactly 5 frames). state.player gains
+//                  vy, vx, grounded.
+//   MOCK_LAG=1     x: the state reacts 3 frames after the press (state.lagged), the picture 5 frames after (a white
+//                  square at 300,10), and a beep starts in the press frame's own audio (+1f)
+//   MOCK_SOUNDS=1  j plays an 80 ms noise burst, but only on odd presses (a planted cooldown bug); landing plays a
+//                  120 ms 660 Hz tone; coins ding. Each sound is announced with an {"event": "sound"} line;
+//                  MOCK_SOUNDS=quiet plays the same sounds without the lines (an adapter without sound events).
+//   MOCK_PNG=1     screenshots come back as format "png" (like Unity, or the JS adapter's screenshotFormat "png")
 import net from "node:net";
+import { encodePNG } from "../src/media/png.js";
 
 const FPS = 60, W = 320, H = 180, SR = 22050;
 let rngState = 1, frame = 0, time = 0, queue = [], keys = new Set(), logs = [], audioBuf = [];
@@ -11,18 +24,22 @@ let player, coins, score;
 // MOCK_LEAK=1: a "particle clock" that reset() forgets, so screenshots depend on earlier runs while the snapshot
 // stays identical (the classic leak only screenshot/audio comparison catches)
 let leakT = 0;
+const JUMP = !!process.env.MOCK_JUMP, LAG = !!process.env.MOCK_LAG, SOUNDS = process.env.MOCK_SOUNDS || "";
+let edges = [], freeze = 0, xAt = null, lagged = false, jPresses = 0;
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
 function reset(seed = 1) {
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
+  if (JUMP) Object.assign(player, { vx: 0, vy: 0, grounded: true });
+  edges = []; freeze = 0; xAt = null; lagged = false; jPresses = 0;
   coins = Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)] }));
 }
 
 function stepOnce(dt) {
   for (const e of queue.filter((e) => e.frame <= frame)) {
-    if (e.type === "key") e.down ? keys.add(e.key) : keys.delete(e.key);
+    if (e.type === "key") { if (e.down && !keys.has(e.key)) edges.push(e.key); e.down ? keys.add(e.key) : keys.delete(e.key); }
     if (e.type === "action" && e.action === "dash") player.pos[0] += 30;
     if (e.type === "touch") e.phase === "up" ? fingers.delete(e.id) : fingers.set(e.id, [e.x, e.y]);
     // finger 0 drives the same pointer as the mouse (down -> button 0 down, move -> move, up -> button up)
@@ -37,16 +54,36 @@ function stepOnce(dt) {
   queue = queue.filter((e) => e.frame > frame);
   const dx = (keys.has("right") || keys.has("d") ? 1 : 0) - (keys.has("left") || keys.has("a") ? 1 : 0);
   const dy = (keys.has("down") || keys.has("s") ? 1 : 0) - (keys.has("up") || keys.has("w") ? 1 : 0);
-  player.pos[0] = Math.max(0, Math.min(W, player.pos[0] + dx * 120 * dt));
-  player.pos[1] = Math.max(0, Math.min(H, player.pos[1] + dy * 120 * dt));
+  const pressed = edges.splice(0);
+  if (LAG && pressed.includes("x")) { xAt = frame; addSound(beep(), null); }
+  if (LAG && xAt != null && frame - xAt >= 2) lagged = true;
+  if (SOUNDS && pressed.includes("j") && ++jPresses % 2 === 1) addSound(burst(), "swing");
+  if (JUMP) {
+    if (pressed.includes("h")) freeze = 5;
+    if (freeze > 0) freeze--;
+    else {
+      // per-frame units: accelerate 0.5 px/f per frame up to 3 px/f, brake 1 px/f per frame
+      if (dx) player.vx = Math.max(-3, Math.min(3, player.vx + 0.5 * dx));
+      else player.vx = Math.sign(player.vx) * Math.max(0, Math.abs(player.vx) - 1);
+      player.pos[0] = Math.max(0, Math.min(W, player.pos[0] + player.vx));
+      if (pressed.includes("space") && player.grounded) { player.vy = -7; player.grounded = false; }
+      if (!player.grounded) {
+        player.pos[1] += player.vy;
+        player.vy += 0.4;
+        if (player.pos[1] >= 90 - 1e-9) { player.pos[1] = 90; player.vy = 0; player.grounded = true; if (SOUNDS) addSound(tone660(), "land"); }
+      }
+    }
+  } else {
+    player.pos[0] = Math.max(0, Math.min(W, player.pos[0] + dx * 120 * dt));
+    player.pos[1] = Math.max(0, Math.min(H, player.pos[1] + dy * 120 * dt));
+  }
   for (const c of [...coins]) {
     if (Math.hypot(c.pos[0] - player.pos[0], c.pos[1] - player.pos[1]) < 12) {
       coins.splice(coins.indexOf(c), 1);
       score++;
       logs.push({ frame, level: "info", message: `coin ${c.id} collected` });
       // ding: a 0.15 s 880 Hz decaying sine starting now
-      const start = audioBuf.length;
-      for (let i = 0; i < SR * 0.15; i++) audioBuf[start + i] = (audioBuf[start + i] || 0) + Math.sin(2 * Math.PI * 880 * i / SR) * 0.5 * Math.exp(-i / (SR * 0.04));
+      addSound(Float32Array.from({ length: SR * 0.15 }, (_, i) => Math.sin(2 * Math.PI * 880 * i / SR) * 0.5 * Math.exp(-i / (SR * 0.04))), SOUNDS ? "ding" : null);
     }
   }
   // audio advances with simulated time
@@ -56,6 +93,21 @@ function stepOnce(dt) {
   if (process.env.MOCK_CRASH_AT && frame === +process.env.MOCK_CRASH_AT) logs.push({ frame, level: "error", message: "boom: something broke" });
 }
 
+// a sound starts at the current simulated time (the start of the frame being stepped)
+function addSound(samples, name) {
+  const start = audioBuf.length;
+  for (let i = 0; i < samples.length; i++) audioBuf[start + i] = (audioBuf[start + i] || 0) + samples[i];
+  if (name && SOUNDS !== "quiet") sock.write(JSON.stringify({ event: "sound", name, frame }) + "\n");
+}
+let noiseSeed = 7;
+function burst() {   // 80 ms of noise, 1 ms attack, decaying
+  const n = Math.round(SR * 0.08), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) { noiseSeed = (noiseSeed * 1103515245 + 12345) & 0x7fffffff; out[i] = ((noiseSeed / 0x7fffffff) * 2 - 1) * 0.5 * Math.min(1, i / (SR * 0.001)) * Math.exp(-i / (SR * 0.03)); }
+  return out;
+}
+const tone660 = () => Float32Array.from({ length: Math.round(SR * 0.12) }, (_, i) => Math.sin(2 * Math.PI * 660 * i / SR) * 0.4 * Math.min(1, i / (SR * 0.002)) * (1 - i / (SR * 0.12)));
+const beep = () => Float32Array.from({ length: Math.round(SR * 0.1) }, (_, i) => Math.sin(2 * Math.PI * 440 * i / SR) * 0.4 * (1 - i / (SR * 0.1)));
+
 function screenshot() {
   const px = Buffer.alloc(W * H * 4);
   const put = (x, y, r, g, b) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const i = (y * W + x) * 4; px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255; };
@@ -64,6 +116,8 @@ function screenshot() {
   coins.forEach((c) => blob(c.pos, 5, [255, 210, 60]));
   blob(player.pos, 7, [80, 200, 255]);
   if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
+  if (LAG && xAt != null && frame - xAt >= 5) for (let y = 10; y < 20; y++) for (let x = 300; x < 310; x++) put(x, y, 255, 255, 255);
+  if (process.env.MOCK_PNG) return { width: W, height: H, format: "png", data: Buffer.from(encodePNG(W, H, px)).toString("base64") };
   return { width: W, height: H, format: "rgba8", data: px.toString("base64") };
 }
 
@@ -92,10 +146,10 @@ sock.on("data", (d) => {
     const reply = (o) => sock.write(JSON.stringify({ id: m.id, ok: true, ...o }) + "\n");
     const fail = (e) => sock.write(JSON.stringify({ id: m.id, ok: false, error: e }) + "\n");
     switch (m.cmd) {
-      case "reset": reset(m.seed); audioSent = 0; reply({}); break;
+      case "reset": reset(m.seed); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
-      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins] } }); break;
+      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}) } }); break;
       case "screenshot": reply(screenshot()); break;
       case "audio": reply(audio()); break;
       case "call":

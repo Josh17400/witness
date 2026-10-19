@@ -3,29 +3,88 @@
 // for games written in ANY language. Helpers make game-state questions short:
 //   state.player.hp            count("Coin")          first("Boss")?.hp
 //   all("Enemy").length        near([x, y], "Enemy")  dist(state.player.pos, first("Door").pos)
-//   len(x)   approx(a, b, eps)   frame   time   entities   prev (previous snapshot, in traces/tests)
+//   len(x)   approx(a, b, eps)   frame   time   entities
+// Time helpers (need the previous frame's snapshot, which eval/trace/tests pass as `prev`):
+//   prev.player.pos[0]     the same path one frame earlier (the previous step in point test steps)
+//   rose(x) / fell(x)      x became true / false on this frame       changed(x)   x differs from the previous frame
+//   since(x)               frames since x last became true (needs every-frame sampling: trace, --when, test ranges;
+//                          if x is already true on the first sampled frame, counting starts there)
 
 export class ExprError extends Error {}
 
 const cache = new Map();
+const TEMPORAL = ["rose", "fell", "changed", "since"];
+
+/**
+ * Rewrite rose(...)/fell(...)/changed(...)/since(...) calls into __t("kind", i) so the helper can evaluate the
+ * argument's *source* on this frame and on the previous one. Strings and member calls (a.rose()) are left alone.
+ * Returns { code, args: [argument source, ...] }.
+ */
+export function rewriteTemporal(src) {
+  const args = [];
+  let out = "", i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === "`") {   // copy a string literal verbatim
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
+      out += src.slice(i, j + 1); i = j + 1; continue;
+    }
+    const m = /^(rose|fell|changed|since)\s*\(/.exec(src.slice(i));
+    const before = i > 0 ? src[i - 1] : "";
+    if (m && !/[\w$.]/.test(before)) {
+      // balanced argument
+      let j = i + m[0].length, depth = 1, q = null;
+      for (; j < src.length; j++) {
+        const d = src[j];
+        if (q) { if (d === "\\") j++; else if (d === q) q = null; continue; }
+        if (d === '"' || d === "'" || d === "`") { q = d; continue; }
+        if (d === "(") depth++;
+        else if (d === ")" && --depth === 0) break;
+      }
+      if (depth !== 0) break;   // unbalanced: let the parser report it
+      const arg = src.slice(i + m[0].length, j).trim();
+      args.push(arg);
+      out += `__t(${JSON.stringify(m[1])}, ${args.length - 1})`;
+      i = j + 1; continue;
+    }
+    out += c; i++;
+  }
+  if (i < src.length) out += src.slice(i);
+  return { code: out, args };
+}
 
 function compileExpr(src) {
   if (cache.has(src)) return cache.get(src);
+  const { code, args } = TEMPORAL.some((k) => src.includes(k)) ? rewriteTemporal(src) : { code: src, args: [] };
   let fn;
   try {
     // eslint-disable-next-line no-new-func
-    fn = new Function("H", `with (H) { return (${src}\n); }`);
+    fn = new Function("H", `with (H) { return (${code}\n); }`);
   } catch (e) {
     throw new ExprError(`can't parse "${src}": ${e.message}`);
   }
-  cache.set(src, fn);
-  return fn;
+  const entry = { fn, args };
+  cache.set(src, entry);
+  return entry;
 }
+
+/** Does an expression look at the previous frame (prev, rose, fell, changed, since)? */
+export const usesPrev = (src) => /(^|[^\w$.])(prev|rose|fell|changed|since)\b/.test(String(src));
+
+/**
+ * Per-run memory for since(): which frame each argument last became true on. Create one per run (or test range)
+ * and pass it to evaluate()/check() on every sampled frame, in frame order.
+ */
+export class TimeContext {
+  constructor() { this.m = new Map(); }
+}
+const truthy = (v) => !!v;
 
 const typeOf = (e) => e && (e.type ?? e.kind ?? e.class ?? e.name);
 const posOf = (p) => (Array.isArray(p) ? p : p && Array.isArray(p.pos) ? p.pos : p && typeof p === "object" && "x" in p ? [p.x, p.y, p.z ?? 0] : null);
 
-export function helpers(snap, prev = null) {
+export function helpers(snap, prev = null, ctx = null, targs = []) {
   const state = (snap && snap.state) || {};
   const entities = Array.isArray(state.entities) ? state.entities : [];
   const match = (t) => (t == null ? entities : entities.filter((e) => typeOf(e) === t || (typeof t === "function" && t(e))));
@@ -50,16 +109,40 @@ export function helpers(snap, prev = null) {
     abs: Math.abs, min: Math.min, max: Math.max, floor: Math.floor, round: Math.round, sqrt: Math.sqrt,
     sum: (xs) => (xs || []).reduce((a, b) => a + (+b || 0), 0),
     Math, JSON,
+    __t: (kind, i) => temporal(kind, targs[i], snap, prev, ctx),
   };
 }
 
+/** rose/fell/changed/since: the argument evaluated on this frame and on the previous one. */
+function temporal(kind, argSrc, snap, prev, ctx) {
+  const cur = evaluate(argSrc, snap, prev, ctx);
+  let before;
+  if (prev) { try { before = evaluate(argSrc, prev, null, null); } catch { before = undefined; } }
+  if (kind === "changed") return !!prev && JSON.stringify(cur) !== JSON.stringify(before);
+  if (kind === "rose") return !!prev && truthy(cur) && !truthy(before);
+  if (kind === "fell") return !!prev && !truthy(cur) && truthy(before);
+  // since(x): frames since x last became true (true on the run's first sample counts as becoming true there)
+  if (!ctx) throw new ExprError(`since(${argSrc}) needs every-frame sampling: use it in trace, eval --when, or test always/never/eventually ranges`);
+  const f = snap ? snap.frame : 0;
+  let m = ctx.m.get(argSrc);
+  if (!m) { m = { seen: null, last: null }; ctx.m.set(argSrc, m); }
+  if (m.seen !== f) {
+    // already true on the first frame this run/range samples: counting starts there
+    if (truthy(cur) && (m.seen === null || !prev || !truthy(before))) m.last = f;
+    m.seen = f;
+  }
+  return m.last == null ? null : f - m.last;
+}
+
 /** Evaluate `src` against a snapshot. Throws ExprError with a friendly message. */
-export function evaluate(src, snap, prev = null) {
-  const fn = compileExpr(src);
+export function evaluate(src, snap, prev = null, ctx = null) {
+  const { fn, args } = compileExpr(src);
   try {
-    return fn(helpers(snap, prev));
+    return fn(helpers(snap, prev, ctx, args));
   } catch (e) {
+    if (e instanceof ExprError) throw e;
     const m = /Cannot read propert(?:y|ies) of (undefined|null) \(reading '([^']+)'\)/.exec(e.message);
+    if (m && !prev && /(^|[^\w$.])prev\b/.test(src)) throw new ExprError(`"${src}": prev is null here (the first sample has no previous frame)`);
     if (m) throw new ExprError(`"${src}": something before .${m[2]} is ${m[1] === "null" ? "null" : "missing"} in this snapshot — check the path with 'witness eval --keys'`);
     throw new ExprError(`"${src}": ${e.message}`);
   }
@@ -87,15 +170,35 @@ export function splitComparison(src) {
 }
 
 /** Check an expectation; returns {ok, detail}. */
-export function check(src, snap, prev = null) {
-  const cmp = splitComparison(src);
+export function check(src, snap, prev = null, ctx = null) {
+  const ok = evaluate(src, snap, prev, ctx);
+  // "a OP b" shows both sides; an expression joined by && / || / ?: is judged whole (its halves may not stand alone)
+  const cmp = topLevelLogic(src) ? null : splitComparison(src);
   if (cmp) {
-    const a = evaluate(cmp.left, snap, prev), b = evaluate(cmp.right, snap, prev);
-    const ok = evaluate(src, snap, prev);
-    return { ok: !!ok, detail: ok ? null : `got ${fmt(a)} ${cmp.op} ${fmt(b)}` };
+    try {
+      const a = evaluate(cmp.left, snap, prev, ctx), b = evaluate(cmp.right, snap, prev, ctx);
+      return { ok: !!ok, detail: `got ${fmt(a)} ${cmp.op} ${fmt(b)}` };
+    } catch { /* a side that can't be evaluated alone: fall back to the whole value */ }
   }
-  const v = evaluate(src, snap, prev);
-  return { ok: !!v, detail: v ? null : `got ${fmt(v)}` };
+  return { ok: !!ok, detail: `got ${fmt(ok)}` };
+}
+
+/** Does the expression have &&, ||, ?? or a ternary at the top level (outside brackets and strings)? */
+export function topLevelLogic(src) {
+  let depth = 0, q = null;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (q) { if (c === "\\") i++; else if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === "`") { q = c; continue; }
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (depth === 0) {
+      const two = src.slice(i, i + 2);
+      if (two === "&&" || two === "||" || two === "??") return true;
+      if (c === "?" && src[i + 1] !== "." ) return true;
+    }
+  }
+  return false;
 }
 
 export function fmt(v, max = 80) {

@@ -1,0 +1,18 @@
+[
+  { "name": "ranges that hold", "input": "right@0-1",
+    "steps": [
+      { "from": 0, "to": 1, "always": "state.player.pos[1] == 90", "never": "state.score > 3", "eventually": "state.score == 1" },
+      { "from": "10f", "within": "10f", "eventually": "rose(state.score == 1)" },
+      { "from": 0, "to": "60f", "always": "frame == 0 || state.player.pos[0] - prev.player.pos[0] == 2" },
+      { "at": "30f", "expect": "state.player.pos[0] == 100" }
+    ] },
+  { "name": "ranges that break", "input": "right@0-1",
+    "steps": [
+      { "from": 0, "to": 1, "always": "state.score == 0" },
+      { "from": 0, "to": 1, "never": "count('Coin') < 4" },
+      { "from": 0, "to": "10f", "eventually": "state.score == 1" },
+      { "from": "40f", "to": "50f", "always": "since(state.score == 2) < 5" }
+    ] },
+  { "name": "prev is the previous step even when it fetched nothing", "input": "right@0-1",
+    "steps": [ { "at": 0.5, "input": "space@0" }, { "at": 0.6, "expect": "state.player.pos[0] - prev.player.pos[0] == 12" } ] }
+]
