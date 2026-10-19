@@ -5,8 +5,10 @@
 // "iPhone 15 landscape", 393×659 and 734×343). screen is the device's portrait point size in every orientation, as
 // iOS reports it. navigator.platform and maxTouchPoints match the user agent ("iPhone" / "MacIntel", 5 touch points:
 // the usual iPad check is platform === "MacIntel" && maxTouchPoints > 1). Safe areas (notch, Dynamic Island, home
-// indicator) are NOT emulated: env(safe-area-inset-*) is 0 in the page; use measure ui --safe <preset>.
+// indicator) are not emulated by the engines: env(safe-area-inset-*) is 0 in the page. --safe-insets rewrites the page's
+// env() uses to the profile's insets (web-init.js safeInsetsInit); measure ui --safe <preset> checks a screenshot.
 import { WitnessError } from "./session.js";
+import { SAFE_PRESETS } from "../media/ui.js";
 
 const IOS_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 // iPadOS Safari asks for the desktop site by default: it reports itself as a Mac (with touch).
@@ -54,6 +56,28 @@ export function resolveDevice(spec) {
   const maxTouchPoints = base.maxTouchPoints != null ? base.maxTouchPoints : base.platform ? 5 : null;
   return { name, title: base.title + (landscape ? ", landscape" : ""), width, height, dpr: base.dpr, touch: base.touch, mobile: base.mobile, standalone: base.standalone, userAgent: base.userAgent,
     screen: base.screen || [Math.min(width, height), Math.max(width, height)], platform: base.platform || null, maxTouchPoints, safe: base.safe || null, landscape };
+}
+
+/** The measure ui --safe preset for a device profile (null: desktop or a custom profile without one). */
+export function safePresetFor(d) {
+  if (!d || !d.safe) return null;
+  const land = !!d.landscape;
+  if (d.safe === "safari") return land ? "iphone-safari-landscape" : "iphone-safari-portrait";
+  if (d.safe === "iphone") return land ? "iphone-landscape" : "iphone-portrait";
+  if (d.safe === "iphone-max") return land ? "iphone-max-landscape" : "iphone-max-portrait";
+  if (d.safe === "iphone-se") return "iphone-se";
+  if (d.safe === "ipad") return "ipad";
+  return null;
+}
+
+/** env(safe-area-inset-*) of a profile in CSS px (= pt) for its orientation: { preset, orientation, top, right, bottom,
+ *  left } (the measure ui --safe preset's numbers), or null (desktop / a custom device). */
+export function safeInsetsFor(d) {
+  const name = safePresetFor(d);
+  if (!name) return null;
+  const p = SAFE_PRESETS[name], orientation = p.only || (d.landscape ? "landscape" : "portrait");
+  const i = p[orientation].insets;
+  return { preset: name, orientation, top: i.top, right: i.right, bottom: i.bottom, left: i.left };
 }
 
 /** One line: "iphone-15 (iPhone 15, Home Screen web app): 393×852 CSS px, DPR 3 = 1179×2556 device px, touch, mobile". */

@@ -321,10 +321,14 @@ check `platform === "MacIntel" && maxTouchPoints > 1` passes), `screen` at the d
 orientations (as iOS), and for Home Screen web apps `navigator.standalone` and `display-mode: standalone`. The
 iPhone profiles are full screen (a web app added to the Home Screen); `iphone-15-safari` is a Safari tab (393×659,
 landscape 734×343). `ipad` reports a Mac user agent, as iPadOS Safari does.
-**Safe areas are not emulated**: headless engines have no notch, so `env(safe-area-inset-*)` is 0 and a HUD at y = 0
-looks fine in every screenshot, while on the phone it sits under the Dynamic Island (59 pt) and the home indicator
-(34 pt). Check it with `witness measure ui --safe <preset>` (doctor names the preset for the profile;
-`iphone-safari-portrait` for a Safari tab, which has none of these insets).
+**Safe areas**: headless engines have no notch, so `env(safe-area-inset-*)` is 0 and a HUD at y = 0 looks fine in
+every screenshot, while on the phone it sits under the Dynamic Island (59 pt) and the home indicator (34 pt).
+`--safe-insets` (or `launch.safeInsets: true`) rewrites every env(safe-area-inset-*) in the page's same-origin CSS
+(`<style>`, `<link>`, `@import`, custom properties, inline styles, rules and styles set from script, also later DOM
+changes) to the profile's insets for its orientation, so a CSS HUD lays out as on the phone; doctor reports the
+count, and cross-origin sheets it can't read. `--safe-overlay` draws the island, home indicator and rounded corners
+(approximate) over every screenshot after capture. A HUD drawn into the canvas: `witness measure ui --safe <preset>`
+(doctor names the preset; `iphone-safari-portrait` for a Safari tab, which has none of these insets).
 
 * `witness doctor` with a browser prints the page (viewport, DPR, screen, touch points, platform), how the main
   canvas lands on the screen, from the layout (`canvas 320×180 shown at 361×203.06 CSS px = 1083×609.19 device px:

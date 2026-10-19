@@ -84,6 +84,25 @@ async function attachWeb(session, web) {
       return { width: c.width, height: c.height, format: "png", data: c.png.toString("base64") };
     };
   }
+  // --safe-overlay: the island, home indicator and rounded corners drawn over every screenshot after capture, mapped
+  // from the viewport onto what was captured (the viewport, the canvas element, or the game's own canvas pixels)
+  if (web.safeOverlay) {
+    const base = session.screenshot.bind(session);
+    session.screenshot = async (...a) => {
+      const sh = await base(...a);
+      const [{ decodePNG, encodePNG }, { drawSafeOverlay }] = await Promise.all([import("../media/png.js"), import("../media/safe-overlay.js")]);
+      const buf = sh.path ? fs.readFileSync(path.resolve(sh.path)) : Buffer.from(sh.data, "base64");
+      const img = sh.path || sh.format === "png" ? decodePNG(buf) : { width: sh.width, height: sh.height, data: new Uint8Array(buf.buffer, buf.byteOffset, buf.length).slice() };
+      const info = await web.info();
+      let best = null;
+      for (const c of (info && info.canvases) || []) if (c.rect[2] * c.rect[3] > 0 && (!best || c.rect[2] * c.rect[3] > best.rect[2] * best.rect[3])) best = c;
+      const vw = info.viewport[0], vh = info.viewport[1];
+      const map = web.captureMode === "screen" || !best ? { ox: 0, oy: 0, kx: img.width / vw, ky: img.height / vh }
+        : { ox: best.rect[0], oy: best.rect[1], kx: img.width / best.rect[2], ky: img.height / best.rect[3] };
+      web.overlayDrawn = drawSafeOverlay(img, web.safeOverlay, vw, vh, map);
+      return { width: img.width, height: img.height, format: "png", data: Buffer.from(encodePNG(img.width, img.height, img.data)).toString("base64") };
+    };
+  }
 }
 
 /**

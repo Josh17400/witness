@@ -129,6 +129,52 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   `step`; §7 says so. The JS guide notes WebGL in WebKit and Chromium.
 - Web test page `tests/web/pages/gl.html`: a WebGL2 game with no audio.
 
+**Two scales in one picture (measure scale, doctor)**
+- A web build whose world is drawn at a whole ×5 under a UI layer stretched at ×4.11 got "couldn't read the scale from
+  the picture (≈×5.000 × 4.911 from runs of one colour vs ×1 from the layout)". A picture that isn't one clean grid is
+  now split into regions with one grid each (media `scaleRegions`): tiles read their own scale, readings within 4% form
+  a candidate (refitted over its tiles; kept when both axes sit on a grid at the same scale within 3%), every tile goes
+  to the grid that holds its colour changes best, flat tiles join a neighbour of their own colour, and region edges move
+  to the row / column where the changes switch grids. Synthetic checks (1000×600): a ×5 world with UI rows 115+ at ×4.11
+  → `×5 (whole, 78.8% of the picture) · ×4.11 (fractional, 21.2%)`, rects 0,0 1000×473 and 0,473 1000×127 exactly (UI
+  ×4.1101 × 4.109, 4 or 5 px, 11% are 5), also with sparse art (flat sky, a flat panel with text); a corner panel at
+  42,33 291×136 (6.6%); ×4 UI on ×5; ×1 text on ×5; a ×2.5 panel beside a ×2 world (split at x 600); plain ×5 and ×3.384
+  pictures stay one region.
+- `doctor` on such a page: `⚠ pixels on screen (…, 2556×1179): 2 scales in one picture: world ×5 (whole, 80.2% of the
+  picture) · ui ×4.11 (fractional, 19.8%)`, then `the canvas is shown 1:1 (the layout's ×1): these are the scales the
+  game draws at itself` (or which region matches the layout's scale) and one line per region with its rect.
+  `--json`: `summary.web.display.pixels.{mixed, regions, groups, layoutRegion}`. A 1:1 canvas whose game draws one
+  scale bigger now says so (`≈×5.000: the canvas is shown 1:1 …, so the game draws its pixels at ×5 itself`) instead of
+  "couldn't read". Checked in Chromium on `tests/web/pages/mixed.html` (iphone-15-landscape: ui region 0,945 2556×234).
+- Region names: optional `state.layers = [{name, rect: [x, y, w, h]}]` in screen pixels (docs/PROTOCOL.md); a region
+  takes the smallest layer holding 60%+ of it; without layers, a region holding `state.ui` elements is "UI".
+- `measure scale shot.png --rect "world=0,0,1000,473; ui=0,473,1000,127"` reads each rect on its own (`✔ world …: exact
+  ×5`, `✖ ui …: FRACTIONAL ×4.11: uneven: one source pixel is 4 or 5 px wide (11% are 5)`); `--layers` names the
+  automatic regions; `--json`: `summary.regions`, `data.regions`. `doctor --scale-rect "…"` does the same in canvas px.
+
+**Safe areas in the page: --safe-insets, --safe-overlay**
+- `--safe-insets` (`launch.safeInsets: true`, with a phone or tablet `--device`): an init script rewrites every
+  `env(safe-area-inset-top|right|bottom|left[, fallback])` in same-origin CSS (`<style>`, `<link>`, `@import`, nested
+  rules, custom properties, `calc()`/`max()`, inline style attributes, `insertRule` / `replace` / `setProperty` /
+  `cssText` from script, and later DOM changes) to the profile's insets for its orientation: the `measure ui --safe`
+  preset's numbers (iPhone 15 portrait top 59 / bottom 34, landscape left and right 59 / bottom 21; a Safari tab 0; SE
+  top 20; iPad top 24 / bottom 20). Cross-origin sheets can't be read: counted. Doctor: `✔ safe areas emulated
+  (--safe-insets, iphone-landscape): env(safe-area-inset-*) = right 59 · bottom 21 · left 59 CSS px; 8 env() uses in the
+  page's CSS rewritten (5 in style sheets, 2 inline, 1 set from script)` (`summary.web.safe`); without it the "not
+  emulated" line names the flag. Checked in Chromium 156 and WebKit 27.2 on `tests/web/pages/safe.html`: a HUD with
+  `padding: env(safe-area-inset-top, 7px) 0 0 env(safe-area-inset-left)` computes 59px left in landscape (0px before),
+  59px top in portrait; the `<link>` sheet's `calc(20px + var(--sab))` 41px.
+- `--safe-overlay`: the Dynamic Island, home indicator and rounded corners (approximate: corner radius 55 pt, island
+  126×37 pt 11 pt from the edge, indicator 134×5 pt 8 pt up) and the inset zones tinted magenta are drawn over every
+  screenshot after capture, mapped onto what was captured (`--capture screen`, `element`, or the game's own canvas
+  pixels); never into the page.
+
+**Follow-up commands keep --config**
+- A playtest started with `--config witness.web.json` wrote report.md replay commands without it, so they ran the
+  desktop build: now `witness replay --config witness.web.json witness/playtests/c/replay.jsonl …` (and paths with
+  spaces are quoted). doctor's "witness test --repeat 2" and "measure ui --safe" hints and effect's "run 'witness
+  doctor'" carry the `--config` that was passed.
+
 **Adoption steps**
 1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
    `--config witness.web.json`. Briefs made before this pointed at the folder (the desktop config): re-make them.
@@ -149,6 +195,13 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
 5. *Optional, web (Emscripten/SDL) builds:* open the SDL audio device in witness mode too, fed silence (cpp GUIDE §13),
    so `doctor --no-auto-unlock` and `web.audio.state` can check the iPhone unlock path; keep `witness_audio_write()`
    for what `listen` hears. Then `witness doctor` also shows the WebGL renderer.
+6. *Optional:* games that draw layers at different scales: expose `state.layers = [{name, rect}]` (screen pixels) so
+   doctor names the regions. Scripts reading `measure scale --json` on such pictures: `verdict` and `summary.fractional`
+   now describe the regions (`summary.regions`); `ok` is false when any region is fractional.
+7. *Optional, web builds with a CSS HUD:* run doctor/tests with `--device <phone> --safe-insets` (or
+   `launch.safeInsets: true` in the web config) to lay the HUD out with the phone's insets, and `--safe-overlay` on
+   shots to see what the island and corners cover. Re-make old playtest reports' replay commands by hand if they used
+   `--config` (add it).
 
 ## 0.7.0 (2026-10-19)
 

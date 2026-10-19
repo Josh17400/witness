@@ -1,0 +1,3 @@
+/* a linked sheet: a custom property and calc()/max() around env() */
+:root { --sab: env(safe-area-inset-bottom); }
+#bar { position: fixed; left: 0; right: 0; bottom: 0; height: calc(20px + var(--sab)); padding-right: max(env(safe-area-inset-right), 4px); background: #3d6; box-sizing: border-box; }

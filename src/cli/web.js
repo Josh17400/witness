@@ -1,19 +1,10 @@
 // Browser launches in `witness doctor`: the device and engine, how the canvas really lands on the screen (device
 // pixels: fractional scaling, smoothing blur), and the audio autoplay policy (the iPhone "no sound until a tap" bug).
-import { describeDevice, canvasDisplay } from "../core/devices.js";
+import { describeDevice, canvasDisplay, safePresetFor, safeInsetsFor } from "../core/devices.js";
+export { safePresetFor };
 
-/** The measure ui --safe preset for a device profile (null: desktop or a custom profile without one). */
-export function safePresetFor(d) {
-  if (!d || !d.safe) return null;
-  const land = !!d.landscape;
-  if (d.safe === "safari") return land ? "iphone-safari-landscape" : "iphone-safari-portrait";
-  if (d.safe === "iphone") return land ? "iphone-landscape" : "iphone-portrait";
-  if (d.safe === "iphone-max") return land ? "iphone-max-landscape" : "iphone-max-portrait";
-  if (d.safe === "iphone-se") return "iphone-se";
-  if (d.safe === "ipad") return "ipad";
-  return null;
-}
 import { begin, stepTo, queueInput } from "../core/runner.js";
+import { nameRegions, scaleLayers, groupsLine, regionLines, fmtScale, readRect, rectVerdict } from "./scale-regions.js";
 import { parseWitnessInput } from "../core/input-spec.js";
 
 const fx = (v, d = 2) => +(+v).toFixed(d);
@@ -25,23 +16,44 @@ export function mainCanvas(info) {
   return best;
 }
 
-/** Lines for the page and its main canvas. Returns {lines: [[mark, text]], display, info}. */
-export async function displayReport(web, media) {
+const insetTxt = (i) => ["top", "right", "bottom", "left"].filter((k) => i[k]).map((k) => `${k} ${i[k]}`).join(" · ") || "none (0 on every side)";
+
+/**
+ * Lines for the page and its main canvas. Returns {lines: [[mark, text]], display, info, safe}.
+ * opts: layers [{name, rect}] in canvas px (state.layers / state.ui) to name the picture's scale regions; scaleRects
+ * [{name, rect}] in canvas px (--scale-rect) read one by one; cfgFlag " --config x" for printed commands.
+ */
+export async function displayReport(web, media, { layers = [], scaleRects = null, cfgFlag = "" } = {}) {
   const lines = [];
   const info = await web.info();
-  if (!info) return { lines: [["⚠", "the page has no Witness init script (attached page?): no display facts"]], display: null, info };
+  if (!info) return { lines: [["⚠", "the page has no Witness init script (attached page?): no display facts"]], display: null, info, safe: null };
   const ua = /iPhone|iPad|Macintosh|Android|Windows|Linux/.exec(info.userAgent);
   lines.push(["", `page: ${info.viewport.join("×")} CSS px, DPR ${info.dpr}${info.screen ? `, screen ${info.screen.join("×")}` : ""}, ${info.maxTouchPoints ? `maxTouchPoints ${info.maxTouchPoints}` : "maxTouchPoints 0"}${web.device && web.device.touch && !info.touchEvents ? " (this build has no TouchEvent: Witness touches arrive as pointer events only; real iPhones send both)" : ""}${info.standalone ? ", navigator.standalone" : ""}${info.platform ? `, platform ${info.platform}` : ""}${ua ? `, user agent says ${ua[0]}` : ""}`]);
   // a touch profile whose page says "no touch" or a desktop platform: games would pick their mouse / desktop UI
   const dev = web.device;
   if (dev && dev.touch && (info.maxTouchPoints || 0) < 2) lines.push(["⚠", `${dev.name} is a touch screen but the page reports maxTouchPoints ${info.maxTouchPoints || 0} (a real one reports 5): a touch-UI check (maxTouchPoints > 0) or the iPad check (platform MacIntel && maxTouchPoints > 1) picks the desktop UI here`]);
   if (dev && dev.platform && info.platform && info.platform !== dev.platform) lines.push(["⚠", `${dev.name}: navigator.platform is "${info.platform}", a real one says "${dev.platform}"`]);
-  // safe areas: the notch / Dynamic Island / home indicator aren't emulated (env(safe-area-inset-*) is 0 here)
+  // safe areas: the engines have no notch (env(safe-area-inset-*) is 0) unless --safe-insets rewrote the page's env() uses
   const preset = safePresetFor(dev);
-  if (preset) lines.push(["", `safe areas are not emulated (env(safe-area-inset-*) is 0 in this page${dev.standalone ? "; on the device a Home Screen web app with viewport-fit=cover gets the insets" : ""}): check the HUD with \`witness measure ui --safe ${preset}\``]);
+  let safe = null;
+  if (web.safeInsets) {
+    const si = await web.safeInfo().catch(() => null);
+    const S = web.safeInsets, b = si ? si.bySource : {};
+    safe = { emulated: !!si, preset: S.preset, insets: { top: S.top, right: S.right, bottom: S.bottom, left: S.left }, rewritten: si ? si.rewritten : 0, bySource: si ? si.bySource : null, crossOrigin: si ? si.crossOrigin : 0, overlay: !!web.safeOverlay };
+    if (!si) lines.push(["⚠", "safe areas: --safe-insets was asked for, but the page has no Witness safe-area script (attached page?)"]);
+    else {
+      const where = [b.stylesheet && `${b.stylesheet} in style sheets`, b.inline && `${b.inline} inline`, b.script && `${b.script} set from script`].filter(Boolean).join(", ");
+      lines.push(["✔", `safe areas emulated (--safe-insets, ${S.preset}${S.preset.includes(S.orientation) ? "" : ` ${S.orientation}`}): env(safe-area-inset-*) = ${insetTxt(S)} CSS px; ${si.rewritten ? `${si.rewritten} env() use${si.rewritten > 1 ? "s" : ""} in the page's CSS rewritten (${where})` : "the page's CSS uses no env(safe-area-inset-*): a HUD drawn into the canvas must keep clear by itself"}`]);
+      if (si.crossOrigin) lines.push(["⚠", `${si.crossOrigin} cross-origin style sheet${si.crossOrigin > 1 ? "s" : ""} couldn't be read: env() in ${si.crossOrigin > 1 ? "them" : "it"} stays 0 here (serve the CSS from the game's origin)`]);
+    }
+  } else if (preset) lines.push(["", `safe areas are not emulated (env(safe-area-inset-*) is 0 in this page${dev.standalone ? "; on the device a Home Screen web app with viewport-fit=cover gets the insets" : ""}): --safe-insets emulates them (--safe-overlay draws the island and corners on screenshots); check a canvas HUD with \`witness measure ui --safe ${preset}${cfgFlag}\``]);
+  if (web.safeOverlay) {
+    lines.push(["", `safe overlay (--safe-overlay): the ${/safari/.test(web.safeOverlay.preset) ? "zero insets of a Safari tab (its toolbars hold the island and corners)" : web.safeOverlay.preset === "iphone-se" ? "status bar inset (no island or rounded corners on an SE)" : `${web.safeOverlay.preset === "ipad" ? "rounded corners and home indicator" : "Dynamic Island, rounded corners and home indicator"}, and the inset zones tinted magenta`} are drawn over every screenshot after capture (not into the page)`]);
+    if (!safe) safe = { emulated: false, preset: web.safeOverlay.preset, overlay: true };
+  }
   if (info.webAudio === false) lines.push(["⚠", `this ${web.engine} build has no Web Audio (Playwright's WebKit for Windows is built without it): Witness put in a silent AudioContext so the page loads; audio can't be captured or heard here (check the unlock path with --engine chromium --no-auto-unlock)`]);
   const c = mainCanvas(info);
-  if (!c) { lines.push(["⚠", "no visible <canvas> on the page"]); return { lines, display: null, info }; }
+  if (!c) { lines.push(["⚠", "no visible <canvas> on the page"]); return { lines, display: null, info, safe }; }
   const d = canvasDisplay(c, info.dpr);
   const name = `canvas${c.id ? `#${c.id}` : ""}`;
   lines.push([d.problem ? "⚠" : "✔",
@@ -72,16 +84,52 @@ export async function displayReport(web, media) {
       // the share of game pixels drawn one px wider, exactly, from the layout's scale (nearest-neighbour: its fraction)
       const layShare = `${pct(lay[0])}% of game pixels are ${Math.floor(lay[0]) + 1} device px wide${Math.abs(lay[0] - lay[1]) > 0.005 ? `, ${pct(lay[1])}% are ${Math.floor(lay[1]) + 1} tall` : ""} (from the layout's ×${lay[0]})`;
       const runTxt = rs[0] == null ? "no scale" : `≈×${rs[0].toFixed(3)}${Math.abs(rs[0] - (rs[1] ?? rs[0])) > 0.002 && rs[1] != null ? ` × ${rs[1].toFixed(3)}` : ""}`;
-      let mark, what;
+      // not one clean grid: the picture may hold two scales (a ×5 world under a UI drawn at ×4.11): region by region
+      const one = (v) => Math.abs(v - 1) < 0.005;
+      const mixed = !exact && !blurry ? media.scaleRegions(img, { region }) : null;
+      const multi = mixed && mixed.groups.length > 1;
+      let mark, what, extra = [];
       if (exact) { mark = "✔"; what = `exact ×${want}: every ${want}×${want} cell is one colour`; }
       else if (blurry) { mark = "⚠"; what = `blurry (${block && block.blurry ? `${block.nonUniformPercent}% of ${want}×${want} cells mixed` : `${runs.smearPercent}% of hard edges smeared over 2+ px, ${runs.softPercent}% of colour changes are soft ramps`})`; }
-      else if (!agrees) { mark = d.problem ? "⚠" : ""; what = `couldn't read the scale from the picture (${runTxt} from runs of one colour vs ×${lay[0]}${Math.abs(lay[0] - lay[1]) > 0.005 ? ` × ${lay[1]}` : ""} from the layout: too few one-pixel details, or something drawn over the canvas); the layout's numbers above hold${d.problem === "fractional" ? `: ${layShare}` : ""}`; }
+      else if (multi) {
+        const kx = img.width / c.w, ky = img.height / c.h;   // capture px per canvas px
+        const names = nameRegions(mixed, scaleLayers(layers, kx, ky));
+        const near = (v, l) => v != null && Math.abs(v - l) / l <= 0.03;
+        const at = mixed.groups.findIndex((g) => near(g.scale[0] ?? g.scale[1], lay[0]) && near(g.scale[1] ?? g.scale[0], lay[1]));
+        const label = (gi) => { const nm = [...new Set(mixed.groups[gi].regions.map((i) => names[i]).filter(Boolean))].join("/"); return nm ? `${nm} (${fmtScale(mixed.groups[gi].scale)})` : fmtScale(mixed.groups[gi].scale); };
+        mark = mixed.groups.some((g) => g.fractional) ? "⚠" : "✔";
+        what = `${mixed.groups.length} scales in one picture: ${groupsLine(mixed, names)}`;
+        if (at >= 0) extra.push(`  the layout's ×${lay[0]} is the ${label(at)} region's; ${mixed.groups.length > 2 ? "the others are" : `the ${label(at === 0 ? 1 : 0)} region is`} drawn by the game at a scale of its own`);
+        else if (one(lay[0]) && one(lay[1])) extra.push("  the canvas is shown 1:1 (the layout's ×1): these are the scales the game draws at itself");
+        else extra.push(`  the layout shows the canvas at ×${lay[0]}: inside it the game draws ${mixed.groups.map((g, gi) => `${label(gi)} = ×${fx((g.scale[0] ?? g.scale[1]) / lay[0], 3)} of its canvas pixels`).join(", ")}`);
+        extra.push(...regionLines(mixed, names, "    "));
+        Object.assign(pixels, { agrees: at >= 0, mixed: true, layoutRegion: at >= 0 ? at : null, regions: mixed.regions.map((g, i) => ({ name: names[i] || null, rect: g.rect, share: g.share, scale: g.scale, whole: g.whole, fractional: g.fractional, group: g.group })), groups: mixed.groups.map((g) => ({ scale: g.scale, whole: g.whole, fractional: g.fractional, share: g.share })) });
+      } else if (!agrees && one(lay[0]) && one(lay[1]) && rs[0] != null && rs[1] != null && rs[0] > 1.05) {
+        // a 1:1 canvas whose game draws its own pixels bigger: nothing to compare, the picture's scale is the game's
+        mark = runs.fractional ? "⚠" : "✔";
+        what = `${runTxt}: the canvas is shown 1:1 (the layout's ×1), so the game draws its pixels at ${runTxt.slice(1)} itself${runs.fractional ? ` — uneven: one game pixel is ${runs.x.single.join(" or ")} device px` : Number.isInteger(rs[0]) && Number.isInteger(rs[1]) ? " (whole: even pixels)" : ""}`;
+        pixels.gameScale = rs;
+      } else if (!agrees) { mark = d.problem ? "⚠" : ""; what = `couldn't read the scale from the picture (${runTxt} from runs of one colour vs ×${lay[0]}${Math.abs(lay[0] - lay[1]) > 0.005 ? ` × ${lay[1]}` : ""} from the layout: too few one-pixel details, or something drawn over the canvas); the layout's numbers above hold${d.problem === "fractional" ? `: ${layShare}` : ""}`; }
       else if (runs.fractional || d.problem === "fractional") { mark = "⚠"; what = `${runTxt}, uneven: one game pixel is ${Math.floor(lay[0])} or ${Math.floor(lay[0]) + 1} device px; ${layShare}`; }
       else { mark = "✔"; what = `${runTxt}, matches the layout`; }
       lines.push([mark, `pixels on screen (the canvas captured at device pixels, ${img.width}×${img.height}): ${what}`]);
+      for (const e of extra) lines.push(["", e]);
+      // --scale-rect: rects in canvas px, each read on its own
+      if (scaleRects && scaleRects.length) {
+        const kx = img.width / c.w, ky = img.height / c.h;
+        pixels.rects = [];
+        for (const { name: nm, rect } of scaleRects) {
+          const dev = { x: Math.round(rect.x * kx), y: Math.round(rect.y * ky), w: Math.round(rect.w * kx), h: Math.round(rect.h * ky) };
+          let r;
+          try { r = readRect(media, img, dev); } catch (e) { lines.push(["⚠", `--scale-rect ${nm}: ${e.message}`]); continue; }
+          const [good, text] = rectVerdict(r);
+          lines.push([good ? "✔" : "⚠", `--scale-rect ${nm} (${rect.x},${rect.y} ${rect.w}×${rect.h} canvas px = ${r.rect.x},${r.rect.y} ${r.rect.w}×${r.rect.h} device px): ${text}`]);
+          pixels.rects.push({ name: nm, rect, deviceRect: r.rect, scale: r.scale, exact: r.exact, fractional: r.fractional, blurry: r.blurry });
+        }
+      }
     } catch (e) { lines.push(["⚠", `couldn't capture the canvas at device pixels: ${e.message}`]); }
   }
-  return { lines, display: { canvas: name, size: [c.w, c.h], css: [fx(c.rect[2], 4), fx(c.rect[3], 4)], ...d, pixels }, info };
+  return { lines, display: { canvas: name, size: [c.w, c.h], css: [fx(c.rect[2], 4), fx(c.rect[3], 4)], ...d, pixels }, info, safe };
 }
 
 const audioLine = (a) => a.contexts.map((c) => `#${c.id} ${c.kind} ${c.state}${c.unlockedBy ? ` (unlocked by ${c.unlockedBy})` : ""}${c.blocked ? `, ${c.blocked} resume() call(s) blocked` : ""}`).join("; ");

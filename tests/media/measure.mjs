@@ -1,7 +1,7 @@
 // Pixel measurement tests: `node tests/media/measure.mjs`
 // Every image is synthesized so the right answer is known by construction.
 import {
-  blockScale, detectScale, pixelRuns, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
+  blockScale, detectScale, pixelRuns, scaleRegions, maskDiff, maskFromColor, maskFromRect, maskBBox, maskInfo, maskStats,
   ringMask, contrast, motion, motionStream, medianPlate,
 } from "../../src/media/measure.js";
 import { encodePNG } from "../../src/media/png.js";
@@ -439,6 +439,69 @@ function framesOf(positions, { size = 8, y = 30, hud = false } = {}) {
   // 1:1 anti-aliased discs (the sample game drawn at 1:1): soft ramps, one in-between pixel per edge: not blurry
   const aa = pixelRuns(game);
   ok("pixelRuns: 1:1 anti-aliased art is not blurry, scale 1", !aa.blurry && !aa.fractional && aa.scale[0] === 1, aa);
+}
+
+// ---- scaleRegions: two scales in one picture (a ×5 world under a UI layer drawn at ×4.11) ----------------------------
+{
+  // the UI layer is scaled from the picture's origin like the world: UI pixel (u, v) covers device px floor(x / 4.11) = u
+  const compose = (W, H, world, k, ui, f, inUI) => {
+    const out = image(W, H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const u = Math.floor(x / f), v = Math.floor(y / f);
+      put(out, x, y, inUI(u, v) ? get(ui, u, v) : get(world, Math.floor(x / k), Math.floor(y / k)));
+    }
+    return out;
+  };
+  const busyWorld = sprite(220, 140, 2), busyUI = (() => { const im = image(260, 160); const P = [[250, 250, 250], [40, 40, 60], [200, 160, 40], [90, 200, 120]]; for (let y = 0; y < 160; y++) for (let x = 0; x < 260; x++) put(im, x, y, P[hash(x, y, 5) % 4]); return im; })();
+  const groups = (r) => r.groups.map((g) => `${g.scale.join("×")}:${g.share}`).join(" ");
+  const rects = (r) => r.regions.map((g) => `${g.rect.x},${g.rect.y} ${g.rect.w}×${g.rect.h}`).join(" | ");
+  const near = (v, want, rel = 0.005) => Math.abs(v - want) / want <= rel;
+
+  const r6 = (v) => Math.round(v * 1e6) / 1e6;
+  // a strip of UI along the bottom: UI rows 115+ start at device row ceil(115 × 4.11) = 473: 1000×127 = 21.17%
+  const strip = scaleRegions(compose(1000, 600, busyWorld, 5, busyUI, 4.11, (u, v) => v >= 115));
+  show("scaleRegions ×5 + ×4.11 strip", `${groups(strip)} · ${rects(strip)}`);
+  const [w0, u0] = strip.regions;
+  ok("scaleRegions: ×5 world + ×4.11 UI strip: two scales", strip.groups.length === 2 && strip.regions.length === 2, strip.groups);
+  ok("scaleRegions: the world is whole ×5 at 0,0 1000×473 (78.83%)", w0.whole && w0.scale.join() === "5,5" && rects({ regions: [w0] }) === "0,0 1000×473" && w0.share === r6(473 / 600), w0);
+  ok("scaleRegions: the UI strip is ×4.11 (±0.5%) fractional at 0,473 1000×127 (21.17%), 4 or 5 px, 11% are 5", !u0.whole && u0.fractional && near(u0.scale[0], 4.11) && near(u0.scale[1], 4.11) && rects({ regions: [u0] }) === "0,473 1000×127" && u0.share === r6(127 / 600) && u0.single[0].join() === "4,5" && Math.abs(u0.longShare[0] - 0.11) < 0.01, u0);
+
+  // the same split with sparse art: a flat sky, grass with a few details, trees; the UI a flat panel with a 1-px border
+  // and a few rows of glyphs (most tiles in it are flat)
+  const world = image(220, 140, [120, 180, 240]);
+  const G = [[60, 140, 60], [70, 150, 70], [120, 90, 50], [90, 160, 80], [40, 110, 50]];
+  for (let y = 36; y < 140; y++) for (let x = 0; x < 220; x++) put(world, x, y, hash(x, y, 1) % 5 === 0 ? G[hash(x, y, 2) % 5] : G[0]);
+  for (const tx of [20, 70, 130, 170]) for (let y = 20; y < 40; y++) for (let x = tx; x < tx + 10; x++) if (Math.abs(x - tx - 5) < (y - 18) / 2) put(world, x, y, hash(x, y, 4) % 3 ? [30, 90, 40] : [20, 70, 30]);
+  const panel = image(260, 160, [0, 0, 0]);
+  for (let v = 115; v < 160; v++) for (let u = 0; u < 260; u++) put(panel, u, v, v === 115 || u === 0 || u === 243 ? [220, 220, 200] : [30, 30, 50]);
+  for (const [gx, gy, n] of [[6, 120, 12], [6, 130, 20], [120, 122, 15], [170, 136, 9]]) for (let c = 0; c < n; c++) for (let y = 0; y < 5; y++) for (let x = 0; x < 3; x++) if (hash(gx + c * 4 + x, gy + y, 9) % 2) put(panel, gx + c * 4 + x, gy + y, [250, 250, 250]);
+  const sparseImg = compose(1000, 600, world, 5, panel, 4.11, (u, v) => v >= 115);
+  const sparse = scaleRegions(sparseImg);
+  show("scaleRegions sparse", `${groups(sparse)} · ${rects(sparse)} · ${Math.round(sparse.unreadShare * 100)}% of tiles flat`);
+  ok("scaleRegions: sparse art (flat sky, a flat panel with text): the same rects and shares", sparse.groups.length === 2 && rects(sparse) === "0,0 1000×473 | 0,473 1000×127" && sparse.regions[0].share === r6(473 / 600) && sparse.regions[1].share === r6(127 / 600) && sparse.regions[0].whole && near(sparse.regions[1].scale[0], 4.11), sparse);
+  // the whole picture read as one says ×5 (the world's grid dominates): that's why the regions are needed
+  const one = pixelRuns(sparseImg);
+  ok("scaleRegions: (the whole sparse picture reads ×5 as one, hiding the UI)", one.scale[0] === 5, one.scale);
+
+  // a HUD panel in the top-left corner: UI cols 10..80, rows 8..40 = device x 42..332, y 33..168: 291×136 = 6.60%
+  const corner = scaleRegions(compose(1000, 600, busyWorld, 5, busyUI, 4.11, (u, v) => u >= 10 && u <= 80 && v >= 8 && v <= 40));
+  show("scaleRegions corner panel", `${groups(corner)} · ${rects(corner)}`);
+  ok("scaleRegions: a corner panel at 42,33 291×136 (6.6%), the world around it (93.4%, not a rectangle)", corner.groups.length === 2 && rects({ regions: [corner.regions[1]] }) === "42,33 291×136" && corner.regions[1].share === r6((291 * 136) / 600000) && corner.regions[0].share === r6(1 - (291 * 136) / 600000) && !corner.regions[0].rectangular && corner.regions[1].rectangular, corner.regions);
+
+  // other pairs: ×4 UI on ×5 (both whole), ×1 text on ×5, a ×2.5 panel right of a ×2 world
+  const k4 = scaleRegions(compose(1000, 600, busyWorld, 5, busyUI, 4, (u, v) => v >= 120));
+  ok("scaleRegions: ×4 UI on a ×5 world: two whole scales split at y 480 (80% / 20%)", groups(k4) === "5×5:0.8 4×4:0.2" && rects(k4) === "0,0 1000×480 | 0,480 1000×120", groups(k4) + " " + rects(k4));
+  const big = sprite(1000, 600, 7);
+  const k1 = scaleRegions(compose(1000, 600, busyWorld, 5, big, 1, (u, v) => v >= 480));
+  ok("scaleRegions: unscaled (×1) art under a ×5 world: split at y 480", groups(k1) === "5×5:0.8 1×1:0.2" && rects(k1) === "0,0 1000×480 | 0,480 1000×120", groups(k1) + " " + rects(k1));
+  const side = scaleRegions(compose(800, 500, sprite(400, 250, 3), 2, sprite(320, 200, 8), 2.5, (u) => u >= 240));
+  ok("scaleRegions: a ×2.5 panel right of a ×2 world: split at x 600", side.groups.length === 2 && rects(side) === "0,0 600×500 | 600,0 200×500" && side.regions[0].scale.join() === "2,2" && near(side.regions[1].scale[0], 2.5), groups(side) + " " + rects(side));
+
+  // one scale: one region, the whole picture
+  const only5 = scaleRegions(scaleNearest(sprite(200, 120, 2), 5));
+  ok("scaleRegions: a plain ×5 picture is one whole region (100%)", only5.groups.length === 1 && only5.regions[0].share === 1 && only5.regions[0].whole, only5.groups);
+  const only3 = scaleRegions(scaleNearest(sprite(320, 180, 2), 3.384375));
+  ok("scaleRegions: a plain ×3.384 picture is one fractional region", only3.groups.length === 1 && only3.regions[0].fractional && near(only3.regions[0].scale[0], 3.384375), only3.groups);
 }
 
 done("measure");

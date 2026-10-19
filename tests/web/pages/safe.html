@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Safe areas</title>
+  <!-- a full-screen game canvas with a DOM HUD that keeps clear of the notch with env(safe-area-inset-*) -->
+  <style>
+    html, body { margin: 0; background: #000; overflow: hidden; }
+    canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+    #hud { position: fixed; left: 0; top: 0; padding: env(safe-area-inset-top, 7px) 0 0 env(safe-area-inset-left); }
+    #hud b { display: block; width: 120px; height: 24px; background: #fd3; }
+    @media (min-width: 1px) { #corner { position: fixed; right: env(safe-area-inset-right); top: 0; width: 40px; height: 40px; background: #3df; } }
+  </style>
+  <link rel="stylesheet" href="safe.css">
+</head>
+<body>
+  <canvas id="game" width="160" height="90"></canvas>
+  <div id="hud"><b></b></div>
+  <div id="corner"></div>
+  <div id="bar"></div>
+  <div id="inl" style="position: fixed; left: 0; top: 50%; margin-left: env(safe-area-inset-left); width: 30px; height: 30px; background: #f3d"></div>
+  <div id="js"></div>
+  <script type="module" src="safe.js"></script>
+</body>
+</html>

@@ -12,6 +12,7 @@ import { parseRect } from "./see.js";
 import { WitnessError } from "../core/session.js";
 import { lookMeasure } from "./measure-look.js";
 import { formatAnim } from "./anim.js";
+import { parseNamedRects, readRect, rectVerdict, fmtScale, nameRegions, groupsLine, regionLines, stateLayers } from "./scale-regions.js";
 import {
   die, withGame, gamePixels, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
@@ -45,8 +46,9 @@ async function pixelMeasure(what, files, opt) {
   const out = (env, lines) => emit(env, lines.filter(Boolean).join("\n"), opt);
   const box = (b) => (b ? `x=${b.x} y=${b.y} ${b.w}×${b.h}` : "none");
   if (what === "scale") {
-    if (!files[0]) die("usage: witness measure scale <shot.png> [--k 3]");
+    if (!files[0]) die("usage: witness measure scale <shot.png> [--k 3] [--rect name=x,y,w,h; ...] [--layers layers.json]");
     const img = m.decodePNG(read(files[0]));
+    if (opt.rect) return scaleRects(m, img, files[0], opt, out);
     const k = opt.k && opt.k !== true ? +opt.k : m.detectScale(img, { region, tolerance: +(opt.tolerance || 0) });
     const r = m.blockScale(img, k, { region, tolerance: +(opt.tolerance || 0) });
     // any scale from runs of one colour: catches fractional scaling (uneven pixels) and smoothing, which the k×k
@@ -67,14 +69,29 @@ async function pixelMeasure(what, files, opt) {
     else if (blurry) { verdict = "blurry or smoothed"; status = `✖ BLURRY: ${runs.blurry ? `${runs.smearPercent}% of hard edges are smeared over 2+ pixels, ${runs.softPercent}% of colour changes are soft ramps (smoothing, or scaling with filtering)` : `${r.nonUniformPercent}% of ${r.k}×${r.k} cells mixed`}`; }
     else if (runs.fractional) { verdict = `fractional scaling ≈${sc} (uneven pixels)`; status = `✖ FRACTIONAL scaling ≈${sc}: pixels are drawn unevenly`; }
     else { verdict = "no pixel grid larger than 1"; status = "no pixel grid larger than 1"; }
-    const bad = !exact && (blurry || runs.fractional);
+    let bad = !exact && (blurry || runs.fractional);
     const where = runRegion && !region ? ` (${runRegion.w}×${runRegion.h} from ${runRegion.x},${runRegion.y}: edges left out)` : "";
+    // not one clean grid: the picture may hold two scales (a ×5 world under a ×4.11 UI): read it region by region
+    let mixed = null, names = [];
+    if (!exact && !blurry && img.width >= 64 && img.height >= 64) {
+      const res = m.scaleRegions(img, { region: runRegion, tolerance: +(opt.tolerance || 0) });
+      if (res.groups.length > 1) {
+        mixed = res;
+        names = nameRegions(res, opt.layers ? loadLayers(opt.layers) : []);
+        bad = res.groups.some((g) => g.fractional);
+        verdict = `${res.groups.length} scales in one picture: ${groupsLine(res, names)}`;
+        status = `${bad ? "✖" : "✔"} ${verdict}`;
+      }
+    }
     // soft ramps with no smeared edges: anti-aliasing or a gradient at 1:1, not a picture blurred by upscaling
     const softNote = !blurry && runs.softPercent > 25 ? `  soft ramps without smeared edges (${runs.smearPercent}% of ${runs.hardEdges} hard edges): anti-aliasing or gradients drawn at 1:1, not upscaling blur` : null;
-    out(envelope("measure scale", { ok: !bad, verdict, summary: { k: r.k, offset: r.offset, nonUniformPercent: r.nonUniformPercent, blurry, fractional: !exact && runs.fractional, scaleX: runs.scale[0], scaleY: runs.scale[1], softPercent: runs.softPercent, smearPercent: runs.smearPercent }, data: { ...r, runs } }), [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
+    const regionsSummary = mixed ? mixed.groups.map((g) => ({ scale: g.scale, whole: g.whole, fractional: g.fractional, share: g.share, names: [...new Set(g.regions.map((i) => names[i]).filter(Boolean))] })) : null;
+    out(envelope("measure scale", { ok: !bad, verdict, summary: { k: r.k, offset: r.offset, nonUniformPercent: r.nonUniformPercent, blurry, fractional: !exact && (mixed ? bad : runs.fractional), scaleX: runs.scale[0], scaleY: runs.scale[1], softPercent: runs.softPercent, smearPercent: runs.smearPercent, ...(mixed ? { regions: regionsSummary } : {}) },
+      data: { ...r, runs, ...(mixed ? { regions: mixed.regions.map((g, i) => ({ name: names[i] || null, ...g })), tile: mixed.tile } : {}) } }), [`${files[0]}: ${img.width}×${img.height}, ${opt.k ? "checked" : "detected"} scale ×${r.k}, grid offset [${r.offset}]`,
       `  ${r.cells} cells, ${r.nonUniform} not one colour (${r.nonUniformPercent}%) → ${status}`,
-      exact ? null : `  runs of one colour${where}: scale ${sc} (x ${fx(runs.scale[0])}, y ${fx(runs.scale[1])}), soft ramps ${runs.softPercent}% of ${runs.changes} colour changes`,
-      ...(exact ? [] : [unevenAxis(runs.x, "  x"), unevenAxis(runs.y, "  y")]),
+      ...(mixed ? regionLines(mixed, names) : []),
+      exact ? null : `  ${mixed ? "the whole picture as one: " : ""}runs of one colour${where}: scale ${sc} (x ${fx(runs.scale[0])}, y ${fx(runs.scale[1])}), soft ramps ${runs.softPercent}% of ${runs.changes} colour changes`,
+      ...(exact || mixed ? [] : [unevenAxis(runs.x, "  x"), unevenAxis(runs.y, "  y")]),
       softNote,
       ...r.worst.slice(0, 5).map((c) => `  worst cell ${box(c)}: ${c.colors} colours, spread ${c.spread}`)]);
   } else if (what === "box") {
@@ -103,6 +120,30 @@ async function pixelMeasure(what, files, opt) {
   } else if (["ui", "colorblind", "cvd", "palette", "figure"].includes(what)) {
     return lookMeasure(what, files, opt);
   } else die("usage: witness measure scale|box|contrast|motion|anim|align|registration|ui|colorblind|palette|figure|perf|curve|jump|move|hitstop ...  (witness help measure)");
+}
+
+/** --layers: names for the regions, as JSON ([{name, rect: [x,y,w,h]}] or a state with .layers / .ui) or a file of it. */
+function loadLayers(v) {
+  let txt = String(v);
+  if (!txt.trim().startsWith("[") && !txt.trim().startsWith("{")) { const p = path.resolve(txt); if (!fs.existsSync(p)) die(`--layers ${v}: no such file`); txt = fs.readFileSync(p, "utf8"); }
+  let j;
+  try { j = JSON.parse(txt); } catch (e) { die(`--layers: bad JSON (${e.message})`); }
+  const st = Array.isArray(j) ? { layers: j } : j.state || j;
+  const layers = stateLayers(st);
+  if (!layers.length) die("--layers wants [{\"name\": \"ui\", \"rect\": [x, y, w, h]}, ...] (or a state with layers / ui)");
+  return layers;
+}
+
+/** measure scale --rect "world=0,0,1000,470; ui=0,470,1000,130": each rect read on its own. */
+function scaleRects(m, img, file, opt, out) {
+  const rects = parseNamedRects(opt.rect);
+  const reads = rects.map(({ name, rect }) => ({ name, ...readRect(m, img, rect, +(opt.tolerance || 0)) }));
+  const verdicts = reads.map(rectVerdict);
+  const okAll = verdicts.every((v) => v[0]);
+  const verdict = reads.map((r, i) => `${r.name} ${verdicts[i][0] ? (r.exact ? `exact ×${r.k}` : fmtScale(r.scale)) : verdicts[i][1].split(":")[0]}`).join(" · ");
+  out(envelope("measure scale", { ok: okAll, verdict, summary: { rects: reads.map((r, i) => ({ name: r.name, scale: r.scale, exact: r.exact, fractional: r.fractional, blurry: r.blurry, ok: verdicts[i][0] })) }, data: { rects: reads } }),
+    [`${file}: ${img.width}×${img.height}, ${reads.length} rect${reads.length > 1 ? "s" : ""} read on their own`,
+      ...reads.map((r, i) => `  ${verdicts[i][0] ? "✔" : "✖"} ${r.name} (${r.rect.x},${r.rect.y} ${r.rect.w}×${r.rect.h}): ${verdicts[i][1]}`)]);
 }
 
 export async function motionMeasure(m, fileFrames, opt, region) {

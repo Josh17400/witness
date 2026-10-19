@@ -7,8 +7,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { WitnessError } from "./session.js";
-import { resolveDevice, contextOptions } from "./devices.js";
-import { webInit } from "./web-init.js";
+import { resolveDevice, contextOptions, safeInsetsFor } from "./devices.js";
+import { webInit, safeInsetsInit } from "./web-init.js";
 
 export const ENGINES = ["chromium", "webkit", "firefox"];
 export const CAPTURES = ["canvas", "element", "screen"];
@@ -55,7 +55,11 @@ export function browserOptions(launch) {
   const capture = String(launch.capture || "canvas").toLowerCase();
   if (!CAPTURES.includes(capture)) throw new WitnessError(`unknown capture '${launch.capture}': use canvas (the game's own pixels, default), element (the canvas as the screen shows it, device pixels) or screen (the whole viewport, device pixels)`);
   if (engine === "firefox" && device && device.mobile) throw new WitnessError(`Playwright's Firefox can't emulate a mobile viewport (device ${device.name}): use --engine webkit or chromium`);
-  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture };
+  // safe areas: env(safe-area-inset-*) rewritten to the profile's insets (safeInsets), the island / home indicator /
+  // corners drawn over screenshots (safeOverlay); both need a phone or tablet profile
+  const safe = launch.safeInsets || launch.safeOverlay ? safeInsetsFor(device) : null;
+  if ((launch.safeInsets || launch.safeOverlay) && !safe) throw new WitnessError(`--safe-insets / --safe-overlay need a phone or tablet profile (--device iphone-15[-landscape], iphone-15-safari, iphone-15-pro-max, iphone-se, ipad); ${device ? `${device.name} has no safe-area preset` : "this launch has no device"}`);
+  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture, safeInsets: launch.safeInsets ? safe : null, safeOverlay: launch.safeOverlay ? safe : null };
 }
 
 /** A clear message when the engine's browser build isn't installed for this Playwright version. */
@@ -92,6 +96,7 @@ export async function openBrowserGame(launch, root, addr, keep) {
     catch (e) { throw launchError(e, opts.engine, pwInfo, root); }
     const context = await browser.newContext(contextOptions(opts.device, launch.size || [1280, 720]));
     await context.addInitScript(webInit, { policy: opts.policy, standalone: !!(opts.device && opts.device.standalone), platform: (opts.device && opts.device.platform) || null, maxTouchPoints: opts.device && opts.device.maxTouchPoints != null ? opts.device.maxTouchPoints : null });
+    if (opts.safeInsets) await context.addInitScript(safeInsetsInit, opts.safeInsets);
     const page = await context.newPage();
     page.on("console", (m) => keep(`[page] ${m.text()}\n`));
     page.on("pageerror", (e) => keep(`[page error] ${e.message}\n`));
@@ -118,6 +123,9 @@ function makeWeb(page, browser, opts, pwInfo) {
   });
   return {
     engine: opts.engine, engineVersion: browser.version(), playwright: pwInfo.version, device: opts.device, policy: opts.policy, captureMode: opts.capture, page,
+    safeInsets: opts.safeInsets, safeOverlay: opts.safeOverlay,
+    /** --safe-insets: what the page's CSS had rewritten so far (null: not emulated). */
+    safeInfo: () => (opts.safeInsets ? evalWeb(() => (globalThis.__witnessSafe ? globalThis.__witnessSafe.info() : null)) : Promise.resolve(null)),
     info: () => evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.info() : null)),
     audio: () => evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.audio() : null)),
     webgl: () => evalWeb(() => (globalThis.__witnessWeb && globalThis.__witnessWeb.webgl ? globalThis.__witnessWeb.webgl() : null)),

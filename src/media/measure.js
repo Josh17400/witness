@@ -11,6 +11,8 @@
 //   detectScale(img, { tolerance = 0, region, maxK = 16, minUniform = 99.5 }) -> k   (1 if none)
 //   pixelRuns(img, { region, tolerance = 0 }) -> { x: {scale, uneven, single, longShare, runs, lengths, grid}, y,
 //     scale: [sx, sy], fractional, softPercent, smearPercent, hardEdges, blurry, region }       any scale (also fractional) from runs of one colour
+//   scaleRegions(img, { region, tile, tolerance = 0 }) -> { regions: [{ rect, share, scale: [sx, sy], whole, fractional, ... }],
+//     groups, tile, unreadShare }                     a picture with more than one scale (a ×5 world under a ×4.11 UI)
 //   maskDiff(a, b, { threshold = 16, region }) -> { mask, width, height, count, bbox, centroid }
 //   maskFromColor(img, color, tolerance = 0) -> mask
 //   maskFromRect(width, height, { x, y, w, h }) -> mask
@@ -39,6 +41,7 @@ const MAX_WORST = 10;
 const r2 = (v) => Math.round(v * 100) / 100;
 const r3 = (v) => Math.round(v * 1000) / 1000;
 const r4 = (v) => Math.round(v * 10000) / 10000;
+const r6 = (v) => Math.round(v * 1e6) / 1e6;
 const mod = (a, k) => ((a % k) + k) % k;
 
 // ---------------------------------------------------------------------------
@@ -505,6 +508,327 @@ export function pixelRuns(input, { region, tolerance = 0 } = {}) {
   const clean = (a) => ({ scale: a.scale == null ? null : r4(a.scale), uneven: a.uneven, single: a.single || null, longShare: r4(a.longShare), runs: a.runs, lengths: a.lengths, grid: a.grid == null ? null : r4(a.grid) });
   const X = clean(x), Y = clean(y);
   return { region: R, x: X, y: Y, scale: [X.scale, Y.scale], fractional: !blurry && (X.uneven || Y.uneven), softPercent, smearPercent, hardEdges: sm.hard, blurry, changes };
+}
+
+// ---------------------------------------------------------------------------
+// more than one scale in one picture (a world at ×5 under a UI drawn at ×4.11)
+// ---------------------------------------------------------------------------
+
+/** The phase o of a pitch-s grid that holds the most colour changes (lines at o + j·s, each 1 px wide). */
+function combPhase(cols, s) {
+  const t = cols.map(([x, m]) => [mod(x, s), m]).sort((a, b) => a[0] - b[0]);
+  const n = t.length;
+  let best = -1, bo = 0, sum = 0, j = 0;
+  for (let i = 0; i < n; i++) {
+    if (j < i) { j = i; sum = 0; }
+    while (j < i + n) { const k = j % n, ph = t[k][0] + (j >= n ? s : 0); if (ph - t[i][0] >= 1 - 1e-9) break; sum += t[k][1]; j++; }
+    if (sum > best) { best = sum; bo = t[i][0]; }
+    sum -= t[i][1];
+  }
+  return bo;
+}
+/** Is line x (a colour change between x-1 and x) on the grid {s, o}? An unscaled grid (s ≤ 1.05) holds every line. */
+const onGrid = (x, g) => g.s <= 1.05 || mod(x - g.o, g.s) < 1 - 1e-9;
+
+/** One axis' changes inside a tile, in picture coordinates: [[x, count]]. */
+const profileCols = (h, origin) => { const c = []; for (let i = 1; i < h.profile.length - 1; i++) if (h.profile[i]) c.push([origin + i, h.profile[i]]); return c; };
+
+/** How well a tile's changes sit on grid c (x and y): lift over chance, 1 = every change on it, ~0 = none beyond chance. */
+function tileLift(t, c) {
+  let on = 0, tot = 0, chance = 0;
+  for (const [axis, g] of [["xs", c.x], ["ys", c.y]]) {
+    if (!g) continue;
+    for (const [p, m] of t[axis]) { tot += m; if (onGrid(p, g)) on += m; chance += m * (g.s <= 1.05 ? 1 : 1 / g.s); }
+  }
+  if (!tot) return null;
+  chance /= tot;
+  return chance >= 1 ? 1 : (on / tot - chance) / (1 - chance);
+}
+
+const NEIGHBOURS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+/**
+ * Pictures with more than one pixel scale (a world drawn at ×5 under a UI layer at ×4.11): splits the picture into
+ * regions that hold one consistent grid each.
+ *   1. tiles (`tile` px, default min(w, h) / 12 clamped to 40..128) each read their own scale from runs of one colour
+ *   2. readings within 4% are one candidate scale (minTiles+ tiles); each candidate is refitted over all its tiles
+ *      (scale and grid phase per axis, in picture coordinates) and kept when both axes hold their changes on a grid
+ *      (lift ≥ 0.75) at the same scale within 3%
+ *   3. every tile with 8+ colour changes goes to the candidate grid that holds them best (lift over chance ≥ 0.5; a
+ *      coarser grid wins a near tie, since ×1 holds every line); flat tiles join a neighbour of their own most common
+ *      colour (a panel's fill beside its text), else the nearest read tile's region
+ *   4. connected tiles of one candidate are a region (islands under minTiles join their neighbours); each side of its
+ *      box against another region (or the analysed area's edge) moves to the row / column where the colour changes
+ *      stop sitting on one grid and start sitting on the other (rows with no evidence: the strongest line on one grid
+ *      only, a panel's edge; at the area's edge the outermost)
+ * Returns { region, tile, regions: [{ rect: {x, y, w, h}, area, share, scale: [sx, sy], whole, fractional, uneven:
+ * [x, y], longShare: [x, y], single: [[a, b] | [k], ...], group, tiles, rectangular }], groups: [{ scale, whole,
+ * fractional, area, share, regions: [indices] }], unreadShare, unassigned }. A rect touching the analysed area's edge
+ * reaches the picture's edge (that margin is left out as chrome, not as another layer). Areas: the rects painted
+ * largest first, smaller ones over them (a HUD panel over the world), pixels counted; share = area / the picture;
+ * rectangular: the region owns its whole rect. Regions and groups are sorted largest first; one group = one scale.
+ */
+export function scaleRegions(input, { region, tile, tolerance = 0, minTiles = 2 } = {}) {
+  const img = toImage(input, "scaleRegions");
+  const tol = clampThreshold(tolerance, "scaleRegions", "tolerance");
+  if (!region && img.width >= 64 && img.height >= 64) {
+    const mx = Math.min(16, Math.floor(img.width * 0.03)), my = Math.min(16, Math.floor(img.height * 0.03));
+    region = { x: mx, y: my, w: img.width - 2 * mx, h: img.height - 2 * my };
+  }
+  const R = clipRegion(region, img.width, img.height, "scaleRegions");
+  const T = Math.max(16, Math.round(tile || Math.min(128, Math.max(40, Math.min(R.w, R.h) / 12))));
+  const nx = Math.max(1, Math.round(R.w / T)), ny = Math.max(1, Math.round(R.h / T));
+  const xs = Array.from({ length: nx + 1 }, (_, i) => R.x + Math.round((i * R.w) / nx)), ys = Array.from({ length: ny + 1 }, (_, j) => R.y + Math.round((j * R.h) / ny));
+  const at = (i, j) => tiles[j * nx + i];
+  const inside = (i, j) => i >= 0 && j >= 0 && i < nx && j < ny;
+  // 1. per tile: its runs, its colour changes (picture coordinates) and its own reading
+  const tiles = [];
+  const read = (h) => {
+    const a = scaleFromRuns(h);
+    if (a.scale == null) return null;
+    if (a.scale <= 1.05) return 1;
+    if (a.grid == null) return null;
+    return (a.grid - 1 / a.scale) / (1 - 1 / a.scale) >= 0.75 ? a.scale : null;
+  };
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const rect = { x: xs[i], y: ys[j], w: xs[i + 1] - xs[i], h: ys[j + 1] - ys[j] };
+    const hx = axisRuns(img, rect, tol, false), hy = axisRuns(img, rect, tol, true);
+    const t = { i, j, rect, hx, hy, xs: profileCols(hx, rect.x), ys: profileCols(hy, rect.y), label: -1 };
+    t.changes = t.xs.reduce((a, c) => a + c[1], 0) + t.ys.reduce((a, c) => a + c[1], 0);
+    t.read = [read(hx), read(hy)];
+    // its most common colour (every 2nd pixel): flat tiles join the read region of the same colour (a panel's fill)
+    const counts = new Map();
+    for (let y = rect.y; y < rect.y + rect.h; y += 2) for (let x = rect.x; x < rect.x + rect.w; x += 2) { const o = (y * img.width + x) * 4, c = ((img.data[o] << 16) | (img.data[o + 1] << 8) | img.data[o + 2]) >>> 0; counts.set(c, (counts.get(c) || 0) + 1); }
+    t.color = [...counts.entries()].reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+    tiles.push(t);
+  }
+  // 2. candidate scales: tile readings within 4% of each other, refitted over all their tiles
+  const close = (a, b) => a == null || b == null || Math.abs(a - b) / b <= 0.04;
+  const clusters = [];
+  for (const t of tiles) {
+    const [sx, sy] = t.read;
+    if (sx == null && sy == null) continue;
+    let c = clusters.find((k) => close(sx, k.sx) && close(sy, k.sy) && ((sx != null && k.sx != null) || (sy != null && k.sy != null)));
+    if (!c) { c = { sx: null, sy: null, nx: 0, ny: 0, tiles: [] }; clusters.push(c); }
+    if (sx != null) { c.sx = (c.sx * c.nx + sx) / (c.nx + 1); c.nx++; }
+    if (sy != null) { c.sy = (c.sy * c.ny + sy) / (c.ny + 1); c.ny++; }
+    c.tiles.push(t);
+  }
+  const fitAxis = (list, vertical) => {
+    const lengths = new Map(), profile = new Float64Array((vertical ? img.height : img.width) + 1);
+    for (const t of list) {
+      const h = vertical ? t.hy : t.hx, o = vertical ? t.rect.y : t.rect.x;
+      for (const [d, c] of h.lengths) lengths.set(d, (lengths.get(d) || 0) + c);
+      for (let i = 1; i < h.profile.length - 1; i++) profile[o + i] += h.profile[i];
+    }
+    const a = scaleFromRuns({ lengths, profile, inner: vertical ? R.h : R.w });
+    if (a.scale == null) return null;
+    // a candidate must hold its changes on one grid over all its tiles (as each tile's own reading had to)
+    if (a.scale > 1.05 && (a.grid == null || (a.grid - 1 / a.scale) / (1 - 1 / a.scale) < 0.75)) return null;
+    const cols = [];
+    for (let i = 1; i < profile.length; i++) if (profile[i]) cols.push([i, profile[i]]);
+    return { s: a.scale, o: a.scale <= 1.05 ? 0 : combPhase(cols, a.scale), uneven: a.uneven, longShare: a.longShare, single: a.single || null };
+  };
+  const main = (c) => (c.x || c.y).s;
+  const cands = [];
+  for (const c of clusters.sort((a, b) => b.tiles.length - a.tiles.length)) {
+    if (c.tiles.length < Math.min(minTiles, tiles.length)) continue;
+    const x = fitAxis(c.tiles, false), y = fitAxis(c.tiles, true);
+    // both axes on a grid, and the same scale across and down (within 3%): a layer is scaled evenly; a sparse picture
+    // can fit stray grids that disagree (×1.86 across, ×2.14 down)
+    if (!x || !y || Math.abs(x.s - y.s) / Math.max(x.s, y.s) > 0.03) continue;
+    const k = { x, y };
+    if (cands.some((o) => Math.abs(main(o) - main(k)) / main(o) < 0.01)) continue;
+    cands.push(k);
+  }
+  // 3. every tile to the grid that holds its changes best; flat tiles from the nearest read tile (breadth first)
+  const MIN_CHANGES = 8;
+  if (cands.length > 1) {
+    for (const t of tiles) {
+      if (t.changes < MIN_CHANGES) continue;
+      let best = -1, bl = -Infinity;
+      cands.forEach((c, k) => {
+        const l = tileLift(t, c);
+        if (l == null || l < 0.5) return;
+        if (best < 0 || l > bl + 0.1 || (l > bl - 0.1 && main(c) > main(cands[best]))) { best = k; bl = l; }
+      });
+      t.label = best;
+    }
+    // flat tiles: first those that continue a read neighbour's colour (a panel's flat fill beside its text), then
+    // the rest from the nearest read tile
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const t of tiles) {
+        if (t.label >= 0) continue;
+        for (const [di, dj] of NEIGHBOURS) {
+          if (!inside(t.i + di, t.j + dj)) continue;
+          const u = at(t.i + di, t.j + dj);
+          if (u.label >= 0 && u.color === t.color) { t.label = u.label; t.filled = true; changed = true; break; }
+        }
+      }
+    }
+    let front = tiles.filter((t) => t.label >= 0);
+    while (front.length) {
+      const next = [];
+      for (const t of front) for (const [di, dj] of NEIGHBOURS) {
+        if (!inside(t.i + di, t.j + dj)) continue;
+        const u = at(t.i + di, t.j + dj);
+        if (u.label < 0 && !u.filled) { u.filled = true; u.label = t.label; next.push(u); }
+      }
+      front = next;
+    }
+  } else for (const t of tiles) t.label = cands.length ? 0 : -1;
+  // 4. regions
+  const components = () => {
+    const seen = new Set(), comps = [];
+    for (const t of tiles) {
+      if (seen.has(t) || t.label < 0) continue;
+      const comp = [t];
+      seen.add(t);
+      for (let q = 0; q < comp.length; q++) for (const [di, dj] of NEIGHBOURS) {
+        if (!inside(comp[q].i + di, comp[q].j + dj)) continue;
+        const u = at(comp[q].i + di, comp[q].j + dj);
+        if (!seen.has(u) && u.label === t.label) { seen.add(u); comp.push(u); }
+      }
+      comps.push(comp);
+    }
+    return comps;
+  };
+  let comps = components();
+  if (comps.length > 1) {
+    for (const comp of comps) {
+      if (comp.length >= minTiles) continue;
+      const votes = new Map();
+      for (const t of comp) for (const [di, dj] of NEIGHBOURS) {
+        if (!inside(t.i + di, t.j + dj)) continue;
+        const u = at(t.i + di, t.j + dj);
+        if (u.label !== t.label && u.label >= 0) votes.set(u.label, (votes.get(u.label) || 0) + 1);
+      }
+      const top = [...votes.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (top) for (const t of comp) t.label = top[0];
+    }
+    comps = components();
+  }
+  // edges between two regions: the row (or column) where the changes move from one grid to the other
+  const d = img.data, W = img.width, hardTol = Math.max(tol, 7);
+  const lineScore = (vertical, pos, from, to, A, B) => {
+    // evidence for A over B (vertical: column pos, changes along y; else row pos, along x): a change on A's grid only
+    // +3, on B's only −3, on both ln(sA / sB) (content of the coarser grid lands on the finer one too, but the finer
+    // grid's content lands on the coarser one only by chance: ×5 art vs ×1 art)
+    const ga = vertical ? A.y : A.x, gb = vertical ? B.y : B.x;
+    const both = ga && gb ? Math.log(Math.max(1, ga.s) / Math.max(1, gb.s)) : 0;
+    let s = 0;
+    for (let q = from + 1; q < to; q++) {
+      const i0 = vertical ? (q - 1) * W + pos : pos * W + q - 1, i1 = vertical ? q * W + pos : pos * W + q;
+      if (delta(d, i0, d, i1) <= hardTol) continue;
+      const a = ga ? onGrid(q, ga) : false, b = gb ? onGrid(q, gb) : false;
+      if (a && !b) s += 3; else if (b && !a) s -= 3; else if (a && b) s += both;
+    }
+    return s;
+  };
+  const changeCount = (vertical, pos, from, to) => {
+    // how many pixels change between line pos-1 and pos (vertical: columns pos-1 | pos over rows from..to; else rows)
+    let n = 0;
+    for (let q = from; q < to; q++) if (delta(d, vertical ? q * W + pos - 1 : (pos - 1) * W + q, d, vertical ? q * W + pos : pos * W + q) > hardTol) n++;
+    return n;
+  };
+  const refine = (side, box, A, B, atEdge) => {
+    const horiz = side === "top" || side === "bottom";
+    const edge = side === "top" ? box.y : side === "bottom" ? box.y + box.h : side === "left" ? box.x : box.x + box.w;
+    // a tile out (the boundary tiles may have gone either way) and two tiles in (a region's box can reach a tile
+    // further out on a jagged row of tiles), never past the box's middle
+    const inward = side === "top" || side === "left" ? 1 : -1, size = horiz ? box.h : box.w;
+    const reach = Math.min(2 * T, Math.floor(size / 2));
+    const lo = Math.max(horiz ? R.y : R.x, inward > 0 ? edge - T : edge - reach), hi = Math.min(horiz ? R.y + R.h : R.x + R.w, inward > 0 ? edge + reach : edge + T);
+    const sc = [];
+    for (let p = lo; p < hi; p++) sc.push(horiz ? lineScore(false, p, box.x, box.x + box.w, A, B) : lineScore(true, p, box.y, box.y + box.h, A, B));
+    // the split k puts lines lo..lo+k-1 before the edge; A is after it for top/left, before it for bottom/right
+    const after = side === "top" || side === "left" ? 1 : -1;
+    let before = 0, rest = sc.reduce((a, v) => a + after * v, 0), best = -Infinity, bs = [];
+    for (let k = 0; k <= sc.length; k++) {
+      const v = before + rest;
+      if (v > best + 1e-9) { best = v; bs = [k]; } else if (v > best - 1e-9) bs.push(k);
+      if (k < sc.length) { before -= after * sc[k]; rest -= after * sc[k]; }
+    }
+    if (best <= 0) return edge;   // no evidence either way: the tile edge
+    let b1 = 0;
+    while (b1 + 1 < bs.length && bs[b1 + 1] === bs[b1] + 1) b1++;
+    if (b1 === 0) return lo + bs[0];
+    // a plateau (lines with no evidence: flat colour between the two): at the analysed area's edge its outer end (no
+    // other layer was seen there); else the strongest line across the span that is on one grid only (a panel's edge
+    // is on its layer's grid), else its middle
+    if (atEdge) return lo + (inward > 0 ? bs[0] : bs[b1]);
+    const ga = horiz ? A.y : A.x, gb = horiz ? B.y : B.x;
+    let line = -1, most = 0;
+    for (let k = bs[0]; k <= bs[b1]; k++) {
+      const p = lo + k;
+      if (p <= 0 || (ga && onGrid(p, ga)) === (gb && onGrid(p, gb))) continue;
+      const n = horiz ? changeCount(false, p, box.x, box.x + box.w) : changeCount(true, p, box.y, box.y + box.h);
+      if (n > most) { most = n; line = p; }
+    }
+    return line >= 0 && most >= 0.25 * (horiz ? box.w : box.h) ? line : lo + Math.round((bs[0] + bs[b1]) / 2);
+  };
+  const out = comps.map((comp) => {
+    const i0 = Math.min(...comp.map((t) => t.i)), i1 = Math.max(...comp.map((t) => t.i)), j0 = Math.min(...comp.map((t) => t.j)), j1 = Math.max(...comp.map((t) => t.j));
+    return { comp, label: comp[0].label, ti: [i0, i1, j0, j1], box: { x: xs[i0], y: ys[j0], w: xs[i1 + 1] - xs[i0], h: ys[j1 + 1] - ys[j0] }, rectangular: comp.length === (i1 - i0 + 1) * (j1 - j0 + 1) };
+  });
+  if (cands.length > 1) {
+    const range = (a, z) => Array.from({ length: z - a + 1 }, (_, k) => a + k);
+    for (const o of out) {
+      const A = cands[o.label], [i0, i1, j0, j1] = o.ti, b = o.box;
+      const neighbour = (cells) => {
+        const v = new Map();
+        for (const [i, j] of cells) { if (!inside(i, j)) continue; const l = at(i, j).label; if (l !== o.label && l >= 0) v.set(l, (v.get(l) || 0) + 1); }
+        const top = [...v.entries()].sort((p, q) => q[1] - p[1])[0];
+        return top ? cands[top[0]] : null;
+      };
+      // at the analysed area's edge there is no tile beyond: the other layer may still start inside the edge tiles
+      // (a panel 17 px below the top): check against the largest other candidate
+      const other = cands.map((c, k) => [c, tiles.filter((t) => t.label === k).length]).filter(([c]) => c !== A).sort((p, q) => q[1] - p[1])[0][0];
+      const nb = { top: j0 === 0 ? other : neighbour(range(i0, i1).map((i) => [i, j0 - 1])), bottom: j1 === ny - 1 ? other : neighbour(range(i0, i1).map((i) => [i, j1 + 1])),
+        left: i0 === 0 ? other : neighbour(range(j0, j1).map((j) => [i0 - 1, j])), right: i1 === nx - 1 ? other : neighbour(range(j0, j1).map((j) => [i1 + 1, j])) };
+      const y0 = nb.top ? refine("top", b, A, nb.top, j0 === 0) : b.y, y1 = nb.bottom ? refine("bottom", b, A, nb.bottom, j1 === ny - 1) : b.y + b.h;
+      const x0 = nb.left ? refine("left", b, A, nb.left, i0 === 0) : b.x, x1 = nb.right ? refine("right", b, A, nb.right, i1 === nx - 1) : b.x + b.w;
+      o.box = { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+    }
+  }
+  const full = img.width * img.height;
+  for (const o of out) {
+    const b = o.box;
+    const x0 = b.x <= R.x ? 0 : b.x, y0 = b.y <= R.y ? 0 : b.y;
+    const x1 = b.x + b.w >= R.x + R.w ? img.width : b.x + b.w, y1 = b.y + b.h >= R.y + R.h ? img.height : b.y + b.h;
+    o.rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+  // areas: each region's rect painted largest first, smaller ones over it (a HUD panel lies over the world), counted
+  const owner = new Int16Array(full).fill(-1);
+  const order = out.map((o, k) => k).sort((a, b) => out[b].rect.w * out[b].rect.h - out[a].rect.w * out[a].rect.h);
+  for (const k of order) { const r = out[k].rect; for (let y = r.y; y < r.y + r.h; y++) owner.fill(k, y * img.width + r.x, y * img.width + r.x + r.w); }
+  for (const o of out) o.area = 0;
+  for (let i = 0; i < full; i++) if (owner[i] >= 0) out[owner[i]].area++;
+  for (const o of out) o.rectangular = o.area === o.rect.w * o.rect.h;
+  const regions = out.map((o) => {
+    const c = cands[o.label], gx = c.x, gy = c.y;
+    const sx = gx ? r4(gx.s) : null, sy = gy ? r4(gy.s) : null;
+    const whole = [sx, sy].every((v) => v == null || Number.isInteger(v));
+    return { rect: o.rect, area: Math.round(o.area), share: r6(o.area / full), scale: [sx, sy], whole, fractional: !whole && Math.max(sx || 0, sy || 0) > 1.05,
+      uneven: [!!(gx && gx.uneven), !!(gy && gy.uneven)], longShare: [gx ? r4(gx.longShare) : 0, gy ? r4(gy.longShare) : 0], single: [gx ? gx.single : null, gy ? gy.single : null],
+      group: o.label, tiles: o.comp.length, rectangular: o.rectangular };
+  }).sort((a, b) => b.area - a.area);
+  const groups = [];
+  regions.forEach((g, k) => {
+    let G = groups.find((x) => x.label === g.group);
+    if (!G) { G = { label: g.group, scale: g.scale, whole: g.whole, fractional: g.fractional, area: 0, regions: [] }; groups.push(G); }
+    G.area += g.area;
+    G.regions.push(k);
+  });
+  groups.sort((a, b) => b.area - a.area);
+  for (const r of regions) r.group = groups.findIndex((G) => G.label === r.group);
+  return {
+    region: R, tile: T, regions,
+    groups: groups.map((G) => ({ scale: G.scale, whole: G.whole, fractional: G.fractional, area: Math.round(G.area), share: r6(G.area / full), regions: G.regions })),
+    unreadShare: r4(tiles.filter((t) => t.changes < MIN_CHANGES).length / tiles.length),
+    unassigned: full - out.reduce((a, o) => a + o.area, 0),
+  };
 }
 
 // ---------------------------------------------------------------------------

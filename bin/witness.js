@@ -9,7 +9,8 @@ import { evaluate, fmt, keyPaths, ExprError, usesPrev } from "../src/core/expr.j
 import { WitnessError } from "../src/core/session.js";
 import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
 import { prune, pruneRegistry, fmtBytes } from "../src/core/clean.js";
-import { CLI, die, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay } from "../src/cli/common.js";
+import { CLI, die, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay, configFlag } from "../src/cli/common.js";
+import { parseNamedRects, stateLayers } from "../src/cli/scale-regions.js";
 import { evalCommand } from "../src/cli/ask.js";
 import { traceCommand } from "../src/cli/trace.js";
 import { heatmapCommand } from "../src/cli/heatmap.js";
@@ -56,8 +57,10 @@ Common options:
   --attach (wait for an already-running game)  --cmd "<launch command>" (no witness.json needed)
   --config DIR|file.json  the project folder, or a config file of any name (witness.web.json beside witness.json)
   Browser games (launch.url): --device iphone-15|iphone-15-safari|iphone-15-pro-max|iphone-se|ipad[-landscape]
-  (viewport, DPR, touch, mobile, user agent, platform, 5 touch points, portrait screen size; safe areas are NOT
-  emulated) · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a
+  (viewport, DPR, touch, mobile, user agent, platform, 5 touch points, portrait screen size) · --safe-insets
+  (launch.safeInsets): the page's env(safe-area-inset-*) rewritten to the device's insets (iPhone 15 portrait top 59 /
+  bottom 34, landscape left/right 59 / bottom 21 CSS px; a Safari tab 0) · --safe-overlay (launch.safeOverlay): the
+  island, home indicator and rounded corners drawn over screenshots after capture · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a
   tap) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
   dom:tap:x,y@t / dom:click / dom:key:space (real browser input) · expressions web.audio.state, web.dpr
   --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
@@ -227,6 +230,11 @@ const CMD_HELP = {
       a phone screen; the share drawn wider is the scale's fraction) or ✖ BLURRY (hard edges smeared over 2+ pixels:
       smoothing / filtered upscaling). Soft ramps alone (gradients, anti-aliasing at 1:1) are not blur. Take the
       picture at device pixels: shot --device iphone-15 --capture element.
+      Two scales in one picture (a ×5 world under a UI layer at ×4.11): when it isn't one clean grid it is split into
+      regions with one grid each: "2 scales in one picture: ×5 (whole, 78.8% of the picture) · ×4.11 (fractional,
+      21.2%)", each region's rect and its uneven pixels (--json: data.regions, summary.regions). --layers
+      '[{"name":"ui","rect":[x,y,w,h]}]' (or a file, or a state with layers / ui) names them.
+      --rect "world=0,0,1000,473; ui=0,473,1000,127": each rect read on its own (exact ×k / FRACTIONAL / BLURRY).
   box <with.png> <without.png> [--threshold 16]
       the pixels that differ between a shot with something and one without it: its exact box, height, centroid.
   contrast <shot.png> --a <mask> --b <mask>
@@ -318,15 +326,19 @@ const CMD_HELP = {
       background, one to measure), or reads PNG files.
       --background auto|first|median|<file.png>  (auto: median for 8+ frames; median needs movers to move their own
       size) · --camera auto|static|moving|state (state: the game's state.camera, exact) · --min-size 6 (smallest object, px) · --threshold 16`,
-  doctor: `witness doctor [--time 3] [--device iphone-15] [--engine webkit] [--no-auto-unlock]
+  doctor: `witness doctor [--time 3] [--device iphone-15] [--engine webkit] [--no-auto-unlock] [--safe-insets]
+              [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
   For long game-specific scenarios (journeys, fights) use test steps with "match", or witness test --repeat 2.
   Browser games also get: the engine and device; the page (CSS viewport, DPR, screen, touch points, platform; ⚠ a
-  touch profile reporting < 2 touch points); safe areas (not emulated: the measure ui --safe preset to check); how
+  touch profile reporting < 2 touch points); safe areas (--safe-insets emulates them; else the measure ui --safe preset to check); how
   the main canvas lands on the screen (backing size → CSS box → device px: an exact ×k, a fractional scale with
   uneven pixels and the exact share drawn wider, or smoothing blur, from the layout; the capture at device pixels
-  confirms it, or says it couldn't be read); WebGL 1/2 in the engine, its renderer (SwiftShader = software) and the
+  confirms it, or says it couldn't be read; a picture with two scales, e.g. a ×5 world under a ×4.11 UI layer, is
+  read region by region, named from state.layers [{name, rect}] or state.ui, and compared with the layout region that
+  matches it; --scale-rect reads rects in canvas px one by one); with --safe-insets whether the insets were emulated
+  and how many env() uses were rewritten; WebGL 1/2 in the engine, its renderer (SwiftShader = software) and the
   context the game's canvas draws with; the AudioContexts and the audio policy. With
   --no-auto-unlock it first checks the iPhone unlock: audio suspended at start, then a tap at the canvas centre, a
   click, space and enter, and which one resumed it (or ⚠ it stayed suspended: silent on iPhone; or ⚠ no AudioContext
@@ -350,6 +362,7 @@ function parseArgs(argv) {
 // ------------------------------------------------------------------ commands
 const commands = {
   async doctor(pos, opt) {
+    const scaleRects = opt["scale-rect"] && opt["scale-rect"] !== true ? parseNamedRects(opt["scale-rect"], "--scale-rect") : null;
     const report = [];
     const ok = (m) => report.push(`✔ ${m}`), bad = (m) => report.push(`✖ ${m}`), warn = (m) => report.push(`⚠ ${m}`);
     const mark = ([m, t]) => report.push(m ? `${m} ${t}` : `  ${t}`);
@@ -412,7 +425,7 @@ const commands = {
           report.push("    tip: look for unseeded RNGs, wall-clock reads, threads, and state a reset doesn't clear (timers, id counters, caches, UI)");
         }
         if (digestOf(first.snap) == null) report.push("  tip: add a snapshot \"digest\" (a hash of the full internal state) so hidden state is compared too");
-        report.push("  for long scenarios (journeys, fights, menus): add \"match\" steps to tests, or run  witness test --repeat 2");
+        report.push(`  for long scenarios (journeys, fights, menus): add "match" steps to tests, or run  witness test --repeat 2${configFlag(opt)}`);
       }
       if (caps.includes("screenshot")) {
         try { const sh = await s.screenshot(); ok(`screenshot ${sh.width ?? "?"}×${sh.height ?? "?"} (${sh.format || (sh.path ? "file" : "?")})`); }
@@ -431,8 +444,12 @@ const commands = {
       }
       if (s.web) {
         const m = await media();
-        const d = await displayReport(s.web, m);
+        // the game's own names for the picture's layers: state.layers [{name, rect}] (or state.ui elements), canvas px
+        let layers = [];
+        try { layers = stateLayers(((await s.snapshot()) || {}).state); } catch { /* no snapshot: unnamed regions */ }
+        const d = await displayReport(s.web, m, { layers, scaleRects, cfgFlag: configFlag(opt) });
         d.lines.forEach(mark);
+        if (d.safe) webSummary.safe = d.safe;
         const wg = await webglReport(s.web, d.info);
         wg.lines.forEach(mark);
         if (wg.summary) webSummary.webgl = wg.summary;

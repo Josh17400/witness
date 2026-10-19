@@ -12,11 +12,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolveDevice, canvasDisplay, contextOptions } from "../../src/core/devices.js";
+import { resolveDevice, canvasDisplay, contextOptions, safeInsetsFor } from "../../src/core/devices.js";
 import { parseWitnessInput } from "../../src/core/input-spec.js";
 import { browserOptions } from "../../src/core/browser.js";
 import { safePresetFor } from "../../src/cli/web.js";
-import { encodePNG } from "../../src/media/png.js";
+import { encodePNG, decodePNG } from "../../src/media/png.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..", "..");
@@ -41,6 +41,10 @@ const json = (r) => { try { return JSON.parse(r.stdout); } catch { return null; 
   ok("landscape profiles keep the portrait screen (iOS doesn't swap screen.width/height)", ["iphone-15-landscape", "iphone-se-landscape", "ipad-landscape", "iphone-15-pro-max-landscape"].every((n) => { const o = contextOptions(resolveDevice(n)); return o.screen.width < o.screen.height; }));
   ok("platform and touch points match the user agent: iPhone / MacIntel, 5", resolveDevice("iphone-15").platform === "iPhone" && resolveDevice("ipad").platform === "MacIntel" && resolveDevice("ipad").maxTouchPoints === 5 && resolveDevice("iphone-se").maxTouchPoints === 5);
   ok("doctor's safe-area preset per profile", safePresetFor(resolveDevice("iphone-15")) === "iphone-portrait" && safePresetFor(resolveDevice("iphone-15-landscape")) === "iphone-landscape" && safePresetFor(resolveDevice("iphone-15-safari")) === "iphone-safari-portrait" && safePresetFor(resolveDevice("iphone-15-pro-max")) === "iphone-max-portrait" && safePresetFor(resolveDevice("ipad-landscape")) === "ipad" && safePresetFor(null) === null);
+  // --safe-insets: the measure ui --safe preset's numbers for the profile's orientation
+  const si = (n) => { const v = safeInsetsFor(resolveDevice(n)); return v && [v.top, v.right, v.bottom, v.left].join(","); };
+  ok("safe insets per profile: iPhone 15 portrait 59/34, landscape 59 left+right/21, Safari tab 0, SE 20 top, iPad 24/20", si("iphone-15") === "59,0,34,0" && si("iphone-15-landscape") === "0,59,21,59" && si("iphone-15-safari-landscape") === "0,0,0,0" && si("iphone-se") === "20,0,0,0" && si("ipad-landscape") === "24,0,20,0" && safeInsetsFor(null) === null);
+  ok("--safe-insets needs a phone or tablet profile", (() => { try { browserOptions({ safeInsets: true }); return false; } catch (e) { return /need a phone or tablet profile/.test(e.message); } })() && browserOptions({ safeInsets: true, device: "iphone-15" }).safeInsets.top === 59);
   // witness_emscripten.js and witness.h's EM_JS bodies under emcc --closure 1: every name crossing the bundle's edge
   // is quoted (Closure ADVANCED renames dotted names: the hello rewrite and gesture marking would silently stop)
   {
@@ -62,6 +66,21 @@ const json = (r) => { try { return JSON.parse(r.stdout); } catch { return null; 
     const gj = json(g);
     ok("measure scale: a 1:1 gradient is 'no pixel grid larger than 1', ok (it said BLURRY 82.79%)", g.status === 0 && gj && gj.ok && gj.verdict === "no pixel grid larger than 1" && !gj.summary.blurry && !gj.summary.fractional, g.stdout + g.stderr);
     fs.rmSync(tmpG, { recursive: true, force: true });
+  }
+  // measure scale on a picture with two scales: a ×5 world, UI rows 115+ drawn at ×4.11 (device rows 473+)
+  {
+    const tmpM = fs.mkdtempSync(path.join(os.tmpdir(), "witness-mixed-"));
+    const hash = (x, y, s) => { let n = Math.imul(x + 1, 374761393) ^ Math.imul(y + 7, 668265263) ^ Math.imul(s + 3, 2246822519); n = Math.imul(n ^ (n >>> 13), 1274126177); return (n ^ (n >>> 16)) >>> 0; };
+    const PAL = [[20, 24, 46], [230, 57, 70], [241, 250, 238], [168, 218, 220], [69, 123, 157], [255, 183, 3]], UIP = [[250, 250, 250], [40, 40, 60], [200, 160, 40], [90, 200, 120]];
+    const W = 1000, H = 600, px = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const u = Math.floor(x / 4.11), v = Math.floor(y / 4.11); px.set([...(v >= 115 ? UIP[hash(u, v, 5) % 4] : PAL[hash(Math.floor(x / 5), Math.floor(y / 5), 2) % 6]), 255], (y * W + x) * 4); }
+    fs.writeFileSync(path.join(tmpM, "mixed.png"), encodePNG(W, H, px));
+    const a = witness(tmpM, ["measure", "scale", "mixed.png", "--layers", '[{"name":"hud","rect":[0,470,1000,130]}]', "--json"]);
+    const aj = json(a);
+    ok("measure scale: two scales in one picture: ×5 world 78.8% and hud ×4.11 21.2% (named by --layers), not one ×4.84 × 5 reading", aj && !aj.ok && aj.summary.regions.length === 2 && aj.summary.regions[0].scale.join() === "5,5" && aj.summary.regions[1].names[0] === "hud" && /^2 scales in one picture: ×5 \(whole, 78\.8% of the picture\) · hud ×4\.11 \(fractional, 21\.2%\)$/.test(aj.verdict) && JSON.stringify(aj.data.regions[1].rect) === '{"x":0,"y":473,"w":1000,"h":127}', a.stdout + a.stderr);
+    const b = witness(tmpM, ["measure", "scale", "mixed.png", "--rect", "world=0,0,1000,473; ui=0,473,1000,127"]);
+    ok("measure scale --rect: world exact ×5, ui FRACTIONAL ×4.11, read on their own", b.status === 1 && /✔ world \(0,0 1000×473\): exact ×5/.test(b.stdout) && /✖ ui \(0,473 1000×127\): FRACTIONAL ×4\.11: uneven: one source pixel is 4 or 5 px wide \(11% are 5\)/.test(b.stdout), b.stdout + b.stderr);
+    fs.rmSync(tmpM, { recursive: true, force: true });
   }
   const c = resolveDevice({ width: 400, height: 300, dpr: 2.5, touch: true });
   ok("custom device", c.width === 400 && c.dpr === 2.5 && c.touch && !c.mobile && c.userAgent === null, c);
@@ -248,6 +267,43 @@ else {
   j = json(r);
   ok("a 2d canvas: the WebGL line is information only, naming the canvas's 2d context", j && j.summary.web.webgl && j.summary.web.webgl.canvasContext === "2d" && /^ {2}WebGL: WebGL 2 · renderer .* · the game's canvas uses 2d$/m.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
 
+  // safe areas: env(safe-area-inset-*) is 0 in a headless page; --safe-insets rewrites every use to the device's insets
+  const safeState = (args) => { const e = witness(P("safe"), ["eval", "--at", "0.5", "state", "--json", ...args], env); const v = json(e); return v ? v.data.rows[0].values.state : { err: e.stdout + e.stderr }; };
+  let st = safeState([]);
+  ok("safe page without --safe-insets: env() is 0 (the HUD sits under the island)", st.hudLeft === "0px" && st.barHeight === "20px" && st.safe === null, st);
+  st = safeState(["--safe-insets"]);
+  ok("--safe-insets, landscape: <style> padding 59px, @media right 59px, <link> custom property 21px and calc() 41px, max() 59px, inline 59px, insertRule 21px", st.hudLeft === "59px" && st.hudTop === "0px" && st.cornerRight === "59px" && st.sab === "21px" && st.barHeight === "41px" && st.barPadRight === "59px" && st.inlLeft === "59px" && st.jsPad === "21px", st);
+  ok("--safe-insets counts 8 env() uses: 5 in style sheets, 2 inline (one added later), 1 from script", st.safe && st.safe.rewritten === 8 && st.safe.bySource.stylesheet === 5 && st.safe.bySource.inline === 2 && st.safe.bySource.script === 1 && st.safe.crossOrigin === 0, st.safe);
+  st = safeState(["--safe-insets", "--device", "iphone-15"]);
+  ok("--safe-insets, portrait: top 59 (the fallback in env(..., 7px) unused), bottom 34, a later element's inline style 59px", st.hudTop === "59px" && st.hudLeft === "0px" && st.sab === "34px" && st.lateTop === "59px", st);
+  r = witness(P("safe"), ["doctor", "--time", "0.5", "--safe-insets", "--json"], env);
+  j = json(r);
+  ok("doctor --safe-insets: says the insets were emulated and how many env() uses were rewritten", j && j.summary.web.safe && j.summary.web.safe.emulated && j.summary.web.safe.rewritten === 8 && /✔ safe areas emulated \(--safe-insets, iphone-landscape\): env\(safe-area-inset-\*\) = right 59 · bottom 21 · left 59 CSS px; 8 env\(\) uses in the page's CSS rewritten \(5 in style sheets, 2 inline, 1 set from script\)/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
+  r = witness(P("safe"), ["doctor", "--time", "0.5", "--json"], env);
+  j = json(r);
+  ok("doctor without it: not emulated, and names --safe-insets", j && !j.summary.web.safe && /safe areas are not emulated.*--safe-insets emulates them/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  // --safe-overlay: drawn over screenshots after capture (viewport capture at DPR 3, and the game's own 160×90 canvas)
+  const ovFile = path.join(os.tmpdir(), `witness-web-ov-${process.pid}.png`);
+  const px = (im, x, y) => Array.from(im.data.slice((y * im.width + x) * 4, (y * im.width + x) * 4 + 3)).join("/");
+  r = witness(P("safe"), ["shot", "--at", "0.5", "--safe-overlay", "--capture", "screen", "--out", ovFile], env);
+  let im = r.status === 0 ? decodePNG(fs.readFileSync(ovFile)) : null;
+  // landscape: island 37×126 pt 11 pt from the left, centred (device x 33..144, y 400.5..778.5); indicator 134×5 pt 8 pt up;
+  // the background #124 tinted 25% magenta in the left inset is 77/26/115
+  ok("--safe-overlay (screen): black corner and island, light home indicator, magenta-tinted left inset, game untouched", im && px(im, 0, 0) === "0/0/0" && px(im, 90, 589) === "0/0/0" && px(im, 1278, 1147) === "235/235/235" && px(im, 160, 300) === "77/26/115" && px(im, 1000, 600) === "17/34/68", r.stdout + r.stderr + (im ? [px(im, 0, 0), px(im, 90, 589), px(im, 1278, 1147), px(im, 160, 300), px(im, 1000, 600)].join(" ") : ""));
+  r = witness(P("safe"), ["shot", "--at", "0.5", "--safe-overlay", "--out", ovFile], env);
+  im = r.status === 0 ? decodePNG(fs.readFileSync(ovFile)) : null;
+  ok("--safe-overlay (the game's 160×90 canvas): the island mapped onto canvas pixels (5,45 black), centre untouched", im && im.width === 160 && px(im, 5, 45) === "0/0/0" && px(im, 80, 45) === "17/34/68" && px(im, 1, 20) === "77/26/115", r.stdout + r.stderr);
+  fs.rmSync(ovFile, { force: true });
+
+  // two scales in one picture (an SDL-style canvas at device resolution: world ×5, UI layer 622×287 stretched ×4.11)
+  r = witness(P("mixed"), ["doctor", "--time", "0.5", "--scale-rect", "world=0,0,2556,940; ui=0,945,2556,234", "--json"], env);
+  j = json(r);
+  const mp = j && j.summary.web.display.pixels, mtxt = j ? j.data.lines.join("\n") : r.stdout + r.stderr;
+  // UI rows 230+ of 287 start at device row 945 (pixel centres: 945.5 × 287 / 1179 = 230.2): 234 of 1179 rows = 19.8%
+  ok("mixed scales: doctor reads world ×5 (whole, 80.2%) and ui ×4.11 (fractional, 19.8%), named from state.layers, not \"couldn't read\"", mp && mp.mixed && mp.regions.length === 2 && mp.regions[0].name === "world" && mp.regions[0].whole && mp.regions[0].scale.join() === "5,5" && mp.regions[1].name === "ui" && mp.regions[1].fractional && Math.abs(mp.regions[1].scale[0] - 2556 / 622) < 0.01 && /⚠ pixels on screen .*: 2 scales in one picture: world ×5 \(whole, 80\.2% of the picture\) · ui ×4\.11 \(fractional, 19\.8%\)/.test(mtxt) && !/couldn't read/.test(mtxt), mtxt);
+  ok("mixed scales: the ui region is exactly 0,945 2556×234; the layout (×1) is said to be the canvas shown 1:1", mp && JSON.stringify(mp.regions[1].rect) === JSON.stringify({ x: 0, y: 945, w: 2556, h: 234 }) && /the canvas is shown 1:1 \(the layout's ×1\): these are the scales the game draws at itself/.test(mtxt), mtxt);
+  ok("mixed scales: --scale-rect reads each rect: world exact ×5, ui FRACTIONAL ×4.11", mp && mp.rects.length === 2 && mp.rects[0].exact && mp.rects[1].fractional && /✔ --scale-rect world .*exact ×5/.test(mtxt) && /⚠ --scale-rect ui .*FRACTIONAL ×4\.11/.test(mtxt), mtxt);
+
   // WebKit (iPhone Safari's engine) when Playwright's build is installed
   r = witness(ex, ["doctor", "--engine", "webkit", "--device", "iphone-15", "--json"], env);
   j = json(r);
@@ -258,11 +314,13 @@ else {
     r = witness(P("gl"), ["doctor", "--engine", "webkit", "--time", "1", "--json"], env);
     j = json(r);
     ok("webgl in webkit (Windows build): WebGL 2 renders; the renderer is WebKit's generic \"Apple GPU\"", j && j.ok && j.summary.web.webgl.webgl2 === true && j.summary.web.webgl.renderer === "Apple GPU" && j.summary.web.webgl.canvasContext === "webgl2" && /WebKit's generic name/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
+    st = safeState(["--safe-insets", "--engine", "webkit"]);
+    ok("--safe-insets in webkit: the same 8 rewrites and values (59px left, 41px bar, 21px var)", st.hudLeft === "59px" && st.barHeight === "41px" && st.sab === "21px" && st.inlLeft === "59px" && st.jsPad === "21px" && st.safe && st.safe.rewritten === 8, st);
     r = witness(P("bridge"), ["test", "--engine", "webkit", "--device", "iphone-15", "--no-auto-unlock"], env);
     ok("shim page in webkit: test passes", r.status === 0 && /2 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
   }
   for (const d of shots) fs.rmSync(d, { recursive: true, force: true });
-  for (const n of ["bridge", "unlock", "unlock-bug", "gl"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
+  for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "mixed"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);

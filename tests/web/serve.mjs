@@ -12,7 +12,7 @@ const alias = {
   "/witness/witness.js": path.join(here, "..", "..", "adapters", "js", "witness.js"),
   "/witness/witness_emscripten.js": path.join(here, "..", "..", "adapters", "cpp", "witness_emscripten.js"),
 };
-const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript" };
+const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css" };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
   const file = alias[url.pathname] || path.join(pages, decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname));
