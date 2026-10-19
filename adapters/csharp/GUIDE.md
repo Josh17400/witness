@@ -185,6 +185,12 @@ or `Witness.Pcm.Write(block)` from your mixer each frame (a continuous stream). 
 buffer exactly `round(time × sampleRate)` frames long and returns f32 PCM on `audio`. Do not open
 the real audio device in witness mode.
 
+**Sound events (optional).** Where the game starts a sound, also announce it:
+`Witness.Sound("jump")`, `Witness.Sound("jump", 0.8)` or `Witness.Sound("jump", 0.8, x, y)` (volume
+0..1, negative = not given; screen position in pixels, NaN = not given). It is sent at once, stamped
+with `Witness.Frame` (inside `Step`: the frame being simulated), so `witness listen` can name what it
+hears and flag sounds announced but silent. It does nothing outside witness mode.
+
 ## 9. Replay recording
 
 Normal play with `WITNESS_RECORD=run.jsonl`: `Witness.Start(hello)` opens the file, then once per

@@ -468,11 +468,24 @@ public partial class WitnessNode : Node
     }
 
     /// <summary>
+    /// Announces a sound the game just started ("jump", "coin") so `witness listen` can name it and tie it to its
+    /// cause: one protocol "sound" event stamped with the frame being simulated. volume 0..1 (negative = not
+    /// given); pos in viewport pixels. Call it next to AudioStreamPlayer.Play(). No-op unless Witness drives the game.
+    /// </summary>
+    public static void Sound(string name, float volume = -1, Vector2? pos = null)
+    {
+        if (pos.HasValue) Witness.Sound(name, volume, pos.Value.X, pos.Value.Y);
+        else Witness.Sound(name, volume);
+    }
+
+    /// <summary>
     /// Mixes a WAV stream (8/16-bit PCM) into Witness.Pcm at the current simulated time. Call it next to
     /// AudioStreamPlayer.Play() for sounds tests should hear. No-op unless Witness.Pcm is set.
+    /// With <paramref name="sound"/> it also announces the sound by that name (see <see cref="Sound"/>).
     /// </summary>
-    public static void Mix(AudioStreamWav wav, float volumeDb = 0)
+    public static void Mix(AudioStreamWav wav, float volumeDb = 0, string sound = null)
     {
+        if (sound != null) Sound(sound, Mathf.Min(1f, Mathf.DbToLinear(volumeDb)));
         var pcm = Witness.Pcm;
         if (pcm == null || wav == null) return;
         byte[] data = wav.Data;

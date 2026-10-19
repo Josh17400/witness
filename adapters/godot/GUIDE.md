@@ -231,6 +231,12 @@ what was mixed since the last `audio` call or reset, as interleaved stereo f32 a
 * Sounds must reach Master: `AudioStreamPlayer`/`2D`/`3D` on buses that route to Master.
   Captured audio is post-effects (reverb, limiter …), exactly what a player hears.
 
+**Sound events (optional).** Next to `player.play()`, announce the sound:
+`Witness.sound("jump")`, `Witness.sound("jump", 0.8)` or `Witness.sound("hit", 0.8, position)`
+(volume 0..1, negative = not given; a `Vector2` in viewport pixels). It is sent at once, stamped with
+`Witness.frame` (the frame being simulated), so `witness listen` can name what it hears and flag
+sounds announced but silent. It does nothing outside witness mode.
+
 ## 9. Replay recording
 
 With `WITNESS_RECORD=<file.jsonl>` set (and no CLI), the autoload records normal play: one line

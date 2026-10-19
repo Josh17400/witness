@@ -182,6 +182,12 @@ func (g *WitnessGame) renderAudio(s *witness.Step) {
 If the synth is an `io.Reader` stream (as Ebitengine/oto players use), read exactly `n` frames
 from it in `Step` and convert the bytes to float32 (16-bit: `float32(int16(le))/32768`).
 
+**Sound events (optional).** Where the game starts a sound, also announce it:
+`witness.Sound("jump")`, or `witness.Sound("hit", witness.Volume(0.8), witness.At(x, y))` (volume
+0..1, position in screen pixels). It is sent at once, stamped with the frame being simulated
+(`Step.Frame` inside `Step`), so `witness listen` can name what it hears and flag sounds announced
+but silent. Safe from any goroutine; it does nothing unless connected.
+
 ## 8. Screenshots
 
 ```go
@@ -336,5 +342,6 @@ witness shot --at 1       # look at the PNG
 | `Hello{..., Touch: true}` | the game handles touch itself: no mouse events from finger 0 |
 | `witness.Image`, `witness.FromRGBA(*image.RGBA)` | screenshots |
 | `witness.Info/Warn/Error/Log` | logs (errors fail tests) |
+| `witness.Sound(name, witness.Volume(v), witness.At(x, y))` | announce a sound (optional) |
 | `RecordFromEnv`, `Record`, `(*Recorder).Seed/Key/Mouse/Touch/Input/Mark/Frame/Close` | replays |
 | `witness.Seed()`, `witness.NormalizeKey()` | helpers |

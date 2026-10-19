@@ -774,6 +774,28 @@ namespace WitnessKit
         public static void Warn(string message) { Log("warn", message); }
         public static void Error(string message) { Log("error", message); }
 
+        // ------------------------------------------------------------------ sound events
+
+        /// <summary>
+        /// Announces a sound the game just started ("jump", "coin"): one {"event":"sound"} line, sent at once and
+        /// stamped with <see cref="Frame"/> (the frame being simulated). Optional; no-op unless connected.
+        /// volume: 0..1 (negative = not given). x, y: screen position in pixels (NaN = not given).
+        /// </summary>
+        public static void Sound(string name, double volume = -1, double x = double.NaN, double y = double.NaN)
+        {
+            if (!_connected || string.IsNullOrEmpty(name)) return;
+            SendLine(SoundJson(name, Frame, volume, x, y));
+        }
+
+        /// <summary>The protocol line Sound sends (docs/PROTOCOL.md section 3).</summary>
+        internal static string SoundJson(string name, int frame, double volume = -1, double x = double.NaN, double y = double.NaN)
+        {
+            var o = new Dictionary<string, object> { { "event", "sound" }, { "name", name ?? "" }, { "frame", frame } };
+            if (volume >= 0) o["volume"] = Math.Min(1.0, volume);
+            if (!double.IsNaN(x) && !double.IsNaN(y) && !double.IsInfinity(x) && !double.IsInfinity(y)) o["pos"] = new[] { x, y };
+            return WitnessJson.Write(o);
+        }
+
         private static List<Dictionary<string, object>> DrainLogs()
         {
             lock (Logs)

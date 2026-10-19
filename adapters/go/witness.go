@@ -418,6 +418,50 @@ func Info(format string, args ...any)  { Log(LevelInfo, format, args...) }
 func Warn(format string, args ...any)  { Log(LevelWarn, format, args...) }
 func Error(format string, args ...any) { Log(LevelError, format, args...) }
 
+// ---------------------------------------------------------------- sound events
+
+// soundConn is the live connection that Sound writes to (nil when not connected).
+var soundConn atomic.Pointer[Conn]
+
+// SoundOption adds an optional field to a Sound event: Volume or At.
+type SoundOption func(ev map[string]any)
+
+// Volume sets the sound's volume, 0..1 (values above 1 are sent as 1; negative or NaN: not sent).
+func Volume(v float64) SoundOption {
+	return func(ev map[string]any) {
+		if v >= 0 {
+			ev["volume"] = math.Min(v, 1)
+		}
+	}
+}
+
+// At sets where the sound happened, in screen pixels (non-finite values: not sent).
+func At(x, y float64) SoundOption {
+	return func(ev map[string]any) {
+		if !math.IsNaN(x) && !math.IsNaN(y) && !math.IsInf(x, 0) && !math.IsInf(y, 0) {
+			ev["pos"] = []float64{x, y}
+		}
+	}
+}
+
+// Sound announces a sound the game just started ("jump", "coin"), so `witness listen` can name
+// it and tie it to its cause: one "sound" event, sent at once and stamped with the frame being
+// simulated (Step.Frame inside Game.Step). Optional; a no-op unless connected. Safe from any
+// goroutine. Example: witness.Sound("coin", witness.Volume(0.8), witness.At(x, y)).
+func Sound(name string, opts ...SoundOption) {
+	c := soundConn.Load()
+	if c == nil || name == "" || !connected.Load() {
+		return
+	}
+	ev := map[string]any{"event": "sound", "name": name, "frame": curFrame.Load()}
+	for _, o := range opts {
+		if o != nil {
+			o(ev)
+		}
+	}
+	_ = c.send(ev) // a dead connection is noticed by the next read
+}
+
 // ---------------------------------------------------------------- step context
 
 // Step is the per-frame context handed to Game.Step.
@@ -542,6 +586,7 @@ func Connect(hello Hello, game Game) (*Conn, error) {
 		c.Close()
 		return nil, err
 	}
+	soundConn.Store(c)
 	return c, nil
 }
 
@@ -591,6 +636,7 @@ func helloJSON(h Hello, g Game) map[string]any {
 // Close ends the connection.
 func (c *Conn) Close() error {
 	connected.Store(false)
+	soundConn.CompareAndSwap(c, nil)
 	return c.nc.Close()
 }
 

@@ -135,6 +135,12 @@ call `WitnessNode.Mix(wavStream)` next to `player.Play()` for sounds tests shoul
 decodes 8/16-bit PCM `AudioStreamWav`s at the current simulated time; for generated audio call
 `Witness.Pcm.Play(floatSamples)`.
 
+**Sound events (optional).** Announce each sound so `witness listen` can name what it hears and
+flag sounds announced but silent: `WitnessNode.Sound("jump")`, `WitnessNode.Sound("hit", 0.8f,
+Position)` (volume 0..1, negative = not given; position in viewport pixels), or name it while mixing:
+`WitnessNode.Mix(wav, volumeDb, "coin")`. It is sent at once, stamped with the frame being
+simulated, and does nothing outside witness mode.
+
 ## 8. Screenshots
 
 `--headless` has no renderer, so the bridge leaves `screenshot` out of its capabilities there.

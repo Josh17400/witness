@@ -206,6 +206,10 @@ wl.setup{ ..., audio = mixer }
   voice. For long tracks, stream with `love.sound.newDecoder` into the mixer, or keep music on a
   normal Source and log `witness.info("music " .. name)` so tests can at least check it.
 * Games with many `Source:play()` calls: write a `sfx(name)` helper first, then switch its body.
+* **Sound events (optional):** `mixer:play(coin, 0.8, "coin")` also announces the sound by name, or
+  call `witness.sound("jump")` / `witness.sound("hit", 0.8, x, y)` (`wl.sound` in LÖVE) next to any
+  `Source:play()`. One line, sent at once, stamped with the frame being simulated, so `witness
+  listen` can name what it hears and flag sounds announced but silent. No-op outside witness mode.
 
 ## 10. Replay recording
 

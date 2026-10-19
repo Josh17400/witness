@@ -1,12 +1,16 @@
 package witness
 
 import (
+	"bufio"
 	"encoding/base64"
+	"encoding/json"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeKey(t *testing.T) {
@@ -242,4 +246,67 @@ func TestAudioFramesNeverDrift(t *testing.T) {
 	if c.emitted != 220500 {
 		t.Errorf("emitted %d frames for 10 s, want 220500", c.emitted)
 	}
+}
+
+// soundGame announces a sound on the third frame of a step.
+type soundGame struct{}
+
+func (soundGame) Reset(int64, string, map[string]any) error { return nil }
+
+func (soundGame) Step(s *Step) {
+	if s.Frame == 2 {
+		Sound("coin", Volume(0.5), At(10, 20))
+	}
+}
+
+func (soundGame) Snapshot() any { return nil }
+
+func TestSoundEvents(t *testing.T) {
+	Sound("ignored") // not connected: nothing to send, must not panic
+	srv, cli := net.Pipe()
+	defer cli.Close()
+	c := &Conn{nc: srv, game: soundGame{}, fps: 60, held: map[string]bool{}, touches: map[int][2]float64{}}
+	connected.Store(true)
+	soundConn.Store(c)
+	defer c.Close()
+	_ = cli.SetReadDeadline(time.Now().Add(5 * time.Second))
+	r := bufio.NewReader(cli)
+	readLine := func() string {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("reading from the adapter: %v", err)
+		}
+		return strings.TrimSuffix(line, "\n")
+	}
+	run := func(cmd string) { // net.Pipe is unbuffered: the adapter writes while the test reads
+		go func() { _ = c.handle(cmd) }()
+	}
+
+	run(`{"id":1,"cmd":"reset","seed":1}`)
+	if got := readLine(); got != `{"id":1,"ok":true}` {
+		t.Fatalf("reset reply %s", got)
+	}
+	// the sound goes out at once, before the step's reply, stamped with the frame being simulated
+	run(`{"id":2,"cmd":"step","frames":4}`)
+	if got, want := readLine(), `{"event":"sound","frame":2,"name":"coin","pos":[10,20],"volume":0.5}`; got != want {
+		t.Errorf("sound inside step:\n got %s\nwant %s", got, want)
+	}
+	var reply map[string]any
+	if err := json.Unmarshal([]byte(readLine()), &reply); err != nil || reply["id"] != 2.0 || reply["frame"] != 4.0 {
+		t.Errorf("step reply %v (%v)", reply, err)
+	}
+	// between steps: the current frame; out-of-range options are clamped or left out
+	go Sound("jump", Volume(2), At(math.NaN(), 1))
+	if got, want := readLine(), `{"event":"sound","frame":4,"name":"jump","volume":1}`; got != want {
+		t.Errorf("sound between steps:\n got %s\nwant %s", got, want)
+	}
+	go Sound("hit", Volume(math.NaN()), At(3, math.Inf(1)))
+	if got, want := readLine(), `{"event":"sound","frame":4,"name":"hit"}`; got != want {
+		t.Errorf("NaN volume / infinite pos:\n got %s\nwant %s", got, want)
+	}
+	c.Close()
+	if soundConn.Load() != nil {
+		t.Error("Close must detach Sound from the connection")
+	}
+	Sound("after-close") // must not panic or write
 }

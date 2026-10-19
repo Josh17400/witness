@@ -151,6 +151,13 @@ stepped frame, renders `AudioRenderer.GetSampleCountForCaptureFrame()` samples o
 AudioListener is the alternative for real-time attach, but it runs on the audio thread at wall-clock
 speed, so it can't follow stepped time.
 
+**Sound events (optional).** Next to `source.Play()`, announce the sound:
+`WitnessBridge.Sound("jump")`, `WitnessBridge.Sound("jump", 0.8f)`, or with where it happened,
+`WitnessBridge.Sound("hit", 0.8f, cam.WorldToScreenPoint(transform.position))` (Unity screen pixels,
+converted to the protocol's top-left logical pixels). It is sent at once, stamped with the frame
+being simulated, so `witness listen` can name what it hears and flag sounds announced but silent.
+It does nothing outside witness mode.
+
 ## 8. Screenshots
 
 `WitnessBridge.Screenshots = ScreenshotSource.Cameras` (default): every enabled camera renders, by

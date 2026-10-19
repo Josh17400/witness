@@ -379,6 +379,19 @@ function witness.info(m) witness.log("info", m) end
 function witness.warn(m) witness.log("warn", m) end
 function witness.error(m) witness.log("error", m) end
 
+--- Announce a sound the game just started ("jump", "coin") so `witness listen` can name it and tie
+--- it to its cause: one {"event":"sound"} line, sent at once and stamped with the frame being
+--- simulated. volume 0..1 and the screen position x, y (pixels) are optional:
+--- witness.sound("coin") or witness.sound("hit", 0.8, x, y). No-op when not connected.
+function witness.sound(name, volume, x, y)
+  if not A.connected or not A.sock or name == nil or name == "" then return end
+  local ev = { event = "sound", name = tostring(name), frame = A.frame }
+  volume, x, y = tonumber(volume), tonumber(x), tonumber(y)
+  if volume and volume >= 0 then ev.volume = math.min(volume, 1) end -- NaN fails >= 0
+  if x and y and x == x and y == y and math.abs(x) ~= huge and math.abs(y) ~= huge then ev.pos = { x, y } end
+  pcall(witness.send, ev) -- a dead connection is noticed by the next receive
+end
+
 --- The seed for the game's RNG: from the last reset, or the replay header when recording.
 function witness.seed()
   if A.seed then return A.seed end
@@ -801,5 +814,6 @@ function witness.stop_recording()
 end
 
 witness._commands = commands -- for tests/test_witness.lua only (not API)
+witness._attach = function(sock) A.sock, A.connected = sock, sock ~= nil end -- tests only: a fake socket
 
 return witness

@@ -107,8 +107,10 @@ function Mixer:floats(sd)
   return f
 end
 
---- Play a SoundData (gain defaults to 1).
-function Mixer:play(sd, gain)
+--- Play a SoundData (gain defaults to 1). With `name` it is also announced to Witness as that
+--- sound (see wl.sound), e.g. mixer:play(coin_sd, 0.8, "coin").
+function Mixer:play(sd, gain, name)
+  if name then witness.sound(name, gain or 1) end
   local samples = self:floats(sd)
   if witness.active() then
     self.capture:play(samples, gain or 1)
@@ -116,6 +118,10 @@ function Mixer:play(sd, gain)
     self.voices[#self.voices + 1] = { samples = samples, pos = 0, gain = gain or 1 }
   end
 end
+
+--- Announce a sound the game just started (witness.sound): wl.sound("jump") or
+--- wl.sound("hit", 0.8, x, y). Call it next to Source:play(). No-op outside witness mode.
+wl.sound = witness.sound
 
 --- Normal play only: keep the QueueableSource fed. Call once per love.update.
 function Mixer:update()

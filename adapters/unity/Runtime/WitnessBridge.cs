@@ -90,6 +90,27 @@ namespace WitnessKit
             CallTable[name] = fn;
         }
 
+        /// <summary>
+        /// Announces a sound the game just started ("jump", "coin") so `witness listen` can name it and tie it to its
+        /// cause: one protocol "sound" event stamped with the frame being simulated. Call it next to AudioSource.Play().
+        /// volume 0..1 (negative = not given). No-op unless Witness drives the game. Same as Witness.Sound(name, volume).
+        /// </summary>
+        public static void Sound(string name, float volume = -1f)
+        {
+            Witness.Sound(name, volume);
+        }
+
+        /// <summary>
+        /// Sound with where it happened, in Unity screen pixels (bottom-left origin, e.g. Camera.WorldToScreenPoint):
+        /// converted to the protocol's top-left logical pixels, the same mapping injected mouse/touch input uses.
+        /// </summary>
+        public static void Sound(string name, float volume, Vector2 screenPos)
+        {
+            if (!Witness.Connected) return;
+            float sx = Hello.Width > 0 ? Screen.width / (float)Hello.Width : 1f, sy = Hello.Height > 0 ? Screen.height / (float)Hello.Height : 1f;
+            Witness.Sound(name, volume, screenPos.x / sx, (Screen.height - screenPos.y) / sy);
+        }
+
         // ------------------------------------------------------------------ bootstrap
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]

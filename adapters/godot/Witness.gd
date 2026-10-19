@@ -214,6 +214,28 @@ func mark(label := "F8") -> void:
 	_rec_mark = label
 
 
+## Announce a sound the game just started ("jump", "coin") so `witness listen` can name it and tie
+## it to its cause: one protocol "sound" event, sent at once and stamped with the frame being
+## simulated. volume 0..1 (negative = not given); pos: a Vector2 in viewport pixels, or null.
+## Call it next to AudioStreamPlayer.play(): Witness.sound("coin", 0.8, position).
+## No-op unless Witness drives the game.
+func sound(sound_name: String, volume := -1.0, pos: Variant = null) -> void:
+	if not active or _closing or sound_name == "":
+		return
+	if _ws == null and _peer == null:
+		return
+	if _ws != null and not _hello_sent:
+		return
+	var ev := {"event": "sound", "name": sound_name, "frame": frame}
+	if volume >= 0.0:
+		ev["volume"] = minf(volume, 1.0)
+	if pos is Vector2 or pos is Vector2i:
+		var p := Vector2(pos)
+		if is_finite(p.x) and is_finite(p.y):
+			ev["pos"] = [p.x, p.y]
+	_send(ev)
+
+
 # ------------------------------------------------------------------------------ transport
 
 func _web_param() -> String:

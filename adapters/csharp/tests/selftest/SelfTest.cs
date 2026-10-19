@@ -204,7 +204,63 @@ internal static class SelfTest
             Eq(false, Witness.Recording, "not recording without WITNESS_RECORD");
         }
 
+        // Sound events: the line shape, a no-op while disconnected, and the frame stamp through a real step
+        Eq("{\"event\":\"sound\",\"name\":\"jump\",\"frame\":60}", Witness.SoundJson("jump", 60), "sound line: name + frame only");
+        Eq("{\"event\":\"sound\",\"name\":\"coin\",\"frame\":3,\"volume\":0.8,\"pos\":[212,140.5]}", Witness.SoundJson("coin", 3, 0.8, 212, 140.5), "sound line with volume + pos");
+        Eq("{\"event\":\"sound\",\"name\":\"x\",\"frame\":0,\"volume\":1}", Witness.SoundJson("x", 0, 2.5, double.NaN, 4), "volume clamped to 1, half a pos dropped");
+        Eq("{\"event\":\"sound\",\"name\":\"x\",\"frame\":0}", Witness.SoundJson("x", 0, double.NaN, double.PositiveInfinity, 1), "NaN volume and infinite pos dropped");
+        Witness.Sound("ignored");   // not connected: nothing to send, must not throw
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WITNESS_ADDR"))) SoundOverSocket();
+
         Console.WriteLine(_failed == 0 ? "selftest: all " + _passed + " checks passed" : "selftest: " + _failed + " FAILED, " + _passed + " passed");
         return _failed == 0 ? 0 : 1;
+    }
+
+    // A fake CLI on a free port: the game announces a sound on the third frame of a 4-frame step, then one
+    // outside any step. Sounds go out at once (before the step's reply), stamped with the simulated frame.
+    private static void SoundOverSocket()
+    {
+        var server = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        server.Start();
+        int port = ((System.Net.IPEndPoint)server.LocalEndpoint).Port;
+        Environment.SetEnvironmentVariable("WITNESS_ADDR", "127.0.0.1:" + port);
+        try
+        {
+            int stepped = 0;
+            var h = new WitnessHandlers
+            {
+                Step = dt => { if (stepped++ == 2) Witness.Sound("coin", 0.5, 10, 20); },
+                Snapshot = () => null,
+            };
+            Eq(true, Witness.Connect(new WitnessHello { Name = "SelfTest", Fps = 60 }, h), "connect to a fake CLI");
+            using (var cli = server.AcceptTcpClient())
+            {
+                cli.ReceiveTimeout = 5000;
+                var stream = cli.GetStream();
+                var reader = new System.IO.StreamReader(stream, new System.Text.UTF8Encoding(false));
+                var writer = new System.IO.StreamWriter(stream, new System.Text.UTF8Encoding(false)) { NewLine = "\n", AutoFlush = true };
+                Eq(true, reader.ReadLine().StartsWith("{\"hello\":", StringComparison.Ordinal), "hello first");
+                writer.WriteLine("{\"id\":1,\"cmd\":\"reset\",\"seed\":1}");
+                Witness.Handle(Witness.Next(5000), h);
+                Eq("{\"id\":1,\"ok\":true}", reader.ReadLine(), "reset reply");
+                writer.WriteLine("{\"id\":2,\"cmd\":\"step\",\"frames\":4}");
+                Witness.Handle(Witness.Next(5000), h);
+                Eq("{\"event\":\"sound\",\"name\":\"coin\",\"frame\":2,\"volume\":0.5,\"pos\":[10,20]}", reader.ReadLine(), "sound inside step: frame 2, before the reply");
+                var stepReply = (Dictionary<string, object>)WitnessJson.Parse(reader.ReadLine());
+                Eq("2/4", stepReply["id"] + "/" + stepReply["frame"], "then the step reply (id 2, frame 4)");
+                Witness.Sound("jump");
+                Eq("{\"event\":\"sound\",\"name\":\"jump\",\"frame\":4}", reader.ReadLine(), "sound between steps: the current frame");
+                writer.WriteLine("{\"id\":3,\"cmd\":\"quit\"}");
+                Witness.Handle(Witness.Next(5000), h);
+                Eq("{\"id\":3,\"ok\":true}", reader.ReadLine(), "quit reply");
+            }
+            Eq(false, Witness.Connected, "disconnected after quit");
+            Witness.Sound("after-quit");   // must not throw
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("WITNESS_ADDR", null);
+            server.Stop();
+        }
     }
 }

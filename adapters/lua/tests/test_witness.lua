@@ -160,5 +160,27 @@ eq(lines[3], '{"dt":0.016666666666666666,"f":1,"in":[{"id":1,"phase":"down","pre
    '{"id":0,"phase":"up","type":"touch","x":15.5,"y":22},{"down":true,"key":"space","type":"key"}],"mark":"F8"}', "pressure kept when not 1, istouch mouse skipped, f8 marks")
 eq(lines[4], '{"dt":0.016666666666666666,"f":2,"in":[{"id":1,"phase":"cancel","type":"touch","x":3,"y":4}]}', "cancel recorded as cancel")
 
+-- sound events: no-op while disconnected; once connected, one line at once, stamped with the frame being simulated
+local sent = {}
+local fake = { send = function(_, data, i) sent[#sent + 1] = data:sub(i or 1); return #data end }
+w.sound("ignored")
+eq(#sent, 0, "sound: nothing sent while disconnected")
+w._attach(fake)
+local sh = { fps = 60, update = function() if w.frame() == 2 then w.sound("coin", 0.5, 10, 20) end end }
+cmds.reset(sh, { seed = 1 })
+cmds.step(sh, { frames = 4 })
+eq(sent[1], '{"event":"sound","frame":2,"name":"coin","pos":[10,20],"volume":0.5}\n', "sound inside step: frame 2")
+eq(#sent, 1, "one line per sound (step replies are sent by run, not here)")
+w.sound("jump", 2, 0 / 0, 1)
+eq(sent[2], '{"event":"sound","frame":4,"name":"jump","volume":1}\n', "between steps: current frame, volume clamped, NaN pos dropped")
+w.sound("hit", 0 / 0, 3, 1 / 0)
+eq(sent[3], '{"event":"sound","frame":4,"name":"hit"}\n', "NaN volume and infinite pos dropped")
+w.sound("")
+eq(#sent, 3, "empty name ignored")
+fake.send = function() return nil, "closed" end
+eq(pcall(w.sound, "lost"), true, "a dead socket doesn't raise")
+w._attach(nil)
+cmds.reset(sh, { seed = 1 })
+
 print(string.format("%s: %d checks, %d failed", fails == 0 and "OK" or "FAILED", count, fails))
 if fails > 0 then os.exit(1) end
