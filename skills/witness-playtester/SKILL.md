@@ -29,7 +29,10 @@ your order carries on. After 15 s without a command the game pauses (`PAUSED`); 
 
 ## Commands
 
-Run them with your Bash tool, **one at a time**. Each returns in a few seconds. Below, `W` stands for
+Run them with your Bash tool, **one at a time**, exactly as written. Each returns in a few seconds. If your brief
+gives a short command by its full path (`C:/…/witness-play/t1 "<orders>"`), use that path every time: never `cd`
+first and never chain commands with `&&` or `;` (a headless tester may run only those exact forms; anything else is
+denied). Below, `W` stands for
 `node "${CLAUDE_PLUGIN_ROOT}/bin/witness.js" play` (the brief gives you the full path), and `t1` is your session name.
 
 ```
@@ -86,7 +89,8 @@ events: 0.6 dialogue — … · 0.6 potions 0→1
 * The header: game time, hp, stats, your cell and facing.
 * The **result line** tells you how your order ended and why: `✔ done`, `✖ failed` (read the reason and any
   `hint:`), `⚠ interrupted` (something happened that needs your decision: an enemy came close, you got hurt, a
-  dialogue opened), `⏱ time` (the order was still running), `★ GOAL REACHED`.
+  dialogue opened), `⏱ time` (the order was still running), `★ GOAL REACHED`, `★ UNTIL REACHED` (the playtest's time is up: run
+  `end`). A `⏲` line under the header shows the game clock and how much is left when you play until a game time.
 * `near`: distance in map cells and compass direction (north = up), then details: `hp 3/3`, `WINDUP 0.2s` (about to
   strike), `chasing you`, `item`, `npc`, `locked`.
 * `map`: `@` is you, `#` wall, `.` open, `?` unknown, letters are things (uppercase = enemies).
@@ -113,7 +117,7 @@ can jump straight to that moment.
 
 ## Finishing
 
-When the goal is done, the budget is used up, or you're truly stuck, run `end` with honest feedback: was it fun, how
+When the goal is done, the budget is used up (or an order says `★ UNTIL REACHED`), or you're truly stuck, run `end` with honest feedback: was it fun, how
 hard was it, what confused you, which bugs you suspect, what you'd change. **Always run `end`**, even if something went
 wrong: it writes the report. Then reply in 3–6 lines: the outcome, the biggest problems, and the report path `end`
 printed.

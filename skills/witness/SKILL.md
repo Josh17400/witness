@@ -184,7 +184,7 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    what each missing one unlocks, and PLAYTEST.md "Playtest-ready snapshots" has a minimal example per profile.
 2. **Sanity-check it yourself:** `witness play start --name check --goal "smoke"`, `witness play do "explore for 3s"
    -s check`, `witness play end -s check`. Fix the config until orders work and things are classified right.
-3. **Brief:** `witness play brief --goal "<what to achieve>" --persona newbie --minutes 4 --name t1` prints the
+3. **Brief:** `witness play brief --goal "<what to achieve>" --persona newbie --minutes 4 --name t1` (4 GAME minutes) prints the
    complete tester prompt (commands with the absolute CLI path, the order card, the rules). **Default: turn-based and
    headless** (no flag): the game waits while the tester thinks and runs as fast as the machine allows during orders.
    That gives the best test (a 4v4 shooter: 25 kills / 5 deaths, the same as a watched run, at ~3.4× the speed).
@@ -194,11 +194,16 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 4. **Spawn the tester** with the Agent tool: `model: "sonnet"`, `effort: "low"` and the brief as the prompt (the
    best play at nearly Haiku's speed; `model: "haiku"` is cheaper but plays shallowly, so keep it for simple games).
    The tester runs the commands itself; don't play for it. **No Agent tool** (a workflow subagent): `witness play
-   batch --goals goals.txt --minutes 3` launches the testers itself as headless `claude -p` processes (Sonnet, low
+   batch --goals goals.txt --minutes 3 --wall-minutes 15` (3 game minutes, a hard stop after 15 real ones) launches the testers itself as headless `claude -p` processes (Sonnet, low
    effort, Bash limited to the witness commands, the user's login), at most 2 at once, and prints one summary (also
-   `witness/playtests/batch-<time>.md`). Use `--parallel 1` when the machine is busy.
+   `witness/playtests/batch-<time>.md`). Use `--parallel 1` when the machine is busy. A tester stopped by a permission
+   denial shows as `blocked: permission denied (<command>)` (it is retried once).
+   **Games with a day clock:** `--game-hours 4` (brief, batch, start) plays 4 in-game hours, given `play.clock` in
+   witness.json (an expression giving in-game hours, e.g. `"state.day*24 + state.hour"`); `--until "<expr>"` plays
+   until any state condition. Orders stop there and the tester ENDs (outcome `until reached`).
 5. **Read `witness/playtests/t1/report.md`**: tester feedback and bug notes first, then fights (windups avoided vs
-   hit), stuck incidents, deaths, coverage. Open the key shots and `coverage.png`.
+   hit), stuck spots (incidents grouped by place, most first, one replay command each), deaths, coverage. Open the
+   key shots and `coverage.png`.
 6. **Reproduce** what it flagged: report.md lists `witness replay witness/playtests/t1/replay.jsonl --at <t> --shot`
    for every note and death. Every playtest is a frame-exact replay.
 7. **Fix**, then **turn each bug into a test** (section 3), and playtest again if the change affects feel.
@@ -210,7 +215,7 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 * Several testers give a broader picture: different `--persona`s (`newbie`, `explorer`, `speedrunner`, `breaker`,
   `fighter`) and different `--name`s. **Run at most 2 at once** (each is a game process; `WITNESS_PLAY_MAX`).
 * **Never leave sessions running.** `witness play list` shows them; `witness play stop --all` ends them. Sessions
-  also end themselves after 5 idle minutes or 20 minutes total.
+  also end themselves after 5 idle minutes or 20 wall-clock minutes (`--wall-minutes`).
 * Judge the feedback: the reflex layer plays like a decent human, not a pro, and a stuck incident can be a harness
   limit (moving blockers, no `state.map`) rather than a game bug. Check with a replay before changing the game.
 

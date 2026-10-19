@@ -25,6 +25,15 @@ export function removeEntry(name) { for (const f of [file(name), shimPath(name),
  * A first word that isn't a play command means `do`. Written for sh (Git Bash, macOS, Linux) and cmd.
  */
 export const shimPath = (name) => path.join(REG_DIR, name.replace(/[^\w.-]+/g, "_"));
+/**
+ * The short command as a tester types it: the shim's absolute path (forward slashes, quoted only when it has spaces).
+ * No `cd` first: Claude Code's dontAsk mode denies a cd outside the tester's working folder even when Bash(cd:*) is
+ * allowed (a 0.7.1 batch tester ran `cd <registry> && ./name …` and got 0 orders).
+ */
+export function shimCommand(name) {
+  const p = shimPath(name).replace(/\\/g, "/");
+  return /[\s"'$&|;<>()]/.test(p) ? `"${p}"` : p;
+}
 export function writeShim(name, cliJs) {
   const node = process.execPath.replace(/\\/g, "/"), js = cliJs.replace(/\\/g, "/"), sub = "do|next|look|shot|note|end|status|stop";
   fs.mkdirSync(REG_DIR, { recursive: true });

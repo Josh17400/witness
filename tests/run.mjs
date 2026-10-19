@@ -924,8 +924,9 @@ ok("config control character refused", r.status !== 0 && /control character/.tes
 fs.rmSync(tmp, { recursive: true, force: true });
 fs.rmSync(work, { recursive: true, force: true });
 
-// agent playtest harness (separate runners: unit tests without processes, then end-to-end CLI/daemon runs)
-for (const suite of ["unit", "e2e"]) {
+// agent playtest harness (separate runners: unit tests without processes, then end-to-end CLI/daemon runs, then
+// session budgets (--until, --game-hours, --wall-minutes) and play batch with a fake claude)
+for (const suite of ["unit", "e2e", "budget"]) {
   const f = path.join(here, "play", `${suite}.mjs`);
   if (!fs.existsSync(f)) continue;
   const m = spawnSync(process.execPath, [f], { encoding: "utf8", timeout: 600000 });

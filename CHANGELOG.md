@@ -19,6 +19,62 @@ the hint blamed a farmer standing nearby)
   in the cell ahead: never a bystander when a wall is ahead, and never the target itself.
 - Adoption steps: none.
 
+**play batch: a tester blocked by a permission denial** (reported by Embervale's first real batch, 2 Sonnet testers:
+tester #2 ran `cd <witness-play dir>` then `./long-explorer "goto Inn"`, was denied, correctly refused to work
+around it, and the batch said `STOPPED · 0s game · 0 orders`)
+- Cause, checked with real `claude -p` runs in dontAsk mode: Claude Code denies a `cd` outside the tester's working
+  folder whatever the rules say (`Bash(cd:*)` was allowed), so the brief's "then, once: cd …" step could never work;
+  testers who used the long `node …` form played.
+- Briefs (`play brief` and batch) now give the session's short command by its absolute path, one command per order,
+  no cd: `C:/Users/me/AppData/Local/Temp/witness-play/b10191200-1 "goto Inn"` (quoted when the path has spaces), and
+  say "no cd, nothing chained". `play start` prints the same form.
+- The batch's `--allowedTools` cover every form the brief uses plus harmless variants: the long `node "…witness.js"
+  play` form, the short command bare and quoted, `./name`; `--add-dir <registry>` makes `cd <registry> && ./name`
+  legal too. A unit test checks every brief command against the rules; real `claude -p` probes (Haiku, dontAsk)
+  ran the bare, quoted (also with a space in the path), cd-chained and long forms and were denied `ls /`.
+- A tester that ends with 0 orders and a permission denial (claude's `permission_denials`, or its reply) is reported
+  as `blocked: permission denied (<command>)`, its empty session folder is removed, and it runs once more with a
+  note naming the exact allowed form; blocked again, that is its outcome in the summary and `batch-*.md`.
+- `WITNESS_CLAUDE=<path>` runs another program instead of `claude` (the tests use a fake tester that runs the brief's
+  own commands through `sh`).
+- Adoption steps: none (the brief and the batch command line changed; a tester briefed by 0.7.1 still works with its
+  long-form commands).
+
+**play: name the units; a hard wall-clock stop** (Embervale read `--minutes 3` as wall-clock minutes)
+- `play brief` / `play batch` `--minutes` is the tester's budget in GAME minutes, and help, PLAYTEST.md, the brief
+  ("about 3 minutes of GAME time") and the batch header ("about 3 game minutes each, tester timeout 15 wall min") now
+  say so. On `play start`, `--minutes` was always a wall-clock cap: it is now `--wall-minutes` (`--minutes` still
+  works there).
+- `play batch --wall-minutes M` (also `play brief`, goals JSON `wallMinutes`): a hard real-time stop, put in the
+  tester's start line (the session ends itself, outcome `timeout`) and told to the tester; the tester's own timeout
+  becomes M + 3.
+- Adoption steps: *optional*: use `--wall-minutes` instead of `--minutes` on `play start`.
+
+**play: run until a game clock** (`--until "<expr>"`, `--game-hours N`, `play.clock`)
+- `--until "<expr>"` (start, brief, batch, goals JSON `until`): any Witness expression over the snapshot, checked
+  after every step: `state.hour >= 18`, `state.day*24 + state.hour >= 30`.
+- `play.clock` in witness.json (or `--clock`): an expression giving in-game hours, which enables `--game-hours N`
+  (goals JSON `gameHours`): play until the clock has advanced N hours from the start.
+- The tester sees `⏲ clock 33h (+1h30m since the start) · 3h of in-game time to go (until clock 37.5h)` under the
+  header and a budget in in-game hours in its brief. When it's reached the order stops: `★ UNTIL REACHED: the game
+  clock reached 37.5h (4h30m of in-game time): the playtest is over, run END now`; later orders are refused (live
+  mode pauses), END gives outcome `until reached` (and the session ends itself that way if nobody ENDs within 3
+  minutes). report.json `until{…, reached, at}`, report.md "Played until: …". A bad expression, `--game-hours`
+  without a clock, or a condition already true fails the start before play.
+- Checked with the arena (`--clock "state.time / 10"`), the mock game (turn-based and live) and a real Sonnet tester
+  (`--game-hours 0.2`: stopped at 12.0 s game time, ENDed, `UNTIL REACHED`).
+- Adoption steps: *optional*: add `"clock": "state.day*24 + state.hour + state.minute/60"` (your fields) to `"play"`
+  to brief testers in in-game hours with `--game-hours`.
+
+**play report: stuck incidents grouped by place** (Embervale's long run had 63 incidents; report.md listed the first
+20 one by one, all at the same spot, and never showed the others)
+- Incidents within 2 cells of each other form a spot; report.md's Stuck section is a table of spots, most incidents
+  first: cell, count, unresolved, total stuck time, first–last time, headings, and one `witness replay … --at <t>
+  --shot` command (its first unresolved incident, else its longest). Single incidents are listed only when there are
+  10 or fewer. Reproduce lists the top 3 spots; the summary says "stuck incidents 63 in 4 spots"; report.json gets
+  `stuckSpots[]`; the batch line says "stuck 63 in 4 spots".
+- Adoption steps: none.
+
 ## 0.7.1 (2026-10-19)
 
 Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web builds).

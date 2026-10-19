@@ -19,6 +19,7 @@ import { reportData, reportMarkdown, coveragePNG } from "./report.js";
 import { updateEntry } from "./registry.js";
 import { r1, clip, oneLine } from "./util.js";
 import { PERSONAS } from "./brief.js";
+import { UntilWatch } from "./until.js";
 export { PERSONAS };
 
 
@@ -89,7 +90,7 @@ export async function runDaemon(dir) {
   const freeze = () => { if (pace.frozenSince == null) pace.frozenSince = Date.now(); };
 
   // ---- start the run
-  let grid, ap, tracker;
+  let grid, ap, tracker, until = null, untilTimer = null;
   try {
     if (S.has("reset")) await S.reset(opts.seed ?? spec.cfg.seed ?? 1, opts.scene || undefined, opts.params || undefined);
     // many games fill their world on the first update: step once (and up to ~1/3 s until something is in view)
@@ -100,6 +101,9 @@ export async function runDaemon(dir) {
       world = perceiver.perceive(await S.snapshot(), frame);
       if (world.player && world.things.length) break;
     }
+    // --until / --game-hours (play.clock): checked after every step from here on
+    until = new UntilWatch({ until: opts.until, gameHours: opts.gameHours, clock: opts.clock || (spec.cfg.play && spec.cfg.play.clock) || null });
+    if (until.active || until.clock) until.start(await S.snapshot());
     grid = new NavGrid({ cell: world.cell, origin: perceiver.geo.origin, northSign: cfg.northSign });
     ap = new Autopilot(cfg, { fps, grid, perceiver, size });
     tracker = new EventTracker(cfg, perceiver);
@@ -174,6 +178,7 @@ export async function runDaemon(dir) {
     let logs = [];
     if (frame - lastLogFrame >= Math.max(1, Math.round(fps / 4))) { logs = await S.drainLogs(); lastLogFrame = frame; }
     const nw = perceiver.perceive(snap, frame);
+    if (until && !until.hit && (until.active || until.clock) && until.check(snap, nw.t)) untilReached();
     ap.observe(nw);
     const ev = tracker.update(world, nw, { lastAttackT: ap.lastAttackT, logs, retreat: ap.policy.retreat });
     for (const e of ap.drainEvents()) ev.push({ t: nw.t, frame, ...e });
@@ -198,6 +203,7 @@ export async function runDaemon(dir) {
     let list;
     try { list = parseOrders(text, { named: cfg.named, combos: cfg.combos }); }
     catch (e) { if (!(e instanceof OrderError)) throw e; parseErrors++; return { code: 2, text: `✖ ${e.message}${e.hint ? `\n  ${e.hint.split("\n").join("\n  ")}` : ""}` }; }
+    if (until && until.hit) return { code: 0, result: untilResult(true) };
     thaw();
     turnPace.wall = Date.now(); turnPace.frame = frame;
     const t0 = world.t;
@@ -228,13 +234,14 @@ export async function runDaemon(dir) {
       if (S.closed) { result = { status: "error", msg: "the game disconnected (crashed?)" }; break; }
       const b = ap.cur ? { verb: ap.cur.o?.verb, careful: !!ap.cur.o?.careful, target: ap.cur.thingId ?? ap.cur.target ?? (ap.cur.thing ? ap.cur.thing.id : null) } : null;
       const evs = await stepWorld(Math.max(1, dec.k));
+      if (until && until.hit) { result = untilResult(false); break; }
       const wake = wakeFor(evs, b);
       if (wake) { result = evs.some((e) => e.kind === "goal") ? { status: "goal", msg: "the game reports a win" } : { status: "interrupted", msg: wake }; break; }
       if (world.t - t0 >= cap - 1e-9) { result = { status: "time", msg: `stopped after ${r1(world.t - t0)}s of game time${ap.cur ? ` (${clip(ap.cur.label, 40)} still running; give a new order or the same one again)` : ""}` }; break; }
     }
     // results of a chain: show each finished order
     const parts = ap.results.map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}${ap.results.length > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
-    if (result.status === "interrupted" || result.status === "time" || result.status === "goal") { if (ap.cur) parts.push(`… ${clip(ap.cur.label, 40)} (stopped)`); ap.clear(); }
+    if (result.status === "interrupted" || result.status === "time" || result.status === "goal" || result.status === "until") { if (ap.cur) parts.push(`… ${clip(ap.cur.label, 40)} (stopped)`); ap.clear(); }
     rec.status = result.status; rec.msg = parts.length > 1 ? parts.join(" → ") : result.msg || ap.results.at(-1)?.msg || ""; rec.seconds = +(world.t - t0).toFixed(2);
     if (ap.results.length > 1 && (result.status === "done" || result.status === "fail")) result.msg = parts.join(" → ");
     // flush logs so errors/notices from the last frames show up now
@@ -244,6 +251,21 @@ export async function runDaemon(dir) {
     writeProgress();
     freeze();
     return { code: 0, result: { ...result, line } };
+  }
+
+  // ---- --until / --game-hours reached: the order stops, no more orders run, the tester ENDs (or the session does)
+  function untilResult(refused) {
+    const msg = refused ? `no more orders: the playtest is over (${until.hit.why}); run END now with your feedback`
+      : `${until.hit.why}: the playtest is over, run END now with your feedback`;
+    return { status: "until", msg, line: resultLine({ status: "until", msg }) };
+  }
+  function untilReached() {
+    const e = { t: until.hit.t, frame, kind: "until", text: `until reached: ${until.hit.why}` };
+    timeline.push({ t: +e.t.toFixed(2), frame, kind: e.kind, text: e.text });
+    recorder.mark(frame, e.text.slice(0, 120));
+    log(e.text);
+    // the tester should END now; if it doesn't within 3 minutes, the session ends itself with the same outcome
+    untilTimer = setTimeout(() => shutdown("until reached (the tester didn't END)", "until reached"), 180000);
   }
 
   // ---- live mode ---------------------------------------------------------------------------------------------
@@ -297,6 +319,11 @@ export async function runDaemon(dir) {
     // small steps keep a watched window responsive (the game presents frames as it steps)
     const k = Math.max(1, Math.min(opts.watch ? 2 : 4, dec.k || cfg.tick));
     const evs = await stepWorld(k);
+    if (until && until.hit) {
+      if (live.waiter) settle("until", untilResult(false).msg);
+      if (live.order && live.order.status === "running") { live.order.status = "until"; live.order.msg = until.hit.why; live.order.seconds = +(world.t - live.order.t).toFixed(2); live.order = null; }
+      ap.clear(); pauseLive(`${until.label} reached: run END`); return;
+    }
     if (live.waiter) {
       const wake = wakeFor(evs, bi);
       if (wake) { if (evs.some((e) => e.kind === "goal")) settle("goal", "the game reports a win"); else settle("event", wake); }
@@ -343,6 +370,7 @@ export async function runDaemon(dir) {
       catch (e) { if (!(e instanceof OrderError)) throw e; parseErrors++; return { code: 2, text: `✖ ${e.message}${e.hint ? `\n  ${e.hint.split("\n").join("\n  ")}` : ""}` }; }
     }
     if (live.stop || S.closed) return { code: 0, result: { status: "error", line: "✖ the game isn't running any more" } };
+    if (until && until.hit) return { code: 0, result: untilResult(true) };
     const answer = new Promise((resolve) => {
       lock.run(() => {
         // the same order again while it's still running: keep it going (restarting it would throw away its progress)
@@ -365,7 +393,7 @@ export async function runDaemon(dir) {
 
   function look(result, asJson) {
     const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: coalesceEvents(pending.splice(0)), first: firstLook, session: { goal: opts.goal, name: spec.name },
-      live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null };
+      live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null, clock: until ? until.line() : null };
     firstLook = false;
     if (asJson) return { data: observeData(world, ctx) };
     return { text: observeText(world, ctx) };
@@ -391,7 +419,7 @@ export async function runDaemon(dir) {
       name: spec.name, game: { name: S.hello.name, engine: S.hello.engine || null }, persona, goal: opts.goal || null, model: opts.model || null,
       seed: recorder.head.seed, scene: opts.scene ?? null, params: opts.params ?? null, startedAt: new Date(wall0).toISOString(),
       wallSeconds: Math.round((Date.now() - wall0) / 1000), gameSeconds: world.t, frames: frame, fps, orders, timeline, tracker,
-      incidents: ap.incidents, coverage: coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
+      until: until ? until.report() : null, incidents: ap.incidents, coverage: coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
       replay: { file: path.join(dir, "replay.jsonl"), frames: frame, calls: recorder ? [...recorder.frames.values()].reduce((a, x) => a + x.calls.length, 0) : 0 },
       ...extra,
     };
@@ -407,7 +435,7 @@ export async function runDaemon(dir) {
   async function finalize(reason, outcome, feedback) {
     if (finalizing) return null;
     finalizing = true;
-    clearTimeout(idleTimer); clearTimeout(maxTimer);
+    clearTimeout(idleTimer); clearTimeout(maxTimer); clearTimeout(untilTimer);
     log(`finalizing: ${reason}`);
     // live: stop the loop first, so nothing steps after the final snapshot (the replay must end on the same frame)
     if (live.on) { live.stop = true; if (live.resume) { const r0 = live.resume; live.resume = null; r0(); } try { await live.loopP; } catch { /* reported */ } }
@@ -416,7 +444,7 @@ export async function runDaemon(dir) {
     let endState = null;
     try { if (!S.closed) { const snap = await S.snapshot(); endState = snap.state; for (const l of await S.drainLogs()) if (l.level === "error") errors.push({ t: +world.t.toFixed(2), text: `game error: ${l.message}` }); } } catch (e) { log(`final snapshot failed: ${e.message}`); }
     tracker.finish(world.t);
-    if (!outcome) outcome = world.won ? "won" : world.dead ? "died" : "ended";
+    if (!outcome) outcome = until && until.hit ? "until reached" : world.won ? "won" : world.dead ? "died" : "ended";
     const st = state({ status: "finished", outcome, endReason: reason, feedback: feedback || null, endedAt: new Date().toISOString() });
     let summary = "";
     try {
@@ -440,7 +468,7 @@ export async function runDaemon(dir) {
   }
 
   // ---- lifetime guards
-  const idleMs = Math.max(30, +(opts.idle || 300)) * 1000, maxMs = Math.max(1, +(opts.minutes || 20)) * 60000;
+  const idleMs = Math.max(30, +(opts.idle || 300)) * 1000, maxMs = Math.max(0.1, +(opts.minutes || 20)) * 60000;
   let idleTimer = null;
   const touch = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => shutdown("idle timeout", "idle"), idleMs); };
   const maxTimer = setTimeout(() => shutdown("max session time", "timeout"), maxMs);

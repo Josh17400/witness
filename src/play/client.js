@@ -6,23 +6,28 @@ import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, MAX_SESSIONS, removeEntry, writeShim } from "./registry.js";
+import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, MAX_SESSIONS, removeEntry, writeShim, shimCommand } from "./registry.js";
 import { makeBrief, PERSONAS, configArg } from "./brief.js";
 import { prune, pruneRegistry, fmtBytes } from "../core/clean.js";
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
 import { launchFlags } from "../cli/common.js";
+import { UntilWatch } from "./until.js";
 
 export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the game and report back (docs/PLAYTEST.md)
 
   witness play start [--name t1] [--goal "…"] [--persona newbie|explorer|speedrunner|breaker|fighter]
-                     [--seed N] [--scene S] [--params JSON] [--minutes 20] [--idle 300] [--allow-calls] [--no-map]
-                     [--model sonnet] [--out DIR] [--force] [--json] [--cmd "<launch>"]
+                     [--seed N] [--scene S] [--params JSON] [--wall-minutes 20] [--idle 300] [--allow-calls] [--no-map]
+                     [--until "<expr>"] [--game-hours N] [--clock "<expr>"] [--model sonnet] [--out DIR] [--force] [--json] [--cmd "<launch>"]
                      [--live] [--watch] [--speed 1] [--horizon 4] [--pause-after 15]
                      → launches the game + a background session daemon, prints the first observation
                      --live: the game keeps running (paced to real time) while the tester thinks; orders steer it
                      --watch: live, and the game shows its window for a human to watch (WITNESS_WATCH=1)
                      --watch --turns: watched, but the game waits while the tester thinks (orders play at real speed)
+                     --wall-minutes: hard stop after that many real minutes (old name: --minutes)
+                     --until "state.hour >= 18": play until it's true (checked every step), then orders stop and the
+                     tester ENDs (outcome "until reached"); --game-hours 4: until the game clock (play.clock in
+                     witness.json, or --clock: an expression giving in-game hours) has advanced 4 hours
   witness play do "<orders>" [-s t1] [--for S]  run orders ("fight wolf block; then talk guard") until done/interrupted
                      (live: replaces the plan now, answers at done / an important event / the horizon; play goes on)
   witness play look [-s t1] [--shot] [--json] [--wait]   the observation now (live --wait: at the next event or horizon)
@@ -31,10 +36,12 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
   witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback "…"]   → report.md/json + replay, stops everything
   witness play status|stop [-s t1|--all]|list [--clean]|report [t1|dir] [--json]
   witness play clean [t1] [--all]                 delete a playtest you've acted on (t1), old ones (no name), or all of them
-  witness play brief [--goal …] [--persona …] [--minutes 4] [--name t1] [--extra "…"] [--live|--watch]  → the prompt for a tester subagent
+  witness play brief [--goal …] [--persona …] [--minutes 4 (GAME minutes)] [--until …|--game-hours N] [--wall-minutes M]
+                     [--name t1] [--extra "…"] [--live|--watch]  → the prompt for a tester subagent
   witness play suggest [--write]                  probe the game and propose a "play" config for witness.json
   witness play check [--scene S] [--params J]     is the snapshot playtest-ready? what each missing convention unlocks
-  witness play batch --goals FILE [--parallel 2]  run tester agents headless (claude -p), one per goal, and summarise
+  witness play batch --goals FILE [--parallel 2] [--minutes 3 (GAME minutes)] [--wall-minutes M] [--until …|--game-hours N]
+                     run tester agents headless (claude -p), one per goal, and summarise
   witness play orders                             the order language
 
 Orders:
@@ -43,7 +50,8 @@ Orders:
   fps:        ${ORDER_CARD_FPS}
 Sessions live in witness/playtests/<name>/ (report.md, report.json, replay.jsonl, shots/, coverage.png). At most
 ${MAX_SESSIONS} sessions run at once machine-wide (WITNESS_PLAY_MAX). A session ends itself after --idle seconds without a
-command, after --minutes, or when the game exits.`;
+command, after --wall-minutes (real time, default 20), when --until is reached and nobody ENDs within 3 minutes,
+or when the game exits.`;
 
 function fail(msg, code = 1) { console.error(`✖ ${msg}`); process.exit(code); }
 
@@ -130,10 +138,14 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       const opts = {
         goal: opt.goal && opt.goal !== true ? String(opt.goal) : null, persona: opt.persona && opt.persona !== true ? String(opt.persona) : null,
         seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : cfg.seed ?? 1, scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params: params ?? null,
-        minutes: opt.minutes ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], model: opt.model && opt.model !== true ? String(opt.model) : null,
+        minutes: opt["wall-minutes"] && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : opt.minutes ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], model: opt.model && opt.model !== true ? String(opt.model) : null,
         live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, speed: opt.speed && opt.speed !== true ? +opt.speed : undefined,
         horizon: opt.horizon && opt.horizon !== true ? +opt.horizon : undefined, pauseAfter: opt["pause-after"] && opt["pause-after"] !== true ? +opt["pause-after"] : undefined,
+        until: opt.until && opt.until !== true ? String(opt.until) : null, gameHours: opt["game-hours"] !== undefined && opt["game-hours"] !== true ? +opt["game-hours"] : null,
+        clock: opt.clock && opt.clock !== true ? String(opt.clock) : null,
       };
+      // --until / --game-hours: a bad combination fails here, before the game launches (bad expressions fail at the first snapshot)
+      try { new UntilWatch({ until: opts.until, gameHours: opts.gameHours, clock: opts.clock || (cfg.play && cfg.play.clock) || null }); } catch (err) { fs.rmSync(dir, { recursive: true, force: true }); fail(err.message); }
       // a config file other than the project's witness.json (--config witness.web.json): report.md's replay commands name it
       const spec = { name, token, root, cfg, configFile: file && !/(^|[\\/])witness\.json$/i.test(file) ? file : null, launchFlags: launchFlags(opt), opts, state: "starting", created: new Date().toISOString() };
       fs.writeFileSync(path.join(dir, "session.json"), JSON.stringify(spec, null, 1));
@@ -161,7 +173,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       const r = await request(e, "look", { json: !!opt.json }).catch((err) => fail(err.message));
       let shim = null;
       try { shim = writeShim(name, path.join(ROOT, "bin", "witness.js")); } catch { /* the long form still works */ }
-      if (!opt.json) console.log(`▶ playtest "${name}" started (${path.relative(process.cwd(), dir) || dir}); orders: ${shim ? `cd "${path.dirname(shim).replace(/\\/g, "/")}" then ./${path.basename(shim)} "<orders>"  (or ` : ""}${cli} play do "<orders>" -s ${name}${shim ? ")" : ""}\n`);
+      if (!opt.json) console.log(`▶ playtest "${name}" started (${path.relative(process.cwd(), dir) || dir}); orders: ${shim ? `${shimCommand(name)} "<orders>"  (or ` : ""}${cli} play do "<orders>" -s ${name}${shim ? ")" : ""}\n`);
       print(r, opt);
       return;
     }
@@ -252,6 +264,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
     }
     case "brief": {
       const { cfg, root, file } = loadConfig(opt);
+      try { new UntilWatch({ until: opt.until, gameHours: opt["game-hours"] !== undefined && opt["game-hours"] !== true ? opt["game-hours"] : null, clock: (opt.clock !== true && opt.clock) || (cfg.play && cfg.play.clock) || null }); } catch (err) { fail(err.message); }
       const pc = resolvePlayConfig(cfg.play || {}, { keys: cfg.play && cfg.play.keys });
       let params = opt.params && opt.params !== true ? String(opt.params) : null;
       console.log(makeBrief({
@@ -259,6 +272,8 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         persona: opt.persona && opt.persona !== true ? String(opt.persona) : "newbie", minutes: opt.minutes ? +opt.minutes : 4, game: `"${cfg.name || "the game"}"`,
         profile: pc.profile, controls: cfg.play && cfg.play.controls ? describeControls(pc) : "", seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : null,
         scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params, model: opt.model && opt.model !== true ? String(opt.model) : null, live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, extra: opt.extra && opt.extra !== true ? String(opt.extra) : (cfg.play && cfg.play.brief) || null,
+        until: opt.until && opt.until !== true ? String(opt.until) : null, gameHours: opt["game-hours"] !== undefined && opt["game-hours"] !== true ? +opt["game-hours"] : null,
+        wallMinutes: opt["wall-minutes"] !== undefined && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : null, clock: opt.clock && opt.clock !== true ? String(opt.clock) : null,
       }));
       return;
     }

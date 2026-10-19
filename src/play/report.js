@@ -6,6 +6,29 @@ import { r1, clip, oneLine } from "./util.js";
 
 const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "?");
 
+/**
+ * Stuck incidents grouped into spots: incidents within `radius` cells (Chebyshev) of a spot's first one join it. A long
+ * run snags on the same few corners again and again (63 incidents, mostly at a few doorways); the spots, most incidents
+ * first, point at those places. Each spot names one moment to replay: its first unresolved incident, else the longest.
+ */
+export function stuckSpots(incidents = [], radius = 2) {
+  const spots = [];
+  for (const s of [...incidents].filter((x) => x && x.cell).sort((a, b) => a.t - b.t)) {
+    let sp = spots.find((q) => Math.max(Math.abs(q.anchor[0] - s.cell[0]), Math.abs(q.anchor[1] - s.cell[1])) <= radius);
+    if (!sp) spots.push(sp = { anchor: s.cell, list: [] });
+    sp.list.push(s);
+  }
+  return spots.map(({ list }) => {
+    const cells = new Map(), heads = new Map();
+    for (const s of list) { const k = s.cell.join(","); cells.set(k, (cells.get(k) || 0) + 1); heads.set(s.heading, (heads.get(s.heading) || 0) + 1); }
+    const cell = [...cells.entries()].sort((a, b) => b[1] - a[1])[0][0].split(",").map(Number);
+    const rep = list.find((s) => !s.resolved) || [...list].sort((a, b) => b.seconds - a.seconds)[0];
+    return { cell, cells: cells.size, count: list.length, unresolved: list.filter((s) => !s.resolved).length, seconds: +list.reduce((a, s) => a + (s.seconds || 0), 0).toFixed(2),
+      first: list[0].t, last: list.at(-1).t, headings: Object.fromEntries([...heads.entries()].sort((a, b) => b[1] - a[1])),
+      replayAt: +(rep.t + Math.min(0.5, rep.seconds || 0)).toFixed(2), shot: (list.find((s) => s.shot) || {}).shot || null };
+  }).sort((a, b) => b.count - a.count || b.seconds - a.seconds);
+}
+
 /** Assemble report.json from the daemon's state. */
 export function reportData(s) {
   const tr = s.tracker;
@@ -17,7 +40,7 @@ export function reportData(s) {
     status: s.status || "in progress", outcome: s.outcome || null, endReason: s.endReason || null,
     orders: s.orders, timeline: s.timeline,
     fights, telegraphs: tele,
-    stuck: s.incidents, deaths: tr.deaths, kills: tr.kills, pickups: tr.pickups, dialogues: tr.dialogues,
+    stuck: s.incidents, stuckSpots: stuckSpots(s.incidents), until: s.until || null, deaths: tr.deaths, kills: tr.kills, pickups: tr.pickups, dialogues: tr.dialogues,
     coverage: s.coverage, shots: s.shots, errors: s.errors, notes: s.notes, feedback: s.feedback || null,
     replay: s.replay, profile: s.profile, pace: s.pace || null,
     stats: {
@@ -40,18 +63,22 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
   // flags: the launch overrides the session started with (--device iphone-15-landscape --engine webkit): same viewport
   if (flags) replayCmd += flags;
   const L = [];
-  const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped" }[r.outcome] || r.outcome || "in progress";
+  const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped", "until reached": "UNTIL REACHED" }[r.outcome] || r.outcome || "in progress";
   L.push(`# Playtest ${r.session}: ${r.game?.name || "game"} — ${outcome}`);
   L.push("");
   L.push(`${r.model ? `Tester: **${r.model}** · ` : ""}${r.persona ? `persona: **${r.persona}** · ` : ""}goal: ${r.goal ? `"${r.goal}"` : "(none)"} · seed ${r.seed}${r.scene ? ` · scene ${r.scene}` : ""}${r.params ? ` · params \`${JSON.stringify(r.params)}\`` : ""}`);
   L.push(`Game time ${r1(r.gameSeconds)}s (${r.frames} frames) · wall time ${fmtWall(r.wallSeconds)} · ${r.stats.orders} orders (${r.stats.ordersFailed} failed${r.stats.parseErrors ? `, ${r.stats.parseErrors} not understood` : ""})${r.endReason ? ` · ended: ${r.endReason}` : ""}`);
+  if (r.until && (r.until.until || r.until.gameHours != null)) {
+    const u = r.until, what = [u.gameHours != null ? `${u.gameHours}h of in-game time (clock ${r1(u.clockStart)}h → ${r1(u.target)}h)` : null, u.until].filter(Boolean).join(" or ");
+    L.push(`Played until: ${what} · ${u.reached ? `**reached** at ${r1(u.at.t)}s game time (${u.at.why})` : `not reached${u.clockEnd != null ? ` (clock ${r1(u.clockEnd)}h at the end)` : ""}`}${u.evalErrors ? ` · ⚠ ${u.evalErrors} evaluation errors (last: ${u.lastError})` : ""}`);
+  }
   L.push("");
   L.push("## Summary");
   const S = r.stats;
   const bits = [];
   bits.push(`fights ${r.fights.length} (${S.fightsWon} won, ${S.fightsLost} lost)`);
   if (S.windups) bits.push(`enemy windups ${S.windups}: ${S.windupsAvoided} avoided, ${S.windupsHit} hit (${pct(S.windupsAvoided, S.windupsAvoided + S.windupsHit)} avoided)`);
-  bits.push(`kills ${S.kills}`, `deaths ${S.deaths}`, `pickups ${S.pickups}`, `stuck incidents ${S.stuck}${S.stuckUnresolved ? ` (${S.stuckUnresolved} unresolved)` : ""}`);
+  bits.push(`kills ${S.kills}`, `deaths ${S.deaths}`, `pickups ${S.pickups}`, `stuck incidents ${S.stuck}${S.stuck > 1 && r.stuckSpots ? ` in ${r.stuckSpots.length} spot${r.stuckSpots.length > 1 ? "s" : ""}` : ""}${S.stuckUnresolved ? ` (${S.stuckUnresolved} unresolved)` : ""}`);
   if (r.coverage) bits.push(`coverage ${r.coverage.cells} cells${r.coverage.percent != null ? ` (${r.coverage.percent}% of ${r.coverage.mapWindow ? "the open cells the moving map window revealed" : "the open map"})` : ""}`);
   if (r.errors.length) bits.push(`**${r.errors.length} game error(s)**`);
   if (r.pace) bits.push(`pace: ${r.pace.mode}; ${r.pace.orders} orders (${r.pace.ordersPerGameMinute} per game minute, ${r.pace.ordersStoppedEarly} stopped early); game frozen ${r.pace.freezes}× for ${r.pace.frozenWallSeconds}s of ${r.pace.wallSeconds}s wall (${Math.round(100 * r.pace.frozenShare)}%)`);
@@ -84,10 +111,19 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     for (const f of r.fights) L.push(`| ${f.n} | ${clip(f.targets.join(", "), 50)} | ${r1(f.start)}s | ${r1(f.seconds)}s | ${f.result} | ${r1(f.dealt)} | ${r1(f.taken)} | ${f.windups ? `${f.windups} (${f.avoided}/${f.hits})` : "-"} |`);
     L.push("");
   }
+  const spots = r.stuckSpots || stuckSpots(r.stuck || []);
+  const replayFile = r.replay && r.replay.file ? sh(rel(r.replay.file)) : "replay.jsonl";
   if (r.stuck.length) {
     L.push("## Stuck incidents");
-    L.push("Detected automatically: the autopilot pushed toward a target and didn't move. Repeated incidents at the same cell can mean a collision bug (a snag on a corner, an invisible wall) or a confusing layout.");
-    for (const s of r.stuck.slice(0, 20)) L.push(`- [${r1(s.t)}s] cell (${s.cell}) heading ${s.heading}, ${r1(s.seconds)}s, ${s.resolved ? "resolved" : "**unresolved**"}: ${s.how}${s.shot ? ` ([shot](${link(s.shot)}))` : ""}`);
+    L.push(`Detected automatically: the autopilot pushed toward a target and didn't move. ${r.stuck.length} incident${r.stuck.length > 1 ? "s" : ""} in **${spots.length} spot${spots.length > 1 ? "s" : ""}** (incidents within 2 cells of each other), most first. A spot with many incidents is a real problem place: a collision bug (a snag on a corner, an invisible wall) or a confusing layout.`);
+    L.push("", "| spot (cell) | incidents | unresolved | stuck for | between | heading | see it |", "|---|---|---|---|---|---|---|");
+    for (const sp of spots.slice(0, 12)) {
+      const heads = Object.entries(sp.headings).map(([h, n]) => (n > 1 ? `${h}×${n}` : h)).join(" ");
+      L.push(`| (${sp.cell})${sp.cells > 1 ? ` +${sp.cells - 1} near` : ""} | ${sp.count} | ${sp.unresolved || "–"} | ${r1(sp.seconds)}s | ${r1(sp.first)}s${sp.count > 1 ? `–${r1(sp.last)}s` : ""} | ${heads} | \`${replayCmd} ${replayFile} --at ${sp.replayAt.toFixed(2)} --shot\`${sp.shot ? ` · [shot](${link(sp.shot)})` : ""} |`);
+    }
+    if (spots.length > 12) L.push("", `… ${spots.length - 12} more spots with fewer incidents in report.json (stuckSpots).`);
+    if (r.stuck.length <= 10) { L.push(""); for (const s of r.stuck) L.push(`- [${r1(s.t)}s] cell (${s.cell}) heading ${s.heading}, ${r1(s.seconds)}s, ${s.resolved ? "resolved" : "**unresolved**"}: ${s.how}${s.shot ? ` ([shot](${link(s.shot)}))` : ""}`); }
+    else L.push("", "Every incident (time, cell, heading, how it ended) is in report.json: stuck[].");
     L.push("");
   }
   if (r.deaths.length) {
@@ -127,6 +163,7 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     L.push(`${replayCmd} ${sh(rel(r.replay.file))}                      # checks the end state matches`);
     const marks = r.notes.filter((n) => n.t != null).slice(0, 6);
     for (const n of marks) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${n.t.toFixed(2)} --shot     # ${clip(oneLine(n.text), 50)}`);
+    for (const sp of spots.slice(0, 3)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${sp.replayAt.toFixed(2)} --shot     # stuck spot (${sp.cell}): ${sp.count} incident${sp.count > 1 ? "s" : ""}`);
     for (const d of r.deaths.slice(0, 2)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${Math.max(0, d.t - 1).toFixed(2)} --shot     # just before death`);
     L.push("```");
   }

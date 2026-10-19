@@ -117,6 +117,7 @@ export function observeText(w, ctx) {
     if (cfg.profile === "platformer" && d.player.onGround != null) where.push(d.player.onGround ? "on ground" : "in the air");
     L.push(`${head.join(" · ")} · ${where.join(" ")}`);
   } else L.push(`${head.join(" ")} · no player right now${w.scene ? ` (scene: ${w.scene})` : ""}: a title screen, intro or menu? (if this lasts into gameplay, check play.player in witness.json)`);
+  if (ctx.clock) L.push(ctx.clock);
   if (ctx.first && ctx.session && ctx.session.goal) L.push(`your goal: ${ctx.session.goal}`);
   if (d.goal) L.push(`goal: ${clip(oneLine(d.goal), 140)}`);
   if (d.result) L.push(d.result.line);
@@ -160,7 +161,7 @@ export function observeText(w, ctx) {
 /** The one-line summary of how a `do` ended. */
 export function resultLine(r) {
   if (!r) return null;
-  const icon = { done: "✔ done", fail: "✖ failed", interrupted: "⚠ interrupted", time: "⏱ time", idle: "· idle", error: "✖ error", goal: "★ GOAL REACHED", running: "⏩ running", event: "⚠" }[r.status] || r.status;
+  const icon = { done: "✔ done", fail: "✖ failed", interrupted: "⚠ interrupted", time: "⏱ time", idle: "· idle", error: "✖ error", goal: "★ GOAL REACHED", until: "★ UNTIL REACHED", running: "⏩ running", event: "⚠" }[r.status] || r.status;
   return `${icon}: ${r.order ? `${clip(r.order, 60)} — ` : ""}${r.msg || ""}${r.seconds != null ? ` (${r1(r.seconds)}s)` : ""}`.replace(/ — $/, "");
 }
 export { thingLabel, len };

@@ -100,7 +100,7 @@ fps (the ground plane is x/z; `yaw`/`pitch` or a `look` vector, `ammo`, `team` a
    ("no interact control is configured …").
 3. **Print the brief:**
    ```bash
-   witness play brief --goal "Escape the arena" --persona newbie --minutes 4 --name t1
+   witness play brief --goal "Escape the arena" --persona newbie --minutes 4 --name t1   # 4 minutes of GAME time
    ```
    It's a complete prompt: role, goal, persona, budget, the exact commands with the absolute CLI path, the order card,
    the game's controls, how to read observations, how to finish.
@@ -129,7 +129,7 @@ of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` bes
 
 | command | options | what it does |
 |---|---|---|
-| `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--minutes 20` `--idle 300` `--allow-calls` `--no-map` `--model NAME` `--out DIR` `--force` `--json` `--live` `--watch` `--speed 1` `--horizon 4` `--pause-after 15` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). `--live` / `--watch`: see [Live mode](#live-mode-and-watching). |
+| `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--wall-minutes 20` `--idle 300` `--until "<expr>"` `--game-hours N` `--clock "<expr>"` `--allow-calls` `--no-map` `--model NAME` `--out DIR` `--force` `--json` `--live` `--watch` `--speed 1` `--horizon 4` `--pause-after 15` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). `--wall-minutes`: a hard stop after that many real minutes (`--minutes` is its old name here). `--until` / `--game-hours`: see [Playing until a game time](#playing-until-a-game-time---until---game-hours). `--live` / `--watch`: see [Live mode](#live-mode-and-watching). |
 | `play do "<orders>"` | `-s t1` `--for S` `--json` | Turn-based: runs an order chain until it's done, failed, interrupted by a wake event, or hits the time cap. Live: replaces the plan at once and answers at the first of done/failed, an important event, or the horizon (`--for S`, default 4 s); the game keeps going. Prints the observation. |
 | `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. |
 | `play next` | `-s t1` `--for S` | Live mode: the same as `look --wait`. |
@@ -140,10 +140,10 @@ of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` bes
 | `play status` | `-s t1` | Game time, frame, orders and notes of a live session; state and summary of an ended one. |
 | `play list` | `--clean` | All sessions in the registry (● live, ○ ended). `--clean` kills unresponsive sessions (daemon and game), marks dead ones ended, and drops entries older than 7 days or whose folder was deleted. |
 | `play report` | `[name\|dir]` `--json` | Prints report.md (or report.json). report.json is also updated after every order while a session runs. |
-| `play brief` | `--goal` `--persona` (newbie) `--minutes` (4) `--name` (t1) `--seed` `--scene` `--params` `--model` `--extra "…"` `--live` `--watch` | Prints the tester prompt. `--extra` (or `play.brief` in witness.json) adds a "notes from the developer" paragraph. `--live` / `--watch` print the live-mode variant (decide quickly, prefer longer orders, `play next`) and put the flag in its start command. |
+| `play brief` | `--goal` `--persona` (newbie) `--minutes` (4 GAME minutes) `--until "<expr>"` `--game-hours N` `--wall-minutes M` `--name` (t1) `--seed` `--scene` `--params` `--model` `--extra "…"` `--live` `--watch` | Prints the tester prompt. The budget is game time (or `--until` / `--game-hours`); `--wall-minutes` adds a hard real-time stop to its start line. `--extra` (or `play.brief` in witness.json) adds a "notes from the developer" paragraph. `--live` / `--watch` print the live-mode variant (decide quickly, prefer longer orders, `play next`) and put the flag in its start command. |
 | `play suggest` | `--seed` `--scene` `--params` `--write` | Probes the game (holds each key for 0.35 s from a fresh reset) and proposes a `"play"` config, plus which snapshot conventions the game follows. `--write` merges it into witness.json. It runs one game process. |
 | `play check` | `--seed` `--scene` `--params` `--at S` `--json` | Is the snapshot playtest-ready? One snapshot from a fresh reset, checked against [the list](#playtest-ready-snapshots): ✔ / ✖ (what to add, what it unlocks) / ? (not visible now). Runs one game process. |
-| `play batch` | `--goals FILE` `--persona P` `--model sonnet` `--effort low` `--parallel 2` `--minutes 3` `--timeout M` `--seed` `--scene` `--params` `--live` `--out DIR` `--dry-run` | Runs one headless tester (`claude -p`) per goal, at most 2 at once, and prints a combined summary. See [Batch runs](#batch-runs-witness-play-batch). |
+| `play batch` | `--goals FILE` `--persona P` `--model sonnet` `--effort low` `--parallel 2` `--minutes 3` (GAME minutes) `--wall-minutes M` `--until "<expr>"` `--game-hours N` `--timeout M` (wall) `--seed` `--scene` `--params` `--live` `--out DIR` `--dry-run` | Runs one headless tester (`claude -p`) per goal, at most 2 at once, and prints a combined summary. See [Batch runs](#batch-runs-witness-play-batch). |
 | `play orders` | | The order card. |
 
 **Personas** (`--persona`): `newbie` (follows hints, reports confusion), `explorer` (coverage, talks to everyone,
@@ -268,27 +268,66 @@ agent inside a workflow) can't spawn subagents. `witness play batch` launches th
 Code processes:
 
 ```bash
-witness play batch --goals goals.txt --minutes 3              # one tester per line of goals.txt
+witness play batch --goals goals.txt --minutes 3 --wall-minutes 15   # one tester per goal: 3 GAME minutes, hard stop after 15 real ones
+witness play batch --goals goals.txt --game-hours 4 --wall-minutes 30   # an RPG with play.clock: 4 in-game hours each
 witness play batch --goals goals.json --parallel 1             # [{"goal": "…", "persona": "explorer", "scene": "cave", "params": {…}, "minutes": 2}, …]
 ```
 
 * **Goals:** a text file with one goal per line (`#` comments), or a JSON list of strings or
-  `{goal, persona, scene, params, seed, minutes, model, live, name}`. Command-line `--persona`, `--scene`, `--params`,
-  `--seed`, `--minutes` and `--live` are the defaults for every goal.
+  `{goal, persona, scene, params, seed, minutes, until, gameHours, wallMinutes, model, live, name}`. Command-line
+  `--persona`, `--scene`, `--params`, `--seed`, `--minutes`, `--until`, `--game-hours`, `--wall-minutes` and `--live`
+  are the defaults for every goal.
+* **Units:** `--minutes` is the tester's budget in GAME time (the `[t …s]` in the header; turn-based game time only
+  passes during orders, so it can take several times as long in real time). `--wall-minutes` is a hard real-time stop:
+  it goes into the tester's start line (the session ends itself, outcome `timeout`) and sets the tester's timeout to
+  wall + 3 minutes. `--timeout` (wall minutes) overrides that; the default without `--wall-minutes` is
+  max(5, 4 × minutes + 3), or 30 with `--until` / `--game-hours`.
 * **Each tester** gets the brief `play brief` would print (session names `b<MMDDhhmm>-1`, `-2` …) and runs as
   `claude -p --model sonnet --effort low --tools Bash,Read --allowedTools "Bash(node \"…/witness.js\" play:*)" …
-  --permission-mode dontAsk --setting-sources project,local --strict-mcp-config --no-session-persistence
-  --output-format json`, with the brief on stdin, in an empty scratch folder. Bash is limited to the witness commands
-  and the session's short command; anything else is denied without a prompt. Read lets it open screenshots. It uses the
-  user's Claude Code login: `ANTHROPIC_API_KEY` is removed from its environment.
+  --add-dir <registry> --permission-mode dontAsk --setting-sources project,local --strict-mcp-config
+  --no-session-persistence --output-format json`, with the brief on stdin, in an empty scratch folder. Bash is limited
+  to the witness commands and the session's short command; anything else is denied without a prompt. Read lets it open
+  screenshots. It uses the user's Claude Code login: `ANTHROPIC_API_KEY` is removed from its environment.
+* **One command per order, by its full path.** The brief's order command is the session's short command by its
+  absolute path (`C:/Users/me/AppData/Local/Temp/witness-play/b10191200-1 "goto Inn"`, quoted when the path has
+  spaces): no `cd`. In dontAsk mode Claude Code denies a `cd` outside the tester's working folder even when
+  `Bash(cd:*)` is allowed, so 0.7.1's `cd <registry>` then `./name` left a tester with 0 orders. The allowed rules
+  cover the long `node "…/witness.js" play …` form, the short command bare and quoted, and `./name`; `--add-dir`
+  makes a `cd` to the registry legal too. Checked with real `claude -p` runs: every brief command is allowed, other
+  commands (`ls /`) are denied.
+* **Blocked testers:** a tester that ends with 0 orders and a permission denial (claude's `permission_denials`, or
+  its reply saying so) is reported as `blocked: permission denied (<the command>)`, its empty session folder is
+  removed, and it is run once more with a note naming the exact allowed form. Blocked again: the outcome stays
+  `blocked: …` in the summary and the batch file.
 * **At most 2 at once** (`--parallel 1` or `2`; each tester is a claude process plus a game and a daemon).
 * **Nothing is left running:** each tester has a wall-clock timeout (`--timeout` minutes, default
-  max(5, 4 × minutes + 3)); its session is stopped when it exits (the report is written either way); Ctrl-C kills
+  above); its session is stopped when it exits (the report is written either way); Ctrl-C kills
   every tester (the whole process tree) and stops its session.
 * **Output:** a line per tester as it finishes, then a summary: outcome, game time, orders, kills, deaths, stuck
   incidents, notes, fun, and each report path. The same goes to `witness/playtests/batch-<MMDDhhmm>.md` (`--out DIR`
   changes the folder) with the testers' feedback, notes and final replies. `--dry-run` prints the claude commands
-  without running anything.
+  without running anything. `WITNESS_CLAUDE=<path>` runs another program instead of `claude` (a `.js`/`.mjs` file runs
+  with node; the tests use a fake tester that runs the brief's own commands through `sh`).
+
+## Playing until a game time (`--until`, `--game-hours`)
+
+For games with their own clock (an RPG's day: "play 4-5 in-game hours"), a budget in game seconds is the wrong
+unit. `play start`, `play brief` and `play batch` take:
+
+* `--until "<expr>"`: any Witness expression over the snapshot (`state.hour >= 18`, `state.day*24 + state.hour >= 30`,
+  `state.quest == 'done'`). Checked after every step.
+* `--game-hours N`: needs `"play": {"clock": "<expr>"}` in witness.json (or `--clock "<expr>"`), an expression giving
+  in-game hours, e.g. `"state.day*24 + state.hour + state.minute/60"`. The session plays until the clock has advanced
+  N hours from its value at the start.
+
+A bad expression (a missing path), `--game-hours` without a clock, or a condition already true at the start fails the
+start before any play. While it runs, a line under the header shows the clock and what is left:
+`⏲ clock 33h (+1h30m since the start) · 3h of in-game time to go (until clock 37.5h)` (or `playing until: <expr> (not
+yet)`). The moment it is reached the running order stops with `★ UNTIL REACHED: the game clock reached 37.5h (4h30m
+of in-game time): the playtest is over, run END now with your feedback`; later orders are refused without stepping
+(live mode pauses the game), the tester ENDs, and the outcome is `until reached`. If nobody ENDs within 3 minutes the
+session ends itself with the same outcome. report.json `until{until, gameHours, clock, clockStart, clockEnd, target,
+reached, at{t, frame, why, clock}}`; report.md says `Played until: … · reached at <t>`.
 
 ## Live mode and watching
 
@@ -549,6 +588,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `platformer` | `{jumpFrames: 18, runJumpFrames: 22, stomp: true}` | also `run` (false: never hold run), `stuckLimit` (7 s), `airAccel` (air control per frame, default 0.005 cells) |
 | `fps` | `{sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2}` | also `range` (12 cells), `degrees`, `yawSign`, `maxTurn` (0.5 rad per tick), `floorHeight` (2.2 world units: a bigger vertical gap is another floor) |
 | `module` | none | see below |
+| `clock` | none | an expression giving in-game hours (`"state.day*24 + state.hour"`): enables `--game-hours N` and shows `⏲ clock …` under the observation header |
 | `brief` | none | default `--extra` text for `play brief` |
 
 **`play.module`** (advanced): an ES module path relative to witness.json. If it exports `perceive(world, snap)`, that
@@ -607,7 +647,8 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 * **Registry.** `<tmpdir>/witness-play/<name>.json` (override with `WITNESS_PLAY_REGISTRY`): pid, folder, state.
   Session names: letters, digits, `- _ .`, up to 40; default `play-<MMDDhhmmss>`.
 * **Lifetime.** The daemon writes the report, stops the game and exits on: `end` / `stop`; `--idle` seconds without a
-  command (default 300, minimum 30; outcome `idle`); `--minutes` of wall time (default 20; outcome `timeout`); the
+  command (default 300, minimum 30; outcome `idle`); `--wall-minutes` of real time (default 20, old name `--minutes`;
+  outcome `timeout`); `--until` / `--game-hours` reached and no END within 3 minutes (outcome `until reached`); the
   game exiting or disconnecting (outcome `crashed`); SIGINT/SIGTERM or an internal error (outcome `stopped`).
 * **Process cap.** `start` refuses when `WITNESS_PLAY_MAX` sessions (default 2) are already live machine-wide, unless
   `--force`. Each session is one game plus one light daemon. `play suggest` runs a game too but isn't counted.
@@ -619,21 +660,27 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 
 **report.md**, most useful first:
 
-1. headline (session, game, outcome: `WON` / `DIED` / ended / `GAME CRASHED` / timed out / abandoned (idle timeout) /
-   stopped), tester model, persona, goal, seed, game time, wall time, order counts;
+1. headline (session, game, outcome: `WON` / `DIED` / ended / `UNTIL REACHED` / `GAME CRASHED` / timed out / abandoned
+   (idle timeout) / stopped), tester model, persona, goal, seed, game time, wall time, order counts, and what it played
+   until (`--until` / `--game-hours`);
 2. **Summary**: fights won/lost, enemy windups avoided/hit, kills, deaths, pickups, stuck incidents, coverage, game
    errors, pace (mode, orders per game minute, frozen time);
 3. **Tester feedback**: fun and difficulty (1–5), the feedback text, then notes grouped as Bugs suspected, Confusing
    moments, Ideas, Fun moments, Notes (time, cell, screenshot link);
-4. Game errors · Fights (table: against, start, length, result, dealt, taken, windups avoided/hit) · Stuck incidents ·
+4. Game errors · Fights (table: against, start, length, result, dealt, taken, windups avoided/hit) · Stuck incidents
+   (grouped into **spots**: incidents within 2 cells of each other, most incidents first, a table row per spot with its
+   count, unresolved count, total stuck time, first–last time, headings and one `witness replay … --at <t> --shot`
+   command at its first unresolved (else longest) incident; each incident is listed too only when there are 10 or
+   fewer, so a long run's 63 incidents read as the 3-4 places that matter) ·
    Deaths · Dialogues · Coverage (link to coverage.png) · Key moments (screenshots) · Orders · Timeline (notable);
-5. **Reproduce**: the exact `witness replay` commands for the whole session, each note (`--at <t> --shot`) and the
-   second before each death.
+5. **Reproduce**: the exact `witness replay` commands for the whole session, each note (`--at <t> --shot`), the top 3
+   stuck spots and the second before each death.
 
 **report.json**: `session, game, persona, goal, seed, scene, params, model, startedAt, endedAt, wallSeconds,
 gameSeconds, frames, fps, status, outcome, endReason, orders[{t, text, status, msg, seconds}], timeline[{t, frame,
 kind, text}], fights[{n, targets, start, seconds, result, dealt, taken, kills, windups, avoided, hits}],
-telegraphs{windups, avoided, hits}, stuck[{t, cell, heading, seconds, resolved, how, blocks, shot?}], deaths[{t, cell,
+telegraphs{windups, avoided, hits}, stuck[{t, cell, heading, seconds, resolved, how, blocks, shot?}], stuckSpots[{cell,
+cells, count, unresolved, seconds, first, last, headings, replayAt, shot}], until{…} (above), deaths[{t, cell,
 cause}], kills[], pickups[], dialogues[{t, speaker, text, options}], coverage{cells, seen, openCells, percent,
 mapWindow?, bounds, png}, shots[{t, why, file}], errors[{t, text}], notes[{t, frame, kind, text, cell, shot?}],
 feedback{fun, difficulty, text}, replay{file, frames, calls}, profile, pace{mode, speed, wallSeconds, gameSeconds,

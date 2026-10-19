@@ -12,7 +12,11 @@ import { makeBrief } from "../../src/play/brief.js";
 import { compass, editDistance, singular } from "../../src/play/util.js";
 import { runFixTests } from "./fixes.mjs";
 import { checkSnapshot, checkLines } from "../../src/play/check.js";
-import { readGoals, testerArgs, batchMarkdown } from "../../src/play/batch.js";
+import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, budgetText } from "../../src/play/batch.js";
+import { shimCommand } from "../../src/play/registry.js";
+import { stuckSpots, reportMarkdown as reportMd } from "../../src/play/report.js";
+import { UntilWatch, fmtHours } from "../../src/play/until.js";
+import { PLAY_HELP } from "../../src/play/client.js";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
@@ -186,7 +190,9 @@ const txt = observeText(w0, { cfg: pc, grid: grid0, ap: null, result: { line: "�
 ok("observation shows hp, goal, near, map, orders", /hp 10\/10/.test(txt) && /goal: Talk to the Old Guard/.test(txt) && /Wolf#5\s+1\.3 E\s+hp 3\/3/.test(txt) && /map \(/.test(txt) && /orders:/.test(txt), txt);
 ok("observation stays small", txt.length < 2400, txt.length);
 const br = makeBrief({ cli: 'node "C:/w/bin/witness.js"', configDir: "C:/game", name: "t7", goal: "win", persona: "breaker", minutes: 3, model: "haiku" });
-ok("brief has the exact commands", br.includes('node "C:/w/bin/witness.js" play start --name t7 --config "C:/game" --goal "win" --persona breaker --model haiku') && br.includes("play end -s t7") === false && br.includes('./t7 end --fun') && br.includes('./t7 "<orders>"') && /bug hunter/.test(br));
+ok("brief has the exact commands", br.includes('node "C:/w/bin/witness.js" play start --name t7 --config "C:/game" --goal "win" --persona breaker --model haiku') && br.includes("play end -s t7") === false && br.includes(`${shimCommand("t7")} end --fun`) && br.includes(`order:  ${shimCommand("t7")} "<orders>"`) && /bug hunter/.test(br), br.slice(0, 1800));
+ok("brief: no cd (dontAsk denies a cd outside the working folder): the short command by its absolute path", !/cd "/.test(br) && !/then, once/.test(br) && /[\\/]t7"?$/.test(shimCommand("t7")) && /no cd, nothing chained/.test(br), br.slice(0, 1800));
+ok("brief: the budget is GAME time, by name", /BUDGET: about 3 minutes of GAME time/.test(br) && /BUDGET: about 3 minutes of GAME time/.test(makeBrief({ cli: "w", configDir: "C:/g", name: "t1", minutes: 3, live: true })));
 // launch overrides (--device/--engine/…) reach the tester's start line and report.md's replay commands
 {
   const { launchFlags } = await import("../../src/cli/common.js");
@@ -459,7 +465,63 @@ function platWorld() {
   const md = batchMarkdown([{ i: 1, goal: "win | fast", persona: "newbie", dir: nodePath.join(tmpB, "b1-1"), report: { outcome: "won", gameSeconds: 41.2, stats: { orders: 5, kills: 4, deaths: 0, stuck: 0 }, notes: [{ kind: "bug", t: 3, text: "door" }], feedback: { fun: 3, text: "easy" } }, reply: "won" },
     { i: 2, goal: "lose", persona: "fighter", report: null, timedOut: true, code: null, stderr: "" }], { base: tmpB, model: "sonnet", effort: "low", minutes: 1 });
   ok("batch: the summary file has a row per tester, links next to it, feedback and notes", /\| 1 \| win \/ fast \| newbie \| won \| 41\.2 \| 5 \| 4 \| 0 \| 0 \| 1 \| 3 \| \[report\]\(b1-1\/report\.md\) \|/.test(md) && /no report \(timed out\)/.test(md) && /- bug at 3s: door/.test(md), md);
+  // every command the brief tells the tester to run is allowed by a --allowedTools rule (prefix rules, as Claude Code matches them)
+  const rules = args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--add-dir")).filter((a) => a.startsWith("Bash(")).map((a) => a.slice(5, -1));
+  const allowed = (cmd) => rules.some((x) => (x.endsWith(":*") ? cmd.startsWith(x.slice(0, -2)) : x.endsWith(" *") ? cmd.startsWith(x.slice(0, -1)) : cmd === x));
+  const bb = makeBrief({ cli: 'node "C:/w/bin/witness.js"', configDir: "C:/game", name: "b1-1", goal: "win", live: true });
+  const shown = bb.split("COMMANDS")[1].split("ORDERS")[0].split("\n").map((l) => /^\s+(start|order|look|next|screen|note|end):\s+(.+?)(\s{2,}\(.*)?$/.exec(l)).filter(Boolean).map((m) => m[2].replace("<orders>", "goto Inn").replace("<what you noticed>", "x"));
+  ok("batch: every command in the brief is allowed (start, order, look, next, screen, note, end)", shown.length === 7 && shown.every(allowed), JSON.stringify(shown.filter((c) => !allowed(c))) + "\n" + rules.join("\n"));
+  ok("batch: the quoted and ./ variants are allowed too; other commands aren't", allowed(`"${shimCommand("b1-1").replace(/"/g, "")}" look`) && allowed("./b1-1 look") && !allowed("ls /") && !allowed("node -e 1") && after("--add-dir").length > 3, rules.join("\n"));
+  // a permission-blocked tester: from claude's JSON permission_denials, or its reply; not when it played
+  const den = [{ tool_name: "Bash", tool_input: { command: 'cd "C:/T/witness-play" && ./long-explorer "goto Inn"' } }];
+  ok("batch: blockedBy reads permission_denials", (blockedBy({ denials: den, report: { stats: { orders: 0 } } }) || {}).command === 'cd "C:/T/witness-play" && ./long-explorer "goto Inn"');
+  ok("batch: blockedBy: a tester that played isn't blocked", blockedBy({ denials: den, report: { stats: { orders: 4 } } }) === null && blockedBy({ denials: [], reply: "done, won", report: null }) === null);
+  ok("batch: blockedBy from the reply alone", (blockedBy({ denials: [], reply: "The command was denied by the permission mode, so I stopped." }) || {}).command === null);
+  ok("batch: blocked outcome text", blockedText({ command: "cd x && ./t look" }) === "blocked: permission denied (cd x && ./t look)");
+  ok("batch: the retry prompt names the exact allowed form", nudge("BRIEF", { command: "cd x" }, "b1-1").includes(`${shimCommand("b1-1")} "explore"`) && /`cd x` was denied/.test(nudge("BRIEF", { command: "cd x" }, "b1-1")));
+  const mdB = batchMarkdown([{ i: 1, goal: "g", persona: "newbie", report: null, blocked: { command: "cd x && ./t look" }, firstBlock: { command: "cd x && ./t look" } }], { base: tmpB, model: "sonnet", effort: "low", minutes: 3 });
+  ok("batch md: a blocked tester's row says so", /\| 1 \| g \| newbie \| blocked: permission denied \(cd x && \.\/t look\) \|/.test(mdB), mdB);
+  ok("batch: budget text names units", budgetText({ minutes: 3 }) === "about 3 game minutes" && budgetText({ minutes: 3, gameHours: 4.5, wall: 20 }) === "4h30m of in-game time (hard stop after 20 wall min)");
   fs.rmSync(tmpB, { recursive: true, force: true });
+}
+
+// ---- help: --minutes is named as GAME time for brief/batch; start's wall-clock cap is --wall-minutes
+ok("help: units named", /brief .*--minutes 4 \(GAME minutes\)/.test(PLAY_HELP) && /batch .*--minutes 3 \(GAME minutes\)\] \[--wall-minutes M\]/.test(PLAY_HELP) && /\[--wall-minutes 20\]/.test(PLAY_HELP) && !/\[--minutes 20\]/.test(PLAY_HELP), PLAY_HELP);
+
+// ---- --until / --game-hours (pure)
+{
+  const sn = (h, extra = {}) => ({ frame: h * 60, time: h * 10, state: { day: 1, hour: h, ...extra } });
+  ok("until: --game-hours needs a clock", (() => { try { new UntilWatch({ gameHours: 4 }); return false; } catch (e) { return /needs play\.clock/.test(e.message); } })());
+  const u = new UntilWatch({ gameHours: 4.5, clock: "state.day*24 + state.hour" });
+  u.start(sn(9));
+  ok("until: the clock line at the start", u.line() === "⏲ clock 33h · 4h30m of in-game time to go (until clock 37.5h)", u.line());
+  ok("until: not yet at 13h", u.check(sn(13)) === false && /30m of in-game time to go/.test(u.line()), u.line());
+  ok("until: reached at 13.5h, and stays reached", u.check(sn(13.5)) === true && u.check(sn(9)) === true && /UNTIL REACHED \(the game clock reached 37\.5h \(4h30m of in-game time\)\): run END now/.test(u.line()), u.line());
+  const v = new UntilWatch({ until: "state.hour >= 18" });
+  v.start(sn(9));
+  ok("until: an expression", v.check(sn(17)) === false && v.check(sn(18)) === true && v.hit.why === "state.hour >= 18 is true" && v.report().reached);
+  ok("until: already true at the start is an error", (() => { try { new UntilWatch({ until: "state.hour >= 1" }).start(sn(9)); return false; } catch (e) { return /already reached at the start/.test(e.message); } })());
+  ok("until: a missing path names the expression", (() => { try { new UntilWatch({ until: "state.nope.x > 1" }).start(sn(9)); return false; } catch (e) { return /--until "state\.nope\.x > 1"/.test(e.message); } })());
+  ok("fmtHours", fmtHours(1.5) === "1h30m" && fmtHours(0.25) === "15m" && fmtHours(2) === "2h");
+}
+
+// ---- stuck incidents: a long run's 63 incidents become a few spots, each with one replay command
+{
+  const inc = [];
+  const add = (n, cell, opts = {}) => { for (let i = 0; i < n; i++) inc.push({ t: 10 + inc.length * 7.3, cell: [cell[0] + (i % 3 === 2 ? 1 : 0), cell[1]], heading: i % 4 ? "N" : "E", seconds: 1.2, resolved: !(opts.unresolved && i === 3), how: "sidestepped", blocks: 2 }); };
+  add(41, [172, -101], { unresolved: true }); add(15, [40, 12]); add(6, [-3, 77]); add(1, [100, 100]);
+  inc.reverse();   // input order doesn't matter
+  const sp = stuckSpots(inc);
+  ok("stuck spots: 63 incidents → 4 spots, most first", sp.length === 4 && sp.map((x) => x.count).join() === "41,15,6,1" && sp[0].cell.join() === "172,-101" && sp[0].unresolved === 1 && sp[0].cells === 2, JSON.stringify(sp.map((x) => [x.cell, x.count, x.cells])));
+  const unres = inc.find((x) => !x.resolved);
+  ok("stuck spots: the replay moment is the unresolved incident", sp[0].replayAt === +(unres.t + 0.5).toFixed(2), JSON.stringify(sp[0]));
+  const rep63 = { session: "long", outcome: "ended", seed: 1, frames: 60, gameSeconds: 600, wallSeconds: 2, stats: { orders: 0, ordersFailed: 0, stuck: 63 }, stuckSpots: sp, replay: { file: "witness/playtests/long/replay.jsonl" }, notes: [], timeline: [], orders: [], errors: [], shots: [], deaths: [], dialogues: [], fights: [], stuck: inc };
+  const md63 = reportMd(rep63);
+  const sec = md63.split("## Stuck incidents")[1].split("\n## ")[0];
+  ok("report.md: the stuck section is a table of spots with one replay command each, not 63 lines", /63 incidents in \*\*4 spots\*\*/.test(sec) && (sec.match(/^\| \(/gm) || []).length === 4 && (sec.match(/witness replay witness\/playtests\/long\/replay\.jsonl --at/g) || []).length === 4 && !/^- \[/m.test(sec) && /\| \(172,-101\) \+1 near \| 41 \| 1 \|/.test(sec), sec);
+  ok("report.md: the summary says how many spots, Reproduce lists the top 3", /stuck incidents 63 in 4 spots/.test(md63) && (md63.split("## Reproduce")[1].match(/# stuck spot/g) || []).length === 3, md63.split("## Reproduce")[1]);
+  const md3 = reportMd({ ...rep63, stats: { ...rep63.stats, stuck: 3 }, stuck: inc.slice(0, 3), stuckSpots: stuckSpots(inc.slice(0, 3)) });
+  ok("report.md: a few incidents are still listed one by one", (md3.split("## Stuck incidents")[1].split("\n## ")[0].match(/^- \[/gm) || []).length === 3);
 }
 
 // ---- regressions from a real game's reports (Embervale)
