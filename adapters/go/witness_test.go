@@ -140,8 +140,7 @@ func TestTouchCancel(t *testing.T) {
 	}
 	b, _ := marshal(e.JSON())
 	if want := `{"id":0,"phase":"cancel","type":"touch","x":4,"y":5}`; string(b) != want {
-		t.Errorf("got %s
-want %s", b, want)
+		t.Errorf("got %s\nwant %s", b, want)
 	}
 	if m, ok := mouseFromTouch(e); !ok || m.Button != 0 || m.Down || !m.HasDown {
 		t.Errorf("cancel must release mouse button 0: %+v", m)
@@ -181,12 +180,10 @@ want %s", b, want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(rb)), "
-")
+	lines := strings.Split(strings.TrimSpace(string(rb)), "\n")
 	want := `{"dt":0.5,"f":0,"in":[{"id":0,"phase":"cancel","type":"touch","x":4,"y":5}]}`
 	if len(lines) != 2 || lines[1] != want {
-		t.Errorf("got %q
-want %s", lines, want)
+		t.Errorf("got %q\nwant %s", lines, want)
 	}
 }
 
