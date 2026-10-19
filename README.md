@@ -14,9 +14,13 @@ witness doctor                                   # is the game wired up and dete
 witness test                                     # run witness/*.witness.json gameplay tests
 witness test --repeat 2                          # every step must repeat exactly: state, screenshot, audio
 witness eval --at 2 "state.player.hp" "count('Enemy')"
-witness trace --watch "state.player.pos[1], state.score" --time 4 --input "space@1"   # → chart PNG
+witness eval --when "state.gate.open" --input "e@2"   # the exact frame something happens
+witness effect --input "space@1"                 # what an input causes, and how many frames later (state, pixels, audio)
+witness measure jump --y "state.player.pos[1]" --input "space@1"   # apex, airtime, hang, gravity: feel as numbers
+witness trace --watch "state.player.pos[1], state.score" --time 4 --input "space@1"   # → table + chart PNG
+witness shot --from 1 --to 1.5 --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
 witness shot --at 1,4 --diff witness/shots/before.png
-witness listen --time 8                          # audio report + spectrogram PNGs
+witness listen --time 8 --input "space@1"        # every sound tied to its cause, audio report + PNGs
 witness replay last --shot                       # what the human saw when they pressed F8
 witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
 witness play start --goal "Escape the arena"     # agent playtests: a cheap model PLAYS the game, Witness reports
@@ -72,12 +76,17 @@ a license).
 3. All the smart work happens in the CLI, over JSON snapshots. That's why one test format,
    one `eval` and one audio analyzer work for every language.
 
-Test files are JSON (or JS modules):
+Test files are JSON (or JS modules). Point steps check a moment; range steps check every frame of a span:
 
 ```json
 [{ "name": "walking right collects the first coin", "input": "right@0-0.5",
-   "steps": [{ "at": 0.6, "expect": ["state.score == 1", "count('Coin') == 4"] }] }]
+   "steps": [{ "at": 0.6, "expect": ["state.score == 1", "count('Coin') == 4"] },
+             { "from": 0, "to": 2, "always": "state.player.hp > 0", "eventually": "state.score == 1" }] }]
 ```
+
+Times are seconds or frames (`90f`), and expressions can look one frame back (`prev`, `rose(x)`, `changed(x)`).
+Games may announce their sounds (`witness.sound("coin")`) so `listen` names them; everything else needs nothing more
+than the adapter.
 
 * Spec: [docs/PROTOCOL.md](docs/PROTOCOL.md)
 * Agent playtests: [docs/PLAYTEST.md](docs/PLAYTEST.md)

@@ -1,6 +1,9 @@
 # Perception plan: see, hear, ask, chart, measure
 
-Status: plan (2026-10-18), written against Witness 0.5.0 (`dc8a70c`). No code has changed yet.
+Status: plan (2026-10-18), written against Witness 0.5.0 (`dc8a70c`). **Phase 1 is implemented** (B1–B13, the state
+schema, `effect`, `measure curve|jump|move|hitstop`, filmstrips, temporal ask, sound↔event matching with the optional
+`event: sound` line in the js, python, cpp, java and rust adapters, and the chart quick wins); phase 2 is not started.
+Not done from phase 1's text: the `snapshot.paths` filter for per-frame sampling (§1.4/§3.4, a speed item).
 
 Witness lets Claude check its own game work. The owner can't read code, so every "it works" Claude
 gives him should rest on evidence Witness produced. This plan audits the five perception tools

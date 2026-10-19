@@ -43,35 +43,45 @@ Run it from the game project (it finds `witness.json` in the current or a parent
 ## 2. The loop: always verify your work
 
 ```bash
-witness test                                   # all witness/*.witness.json|mjs tests
-witness eval --at 2 "state.player.hp" "count('Enemy')"      # ask instead of guessing
-witness eval --keys                            # list every state path the game exposes
-witness trace --watch "state.player.pos[1], state.score" --time 4 --input "space@1"   # + chart PNG
+witness test                                   # all witness/*.witness.json|mjs tests (--repeat 2: prove determinism)
+witness eval --keys                            # every state path (vectors inline, entities grouped by type, ~ = live)
+witness eval --at 2,90f "state.player.hp" "count('Enemy')"   # ask instead of guessing (times: seconds or 90f frames)
+witness eval --when "state.gate.open" --time 6 --input "e@2"  # the exact frame a condition becomes true, and its spans
+witness eval --diff 1,3 --input "e@2"          # what changed in the state between two moments (entities by id)
+witness effect --input "space@1"               # what an input causes, and how many frames later: state, pixels, audio
+witness measure jump --y "state.player.pos[1]" --input "space@1"   # apex, airtime, hang, gravity (feel numbers)
+witness measure move --x "state.player.pos[0]" --input "right@1-2" # top speed, accel frames, stop/slide
+witness measure hitstop --paths "state.player.pos" --input "right@0-2, j@1"   # freezes between motion
+witness measure curve --of "state.camera.pos[0]" --vs "state.player.pos[0]" --input "d@1-3"  # rise/settle/overshoot/lag/stutter
+witness trace --watch "state.player.pos, state.score" --time 4 --input "space@1" --events "land: rose(state.player.grounded)"
 witness shot --at 1,4 --input "right@0-3"      # PNGs: OPEN THEM with your image tool and look
-witness shot --at 3 --diff witness/shots/before.png   # what changed visually
-witness listen --time 8                        # audio report + spectrogram PNGs
+witness shot --from 1 --to 1.5 --every 2f --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
+witness shot --from 0 --to 4 --auto 9          # the 9 frames where the picture changes most (key moments)
+witness shot --at 3 --diff witness/shots/before.png   # what changed visually (regions listed)
+witness listen --time 8 --input "space@1" --events "land: rose(state.player.grounded)"   # sounds vs their causes
 witness replay last --shot                     # what the human saw when they hit the bug
 witness call teleport 100 200 --at 1           # run a game command, then print the state
-witness test --repeat 2                        # prove every step repeats exactly (state, screenshot, audio)
-witness measure scale shot.png                 # integer-scale / blur test (pixel art)
-witness measure box with.png without.png       # exact box/height of whatever differs (a sprite's silhouette)
-witness measure contrast shot.png --a "#202020" --b ring:2    # WCAG ratio + ΔE (outline vs ground)
-witness measure motion --at 1 --time 0.5 --input "right@0-2"  # per-frame box/centroid/steps (foot slide, jitter)
+witness measure scale|box|contrast|motion ...  # pixel facts: integer scale/blur, sprite box, WCAG contrast, motion/jitter
 ```
 
-* **Measure instead of eyeballing** when a judgement can be a number: sprite height, blur from
-  fractional scaling, outline contrast, foot slide. `witness help measure` has the details.
-
+* **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Animation or
+  juice → `shot --sheet` (and look). "When does X happen?" → `eval --when`. "What did that do?" → `eval --diff` or
+  `effect`. A rule that must always hold → a test range (section 3). Sound wiring → `listen --events`. The numbers
+  come from the game's own state, pixels and audio: quote them to the user instead of "feels fine".
+* **Frames.** Offsets read `+Nf`: N frames after the input's frame; `+1f` is the next frame (immediate). Any time can
+  be given in frames: `--at 90f`, `--every 1f`, `space@60f`.
 * **Scripted input** (`--input` and test `input`): `key@t` taps, `key@a-b` holds,
   `click:x,y@t` (or `@a-b` to hold), `mouse:x,y@t`, `drag:x1,y1->x2,y2@a-b`, `wheel:+3@t`,
   `action:jump@t` (games with input mapping), `pad:a@t`, `touch:x,y@t` (finger tap; `@a-b`
-  holds, `touch2:` = second finger), `swipe:x1,y1->x2,y2@a-b`. Times are seconds. Keys are lowercase
+  holds, `touch2:` = second finger), `swipe:x1,y1->x2,y2@a-b`. Keys are lowercase
   names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `left`, `right`, `up`, `down`, `shift` ….
 * Runs are deterministic: the same command gives the same result, so a failing test is a
-  real bug, not flakiness.
-* **Look at screenshots and charts** with your image viewer. Judge composition, readability
-  and whether the action is framed. For audio, read the `listen` report: pitch movement,
-  length, loudness vs music, and the Problems list.
+  real bug, not flakiness. `--json` prints `{ok, command, verdict, summary, data, files}` on the new commands.
+* **Look at screenshots, sheets and charts** with your image viewer. Judge composition, readability
+  and whether the action is framed. For audio, read the `listen` report: which events got their sound
+  (✔/✖/⚠ double), pitch movement, length, loudness vs music, and the Problems list.
+* **Sound names**: games can announce sounds (`witness.sound("jump")` in the adapters), so `listen` names them
+  and ties them to their cause. Without it, `listen` still matches sounds by onset.
 
 ## 3. Test files: prove gameplay, keep it proven
 
@@ -84,18 +94,25 @@ witness measure motion --at 1 --time 0.5 --input "right@0-2"  # per-frame box/ce
     "steps": [
       { "at": 1.5, "expect": ["state.score == 1", "count('Gem') == 0", "state.player.grounded"] },
       { "at": 1.6, "call": ["teleport", 10, 20], "expect": "dist(state.player.pos, [10, 20]) < 1",
-        "probe": "state.player.hp", "shot": "after-teleport.png" }
+        "probe": "state.player.hp", "shot": "after-teleport.png" },
+      { "from": 0, "to": 3, "always": "state.player.hp >= 0", "never": "state.player.pos[1] > 400",
+        "eventually": "state.score == 1" },
+      { "from": 0.6, "within": "20f", "eventually": "rose(state.player.grounded)" }
     ] }
 ]
 ```
 
 * Each step at time `at`: `call` → `input` → `expect` → `probe` → `shot` → `match`.
+* **Range steps** check every frame from `from` to `to` (or `from + within`): `always` must hold on every frame,
+  `never` on none, `eventually` on one. Failures name the frame: `always state.player.hp >= 0 — failed at frame 212
+  (t=3.533s): got -1 >= 0`. Rules of the game ("can't fall through the floor") belong here, not in point checks.
 * `"match": "label"`: the first capture of a label (state, digest, screenshot, audio) is the
   reference; any later capture of the same label in the run must be identical. Use it to prove
   the same scenario gives the same result after other tests ran.
 * Expressions are JavaScript over the snapshot, with helpers: `state.*`, `count(type)`,
   `first(type)`, `all(type)`, `byId(id)`, `near(pos, type)`, `dist(a, b)`, `len(x)`,
-  `approx(a, b, eps)`, `sum(list)`, `frame`, `time`, `prev` (the previous snapshot).
+  `approx(a, b, eps)`, `sum(list)`, `frame`, `time`, `prev` (the previous step; the previous frame in ranges, trace
+  and eval), `rose(x)`/`fell(x)` (became true/false this frame), `changed(x)`, `since(x)` (frames since x became true).
 * A failure prints both sides: `state.score == 1 — got 0 == 1`. Game error logs fail the test.
 * Write a test for **every mechanic you build or fix**, and turn every reproduced bug into a
   test.
