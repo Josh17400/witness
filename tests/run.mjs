@@ -11,6 +11,7 @@ import { analyzeJump, analyzeMove, frozenSpans, response, lag, stutters, summari
 import { matchSounds, alignSoundEvents, soundFrame } from "../src/core/soundmatch.js";
 import { windowsOf } from "../src/cli/window.js";
 import { parseVariant, compareRect } from "../src/cli/ab.js";
+import { compareSeries, posOf, autoDeathExpr, mapOf } from "../src/cli/trace.js";
 import { parseWitnessInput } from "../src/core/input-spec.js";
 import { loadReplay, frameAt } from "../src/core/runner.js";
 import { detect, listAdapters } from "../src/core/init.js";
@@ -53,6 +54,19 @@ ok("keyPaths", keyPaths(snap.state).some((k) => k.startsWith("state.player.hp"))
   ok("since needs a run context", (() => { try { evaluate("since(state.g)", s1, s0); return false; } catch (e) { return /every-frame sampling/.test(e.message); } })());
   ok("check: a && / || expression is judged whole", check("frame == 0 || state.p[0] - prev.p[0] == 2", s1, s0).ok && check("frame == 0 || state.p[0] - prev.p[0] == 2", s0, null).ok);
   ok("check: failing detail shows both sides", check("state.n == 3", s1).detail === "got 1 == 3");
+}
+
+// ---- chart v2 helpers: comparing two runs, positions, conventions
+{
+  const c = compareSeries([0, 1, 2, 3], [1, 2, 3, 4], [1, 2, 5, 3]);
+  ok("compareSeries: first differing frame, deltas, largest gap", c.differ === 2 && c.first.f === 2 && c.first.a === 3 && c.first.b === 5 && c.delta.end === -1 && c.delta.max === 1 && c.maxGap.f === 2 && c.maxGap.d === 2 && c.a.maxFrame === 3 && c.b.maxFrame === 2, c);
+  ok("compareSeries: identical", compareSeries([0, 1], [1, 1], [1, 1]).differ === 0 && compareSeries([0, 1], [1, 1], [1, 1]).maxGap === null);
+  const t = compareSeries([0, 1, 2], ["idle", "run", "run"], ["idle", "idle", "run"]);
+  ok("compareSeries: strings compared by value, no numeric deltas", t.differ === 1 && t.first.f === 1 && t.first.a === "run" && !t.delta, t);
+  ok("posOf: arrays, {x, y}, things with pos", posOf([1, 2]).join() === "1,2" && posOf({ x: 3, y: 4 }).join() === "3,4" && posOf({ pos: [5, 6, 7] }).join() === "5,6" && posOf([1]) === null && posOf("1,2") === null && posOf({ x: 1 }) === null);
+  ok("autoDeathExpr: state.dead, then state.player.dead", autoDeathExpr({ dead: false }) === "state.dead" && autoDeathExpr({ player: { dead: false } }) === "state.player.dead" && autoDeathExpr({ dead: 0 }) === null && autoDeathExpr(null) === null);
+  ok("mapOf: rows + cell + origin, defaults cell 1", mapOf({ map: { rows: ["#.#"], origin: [8, 4] } }).cell === 1 && mapOf({ map: { rows: ["#.#"], cell: 16 } }).origin.join() === "0,0" && mapOf({ map: { rows: [1, 2] } }) === null);
+  ok("parseVariant: replay= is its own key, not an env var", (() => { const v = parseVariant("replay=b.jsonl; seed=2", "compare"); return v.replay === "b.jsonl" && v.seed === 2 && !Object.keys(v.env).length; })());
 }
 
 // ---- times: seconds or frames
@@ -306,6 +320,41 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   ok("trace --every 3f: frame-aligned samples, [t, value, frame] one per line", series && series.length === 11 && series.every((p, i) => p[2] === i * 3 && p[1] === 40 + 6 * i && Math.abs(p[0] - (i * 3) / 60) < 1e-9) && r.stdout.split("\n").filter((l) => /^\s+\[[\d.]+,/.test(l)).length === 11, r.stdout.slice(0, 300));
   r = cli(["trace", "--watch", "state.player.pos, state.score", "--time", "1", "--input", "right@0-1", "--events", "coin: changed(state.score)", "--out", path.join(work, "tr.png")]);
   ok("trace: vectors per axis, state events listed, chart written", r.status === 0 && /pos\.x: 40 → 160/.test(r.stdout) && /pos\.y: 90 \(constant/.test(r.stdout) && /events: coin @f15, coin @f37, coin @f55/.test(r.stdout) && fs.existsSync(path.join(work, "tr.png")), r.stdout + r.stderr);
+
+  // chart v2: --compare (two runs, one difference), --save/--against (before/after), --xy (path + deaths), --hist,
+  // and heatmap (MOCK_HAZARD: lava from x = 150 kills at f55 and f120, respawn after 10 frames)
+  r = cli(["trace", "--watch", "state.player.pos, state.score", "--compare", "input=up@0.5-0.7", "--input", "right@0-1", "--time", "1.2", "--out", path.join(work, "cmp.png"), "--json"]);
+  ok("trace --compare: B − A per axis, the first frame they differ (up pressed at f30 → f31)", (() => { const j = J(r); return j && j.summary.differs === 2 && j.summary.firstDiffFrame === 31 && j.summary.deltas["state.player.pos.y"].end === -24 && j.summary.deltas["state.player.pos.y"].min === -24 && j.summary.deltas["state.player.pos.x"].end === 0 && j.data.compare.series["state.player.pos.x"].differ === 0 && j.data.compare.series["state.player.pos.y"].first.f === 31 && j.data.seriesB["state.player.pos"].length === 73 && j.summary.a["state.player.pos.x"].max === 160 && fs.existsSync(path.join(work, "cmp.png")); })(), r.stdout.slice(0, 600) + r.stderr);
+  r = cli(["trace", "--watch", "state.player.pos[0]", "--compare", "input=up@0.5-0.7", "--input", "right@0-1", "--time", "1.2", "--no-chart"]);
+  ok("trace --compare text: identical series say so", r.status === 0 && /compare: A = \(as given\) · B = input=up@0\.5-0\.7/.test(r.stdout) && /state\.player\.pos\[0\]: identical on all 73 samples/.test(r.stdout), r.stdout + r.stderr);
+  const base = path.join(work, "base.json");
+  r = cli(["trace", "--watch", "state.player.pos[0], state.score", "--input", "right@0-1", "--time", "1.2", "--no-chart", "--save", base]);
+  ok("trace --save writes the trace JSON", r.status === 0 && fs.existsSync(base) && JSON.parse(fs.readFileSync(base, "utf8")).data.series["state.player.pos[0]"].length === 73, r.stdout + r.stderr);
+  r = cli(["trace", "--watch", "state.player.pos[0], state.score", "--input", "right@0-0.8", "--time", "1.2", "--no-chart", "--against", base]);
+  ok("trace --against: before/after deltas (right held 0.8 s instead of 1 s: end −24, first differs at f49)", r.status === 0 && /A = before \(base\.json\) · B = now/.test(r.stdout) && /state\.player\.pos\[0\]: A 40 → 160 \(min 40 @f0, max 160 @f60\) · B 40 → 136 \(min 40 @f0, max 136 @f48\) · B − A: end -24, max -24 · first differs at f49 \(0\.817s\): 138 vs 136/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["trace", "--replay", path.join(here, "mock", "session.jsonl"), "--compare", `replay=${path.join(here, "mock", "touch-session.jsonl")}`, "--watch", "state.player.pos", "--no-chart", "--json"]);
+  ok("trace --compare replay=: two recordings, compared over the shorter one", (() => { const j = J(r); return j && j.data.series["state.player.pos"].length === 42 && j.data.compare.b === "replay touch-session.jsonl" && j.data.compare.a === "replay session.jsonl" && j.summary.deltas["state.player.pos.x"].end === -20.4 && j.summary.deltas["state.player.pos.y"].min === -30; })(), r.stdout.slice(0, 600) + r.stderr);
+  r = cli(["ab", "--a", "replay=x.jsonl", "--b", "seed=2"]);
+  ok("ab rejects replay= (it's for trace --compare)", r.status === 1 && /replay= is for 'witness trace --compare'/.test(r.stderr), r.stderr);
+  r = cli(["trace", "--xy", "state.player.pos", "--watch", "state.player.pos[0]", "--hist", "--input", "right@0-3", "--time", "2.5", "--out", path.join(work, "hz.png"), "--json"], { MOCK_HAZARD: "1" });
+  ok("trace --xy: the path, deaths found by themselves (state.dead) with their frame and position", (() => { const j = J(r); const x = j && j.data.xy.runs[0]; return x && x.length === 480 && x.start.join() === "40,90" && x.end.join() === "80,90" && x.deaths.map((d) => `${d.f}:${d.pos}`).join(" ") === "55:150,90 120:150,90" && j.summary.xy.deaths === 2 && x.points.length === 151 && x.points[55].join() === "150,90,55" && fs.existsSync(path.join(work, "hz-xy.png")); })(), r.stdout.slice(0, 600) + r.stderr);
+  ok("trace --hist: exact stats (mean 96.689, median 94, mode 150..160 with 20 samples)", (() => { const j = J(r); const h = j && j.summary.hist["state.player.pos[0]"]; return h && h.n === 151 && h.mean === 96.689 && h.median === 94 && h.min === 40 && h.max === 150 && h.mode.join() === "150,160" && j.data.hist[0].bins[0].at(-1)[2] === 20 && fs.existsSync(path.join(work, "hz-hist.png")); })(), r.stdout.slice(0, 300));
+  r = cli(["trace", "--xy", "state.score", "--time", "0.2", "--no-chart"]);
+  ok("trace --xy on a non-position says what it got", r.status === 0 && /✖ xy state\.score: got 0, not a position/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["heatmap", "--input", "right@0-3", "--time", "2.5", "--cell", "10", "--out", path.join(work, "heat.png"), "--json"], { MOCK_HAZARD: "1" });
+  ok("heatmap (one scripted run): time per cell and deaths, exact", (() => { const j = J(r); return j && j.summary.samples === 151 && j.summary.seconds === 2.517 && j.summary.cells === 12 && j.summary.deaths === 2 && j.summary.deathCells === 1 && j.summary.hottest.x0 === 150 && j.summary.hottest.y0 === 90 && j.summary.hottest.frames === 20 && j.data.top[1].x0 === 40 && j.data.top[1].frames === 15 && j.data.deaths.map((d) => d.f).join() === "55,120" && fs.existsSync(path.join(work, "heat.png")); })(), r.stdout.slice(0, 600) + r.stderr);
+  r = cli(["heatmap", "--input", "right@0-3", "--time", "2.5", "--cell", "10", "--no-chart"], { MOCK_HAZARD: "1" });
+  ok("heatmap text: most time and the death cell", r.status === 0 && /151 samples = 2\.517 s of play · cell 10 · 12 cells visited/.test(r.stdout) && /most time: x 150\.\.160, y 90\.\.100: 0\.333 s \(13%\)/.test(r.stdout) && /deaths \(state\.dead\): 2 in 1 cell — x 150\.\.160, y 90\.\.100 ×2 \[f55, f120\]/.test(r.stdout), r.stdout + r.stderr);
+  {
+    // playtests: every witness/playtests/*/replay.jsonl (t1 dies at f55, t2 lets go of right at f30)
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), "witness-heat-"));
+    const put = (name, lines) => { fs.mkdirSync(path.join(proj, "witness", "playtests", name), { recursive: true }); fs.writeFileSync(path.join(proj, "witness", "playtests", name, "replay.jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n"); };
+    put("t1", [{ replay: 1, name: "Mock Coins", seed: 1, fps: 60 }, { f: 0, in: [{ type: "key", key: "right", down: true }] }, { f: 90 }]);
+    put("t2", [{ replay: 1, name: "Mock Coins", seed: 1, fps: 60 }, { f: 0, in: [{ type: "key", key: "right", down: true }] }, { f: 30, in: [{ type: "key", key: "right", down: false }] }, { f: 60 }]);
+    const h = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "heatmap", "playtests", "--cell", "10", "--json", "--cmd", `"${process.execPath}" "${path.join(here, "mock-game.mjs")}"`], { encoding: "utf8", timeout: 120000, cwd: proj, env: { ...process.env, MOCK_HAZARD: "1" } });
+    ok("heatmap playtests: every playtest replay, deaths with their run", (() => { const j = J(h); return j && j.summary.runs === 2 && j.data.runs.map((x) => `${x.name}:${x.samples}:${x.deaths}`).join() === "t1:92:1,t2:62:0" && j.summary.samples === 154 && j.summary.deaths === 1 && j.data.deaths[0].run === "t1" && j.data.deaths[0].f === 55; })(), h.stdout.slice(0, 600) + h.stderr);
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
 
   // eval: frames, prev, --keys, --summary, --when, --diff
   r = cli(["eval", "--at", "30f", "--input", "right@0-30f", "state.player.pos[0]", "state.player.pos[0] - prev.player.pos[0]", "--json"]);

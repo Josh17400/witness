@@ -19,6 +19,9 @@ witness effect --input "space@1"                 # what an input causes, and how
 witness ab --a LIFT=0 --b LIFT=1 --at 3.2 --rect 200,100,64,64   # A/B runs: changed pixels, luma Δ, A | B | diff, state
 witness measure jump --y "state.player.pos[1]" --input "space@1"   # apex, airtime, hang, gravity: feel as numbers
 witness trace --watch "state.player.pos[1], state.score" --time 4 --input "space@1"   # → table + chart PNG
+witness trace --watch "state.player.pos[1]" --input "space@1" --compare "GRAVITY=0.5"   # two runs on one chart, B − A
+witness trace --xy "state.player.pos" --input "right@0-3"   # the path over the level, start/end/death markers
+witness heatmap playtests                        # where playtesters spent time and died
 witness shot --from 1 --to 1.5 --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
 witness shot --at 1,4 --diff witness/shots/before.png
 witness listen --time 8 --input "space@1"        # every sound tied to its cause, audio report + PNGs

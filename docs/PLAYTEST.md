@@ -651,7 +651,8 @@ with `--shot`. `play shot` and `look --shot` are extra.
 
 **Reproducing a marked moment.** Notes are replay marks. `witness replay witness/playtests/t1/replay.jsonl` replays
 the whole session and checks the final state against `replay.jsonl.state.json`; `--at <t> --shot` shows a moment;
-`witness trace --replay <file> --watch "…"` charts values through it.
+`witness trace --replay <file> --watch "…"` charts values through it (`--xy "state.player.pos"` draws the path).
+`witness heatmap playtests` overlays every session's replay: where testers spent time and where they died.
 
 ## Determinism
 

@@ -2,7 +2,9 @@
 
 Status: plan (2026-10-18), written against Witness 0.5.0 (`dc8a70c`). **Phase 1 is implemented** (B1–B13, the state
 schema, `effect`, `measure curve|jump|move|hitstop`, filmstrips, temporal ask, sound↔event matching with the optional
-`event: sound` line in the js, python, cpp, java and rust adapters, and the chart quick wins); phase 2 is not started.
+`event: sound` line in the js, python, cpp, java and rust adapters, and the chart quick wins). Most of phase 2
+shipped in 0.6.0 (not yet: UI layout, palette, `measure perf`, APNG), and chart v2 (§3.12: `trace --compare` / `--save` / `--against` overlays, `--xy` paths, `--hist`, plus
+`witness heatmap` over replays and playtests, pulled forward from "not doing") is in 0.7.0.
 Not done from phase 1's text: the `snapshot.paths` filter for per-frame sampling (§1.4/§3.4, a speed item).
 
 Witness lets Claude check its own game work. The owner can't read code, so every "it works" Claude
@@ -148,7 +150,8 @@ things Claude most often gets wrong in games and can't see from code:
 * **GIF.** APNG covers the human case (§3.17), and Claude's image reader shows only the first frame of an
   animation, so animations don't help the AI reader at all. Filmstrips do.
 * **Heatmaps across runs.** Playtests already draw `coverage.png`. A deaths/positions heatmap over several
-  replays is nice but rarely decides anything. Phase 3 at the earliest.
+  replays is nice but rarely decides anything. Phase 3 at the earliest. *(Built anyway in 0.7.0 as `witness heatmap`, since the
+  chart v2 world plot made it cheap.)*
 
 ---
 
@@ -517,6 +520,11 @@ flagged; a 997 Hz tone at -3 dBFS phase-shifted to have an inter-sample over giv
 identical bursts 1 frame apart are flagged as a double trigger.
 
 ### 3.12 Chart v2 (M, agnostic), rank 12
+
+**Status (0.7.0): done**, except `--panel` grouping (series of an overlay share a lane by key; `lanesFor` takes a
+`lane` key, so `--panel` is a small step when needed). As built: `trace --compare <variant>` (the `ab` variants plus
+`replay=`), `--save` / `--against`, `--xy` over `state.map` or the last screenshot with start/end/death markers,
+`--hist`, and `witness heatmap [replays|playtests|--seeds]`.
 
 * Input spans as shaded bands (held keys) and ticks (taps) along the time axis, plus `--events` markers (shared
   with §3.5). Cause and effect are visible on the chart.

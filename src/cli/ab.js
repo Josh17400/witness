@@ -11,11 +11,11 @@ import { fmt } from "../core/expr.js";
 import { parseRect } from "./see.js";
 import { die, withGame, runOpts, media, printLogs, timeList, framesOf, fmtT, shotImage, envelope, emit } from "./common.js";
 
-const RESERVED = new Set(["params", "scene", "seed", "input", "cmd"]);
+const RESERVED = new Set(["params", "scene", "seed", "input", "cmd", "replay"]);
 
 /** "LIFT=1; params={\"rig\":2}; input=j@1" -> { env, params, scene, seed, input, cmd, label } */
 export function parseVariant(spec, name) {
-  const v = { env: {}, params: null, scene: undefined, seed: undefined, input: "", cmd: undefined, label: spec ? String(spec) : "(baseline)" };
+  const v = { env: {}, params: null, scene: undefined, seed: undefined, input: "", cmd: undefined, replay: undefined, label: spec ? String(spec) : "(baseline)" };
   if (!spec || spec === true) return v;
   let items = String(spec).split(";").map((x) => x.trim()).filter(Boolean);
   // "A=1 B=2" (spaces between plain env assignments) works too
@@ -29,6 +29,7 @@ export function parseVariant(spec, name) {
     else if (k === "seed") v.seed = +val;
     else if (k === "input") v.input = val;
     else if (k === "cmd") v.cmd = val;
+    else if (k === "replay") v.replay = val;   // trace --compare only: run a recording instead
     else v.env[k] = val;
   }
   return v;
@@ -60,6 +61,7 @@ export function compareRect(A, B, R, threshold = 16) {
 
 export async function abCommand(pos, opt) {
   const A = parseVariant(opt.a, "a"), B = parseVariant(opt.b, "b");
+  if (A.replay !== undefined || B.replay !== undefined) die("replay= is for 'witness trace --compare' (ab compares pictures of one scenario)");
   if (!opt.a && !opt.b) die('usage: witness ab --a LIFT=0 --b LIFT=1 --at 3.2 [--input "..."] [--rect x,y,w,h] [--from 3 --to 4 --every 0.1] [--state]');
   const rect = opt.rect && opt.rect !== true ? parseRect(opt.rect, "--rect") : null;
   const zoom = opt.zoom && opt.zoom !== true ? Math.max(1, Math.round(+opt.zoom)) : 0;

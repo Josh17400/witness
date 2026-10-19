@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const SUITES = ["png.mjs", "raster.mjs", "chart.mjs", "audio.mjs", "spectrogram.mjs", "diff.mjs", "measure.mjs", "sheet.mjs", "track.mjs", "align.mjs"];
+const SUITES = ["png.mjs", "raster.mjs", "chart.mjs", "plot.mjs", "audio.mjs", "spectrogram.mjs", "diff.mjs", "measure.mjs", "sheet.mjs", "track.mjs", "align.mjs"];
 
 let failed = 0;
 const t0 = Date.now();

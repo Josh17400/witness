@@ -3,10 +3,12 @@
 //   lineChart(spec)   -> PNG Buffer
 //   renderChart(spec) -> Raster (to composite further)
 //
-// spec = { title, series: [{ label, points: [[t, value], ...], color?, step? }],
+// spec = { title, series: [{ label, points: [[t, value], ...], color?, step?, dash?, lane? }],
 //          width: 1280, height: 640, markers?: [{ t, label, color? }], subtitle?,
 //          inputs?: [{ label, t0, t1 }] (held inputs: one row per label under the plot, a tick line at each press),
 //          fps? (names frames on the time axis) }
+// dash: true draws the line dashed (the "B" / "before" run of an overlay); series with the same `lane` key always
+// share one lane and value axis (an overlay of two runs of the same expression).
 //
 // Dark style: one time axis in seconds shared by all series, gridlines, a legend with each
 // series' final value, and dashed marker lines (e.g. replay F8 marks). Series whose value
@@ -88,7 +90,7 @@ function prepareAll(series) {
     return {
       label: String(s?.label ?? `series ${i + 1}`),
       color: s?.color || COLORS[i % COLORS.length],
-      step: !!s?.step || isBool, isBool, points, valid,
+      step: !!s?.step || isBool, isBool, points, valid, dash: !!s?.dash, lane: s?.lane ?? null,
       last: valid.length ? valid[valid.length - 1][1] : null,
     };
   });
@@ -108,7 +110,15 @@ export function lanesFor(series) {
   for (const s of series) {
     const [lo, hi] = rangeOf(s.valid), span = Math.max(hi - lo, 1e-9);
     let lane = null;
+    // an explicit lane key: series that share it always share a lane (overlays of two runs)
+    if (s.lane != null) {
+      lane = lanes.find((L) => L.key === s.lane) || null;
+      if (lane) { lane.lo = Math.min(lane.lo, lo); lane.hi = Math.max(lane.hi, hi); lane.span = Math.max(lane.span, span); lane.items.push(s); }
+      else lanes.push({ key: s.lane, lo, hi, span, isBool: s.isBool, items: [s] });
+      continue;
+    }
     for (const L of lanes) {
+      if (L.key != null) continue;
       if (L.isBool !== s.isBool) continue;   // flags get their own lane, labelled false/true
       const jlo = Math.min(L.lo, lo), jhi = Math.max(L.hi, hi), jspan = Math.max(jhi - jlo, 1e-9);
       // joining must not squash either side below 1/6 of the lane
@@ -177,7 +187,8 @@ export function renderChart(spec = {}) {
   if (subtitle) g.text(subtitle, W - 24, 36, { color: DIM, align: "right", baseline: "middle" });
   for (const it of legend) {
     const y = 72 + it.row * 22;
-    g.roundRect(it.x, y - 2, 18, 4, 2, it.s.color);
+    if (it.s.dash) g.line(it.x, y, it.x + 18, y, it.s.color, 3, { dash: [5, 3] });
+    else g.roundRect(it.x, y - 2, 18, 4, 2, it.s.color);
     g.text(it.name, it.x + 26, y, { color: TEXT, baseline: "middle" });
     g.text(it.value, it.x + 26 + g.measureText(it.name) + 10, y, { color: it.s.valid.length ? it.s.color : DIM, bold: true, baseline: "middle" });
   }
@@ -243,7 +254,7 @@ export function renderChart(spec = {}) {
       }
       // a step series holds its last value to the end of the time axis
       if (s.step && prev !== null && s.points[s.points.length - 1][1] !== null) pts.push([tx(t1), vy(prev)]);
-      g.polyline(pts, s.color, 2.25);
+      g.polyline(pts, s.color, 2.25, s.dash ? { dash: [7, 5] } : {});
       if (s.valid.length < 40) for (const [t, v] of s.valid) { g.circle(tx(t), vy(v), 4.5, PANEL); g.circle(tx(t), vy(v), 3.2, s.color); }
       else if (!s.step) { const [t, v] = s.valid[s.valid.length - 1]; g.circle(tx(t), vy(v), 3.5, s.color); }
     }
@@ -256,7 +267,8 @@ export function renderChart(spec = {}) {
       for (const s of items) {
         const name = g.fitText(s.label, right - cx);
         if (!name) break;
-        g.roundRect(cx, ly0 - 13, 10, 4, 2, s.color);
+        if (s.dash) g.line(cx, ly0 - 11, cx + 10, ly0 - 11, s.color, 3, { dash: [4, 2] });
+        else g.roundRect(cx, ly0 - 13, 10, 4, 2, s.color);
         g.text(name, cx + 16, ly0 - 11, { color: s.color, bold: true, baseline: "middle" });
         cx += 16 + g.measureText(name) + 18;
       }

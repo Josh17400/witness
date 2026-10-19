@@ -3,6 +3,8 @@
 //   PNG       encodePNG, decodePNG, isPNG
 //   drawing   Raster (Canvas-like RGBA rasterizer with an embedded 8x16 bitmap font), parseColor
 //   charts    lineChart, renderChart                         (witness trace)
+//   plots     histogram, sharedHistograms, heatGrid, pathStats, renderWorld/worldPNG, renderHist/histPNG
+//             (trace --xy / --hist, witness heatmap)
 //   audio     analyzePCM, formatPCMReport, decodePCM, concatPCM, wavToPCM, pcmToWav, detectOnsets,
 //             plus Lumen's analysis core (analyzeEvent, analyzeMusic, analyzeMix, ...)  (witness listen)
 //   pictures  timelinePNG, soundSheetPNG                     (witness listen)
@@ -16,6 +18,7 @@ export { encodePNG, decodePNG, isPNG } from "./png.js";
 export { Raster, parseColor, withAlpha, mixColor } from "./raster.js";
 export { CHARSET, hasGlyph } from "./font.js";
 export { lineChart, renderChart, COLORS as CHART_COLORS } from "./chart.js";
+export { histogram, sharedHistograms, percentile, heatGrid, pathStats, heatColor, renderWorld, worldPNG, renderHist, histPNG } from "./plot.js";
 export {
   analyzePCM, formatPCMReport, decodePCM, concatPCM, wavToPCM, pcmToWav, detectOnsets,
   analyzeEvent, describeEvent, analyzeMusic, analyzeMix, transcribe, formatReport,

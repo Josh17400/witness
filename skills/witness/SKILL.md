@@ -55,6 +55,10 @@ witness measure move --x "state.player.pos[0]" --input "right@1-2" # top speed, 
 witness measure hitstop --paths "state.player.pos" --input "right@0-2, j@1"   # freezes between motion
 witness measure curve --of "state.camera.pos[0]" --vs "state.player.pos[0]" --input "d@1-3"  # rise/settle/overshoot/lag/stutter
 witness trace --watch "state.player.pos, state.score" --time 4 --input "space@1" --events "land: rose(state.player.grounded)"
+witness trace --watch "state.player.pos[1]" --input "space@1" --compare "GRAVITY=0.5"   # A/B on one chart: B − A, first differing frame
+witness trace --watch "..." --save base.json   # then after a code change: --against base.json (before/after deltas)
+witness trace --xy "state.player.pos" --input "right@0-3" --hist   # the path over the level (start/end/deaths) + histograms
+witness heatmap playtests                      # where testers spent time and died (also: replays, last, --seeds 1,2,3)
 witness shot --at 1,4 --input "right@0-3"      # PNGs: OPEN THEM with your image tool and look
 witness shot --from 1 --to 1.5 --every 2f --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
 witness shot --from 0 --to 4 --auto 9          # the 9 frames where the picture changes most (key moments)
@@ -70,7 +74,8 @@ witness measure align --at 2                   # are sprites drawn where the sta
 witness measure scale|box|contrast ...         # pixel facts: integer scale/blur, sprite box, WCAG contrast
 ```
 
-* **A/B anything** (a flag, a rig, a mask, a param, an input): `witness ab`, never a hand-written comparison script.
+* **A/B anything** (a flag, a rig, a mask, a param, an input): `witness ab` (pictures) or `trace --compare` (values over
+  time), never a hand-written comparison script. Tuning by editing code: `trace --save` before, `--against` after.
   `--hold-camera` asks games that support it (reset param `"camera": "hold"`) to keep the camera still for pixel work.
 * **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Timing that should "feel fair" (coyote time, buffer,
   parry, i-frames, combo windows) → `window`. Animation or juice → `shot --sheet` (and look). "When does X happen?" → `eval --when`. "What did that do?" → `eval --diff` or

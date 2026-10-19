@@ -3,6 +3,40 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.0 (unreleased)
+
+**Chart v2: compare runs, paths, heatmaps, histograms**
+- `witness trace --compare <variant>`: the same trace run twice (the `witness ab` variants: env var, `params={...}`,
+  `seed=`, `scene=`, `input=`, `cmd=`, plus `replay=b.jsonl` for two recordings) on one chart, A dashed and B solid
+  in one lane per series. Per series: A and B start → end with min/max frames, B − A for start/end/min/max, the first
+  frame they differ and the largest gap; `--json` has `data.seriesB`, `data.compare` and `summary.differs`,
+  `firstDiffFrame`, `deltas`.
+- `trace --save base.json`, then `trace --against base.json` after a code change: the same before/after report with
+  the saved run as A.
+- `trace --xy "state.player.pos"`: the path over the level (`state.map` walls, else the last screenshot when the
+  positions line up with it or `state.camera` places it; `--bg map|shot|none`), equal scale on both axes, start / end
+  markers, a dot every second, deaths as red X (`--deaths "expr"`; `state.dead` / `state.player.dead` are found by
+  themselves) and `--events` as dots. Text: start → end, path length, bounds, net displacement, deaths with frame and
+  position; `--y-up` for y-up worlds.
+- `trace --hist [--bins 20]`: a histogram per series (n, mean, median, p5, p95, min, max, the most common value;
+  small integers get one bin each; A/B overlaid with `--compare`).
+- `witness heatmap [last | file.jsonl ... | folder | playtests]`: where the player spent time (seconds per cell) and
+  where they died, over replays, every playtest replay, or scripted runs (`--seeds 1,2,3`). Prints the cells with the
+  most time, deaths grouped by cell with run and frame, and with `state.map` the open cells never visited; the
+  picture draws the level, the heat and the deaths. `--expect "deaths == 0"`, `"unvisitedOpen < 20"`.
+- Media: `histogram`, `sharedHistograms`, `heatGrid`, `pathStats`, `renderWorld`, `renderHist` in `src/media/plot.js`;
+  line charts take per-series `dash` and `lane` keys.
+
+**Behaviour changes**
+- `trace --json` `summary`: vector series are summarized per axis (`"state.player.pos.x": {start, end, min, ...}`)
+  instead of `{"error": null}`. `trace` now accepts `--expect` (over the summary).
+
+### Adoption steps (0.6.0 → 0.7.0)
+1. Update the plugin (`claude plugin update witness@witness-tools`) or pull the repo.
+2. If a script reads `trace --json` `summary` for a vector expression: read the per-axis keys (`<expr>.x`, `<expr>.y`).
+3. *Optional:* expose `state.dead` (or `state.player.dead`) so `trace --xy` and `heatmap` mark deaths without
+   `--deaths`, and `state.map` with a `cell` size so paths and heatmaps are drawn over the level.
+
 ## 0.6.0 (2026-10-19)
 
 **Perception: measure what you used to eyeball**

@@ -10,7 +10,9 @@ import { WitnessError } from "../src/core/session.js";
 import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
 import { prune, pruneRegistry, fmtBytes } from "../src/core/clean.js";
 import { CLI, die, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay } from "../src/cli/common.js";
-import { evalCommand, traceCommand } from "../src/cli/ask.js";
+import { evalCommand } from "../src/cli/ask.js";
+import { traceCommand } from "../src/cli/trace.js";
+import { heatmapCommand } from "../src/cli/heatmap.js";
 import { shotCommand } from "../src/cli/see.js";
 import { measureCommand } from "../src/cli/measure.js";
 import { effectCommand } from "../src/cli/effect.js";
@@ -27,7 +29,9 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness doctor                      connect, list capabilities, check determinism/screens/audio
   witness test [files] [--name x]     run *.witness.json / *.witness.mjs test files (--repeat 2: prove determinism)
   witness eval --at 2 "expr" ...      state at given times; --keys (what's there), --when "cond", --diff 1,3
-  witness trace --watch "a, b"        values over time: per-series table (frames, per-frame steps) + chart PNG
+  witness trace --watch "a, b"        values over time: per-series table (frames, per-frame steps) + chart PNG;
+                                      --compare VAR=1 / --against base.json (two runs), --xy (path), --hist
+  witness heatmap [playtests|last]    where the player spent time and died, over replays, playtests or runs
   witness effect --input "space@1"    what an input causes and how many frames later (state, pixels, audio)
   witness window --input "space@{t}"  sweep an input's timing: where it still works (coyote, buffer, parry windows)
   witness ab --a ENV=0 --b ENV=1      the same scenario twice with one difference, compared (pixels in a rect, state)
@@ -94,7 +98,29 @@ const CMD_HELP = {
   per-frame step range (vectors per axis); for flags and strings, each change with its frame. Expressions that fail
   are reported once with the number of samples. --events "land: rose(state.player.grounded)" marks state events;
   the chart PNG also draws the --input keys as bars under the plot. --replay last traces a recording.
-  --json: { "expr": [[t, value, frame], ...] }, one sample per line.`,
+  Two runs on one chart (A dashed, B solid; per series B − A for start/end/min/max, the first frame they differ and
+  the largest gap):
+    --compare <variant>     B = this run with one difference, the same variants as 'witness ab' (LIFT=1,
+                            params={...}, seed=3, input=j@1, cmd=...) plus replay=b.jsonl (two replays:
+                            --replay a.jsonl --compare replay=b.jsonl); --a <variant> changes A too
+    --save base.json, later --against base.json    before/after a code change: the saved run is A
+  --xy "state.player.pos"   the path over the level (state.map, else the last screenshot when it lines up; --bg
+                            map|shot|none), start/end markers, a dot every second, deaths as red X (--deaths
+                            "state.dead"; state.dead / state.player.dead are found by themselves), --events as dots;
+                            --y-up for y-up worlds. → <out>-xy.png
+  --hist [--bins 20]        histograms of each series (mean, median, p5, p95, most common value; A/B overlaid)
+                            → <out>-hist.png
+  --json: data.series { "expr": [[t, value, frame], ...] } one sample per line (+ data.seriesB, data.compare,
+  data.xy, data.hist); summary has differs / firstDiffFrame / deltas, xy { length, end, deaths }, hist.`,
+  heatmap: `witness heatmap [last | file.jsonl ... | folder | playtests] [--pos "state.player.pos"] [--deaths "state.dead"]
+              [--cell 16] [--every 1f] [--time T] [--out heatmap.png] [--bg map|shot|none] [--y-up]
+  Where the player spent time and where they died. Sources: replays (files, a folder of them, "last", or
+  "playtests" = every witness/playtests/*/replay.jsonl), or with none a scripted run (--input, --time 5; --seeds 1,2,3
+  runs it once per seed). Each sample counts the frames until the next one, so cells hold time. Prints the cells with
+  the most time (seconds and %), deaths grouped by cell with run and frame, and with state.map the open cells never
+  visited. Default position: state.player (pos or x/y); default cell: the map's cell, else about 1/16 of the area;
+  deaths default to state.dead / state.player.dead (rising edges). The picture: the level, the heat (sqrt scale,
+  seconds per cell), deaths as red X. --expect "deaths == 0", "unvisitedOpen < 20", "hottest.share < 0.5".`,
   shot: `witness shot [--at 1,4,90f] [--out shots/s.png] [--scale 0.5] [--json]
   --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)
   --zoom 3                     crisp nearest-neighbour enlargement (small sprites)
@@ -349,6 +375,7 @@ const commands = {
 
   eval: evalCommand,
   trace: traceCommand,
+  heatmap: heatmapCommand,
 
   shot: shotCommand,
 

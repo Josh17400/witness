@@ -1,4 +1,4 @@
-// Witness CLI: ask the game's state — eval (at times, --when, --diff, --keys) and trace (values over time + chart).
+// Witness CLI: ask the game's state — eval (at times, --when, --diff, --keys), plus helpers trace (trace.js) shares.
 import fs from "node:fs";
 import path from "node:path";
 import { begin, stepTo, loadReplay } from "../core/runner.js";
@@ -232,57 +232,6 @@ async function evalDiff(pos, opt) {
 
 // ------------------------------------------------------------------ trace
 
-export async function traceCommand(pos, opt) {
-  if (!opt.watch || opt.watch === true) die('usage: witness trace --watch "state.player.pos[1], state.score" [--time 5] [--every 1f]');
-  const exprs = splitTop(String(opt.watch));
-  const named = parseNamedEvents(opt.events);
-  let res;
-  await withGame(opt, async (s, cfg, root) => {
-    const fps = s.fps;
-    let replay = null;
-    if (opt.replay) replay = loadReplay(resolveReplay(opt.replay, cfg, root));
-    const endF = framesOf(opt.time && opt.time !== true ? String(opt.time) : replay ? `${replay.frames}f` : "5", fps, replay ? replay.dts : null);
-    // every frame by default (velocity from consecutive samples is exact); long runs thin out to <= 600 samples
-    const every = opt.every && opt.every !== true ? Math.max(1, framesOf(String(opt.every), fps)) : Math.max(1, Math.ceil(endF / 600));
-    const st = await begin(s, { ...runOpts(opt, cfg), replay });
-    const all = [...exprs, ...named.map((n) => n.expr)];
-    const sample = await sampleExprs(s, st, all, frameGrid(0, endF, every), { dts: st.dts });
-    printLogs(await s.drainLogs());
-    const outFile = path.resolve(opt.out || path.join(root, cfg.shots, "trace.png"));
-    const evs = named.length ? eventFrames(named, { ...sample, values: sample.values.slice(exprs.length) }) : [];
-    const main = { ...sample, values: sample.values.slice(0, exprs.length), errors: sample.errors.slice(0, exprs.length), missing: sample.missing.slice(0, exprs.length) };
-    let chart = null;
-    if (!opt["no-chart"]) {
-      try {
-        const m = await media();
-        const markers = [...(replay ? replay.marks : []), ...evs.map((e) => ({ t: e.t, label: e.name, color: "#ffd166" }))];
-        const inputs = inputSpans(runOpts(opt, cfg).input, fps).map((sp) => ({ label: sp.label, t0: sp.f0 / fps, t1: (sp.f1 ?? endF) / fps }));
-        fs.mkdirSync(path.dirname(outFile), { recursive: true });
-        fs.writeFileSync(outFile, m.lineChart({ title: `${s.hello.name}: ${exprs.join(", ")}`, series: chartSeriesOf(exprs, main), markers, inputs, fps }));
-        chart = outFile;
-      } catch (e) { say(`(no chart: ${e.message})`); }
-    }
-    res = { fps, endF, every, sample: main, evs, chart };
-  });
-  const { fps, endF, every, sample, evs, chart } = res;
-  if (opt.json) {
-    // the envelope, with each series compact: one [t, value, frame] sample per line
-    const seriesObj = Object.fromEntries(exprs.map((x, i) => [x, sample.frames.map((f, k) => [tr(sample.times[k]), sample.values[i][k], f])]));
-    const summary = Object.fromEntries(exprs.map((x, i) => {
-      const sm = summarize(sample.frames.map((f, k) => ({ f, v: sample.values[i][k] })));
-      return [x, sm ? { start: sm.start.v, end: sm.end.v, min: sm.min.v, minFrame: sm.min.f, max: sm.max.v, maxFrame: sm.max.f } : { error: sample.errors[i] ? sample.errors[i].message : null }];
-    }));
-    const env = envelope("trace", { verdict: `${sample.frames.length} samples, f0..f${endF}`, summary, data: { fps, every, events: evs, errors: errorLines(exprs, sample), series: "__SERIES__" }, files: chart ? [chart] : [] });
-    const text = JSON.stringify(env, null, 1).replace('"__SERIES__"', compactSeriesJSON(seriesObj).split("\n").map((l, j) => (j ? `  ${l}` : l)).join("\n"));
-    console.log(text);
-    for (const l of errorLines(exprs, sample)) console.error(l);
-    return;
-  }
-  console.log(`${sample.frames.length} samples, f0..f${endF} (${fmtT(endF / fps)})${every > 1 ? `, every ${every} frames` : ", every frame"}`);
-  for (const l of errorLines(exprs, sample)) console.log(l);
-  exprs.forEach((x, i) => { if (!sample.errors[i] || sample.errors[i].count < sample.frames.length) for (const l of seriesLines(x, sample.frames, sample.values[i], fps)) console.log(l); });
-  if (evs.length) console.log(`  events: ${evs.slice(0, 12).map((e) => `${e.name} @f${e.f}`).join(", ")}${evs.length > 12 ? ", …" : ""}`);
-  if (chart) console.log(`chart → ${chart}  (view it with your image tool)`);
-}
+// trace lives in trace.js (chart v2: --compare, --against, --xy, --hist)
 
 export { perFrame };

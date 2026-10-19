@@ -23,6 +23,9 @@
 //                  MOCK_SOUNDS=quiet plays the same sounds without the lines (an adapter without sound events).
 //   reset params: {"big": true} draws the player with radius 9 instead of 7 (an A/B difference);
 //                  {"camera": "hold"} (the reserved camera-hold param) keeps MOCK_CAMERA's camera still
+//   MOCK_HAZARD=1  (top-down only) lava from x = 150: the player dies the frame it reaches x >= 150 (snapped to exactly
+//                  x = 150), stays dead and still for 10 frames, then respawns at [40, 90]. state.dead / state.deaths.
+//                  Holding right from f0: deaths at f55 and f120 (respawns at f65 and f130), both at [150, 90].
 //   MOCK_PNG=1     screenshots come back as format "png" (like Unity, or the JS adapter's screenshotFormat "png")
 import net from "node:net";
 import { encodePNG } from "../src/media/png.js";
@@ -45,6 +48,8 @@ const groundY = (x) => (LEDGE && x >= 200 ? 150 : 90);
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
 let bigPlayer = false, holdCamera = false;
+const HAZARD = !!process.env.MOCK_HAZARD;
+let dead = false, deaths = 0, deadAt = -1;
 function reset(seed = 1, params = {}) {
   bigPlayer = !!params.big; holdCamera = params.camera === "hold";
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
@@ -52,6 +57,7 @@ function reset(seed = 1, params = {}) {
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
   if (JUMP) Object.assign(player, { vx: 0, vy: 0, grounded: true, jumps: 0 });
   if (ALIGN) player.box = [15, 15];   // matches the 15 px disc it's drawn as
+  dead = false; deaths = 0; deadAt = -1;
   edges = []; freeze = 0; xAt = null; lagged = false; jPresses = 0; coyote = 0; buffer = 0;
   coins = Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)], ...(ALIGN ? { box: [16, 16] } : {}) }));   // MOCK_ALIGN: a hitbox bigger than the 11 px art
 }
@@ -101,9 +107,13 @@ function stepOnce(dt) {
       }
       coyote = Math.max(0, coyote - 1); buffer = Math.max(0, buffer - 1);
     }
+  } else if (HAZARD && dead) {
+    // dead: still for 10 frames, then back at the start
+    if (frame + 1 - deadAt >= 10) { dead = false; player.pos = [40, 90]; }
   } else {
     player.pos[0] = Math.max(0, Math.min(W, player.pos[0] + dx * 120 * dt));
     player.pos[1] = Math.max(0, Math.min(H, player.pos[1] + dy * 120 * dt));
+    if (HAZARD && player.pos[0] >= 150 - 1e-6) { player.pos[0] = 150; dead = true; deaths++; deadAt = frame + 1; }
   }
   for (const c of [...coins]) {
     if (Math.hypot(c.pos[0] - player.pos[0], c.pos[1] - player.pos[1]) < 12) {
@@ -182,7 +192,7 @@ sock.on("data", (d) => {
       case "reset": reset(m.seed, m.params || {}); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
-      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}) } }); break;
+      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(HAZARD ? { dead, deaths } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}) } }); break;
       case "screenshot": reply(screenshot()); break;
       case "audio": reply(audio()); break;
       case "call":
