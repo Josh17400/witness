@@ -9,6 +9,7 @@ import { describeState } from "../src/core/schema.js";
 import { diffStates } from "../src/core/compare.js";
 import { analyzeJump, analyzeMove, frozenSpans, response, lag, stutters, summarize } from "../src/core/signal.js";
 import { matchSounds, alignSoundEvents, soundFrame } from "../src/core/soundmatch.js";
+import { windowsOf } from "../src/cli/window.js";
 import { parseWitnessInput } from "../src/core/input-spec.js";
 import { loadReplay, frameAt } from "../src/core/runner.js";
 import { detect, listAdapters } from "../src/core/init.js";
@@ -135,6 +136,14 @@ ok("bad time: a clear error", (() => { try { frameAt("soon", 60); return false; 
   const sm = summarize(pts([5, 7, 9, 4]));
   ok("summarize: start/end/min/max with frames, per-frame step range", sm.start.v === 5 && sm.end.v === 4 && sm.min.f === 3 && sm.max.f === 2 && sm.step.min.d === -5 && sm.step.max.d === 2 && sm.step.min.f === 3, sm);
   ok("summarize: steps only between consecutive frames", summarize([{ f: 0, v: 0 }, { f: 3, v: 9 }]).step === null);
+}
+
+// ---- window: contiguous passing values
+{
+  const res = [1, 2, 3, 5, 6, 9].map((v) => ({ v, step: 1, ok: true })).concat([4, 7, 8].map((v) => ({ v, step: 1, ok: false }))).sort((a, b) => a.v - b.v);
+  const w = windowsOf(res);
+  ok("windowsOf: contiguous runs with their sizes", JSON.stringify(w) === JSON.stringify([{ from: 1, to: 3, frames: 3 }, { from: 5, to: 6, frames: 2 }, { from: 9, to: 9, frames: 1 }]), w);
+  ok("windowsOf: a step of 2 frames", JSON.stringify(windowsOf([0, 2, 4].map((v) => ({ v, step: 2, ok: true })))) === JSON.stringify([{ from: 0, to: 4, frames: 3 }]));
 }
 
 // ---- sound ↔ event matching (listen)
@@ -370,6 +379,11 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
     ok(`listen (${mode === "1" ? "with" : "without"} sound events): press → +1f, the eaten press, land → +0f`, j && m["j pressed@60"]?.offset === 1 && m["j pressed@120"]?.sound === null && m["j pressed@150"]?.offset === 1 && m["land@216"]?.offset === 0 && m["space pressed@180"]?.sound === null && j.summary.missing === 2 && j.ok === false, r.stdout.slice(0, 600) + r.stderr);
     if (mode === "1") ok("listen: sounds named by the game", j && j.data.matches.find((x) => x.frame === 60)?.sound === "swing" && j.data.soundEvents.length === 3 && j.data.soundEvents.every((x) => x.heard));
   }
+  // window: timing sweeps find the planted coyote time (5 frames) and jump buffer (4 frames) exactly
+  r = cli(["window", "--input", "right@0-3, space@{t}", "--t", "40f..70f", "--expect", "state.player.jumps == 1", "--at", "{t}+2f", "--ref", "fell(state.player.grounded)", "--json"], { MOCK_JUMP: "1", MOCK_LEDGE: "1" });
+  ok("window: coyote time = 5 frames after the ledge (+0f..+4f), one run per value", (() => { const j = J(r); return j && j.summary.runs === 31 && j.summary.windows.length === 1 && j.summary.ref === 55 && j.summary.relative[0][1] === 4 && j.summary.windows[0][0] === 40; })(), r.stdout.slice(0, 400) + r.stderr);
+  r = cli(["window", "--input", "space@1, space@{t}", "--t", "80f..100f", "--expect", "state.player.jumps == 2", "--at", "120f", "--ref", "rose(state.player.grounded)"], { MOCK_JUMP: "1" });
+  ok("window: jump buffer = 4 frames before the landing step", /passes at t = f91\.\.f100/.test(r.stdout) && /happened in step f95/.test(r.stdout) && /4 values before it \(from -4f/.test(r.stdout) && /fails at f80\.\.f90/.test(r.stdout), r.stdout + r.stderr);
   r = cli(["listen", "--time", "4", "--input", "j@1, j@2, j@2.5", "--out", work], { MOCK_SOUNDS: "1" });
   ok("listen text: ✔/✖ lines and the cooldown hint", /✔ j pressed f60 +→ swing at \+1f/.test(r.stdout) && /✖ j pressed f120 +→ no sound within 6f \(the j press at f60 played swing/.test(r.stdout), r.stdout + r.stderr);
 }

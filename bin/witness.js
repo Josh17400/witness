@@ -15,6 +15,7 @@ import { shotCommand } from "../src/cli/see.js";
 import { measureCommand } from "../src/cli/measure.js";
 import { effectCommand } from "../src/cli/effect.js";
 import { listenCommand } from "../src/cli/listen.js";
+import { windowCommand } from "../src/cli/window.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -27,6 +28,7 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness eval --at 2 "expr" ...      state at given times; --keys (what's there), --when "cond", --diff 1,3
   witness trace --watch "a, b"        values over time: per-series table (frames, per-frame steps) + chart PNG
   witness effect --input "space@1"    what an input causes and how many frames later (state, pixels, audio)
+  witness window --input "space@{t}"  sweep an input's timing: where it still works (coyote, buffer, parry windows)
   witness shot --at 1,4               screenshots; --sheet/--auto filmstrips, --crop/--follow/--zoom, --diff ref.png
   witness listen --time 8             hear the game: sounds tied to their causes, audio report + PNGs
   witness measure <what> ...          numbers: jump, move, hitstop, curve (state) · scale, box, contrast, motion (pixels)
@@ -102,6 +104,13 @@ const CMD_HELP = {
   * timeline.png + sounds.png (+ mix.wav).
   Games that announce sounds ({"event": "sound"}, e.g. witness.sound("jump")) get them named and checked against the
   audio (announced but silent, audible but unannounced).`,
+  window: `witness window --input "right@0-2, space@{t}" --t 0.9..1.3 [--step 1f] --expect "expr" [--at "{t}+0.4"]
+              [--ref "fell(state.player.grounded)"]
+  One run per value of {t} (seconds or frames), each checking --expect at --at ("{t}+offset" or a plain time). Prints
+  the values where it passes as windows, and the first failure's values. --ref names the moment the window is about
+  (leaving a ledge, landing, an enemy's attack): it is found in a run without the swept input, and the windows are
+  given relative to the step it happened in: "+0f..+4f" after leaving the ledge = 5 frames of coyote time;
+  "-4f" before landing = a 4-frame jump buffer. Needs 'reset'; at most 600 runs.`,
   effect: `witness effect --input "space@1" [--base "right@0-3"] [--time 0.5] [--paths "player, camera"] [--shot]
   Runs the same seed twice in one process, with the input and without it (both with --base), and reports the first
   frame where the state, the picture and the audio differ: "+1f" = the next frame (immediate). Lists the state paths
@@ -305,6 +314,7 @@ const commands = {
 
   measure: measureCommand,
   effect: effectCommand,
+  window: windowCommand,
 
   async replay(pos, opt) {
     await withGame(opt, async (s, cfg, root) => {

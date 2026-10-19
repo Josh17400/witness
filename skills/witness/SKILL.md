@@ -49,6 +49,7 @@ witness eval --at 2,90f "state.player.hp" "count('Enemy')"   # ask instead of gu
 witness eval --when "state.gate.open" --time 6 --input "e@2"  # the exact frame a condition becomes true, and its spans
 witness eval --diff 1,3 --input "e@2"          # what changed in the state between two moments (entities by id)
 witness effect --input "space@1"               # what an input causes, and how many frames later: state, pixels, audio
+witness window --input "right@0-2, space@{t}" --t 0.9..1.3 --expect "state.player.jumps == 1" --at "{t}+2f" --ref "fell(state.player.grounded)"   # coyote/buffer/parry windows
 witness measure jump --y "state.player.pos[1]" --input "space@1"   # apex, airtime, hang, gravity (feel numbers)
 witness measure move --x "state.player.pos[0]" --input "right@1-2" # top speed, accel frames, stop/slide
 witness measure hitstop --paths "state.player.pos" --input "right@0-2, j@1"   # freezes between motion
@@ -64,8 +65,8 @@ witness call teleport 100 200 --at 1           # run a game command, then print 
 witness measure scale|box|contrast|motion ...  # pixel facts: integer scale/blur, sprite box, WCAG contrast, motion/jitter
 ```
 
-* **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Animation or
-  juice → `shot --sheet` (and look). "When does X happen?" → `eval --when`. "What did that do?" → `eval --diff` or
+* **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Timing that should "feel fair" (coyote time, buffer,
+  parry, i-frames, combo windows) → `window`. Animation or juice → `shot --sheet` (and look). "When does X happen?" → `eval --when`. "What did that do?" → `eval --diff` or
   `effect`. A rule that must always hold → a test range (section 3). Sound wiring → `listen --events`. The numbers
   come from the game's own state, pixels and audio: quote them to the user instead of "feels fine".
 * **Frames.** Offsets read `+Nf`: N frames after the input's frame; `+1f` is the next frame (immediate). Any time can

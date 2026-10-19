@@ -6,8 +6,10 @@
 // Opt-in mechanics with exact, planted numbers (for testing Witness's measurements):
 //   MOCK_JUMP=1    platformer: no up/down walking; space jumps (vy0 = -7 px/f, gravity 0.4 px/f², explicit Euler:
 //                  apex 64.8 px at +18f, lands at +36f); left/right accelerate 0.5 px/f per frame up to 3 px/f and
-//                  brake 1 px/f per frame; h = hitstop (all motion frozen for exactly 5 frames). state.player gains
-//                  vy, vx, grounded.
+//                  brake 1 px/f per frame; h = hitstop (all motion frozen for exactly 5 frames). Coyote time: a jump
+//                  still works in the step the ground disappears and the 4 after it (5 frames); jump buffer: a press
+//                  up to 4 frames before the landing step jumps on landing. state.player gains vy, vx, grounded, jumps.
+//   MOCK_LEDGE=1   (with MOCK_JUMP) the floor at y=90 ends at x=200; past it the player falls to y=150
 //   MOCK_LAG=1     x: the state reacts 3 frames after the press (state.lagged), the picture 5 frames after (a white
 //                  square at 300,10), and a beep starts in the press frame's own audio (+1f)
 //   MOCK_SOUNDS=1  j plays an 80 ms noise burst, but only on odd presses (a planted cooldown bug); landing plays a
@@ -25,15 +27,17 @@ let player, coins, score;
 // stays identical (the classic leak only screenshot/audio comparison catches)
 let leakT = 0;
 const JUMP = !!process.env.MOCK_JUMP, LAG = !!process.env.MOCK_LAG, SOUNDS = process.env.MOCK_SOUNDS || "";
-let edges = [], freeze = 0, xAt = null, lagged = false, jPresses = 0;
+let edges = [], freeze = 0, xAt = null, lagged = false, jPresses = 0, coyote = 0, buffer = 0;
+const LEDGE = !!process.env.MOCK_LEDGE;
+const groundY = (x) => (LEDGE && x >= 200 ? 150 : 90);
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
 function reset(seed = 1) {
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
-  if (JUMP) Object.assign(player, { vx: 0, vy: 0, grounded: true });
-  edges = []; freeze = 0; xAt = null; lagged = false; jPresses = 0;
+  if (JUMP) Object.assign(player, { vx: 0, vy: 0, grounded: true, jumps: 0 });
+  edges = []; freeze = 0; xAt = null; lagged = false; jPresses = 0; coyote = 0; buffer = 0;
   coins = Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)] }));
 }
 
@@ -66,12 +70,21 @@ function stepOnce(dt) {
       if (dx) player.vx = Math.max(-3, Math.min(3, player.vx + 0.5 * dx));
       else player.vx = Math.sign(player.vx) * Math.max(0, Math.abs(player.vx) - 1);
       player.pos[0] = Math.max(0, Math.min(W, player.pos[0] + player.vx));
-      if (pressed.includes("space") && player.grounded) { player.vy = -7; player.grounded = false; }
+      const jump = () => { player.vy = -7; player.grounded = false; player.jumps++; coyote = 0; buffer = 0; };
+      // walked off the ledge: the floor is gone, coyote time starts (this step and the 4 after it)
+      if (player.grounded && groundY(player.pos[0]) > player.pos[1] + 1e-9) { player.grounded = false; player.vy = 0; coyote = 5; }
+      if (pressed.includes("space")) { if (player.grounded || coyote > 0) jump(); else buffer = 5; }
       if (!player.grounded) {
         player.pos[1] += player.vy;
         player.vy += 0.4;
-        if (player.pos[1] >= 90 - 1e-9) { player.pos[1] = 90; player.vy = 0; player.grounded = true; if (SOUNDS) addSound(tone660(), "land"); }
+        const gy = groundY(player.pos[0]);
+        if (player.pos[1] >= gy - 1e-9) {
+          player.pos[1] = gy; player.vy = 0; player.grounded = true;
+          if (SOUNDS) addSound(tone660(), "land");
+          if (buffer > 0) jump();   // a buffered press jumps on landing
+        }
       }
+      coyote = Math.max(0, coyote - 1); buffer = Math.max(0, buffer - 1);
     }
   } else {
     player.pos[0] = Math.max(0, Math.min(W, player.pos[0] + dx * 120 * dt));
