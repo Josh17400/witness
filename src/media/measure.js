@@ -424,9 +424,20 @@ function combFit(profile, inner, s0, span = 0.1) {
     const c = combCoverage(cols, mass, s);
     if (c > best + 1e-9) { best = c; bs = [s]; } else if (c > best - 1e-9) bs.push(s);
   }
-  let b = 0;   // the plateau around the first best pitch
-  while (b + 1 < bs.length && bs[b + 1] - bs[b] < 1.5 * step) b++;
-  return { s: (bs[0] + bs[b]) / 2, lo: bs[0], hi: bs[b], coverage: best, lines: cols.length };
+  // of several equally good plateaus, the one nearest the runs' estimate: a grid of pitch s/(s-1) holds the same
+  // changes (×2.05 art read ×1.952), and evidence in two bands far apart (two bars at one scale) also fits pitches
+  // that skip a pixel across the gap between them (×3.94 for two ×4 bars 440 px apart). Near ×1 the first (×1
+  // holds every line)
+  const plateaus = [];
+  for (let a = 0; a < bs.length;) {
+    let b = a;
+    while (b + 1 < bs.length && bs[b + 1] - bs[b] < 1.5 * step) b++;
+    plateaus.push({ lo: bs[a], hi: bs[b] });
+    a = b + 1;
+  }
+  const dist = (p) => (s0 < p.lo ? p.lo - s0 : s0 > p.hi ? s0 - p.hi : 0);
+  const pl = s0 >= 1.5 ? plateaus.reduce((a, p) => (dist(p) < dist(a) - 1e-12 ? p : a)) : plateaus[0];
+  return { s: (pl.lo + pl.hi) / 2, lo: pl.lo, hi: pl.hi, coverage: best, lines: cols.length };
 }
 
 /** Scale along one axis. Run lengths give a first estimate (two of them when 1-px runs may be page chrome or
@@ -459,7 +470,10 @@ function scaleFromRuns(h) {
   // a whole number inside the best plateau (or drifting under half a pixel over the axis) is that whole number
   const slack = (0.5 * s) / Math.max(1, inner);
   const k = Math.round(s);
-  const nearInt = onGrid ? k >= fit.lo - slack - 1e-9 && k <= fit.hi + slack + 1e-9 || Math.abs(s - k) <= slack : Math.abs(s - k) <= slack;
+  // ...unless the runs say otherwise: at a whole scale k no run is k+1 px long, so two common lengths L and L+1 (5%+
+  // of them L+1) are uneven pixels, however wide the plateau (a 100 px column of ×4.11 art fits ×4 too)
+  const pairRuns = c.pair && c.L >= 2 && c.share >= 0.05 && c.share <= 0.95 && Math.round(s) === c.L;
+  const nearInt = !pairRuns && (onGrid ? k >= fit.lo - slack - 1e-9 && k <= fit.hi + slack + 1e-9 || Math.abs(s - k) <= slack : Math.abs(s - k) <= slack);
   if (onGrid && nearInt) s = k;
   let uneven, single;
   if (onGrid) {
@@ -533,16 +547,54 @@ const onGrid = (x, g) => g.s <= 1.05 || mod(x - g.o, g.s) < 1 - 1e-9;
 /** One axis' changes inside a tile, in picture coordinates: [[x, count]]. */
 const profileCols = (h, origin) => { const c = []; for (let i = 1; i < h.profile.length - 1; i++) if (h.profile[i]) c.push([origin + i, h.profile[i]]); return c; };
 
-/** How well a tile's changes sit on grid c (x and y): lift over chance, 1 = every change on it, ~0 = none beyond chance. */
-function tileLift(t, c) {
+/** How well changes [[x, count]] (one axis each) sit on their grids: lift over chance, 1 = every change on them,
+ *  ~0 = none beyond chance; null: no changes. */
+function liftOn(pairs) {
   let on = 0, tot = 0, chance = 0;
-  for (const [axis, g] of [["xs", c.x], ["ys", c.y]]) {
+  for (const [cols, g] of pairs) {
     if (!g) continue;
-    for (const [p, m] of t[axis]) { tot += m; if (onGrid(p, g)) on += m; chance += m * (g.s <= 1.05 ? 1 : 1 / g.s); }
+    for (const [p, m] of cols) { tot += m; if (onGrid(p, g)) on += m; chance += m * (g.s <= 1.05 ? 1 : 1 / g.s); }
   }
   if (!tot) return null;
   chance /= tot;
   return chance >= 1 ? 1 : (on / tot - chance) / (1 - chance);
+}
+/** How well a tile's changes sit on grid c (x and y). */
+const tileLift = (t, c) => liftOn([[t.xs, c.x], [t.ys, c.y]]);
+const axisLift = (cols, g) => liftOn([[cols, g]]);
+
+/** One axis' grid from run lengths and a change profile in picture coordinates: {g: {s, o, uneven, longShare, single}}
+ *  when the changes sit on one grid (lift ≥ 0.75), {none: true} when there are no runs to read, else {}. The span the
+ *  scale is read over is the evidence's own (first to last change), not the picture's. */
+function gridFromProfile(lengths, profile) {
+  const cols = [];
+  for (let i = 1; i < profile.length; i++) if (profile[i]) cols.push([i, profile[i]]);
+  const inner = cols.length ? Math.max(1, cols[cols.length - 1][0] - cols[0][0]) : 1;
+  const a = scaleFromRuns({ lengths, profile, inner });
+  if (a.scale == null) return a.runs ? {} : { none: true };
+  if (a.scale > 1.05 && (a.grid == null || (a.grid - 1 / a.scale) / (1 - 1 / a.scale) < 0.75)) return {};
+  return { g: { s: a.scale, o: a.scale <= 1.05 ? 0 : combPhase(cols, a.scale), uneven: a.uneven, longShare: a.longShare, single: a.single || null } };
+}
+
+/** Runs of one colour along one axis over the pixels of R owned by region k (owner[i] === k): run lengths and the
+ *  change profile in picture coordinates (a run or change across the region's border isn't counted). */
+function ownedRuns(img, owner, k, R, tol, vertical) {
+  const d = img.data, W = img.width, hardTol = Math.max(tol, 7);
+  const outer = vertical ? R.w : R.h, inner = vertical ? R.h : R.w, base = vertical ? R.y : R.x;
+  const idx = (o, i) => (vertical ? (R.y + i) * W + (R.x + o) : (R.y + o) * W + (R.x + i));
+  const lengths = new Map(), profile = new Float64Array((vertical ? img.height : img.width) + 1);
+  for (let o = 0; o < outer; o++) {
+    let hs = -1;   // start of the current run (-1: none started inside the region)
+    for (let i = 1; i < inner; i++) {
+      const a = idx(o, i - 1), b = idx(o, i);
+      if (owner[a] !== k || owner[b] !== k) { hs = -1; continue; }
+      if (delta(d, a, d, b) <= hardTol) continue;
+      profile[base + i]++;
+      if (hs >= 0) lengths.set(i - hs, (lengths.get(i - hs) || 0) + 1);
+      hs = i;
+    }
+  }
+  return { lengths, profile };
 }
 
 const NEIGHBOURS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -614,6 +666,7 @@ export function scaleRegions(input, { region, tile, tolerance = 0, minTiles = 2 
     if (sy != null) { c.sy = (c.sy * c.ny + sy) / (c.ny + 1); c.ny++; }
     c.tiles.push(t);
   }
+  const MIN_CHANGES = 8;
   const fitAxis = (list, vertical) => {
     const lengths = new Map(), profile = new Float64Array((vertical ? img.height : img.width) + 1);
     for (const t of list) {
@@ -621,28 +674,69 @@ export function scaleRegions(input, { region, tile, tolerance = 0, minTiles = 2 
       for (const [d, c] of h.lengths) lengths.set(d, (lengths.get(d) || 0) + c);
       for (let i = 1; i < h.profile.length - 1; i++) profile[o + i] += h.profile[i];
     }
-    const a = scaleFromRuns({ lengths, profile, inner: vertical ? R.h : R.w });
-    if (a.scale == null) return null;
-    // a candidate must hold its changes on one grid over all its tiles (as each tile's own reading had to)
-    if (a.scale > 1.05 && (a.grid == null || (a.grid - 1 / a.scale) / (1 - 1 / a.scale) < 0.75)) return null;
-    const cols = [];
-    for (let i = 1; i < profile.length; i++) if (profile[i]) cols.push([i, profile[i]]);
-    return { s: a.scale, o: a.scale <= 1.05 ? 0 : combPhase(cols, a.scale), uneven: a.uneven, longShare: a.longShare, single: a.single || null };
+    return gridFromProfile(lengths, profile);
   };
   const main = (c) => (c.x || c.y).s;
+  // a candidate from tiles: both axes on a grid at the same scale (within 3%: a layer is scaled evenly; a sparse
+  // picture can fit stray grids that disagree, ×1.86 across, ×2.14 down). When one axis misses, it is refitted from
+  // the tiles whose changes sit on the other axis' grid (a thin column's tiles straddle the world beside it); one
+  // axis alone is enough when the other has no runs to read (a strip of vertical bars)
+  const fitTiles = (list) => {
+    let x = fitAxis(list, false), y = fitAxis(list, true);
+    if (!x.g !== !y.g && (x.g || y.g)) {
+      const g = x.g || y.g, ax = x.g ? "xs" : "ys";
+      const pure = list.filter((t) => { const l = axisLift(t[ax], g); return l != null && l >= 0.75; });
+      if (pure.length >= Math.min(minTiles, list.length) && pure.length < list.length) { if (x.g) y = fitAxis(pure, true); else x = fitAxis(pure, false); }
+    }
+    if (x.g && y.g) return Math.abs(x.g.s - y.g.s) / Math.max(x.g.s, y.g.s) > 0.03 ? null : { x: x.g, y: y.g };
+    if ((x.g && y.none) || (y.g && x.none)) return { x: x.g, y: y.g };
+    return null;
+  };
   const cands = [];
   for (const c of clusters.sort((a, b) => b.tiles.length - a.tiles.length)) {
     if (c.tiles.length < Math.min(minTiles, tiles.length)) continue;
-    const x = fitAxis(c.tiles, false), y = fitAxis(c.tiles, true);
-    // both axes on a grid, and the same scale across and down (within 3%): a layer is scaled evenly; a sparse picture
-    // can fit stray grids that disagree (×1.86 across, ×2.14 down)
-    if (!x || !y || Math.abs(x.s - y.s) / Math.max(x.s, y.s) > 0.03) continue;
-    const k = { x, y };
+    const k = fitTiles(c.tiles);
+    // the refit must stay within the clustering's 4% of what its tiles read: a few sparse tiles reading ×2 fit the twin
+    // grid ×1.87 of the ×2.14 art around them (pitch s/(s-1) holds the same changes)
+    const far = (g, r) => g && r != null && Math.abs(g.s - r) / r > 0.04;
+    if (!k || far(k.x, c.sx) || far(k.y, c.sy)) continue;
     if (cands.some((o) => Math.abs(main(o) - main(k)) / main(o) < 0.01)) continue;
-    cands.push(k);
+    cands.push(Object.assign(k, { tiles: c.tiles }));
+  }
+  // a cluster can hold two layers whose scales are within a tile's reading error (a ×4 world under a ×4.11 UI: a
+  // 50 px tile of ×4.11 art fits a ×4 grid too). Over the whole picture their grids part: the tiles whose changes
+  // are off the candidate's grid (lift < 0.5) are refitted on their own, the rest refitted without them; kept as two
+  // candidates when the two scales differ by 1-6%
+  const readable = (list) => list.filter((t) => t.changes >= MIN_CHANGES);
+  for (let k = 0, guard = 0; k < cands.length && guard < 12; k++, guard++) {
+    let c = cands[k];
+    // first settle the candidate on its own tiles (the other layer's tiles pulled its fit: ×3.9959 for ×4)
+    for (let it = 0; it < 2; it++) {
+      const on = readable(c.tiles).filter((t) => { const l = tileLift(t, c); return l != null && l >= 0.75; });
+      if (on.length < Math.min(minTiles, c.tiles.length) || on.length === readable(c.tiles).length) break;
+      const f = fitTiles(on);
+      if (!f) break;
+      c = Object.assign(f, { tiles: c.tiles });
+    }
+    cands[k] = c;
+    const off = readable(c.tiles).filter((t) => { const l = tileLift(t, c); return l != null && l < 0.5; });
+    if (off.length < minTiles || off.length === readable(c.tiles).length) continue;
+    const n = fitTiles(off);
+    // only scales the clustering couldn't tell apart (within 6%): farther ones were their own clusters, and a grid of
+    // pitch s/(s-1) holds a sparse ×s picture's changes too (×1.88 inside ×2.14 art)
+    const apart = n ? Math.abs(main(n) - main(c)) / main(c) : 0;
+    if (!n || apart < 0.01 || apart > 0.06 || cands.some((o) => o !== c && Math.abs(main(o) - main(n)) / main(o) < 0.01)) continue;
+    // the split must hold: the tiles taken out sit on their own grid
+    const held = off.filter((t) => { const l = tileLift(t, n); return l != null && l >= 0.5; });
+    if (held.length < Math.max(minTiles, 0.5 * off.length)) continue;
+    const rest = c.tiles.filter((t) => !held.includes(t));
+    const r = fitTiles(rest);
+    if (!r) continue;
+    cands[k] = Object.assign(r, { tiles: rest });
+    cands.push(Object.assign(n, { tiles: held }));
+    k--;
   }
   // 3. every tile to the grid that holds its changes best; flat tiles from the nearest read tile (breadth first)
-  const MIN_CHANGES = 8;
   if (cands.length > 1) {
     for (const t of tiles) {
       if (t.changes < MIN_CHANGES) continue;
@@ -653,6 +747,13 @@ export function scaleRegions(input, { region, tile, tolerance = 0, minTiles = 2 
         if (best < 0 || l > bl + 0.1 || (l > bl - 0.1 && main(c) > main(cands[best]))) { best = k; bl = l; }
       });
       t.label = best;
+      // a tile on a border holds both layers' changes (neither grid holds half): the grid that holds more of them
+      if (best < 0) {
+        let bl2 = 0.2;
+        cands.forEach((c, k) => { const l = tileLift(t, c); if (l != null && l > bl2 + 0.05) { best = k; bl2 = l; } });
+        t.label = best;
+        t.border = best >= 0;
+      }
     }
     // flat tiles: first those that continue a read neighbour's colour (a panel's flat fill beside its text), then
     // the rest from the nearest read tile
@@ -788,7 +889,10 @@ export function scaleRegions(input, { region, tile, tolerance = 0, minTiles = 2 
       const nb = { top: j0 === 0 ? other : neighbour(range(i0, i1).map((i) => [i, j0 - 1])), bottom: j1 === ny - 1 ? other : neighbour(range(i0, i1).map((i) => [i, j1 + 1])),
         left: i0 === 0 ? other : neighbour(range(j0, j1).map((j) => [i0 - 1, j])), right: i1 === nx - 1 ? other : neighbour(range(j0, j1).map((j) => [i1 + 1, j])) };
       const y0 = nb.top ? refine("top", b, A, nb.top, j0 === 0) : b.y, y1 = nb.bottom ? refine("bottom", b, A, nb.bottom, j1 === ny - 1) : b.y + b.h;
-      const x0 = nb.left ? refine("left", b, A, nb.left, i0 === 0) : b.x, x1 = nb.right ? refine("right", b, A, nb.right, i1 === nx - 1) : b.x + b.w;
+      // left and right are scored over the rows between the refined top and bottom (a box of tiles reaches into the
+      // layer above it, whose changes would pull a side in where its own layer is flat)
+      const bv = { x: b.x, y: y0, w: b.w, h: Math.max(1, y1 - y0) };
+      const x0 = nb.left ? refine("left", bv, A, nb.left, i0 === 0) : b.x, x1 = nb.right ? refine("right", bv, A, nb.right, i1 === nx - 1) : b.x + b.w;
       o.box = { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
     }
   }
@@ -806,8 +910,22 @@ export function scaleRegions(input, { region, tile, tolerance = 0, minTiles = 2 
   for (const o of out) o.area = 0;
   for (let i = 0; i < full; i++) if (owner[i] >= 0) out[owner[i]].area++;
   for (const o of out) o.rectangular = o.area === o.rect.w * o.rect.h;
+  // each scale read again from its regions' own pixels (inside the analysed area): the candidate's fit came from
+  // whole tiles, and tiles on a border hold the other layer's changes too (two ×4 bars on a ×5 world read ×4 × 3.91)
+  const final = cands.map((c) => c);
+  if (cands.length > 1) {
+    const lab = new Int16Array(full).fill(-1);
+    for (let i = 0; i < full; i++) if (owner[i] >= 0) lab[i] = out[owner[i]].label;
+    cands.forEach((c, k) => {
+      const hx = ownedRuns(img, lab, k, R, tol, false), hy = ownedRuns(img, lab, k, R, tol, true);
+      const x = gridFromProfile(hx.lengths, hx.profile), y = gridFromProfile(hy.lengths, hy.profile);
+      // kept when it reads on the same grid as before (within 3%); else the candidate's own fit stands
+      const same = (a, b) => (a && b ? Math.abs(a.s - b.s) / b.s <= 0.03 : !b);
+      if ((x.g || y.g) && same(x.g, c.x) && same(y.g, c.y)) final[k] = { x: x.g || null, y: y.g || null };
+    });
+  }
   const regions = out.map((o) => {
-    const c = cands[o.label], gx = c.x, gy = c.y;
+    const c = final[o.label], gx = c.x, gy = c.y;
     const sx = gx ? r4(gx.s) : null, sy = gy ? r4(gy.s) : null;
     const whole = [sx, sy].every((v) => v == null || Number.isInteger(v));
     return { rect: o.rect, area: Math.round(o.area), share: r6(o.area / full), scale: [sx, sy], whole, fractional: !whole && Math.max(sx || 0, sy || 0) > 1.05,

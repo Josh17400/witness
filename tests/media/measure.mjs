@@ -430,6 +430,9 @@ function framesOf(positions, { size = 8, y = 30, hud = false } = {}) {
   // without a region it leaves the edges out by itself (the 1-px border runs made it ×1.67 × 1.58 before)
   const sea = pixelRuns(se);
   ok("pixelRuns: no region: the rounded border's 1-px runs don't anchor the scale at 1 px", Math.abs(sea.scale[0] - SE) / SE < 0.005 && sea.region.x === 16 && sea.fractional, sea);
+  // read for regions it is one scale: no phantom region on the twin grid ×2.14 / 1.14 = ×1.88 (sparse detail fits both)
+  const ses = scaleRegions(se);
+  ok("scaleRegions: the sparse ×2.14375 picture is one region (no ×1.88 twin)", ses.groups.length === 1 && Math.abs(ses.groups[0].scale[0] - SE) / SE < 0.005, ses.groups);
 
   // a 1:1 gradient (nothing scaled): soft one-pixel steps, but no hard edge smeared: not blurry, no scale read
   const grad = image(320, 180);
@@ -496,6 +499,45 @@ function framesOf(positions, { size = 8, y = 30, hud = false } = {}) {
   ok("scaleRegions: unscaled (×1) art under a ×5 world: split at y 480", groups(k1) === "5×5:0.8 1×1:0.2" && rects(k1) === "0,0 1000×480 | 0,480 1000×120", groups(k1) + " " + rects(k1));
   const side = scaleRegions(compose(800, 500, sprite(400, 250, 3), 2, sprite(320, 200, 8), 2.5, (u) => u >= 240));
   ok("scaleRegions: a ×2.5 panel right of a ×2 world: split at x 600", side.groups.length === 2 && rects(side) === "0,0 600×500 | 600,0 200×500" && side.regions[0].scale.join() === "2,2" && near(side.regions[1].scale[0], 2.5), groups(side) + " " + rects(side));
+
+  // the UI layer with its own origin (ox, oy) and a device-pixel mask: inUI(x, y)
+  const composeAt = (W, H, world, k, ui, f, inUI, ox = 0, oy = 0) => {
+    const out = image(W, H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(out, x, y, inUI(x, y) ? get(ui, Math.floor((x - ox) / f), Math.floor((y - oy) / f)) : get(world, Math.floor(x / k), Math.floor(y / k)));
+    return out;
+  };
+  const bigWorld = sprite(400, 300, 2), bigUI = (() => { const im = image(400, 300); const P = [[250, 250, 250], [40, 40, 60], [200, 160, 40], [90, 200, 120]]; for (let y = 0; y < 300; y++) for (let x = 0; x < 400; x++) put(im, x, y, P[hash(x, y, 5) % 4]); return im; })();
+  const sc = (r, i) => r.regions[i].scale;
+  // two scales within a tile's reading error (a 50 px tile of ×4.11 art fits ×4 too): one ×4 grid at 100% before
+  for (const [k, f] of [[4, 4.11], [5, 4.9], [5, 5.15], [3, 3.1]]) {
+    const r = scaleRegions(composeAt(1000, 600, bigWorld, k, bigUI, f, (x, y) => y >= 473));
+    show(`scaleRegions ×${k} + ×${f} strip`, `${groups(r)} · ${rects(r)}`);
+    ok(`scaleRegions: ×${k} world + ×${f} UI strip (${Math.round(Math.abs(f - k) / k * 1000) / 10}% apart): whole ×${k} 0,0 1000×473, ×${f} (±0.5%) fractional 0,473 1000×127`, r.groups.length === 2 && rects(r) === "0,0 1000×473 | 0,473 1000×127" && sc(r, 0).join() === `${k},${k}` && near(sc(r, 1)[0], f) && near(sc(r, 1)[1], f) && r.regions[1].fractional, groups(r) + " " + rects(r));
+  }
+  // two bars at one whole scale, far apart: each bar's own pixels, not the border tiles (×4 × 3.91 before)
+  const bars = scaleRegions(composeAt(1000, 600, bigWorld, 5, bigUI, 4, (x, y) => y < 80 || y >= 520));
+  show("scaleRegions ×5 + two ×4 bars", `${groups(bars)} · ${rects(bars)}`);
+  ok("scaleRegions: two ×4 bars on a ×5 world: whole ×4 (2 areas, 26.67%), ×5 between", groups(bars) === "5×5:0.733333 4×4:0.266667" && rects(bars) === "0,80 1000×440 | 0,0 1000×80 | 0,520 1000×80" && bars.regions[1].whole, groups(bars) + " " + rects(bars));
+  const bars411 = scaleRegions(composeAt(1000, 600, bigWorld, 5, bigUI, 4.11, (x, y) => y < 80 || y >= 520));
+  ok("scaleRegions: two ×4.11 bars: ×4.11 across and down (±0.5%; was ×4.11 × 4.02)", near(sc(bars411, 1)[0], 4.11) && near(sc(bars411, 1)[1], 4.11), bars411.regions[1]);
+  // thin layers, two tiles across or less, at any UI phase
+  for (const ox of [0, 3, 905]) {
+    const r = scaleRegions(composeAt(1000, 600, bigWorld, 3, bigUI, 4.11, (x) => x >= 900, ox));
+    ok(`scaleRegions: a 100 px ×4.11 column on a ×3 world (UI origin x ${ox}): 900,0 100×600 (10%), ×4.11 (±0.5%)`, r.groups.length === 2 && rects(r) === "0,0 900×600 | 900,0 100×600" && r.regions[1].share === 0.1 && near(sc(r, 1)[0], 4.11) && near(sc(r, 1)[1], 4.11), groups(r) + " " + rects(r));
+  }
+  for (const oy of [0, 501]) {
+    const r = scaleRegions(composeAt(1000, 600, bigWorld, 5, bigUI, 4.11, (x, y) => y >= 500, 0, oy));
+    ok(`scaleRegions: a 100 px ×4.11 bottom strip (UI origin y ${oy}): 0,500 1000×100`, rects(r) === "0,0 1000×500 | 0,500 1000×100" && near(sc(r, 1)[1], 4.11), groups(r) + " " + rects(r));
+  }
+  // a ×2.5 strip 120 px tall whose art runs out after x 750 (a flat fill beyond): found, its art's extent
+  const part = image(400, 300, [30, 30, 50]);
+  for (let y = 0; y < 300; y++) for (let x = 0; x < 300; x++) put(part, x, y, get(bigUI, x, y));
+  const thin = scaleRegions(composeAt(1000, 600, bigWorld, 5, part, 2.5, (x, y) => y >= 480, 0, 2));
+  show("scaleRegions ×2.5 strip, art to x 750", `${groups(thin)} · ${rects(thin)}`);
+  ok("scaleRegions: a ×2.5 strip 120 px tall (art to x 750) on ×5: found at 0,480 750×120, ×2.5", thin.groups.length === 2 && rects({ regions: [thin.regions[1]] }) === "0,480 750×120" && near(sc(thin, 1)[0], 2.5) && near(sc(thin, 1)[1], 2.5), groups(thin) + " " + rects(thin));
+  // ×2.05 has a twin grid of pitch 2.05 / 1.05 = 1.952 that holds the same changes: the one the runs read wins
+  const r205 = pixelRuns(scaleNearest(sprite(400, 300, 4), 2.05));
+  ok("pixelRuns: ×2.05 reads ×2.05 (2 or 3 px), not its twin ×1.952", near(r205.scale[0], 2.05) && near(r205.scale[1], 2.05) && r205.x.single.join() === "2,3", r205.scale);
 
   // one scale: one region, the whole picture
   const only5 = scaleRegions(scaleNearest(sprite(200, 120, 2), 5));
