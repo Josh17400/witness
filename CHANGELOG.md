@@ -79,7 +79,42 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
 **Fixed**
 - `measure motion` (and `measure anim`) took a lone sprite moving over a plain background for a scrolling camera
   (the picture shift matched the sprite); camera tracking now keeps the camera still when under 2% of the picture
-  changed between frames.
+  changed between frames in up to 4 blobs. A sparse scene that scrolls (a starfield: many small changes that one
+  shift explains far better than none) is still found as a camera move.
+- `trace --xy`: with `--no-chart` it reported a valid position as "not a position" and `--save` stored an empty
+  path; path length counted respawn teleports as distance walked (a run with two deaths read 480 instead of 260):
+  teleports (the step into a respawn after the death flag, or a step over 10× the usual one) are left out, listed
+  ("2 teleports left out: f65, f130", `data.xy.runs[].jumps`) and drawn as thin dotted hops; the dot every second
+  vanished when `--every` didn't divide the tick (now the nearest sample).
+- `trace --against base.json --save new.json` saved the baseline's series instead of this run.
+- `trace --compare` with only `--xy` said "A and B identical on all 0 series": the xy position is now compared per
+  axis.
+- Deaths while the position is null (games that remove the player while dead) are placed at the last position seen
+  (`trace --xy`, `heatmap`), not dropped ("2 in 0 cells").
+- `heatmap`: each run counted one frame too many (2.517 s for `--time 2.5`); the automatic cell collapsed to ~1e-10
+  for an idle player (now at least 1 unit, or 1/64 of the screenshot behind it); the help said "1/16 of the area"
+  (it is 1/16 of the longer side).
+- Histograms (`trace --hist`) crashed above ~120k samples (`Math.min(...)` stack overflow).
+- `measure ui`: pixel-mode text rows depended on unrelated shapes elsewhere on screen; outlined HUD text (yellow
+  letters, black outline) was failed on its fill-vs-background ratio: the outline is now measured and the stronger
+  edge is reported, with both ratios ("outlined in rgb(0,0,0): text/outline 19.56, outline/background 12.55,
+  without the outline 1.56"); a zero-size `state.ui` text element was called "one flat colour (text not drawn?)".
+- `measure colorblind --a/--b` now takes `diff:<png>` masks, as `contrast` does.
+- `measure palette`: `--max` merge suggestions could point at each other (both being removed); targets are now
+  only colours that stay. Lospec Paint.NET `.txt` palettes (`;` comment lines, AARRGGBB) failed to parse or read
+  as the wrong colours. Key colours (`dominantColors`) are most common first again after merging.
+- `measure perf`: crashed when memory was reported on fewer than 3 frames (`--time 2f`); a counts peak was labelled
+  one frame after its spike (f91 vs f90).
+- `measure anim --of` a missing field said "never visible"; it now says the path is undefined on every frame.
+- `shot --clip`: the reported length used the requested range, not what was written (wrong when the range isn't a
+  multiple of `--every` or frames were dropped for size); a still stretch longer than 65535 delay units was cut to
+  that length (now carried on in repeats storing one pixel).
+
+**Adapters**
+- Sound event helpers are in every adapter: C/C++ `witness_sound(name)` / `witness_sound_ex(...)`; JS, Python,
+  Java, Rust, Lua `sound(...)`; C#, Unity `Witness.Sound(name, volume, x, y)` (Unity also `WitnessBridge.Sound`);
+  Godot GDScript `sound(name, volume, pos)`, Godot C# `WitnessNode.Sound(...)`; Go `witness.Sound(name,
+  witness.Volume(v), witness.At(x, y))`.
 
 **Behaviour changes**
 - `trace --json` `summary`: vector series are summarized per axis (`"state.player.pos.x": {start, end, min, ...}`)
@@ -97,6 +132,10 @@ to pick it up. Steps marked *optional* unlock new features; everything else keep
    `measure perf` can show leaks and what a spike spawned; adapters that answer `perf` already give frame times.
 6. *Optional:* if your adapter implements the snapshot `paths` filter, check it returns the asked-for top-level keys
    unchanged (Witness turns a wrong filter off by itself, but then gets no speed-up); `WITNESS_PATHS=0` turns it off.
+7. If a test or script gates on `trace --xy` path length or `heatmap` seconds: re-check the numbers (respawn
+   teleports no longer count as distance, and each heatmap run is one frame shorter).
+8. *Optional:* C#, Unity, Godot, Go and Lua games can re-vendor their adapter and call its `sound(...)` helper where
+   a sound starts, so `listen` and `effect` can name sounds.
 
 ## 0.6.0 (2026-10-19)
 

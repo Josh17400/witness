@@ -84,4 +84,27 @@ const LAYOUT = [
   ok("not text: a fence of 1 px bars, a row of identical coins (icons): exactly the 2 text rows", rows.length === 2, rows);
 }
 
+// ---- regressions: rows don't depend on unrelated shapes elsewhere; outlined text is judged by its edges
+{
+  const im = img(200, 150, [10, 10, 20]);
+  rect(im, 40, 15, 4, 4, [255, 255, 255]); rect(im, 52, 10, 5, 9, [255, 255, 255]); rect(im, 60, 13, 4, 6, [255, 255, 255]);
+  const before = findTextRows(im).rows;
+  rect(im, 50, 100, 3, 4, [255, 255, 255]);   // far below, but between the glyphs in x order
+  const after = findTextRows(im).rows;
+  ok("findTextRows: a small shape far away doesn't break the row (was: rows = [])", before.length === 1 && after.length === 1 && after[0].x === 40 && after[0].y === 10 && after[0].w === 24 && after[0].h === 9 && after[0].glyphs === 3, after);
+
+  // yellow letters with a 1 px black outline on light grey: unreadable without the outline, plainly readable with it
+  const o = img(60, 20, [200, 200, 200]), ink = new Set();
+  [..."HELLO"].forEach((ch, i) => { const g = glyph(ch); for (let y = 0; y < 16; y++) for (let x = 0; x < 8; x++) if (g[y * 8 + x]) ink.add(`${4 + i * 10 + x},${2 + y}`); });
+  for (const k of ink) { const [x, y] = k.split(",").map(Number); for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (!ink.has(`${x + dx},${y + dy}`)) put(o, x + dx, y + dy, [0, 0, 0]); }
+  for (const k of ink) { const [x, y] = k.split(",").map(Number); put(o, x, y, [255, 255, 0]); }
+  const tc = textContrast(o, { x: 0, y: 0, w: 60, h: 20 });
+  const yb = contrastRatio([255, 255, 0], [0, 0, 0]), bg2 = contrastRatio([0, 0, 0], [200, 200, 200]), plain = contrastRatio([255, 255, 0], [200, 200, 200]);
+  ok("textContrast: an outline is measured (yellow/black 19.56, black/grey 12.55; 1.56 without it)", tc && tc.outline && Math.abs(tc.ratio - yb) < 0.01 && Math.abs(tc.outline.outlineVsBg - bg2) < 0.01 && Math.abs(tc.outline.plainRatio - plain) < 0.01 && tc.outline.color.join() === "0,0,0", tc);
+  const p2 = img(60, 20, [200, 200, 200]);
+  for (const k of ink) { const [x, y] = k.split(",").map(Number); put(p2, x, y, [255, 255, 0]); }
+  const tp = textContrast(p2, { x: 0, y: 0, w: 60, h: 20 });
+  ok("textContrast: the same letters without an outline stay low contrast, no outline reported", tp && !tp.outline && Math.abs(tp.ratio - plain) < 0.01, tp);
+}
+
 done("ui");

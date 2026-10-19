@@ -230,7 +230,7 @@ const CMD_HELP = {
       were distinct normally). Key colours: --colors, else (driving the game) each entity type's sprite colour
       (sprites fitted to state positions, like align) + the background, else the picture's most common colours.
       --a/--b: the contrast of two masks under each type (as in contrast).
-  palette <shot.png | --at 1> [--palette pal.png|pal.hex|pal.gpl|pal.json|"#a,#b"] [--max N] [--tolerance 0]
+  palette <shot.png | --at 1> [--palette pal.png|pal.hex|pal.txt|pal.gpl|pal.json|"#a,#b"] [--max N] [--tolerance 0]
      [--region x,y,w,h] [--list 20] [--out off.png]
       distinct colours (most used, rare ones: blending or scaling blur in pixel art), --max: over budget lists the
       least used colours and the closest colour to merge each into; --palette: every off-palette pixel counted,

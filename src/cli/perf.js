@@ -83,7 +83,7 @@ export async function perfMeasure(opt) {
     for (const k of countKeys) {
       const v = replies.map((p) => num(p && p.counts && p.counts[k]));
       let pk = 0; v.forEach((x, i) => { if (x != null && (v[pk] == null || x > v[pk])) pk = i; });
-      perfCounts[k] = { first: v.find((x) => x != null), last: [...v].reverse().find((x) => x != null), peak: v[pk], peakFrame: frames[pk] + 1, trend: linearTrend(frames.map((f) => (f + 1) / fps), v) };
+      perfCounts[k] = { first: v.find((x) => x != null), last: [...v].reverse().find((x) => x != null), peak: v[pk], peakFrame: frames[pk], trend: linearTrend(frames.map((f) => (f + 1) / fps), v) };
     }
     for (const sp of spikes) {
       const d = [];
@@ -98,7 +98,8 @@ export async function perfMeasure(opt) {
     const memS = replies.map((p) => memoryOf(p));
     const memKey = (memS.find(Boolean) || {}).key || null;
     const memV = memS.map((m) => (m ? m.mb : null));
-    const memTrend = memKey ? linearTrend(frames.map((f) => (f + 1) / fps), memV) : null;
+    const memTrend = memKey ? linearTrend(frames.map((f) => (f + 1) / fps), memV) : null;   // null under 3 values
+    const memEnds = memKey ? { first: memV.find((v) => v != null), last: [...memV].reverse().find((v) => v != null) } : null;
     // entity counts from the state
     const types = [...new Set(countSnaps.flatMap((c) => Object.keys(c)))];
     const entTrends = Object.fromEntries(types.map((t) => [t, linearTrend(countT, countSnaps.map((c) => c[t] || 0))]));
@@ -138,7 +139,7 @@ export async function perfMeasure(opt) {
       if (realSpikes.length > shown.length) lines.push(`    … ${realSpikes.length - shown.length} more (--json)`);
     } else lines.push(`  no spikes (nothing over ${factor}× the median and +${minMs} ms)`);
     if (slower) lines.push(`  ⚠ frames get slower over the run: mean ${fmtMs(early)} ms in the first fifth → ${fmtMs(late)} ms in the last`);
-    if (memKey) lines.push(`  memory (${memKey}): ${fmtMs(memTrend.first)} → ${fmtMs(memTrend.last)} MB over ${fmtT(frames.length / fps)}${memTrend ? ` (${memTrend.slope >= 0 ? "+" : ""}${fmtMs(memTrend.slope)} MB/s, r² ${memTrend.r2.toFixed(2)})` : ""}${memGrowing ? " ⚠ grows steadily: a leak?" : ""}`);
+    if (memKey) lines.push(`  memory (${memKey}): ${fmtMs(memEnds.first)} → ${fmtMs(memEnds.last)} MB over ${fmtT(frames.length / fps)}${memTrend ? ` (${memTrend.slope >= 0 ? "+" : ""}${fmtMs(memTrend.slope)} MB/s, r² ${memTrend.r2.toFixed(2)})` : ""}${memGrowing ? " ⚠ grows steadily: a leak?" : ""}`);
     else if (hasPerf) lines.push("  memory: not reported (a game can add memory_mb to its perf reply)");
     const cl = Object.entries(perfCounts).map(([k, c]) => `${k} ${c.first} → ${c.last}${c.peak !== c.last && c.peak !== c.first ? ` (peak ${c.peak} at f${c.peakFrame})` : ""}`);
     if (cl.length) lines.push(`  perf counts: ${cl.join(" · ")}`);
@@ -154,7 +155,7 @@ export async function perfMeasure(opt) {
         p50: r3(S.p50), p95: r3(S.p95), p99: r3(S.p99), max: r3(S.max), maxFrame: S.maxFrame, mean: r3(S.mean), overBudget: S.overBudget, budget: r3(budget),
         spikes: realSpikes.length, spikeFrames: realSpikes.map((x) => x.frame),
         wallP50: r3(wStats.p50), wallP95: r3(wStats.p95), wallMax: r3(wStats.max), wallMaxFrame: wStats.maxFrame,
-        memoryStartMB: memTrend ? r3(memTrend.first) : null, memoryEndMB: memTrend ? r3(memTrend.last) : null, memoryGrowthMBps: memTrend ? r3(memTrend.slope) : null, memoryGrows: !!memGrowing,
+        memoryStartMB: memEnds ? r3(memEnds.first) : null, memoryEndMB: memEnds ? r3(memEnds.last) : null, memoryGrowthMBps: memTrend ? r3(memTrend.slope) : null, memoryGrows: !!memGrowing,
         slowsDown: slower, deterministic: false,
       },
       data: {

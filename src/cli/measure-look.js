@@ -101,8 +101,9 @@ async function uiMeasure(m, files, opt) {
     const minC = val(opt["min-contrast"]) != null ? +opt["min-contrast"] : null;
     const contrasts = [];
     const offIds = new Set(chk.offscreen.map((o) => o.id));
+    const zero = els.filter((e) => !(e.w > 0 && e.h > 0) && (e.kind === "text" || e.text));
     for (const e of els) {
-      if (offIds.has(e.id) || !(e.kind === "text" || e.text)) continue;
+      if (offIds.has(e.id) || !(e.kind === "text" || e.text) || zero.includes(e)) continue;
       const tc = ui.textContrast(img, e);
       const need = minC ?? ((e.fontPx ?? e.h) >= 24 ? 3 : 4.5);
       contrasts.push({ id: e.id, need, ...(tc ? tc : { ratio: null }) });
@@ -117,10 +118,12 @@ async function uiMeasure(m, files, opt) {
     for (const c of chk.offscreen) { const e = byId.get(c.id); add("fail", "offscreen", [c.id], `${name(c.id)} entirely off screen (rect ${e.x},${e.y} ${e.w}×${e.h}; screen ${W}×${H})`); }
     for (const id of touching) if (!chk.clipped.some((c) => c.id === id)) add("warn", "edge", [id], `${name(id)} touches the screen edge (cut off?)`);
     for (const o of chk.overlaps) add("fail", "overlap", [o.a, o.b], `${name(o.a)} and ${name(o.b)} overlap by ${o.rect[2]}×${o.rect[3]} px at ${o.rect[0]},${o.rect[1]}`);
-    for (const s of chk.small) { const e = byId.get(s.id); add("fail", "small", [s.id], source === "pixels" ? `${name(s.id)} glyphs ${e.glyphPx} px tall (≈ ${s.fontPx} px font) < ${r2(chk.minText)} px` : `${name(s.id)} ${s.estimated ? "rect height" : "font"} ${s.fontPx} px < ${r2(chk.minText)} px`); }
+    for (const e of zero) add("warn", "zero-size", [e.id], `${name(e.id)}: zero-size rect (${e.w}×${e.h}): nothing to measure`);
+    for (const s of chk.small) { const e = byId.get(s.id); if (zero.includes(e)) continue; add("fail", "small", [s.id], source === "pixels" ? `${name(s.id)} glyphs ${e.glyphPx} px tall (≈ ${s.fontPx} px font) < ${r2(chk.minText)} px` : `${name(s.id)} ${s.estimated ? "rect height" : "font"} ${s.fontPx} px < ${r2(chk.minText)} px`); }
     for (const c of contrasts) {
       if (c.ratio == null) { const e = byId.get(c.id); if (e.text) add("warn", "invisible", [c.id], `${name(c.id)}: its rect is one flat colour (text not drawn?)`); continue; }
-      if (c.ratio < c.need) add("fail", "contrast", [c.id], `${name(c.id)} contrast ${c.ratio.toFixed(2)}:1 < ${c.need} (text ${rgb(c.fg)} on ${rgb(c.bg)})`);
+      const ol = c.outline ? ` (outlined in ${rgb(c.outline.color)}: text/outline ${c.outline.textVsOutline.toFixed(2)}, outline/background ${c.outline.outlineVsBg.toFixed(2)}, without the outline ${c.outline.plainRatio.toFixed(2)})` : "";
+      if (c.ratio < c.need) add("fail", "contrast", [c.id], `${name(c.id)} contrast ${c.ratio.toFixed(2)}:1 < ${c.need} (text ${rgb(c.fg)} on ${rgb(c.bg)})${ol}`);
     }
     for (const u of chk.unsafe) if (!touching.includes(u.id)) add("warn", "safe", [u.id], `${name(u.id)} outside the safe area: ${Object.entries(u.into).map(([k, v]) => `${v} px into the ${k} margin`).join(", ")}`);
     for (const a of chk.aligned) add("warn", "align", [a.a, a.b], `${a.a} / ${a.b} almost aligned: ${a.edges.map((e) => `${e.edge} ${e.a} vs ${e.b}`).join(", ")} (${Math.max(...a.edges.map((e) => e.diff))} px off)`);
@@ -149,7 +152,7 @@ async function uiMeasure(m, files, opt) {
     lines.push(`  safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? "4.5 (3 for 24 px+)"} · edges within ${alignTol} px`);
     lines.push(r.F.length ? `  ${r.fails ? "✖" : "⚠"} ${r.fails} problem${r.fails === 1 ? "" : "s"}, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : r.els.length ? `  ✔ no layout problems` : "  nothing to check: no UI elements found");
     for (const f of r.F) lines.push(`  ${f.level === "fail" ? "✖" : "⚠"} ${f.text}`);
-    if (r.readable.length) lines.push(`  ✔ readable: ${r.readable.slice(0, 8).map((c) => { const e = r.els.find((x) => x.id === c.id); return `${c.id} ${e.glyphPx != null ? `glyphs ${e.glyphPx}` : e.fontPx ?? e.h} px ${c.ratio.toFixed(1)}:1`; }).join(" · ")}${r.readable.length > 8 ? ` (+${r.readable.length - 8})` : ""}`);
+    if (r.readable.length) lines.push(`  ✔ readable: ${r.readable.slice(0, 8).map((c) => { const e = r.els.find((x) => x.id === c.id); return `${c.id} ${e.glyphPx != null ? `glyphs ${e.glyphPx}` : e.fontPx ?? e.h} px ${c.ratio.toFixed(1)}:1${c.outline ? ` (outline; ${c.outline.plainRatio.toFixed(1)}:1 without)` : ""}`; }).join(" · ")}${r.readable.length > 8 ? ` (+${r.readable.length - 8})` : ""}`);
   }
   if (results.length > 1) {
     // the same finding at two sizes: the same kind on the same elements
@@ -253,6 +256,7 @@ async function colorblindMeasure(m, c, files, opt) {
     const mask = (spec) => {
       const s = String(spec);
       if (s.startsWith("#") || s.startsWith("rgb")) { const [col, tol] = s.split("~"); return m.maskFromColor(img, col, +(tol || 0)); }
+      if (s.startsWith("diff:")) { const p = path.resolve(s.slice(5)); if (!fs.existsSync(p)) die(`no such image: ${s.slice(5)}`); return m.maskDiff(img, fs.readFileSync(p), { threshold: +(opt.threshold || 16) }).mask; }
       return m.maskFromRect(img.width, img.height, parseRect(s));
     };
     const A = mask(opt.a);

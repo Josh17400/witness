@@ -88,4 +88,22 @@ const view = (cx, cy, w = W, h = H) => { const out = blank(w, h); for (let y = 0
   ok("scrolling: its world motion is +1 px/f, its screen motion -2 px/f", world.net[0] === N - 1 && world.meanStep === 1 && trackReport(tracks[0]).net[0] === -2 * (N - 1), [world.net, trackReport(tracks[0]).net]);
 }
 
+// ---- a sparse scene scrolling (a starfield: under 2% of pixels change) is still a camera; a lone sprite isn't
+{
+  const W = 320, H = 180;
+  let seed = 7; const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const stars = Array.from({ length: 60 }, () => [Math.floor(rnd() * 600), Math.floor(rnd() * (H - 3))]);
+  const sky = (off, sprite = null) => {
+    const d = new Uint8Array(W * H * 4);
+    for (let i = 0; i < W * H; i++) d.set([8, 8, 20, 255], i * 4);
+    for (const [sx, sy] of stars) { const x0 = (((sx - off) % 600) + 600) % 600; for (let y = sy; y < sy + 3; y++) for (let x = x0; x < Math.min(W, x0 + 3); x++) d.set([255, 255, 255, 255], (y * W + x) * 4); }
+    if (sprite != null) for (let y = 80; y < 92; y++) for (let x = sprite; x < sprite + 12; x++) d.set([90, 200, 255, 255], (y * W + x) * 4);
+    return { width: W, height: H, data: d };
+  };
+  const cam = cameraPath(Array.from({ length: 20 }, (_, i) => sky(i * 2)));
+  ok("camera: a starfield scrolling 2 px/f (60 stars, <2% of pixels change) is found: total 38, every step 2", cam.moving && cam.total[0] === 38 && cam.total[1] === 0 && cam.steps.every((q) => q.dx === 2 && q.dy === 0), cam.steps.slice(0, 4));
+  const lone = cameraPath(Array.from({ length: 10 }, (_, i) => { const d = new Uint8Array(W * H * 4); for (let k = 0; k < W * H; k++) d.set([8, 8, 20, 255], k * 4); for (let y = 80; y < 92; y++) for (let x = 40 + 2 * i; x < 52 + 2 * i; x++) d.set([90, 200, 255, 255], (y * W + x) * 4); return { width: W, height: H, data: d }; }));
+  ok("camera: a lone sprite on a plain background still isn't a scroll", !lone.moving && lone.total[0] === 0, lone.steps.slice(0, 3));
+}
+
 done("track");

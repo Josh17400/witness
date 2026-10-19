@@ -84,4 +84,19 @@ const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
   ok("budget: colours under 0.1% are counted as rare", b.rare.colors === 2 && b.rare.pixels === 3, b.rare);
 }
 
+// ---- regressions: Paint.NET palettes, merge targets that stay, dominant colours in order after merging
+{
+  const pdn = parsePalette("; paint.net Palette File\n; Downloaded from Lospec.com\nFFFF0000\nFF00FF00\nFF0000FF", "txt");
+  ok("parsePalette: Lospec PAINT.NET TXT (comment lines, AARRGGBB) → red, green, blue", pdn.map(hex).join() === "#ff0000,#00ff00,#0000ff", pdn);
+  ok("parsePalette: a paint.net header makes 8 digits AARRGGBB in any file; elsewhere RRGGBBAA", parsePalette("; paint.net\n80112233").map(hex).join() === "#112233" && parsePalette("112233ff").map(hex).join() === "#112233");
+  const im = img(4, 3, [255, 255, 255]);
+  put(im, 1, 2, [1, 2, 3]); put(im, 2, 2, [1, 2, 3]); put(im, 3, 2, [9, 9, 9]);
+  const b = colorBudget(im, 1);
+  ok("colorBudget: merge targets are colours that stay (not each other)", b.leastUsed.length === 2 && b.leastUsed.every((e) => e.nearest === "#ffffff"), b.leastUsed);
+  const W = 100, H = 100, big = img(W, H, [0, 0, 0]);
+  for (let i = 0; i < W * H; i++) { const k = i % 8; const c = i < 3000 ? [200, 30, 30] : i < 5500 ? [30, 30, 200] : [46 + (k & 1) * 4, 206 + ((k >> 1) & 1) * 4, 30 + ((k >> 2) & 1) * 4]; put(big, i % W, Math.floor(i / W), c); }
+  const dc = dominantColors(big, { max: 2 });
+  ok("dominantColors: re-sorted after merging, so a colour that grew by merging (45%) isn't cut by max", dc.map((x) => `${x.hex} ${x.share}`).join() === "#30d020 0.45,#c81e1e 0.3", dc);
+}
+
 done("color");

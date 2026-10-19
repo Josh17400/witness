@@ -321,12 +321,13 @@ async function clipShots(opt) {
       stride *= 2;
       pick = imgs.map((_, i) => i).filter((i) => i % stride === 0);
     }
-    if (stride > 1) notes.push(`over ${Math.round(maxBytes / 1048576)} MB: kept every ${stride}th frame (every ${every * stride}f; raise --max-mb, or use --scale/--crop)`);
+    if (stride > 1) notes.push(`over ${Math.round(maxBytes / 1048576)} MB: kept every ${stride === 2 ? "2nd" : `${stride}th`} frame (every ${every * stride}f; raise --max-mb, or use --scale/--crop)`);
     const clipFile = path.resolve(typeof opt.clip === "string" ? opt.clip : opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, "clip.png"));
     fs.mkdirSync(path.dirname(clipFile), { recursive: true });
     fs.writeFileSync(clipFile, enc.png);
     const kept = pick.map((i) => frames[i]);
-    const seconds = ((f1 - f0 + every * stride) / fps) / speed;
+    // what the file plays: the sum of the delays written (the last kept frame is often before --to)
+    const seconds = enc.delays.reduce((a, [n, d]) => a + n / d, 0);
     const w = imgs[0].width, h = imgs[0].height;
     const kb = enc.bytes < 1048576 ? `${Math.round(enc.bytes / 1024)} KB` : `${(enc.bytes / 1048576).toFixed(1)} MB`;
     const text = [

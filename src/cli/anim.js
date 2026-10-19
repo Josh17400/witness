@@ -63,6 +63,7 @@ async function stateAnim(opt) {
     const sample = await sampleExprs(s, st, [expr], frameGrid(f0, f1, 1));
     printLogs(await s.drainLogs());
     if (sample.errors[0] && sample.errors[0].count === sample.frames.length) die(`--of ${expr}: ${sample.errors[0].message}`);
+    if (sample.missing[0] === sample.frames.length) die(`--of ${expr}: undefined on every frame (f${f0}..f${f1}): check the path with 'witness eval --keys'`);
     const labels = sample.values[0].map((v) => (v == null ? null : typeof v === "object" ? JSON.stringify(v) : v));
     const a = analyzeAnim(labels, sample.frames);
     const f = formatAnim(a, { fps, what: expr, first: f0, last: f1 });

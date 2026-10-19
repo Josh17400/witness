@@ -268,15 +268,18 @@ function sad(a, b, R, dx, dy) {
 }
 
 /** The share of pixels (every 2nd px) of R that differ by more than 16 on some channel between a and b, unshifted. */
+/** The share of pixels that changed (every 2nd pixel each way) and how many separate blobs they form. */
 function changedShare(a, b, R) {
   let c = 0, n = 0;
-  const da = a.data, db = b.data, W = a.width;
-  for (let y = R.y; y < R.y + R.h; y += 2) for (let x = R.x; x < R.x + R.w; x += 2) {
+  const da = a.data, db = b.data, W = a.width, gw = Math.ceil(R.w / 2), gh = Math.ceil(R.h / 2), mask = new Uint8Array(gw * gh);
+  for (let y = R.y, gy = 0; y < R.y + R.h; y += 2, gy++) for (let x = R.x, gx = 0; x < R.x + R.w; x += 2, gx++) {
     const o = (y * W + x) * 4;
-    if (Math.abs(da[o] - db[o]) > 16 || Math.abs(da[o + 1] - db[o + 1]) > 16 || Math.abs(da[o + 2] - db[o + 2]) > 16) c++;
+    if (Math.abs(da[o] - db[o]) > 16 || Math.abs(da[o + 1] - db[o + 1]) > 16 || Math.abs(da[o + 2] - db[o + 2]) > 16) { c++; mask[gy * gw + gx] = 1; }
     n++;
   }
-  return n ? c / n : 0;
+  // blobs only matter when few pixels changed (the case they decide); cap the work
+  const blobs = c && c <= 20000 ? components(mask, gw, gh, { minPixels: 1 }).length : null;
+  return { share: n ? c / n : 0, blobs };
 }
 
 /**
@@ -297,10 +300,16 @@ export function estimateShift(a, b, { region = null, maxShift = 32, stillShare =
     if (e < best.e) best = { dx, dy, e };
   }
   // zero motion is the common case: prefer it when it matches as well, or when almost all of the picture stayed
-  // put (under stillShare of it changed; cameraPath and measure motion use 2%): then what moved is a sprite on a
-  // plain background, not the camera
+  // put (under stillShare of it changed; cameraPath and measure motion use 2%) in a few blobs (up to 4): then what
+  // moved is a sprite or two on a plain background, not the camera. Many scattered changes that one shift explains
+  // far better than no shift (best error under half of it) are a sparse scene scrolling: a starfield, a sky.
   const e0 = sad(a, b, R, 0, 0);
-  if (e0 <= best.e + 1e-9 || (stillShare > 0 && changedShare(a, b, R) < stillShare)) best = { dx: 0, dy: 0, e: e0 };
+  let still = e0 <= best.e + 1e-9;
+  if (!still && stillShare > 0) {
+    const ch = changedShare(a, b, R);
+    if (ch.share < stillShare) still = ch.blobs != null && ch.blobs <= 4 ? true : !(best.e < 0.5 * e0);
+  }
+  if (still) best = { dx: 0, dy: 0, e: e0 };
   const para = (em, e0_, ep) => { const den = em - 2 * e0_ + ep; return den > 1e-9 ? Math.max(-0.5, Math.min(0.5, (em - ep) / (2 * den))) : 0; };
   const sx = para(sad(a, b, R, best.dx - 1, best.dy), best.e, sad(a, b, R, best.dx + 1, best.dy));
   const sy = para(sad(a, b, R, best.dx, best.dy - 1), best.e, sad(a, b, R, best.dx, best.dy + 1));

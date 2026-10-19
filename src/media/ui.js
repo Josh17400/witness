@@ -5,11 +5,13 @@
 //                                                 throws on a malformed entry
 //   layoutChecks(els, { width, height, safe, minText, alignTol })
 //        -> { margins, minText, clipped, offscreen, unsafe, overlaps, small, aligned }   (geometry only)
-//   textContrast(img, rect)                    -> { ratio, deltaE, fg, bg, fgCount, bgCount } | null (one flat colour):
-//                                                 the rect's pixels split in two colour groups (2-means in Lab), the
-//                                                 smaller one is the text; only each group's core pixels (closer to
-//                                                 their own centre than a third of the gap) are compared, so
-//                                                 anti-aliased edges don't dilute the ratio. Uses measure `contrast`.
+//   textContrast(img, rect)                    -> { ratio, deltaE, fg, bg, fgCount, bgCount, outline? } | null (one
+//                                                 flat colour): the rect's pixels split in two colour groups (2-means
+//                                                 in Lab), the smaller one is the text; only each group's core pixels
+//                                                 (closer to their own centre than a third of the gap) are compared, so
+//                                                 anti-aliased edges don't dilute the ratio. A third colour hugging the
+//                                                 text (an outline) is measured too: ratio is then the stronger edge,
+//                                                 text vs outline or outline vs background (outline has all three).
 //   findTextRows(img, { threshold, minGlyphs }) -> text-like rows (no state.ui): [{ x, y, w, h, glyphs, glyphPx }]
 //                                                 and panel-like solid rects: { rows, panels }
 //
@@ -143,7 +145,34 @@ export function textContrast(img, rect) {
   });
   if (!fgCount || !bgCount) return null;
   const r = contrast(img, fg, bg);
-  return { ratio: r.ratio, deltaE: r.deltaE, fg: r.meanA.slice(0, 3).map(Math.round), bg: r.meanB.slice(0, 3).map(Math.round), fgCount, bgCount };
+  const res = { ratio: r.ratio, deltaE: r.deltaE, fg: r.meanA.slice(0, 3).map(Math.round), bg: r.meanB.slice(0, 3).map(Math.round), fgCount, bgCount };
+  // an outline (a third colour hugging the text: black around yellow letters): pixels in neither core that are far
+  // from the text-background line in Lab (so not anti-aliased edges between the two). The glyph edge the eye reads
+  // is then text vs outline or outline vs background, whichever is stronger.
+  const c0 = c[fgGroup], c1 = c[1 - fgGroup], v = [c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2]], vv = gap * gap;
+  const ol = new Uint8Array(W * H);
+  let olCount = 0, hugging = 0;
+  labs.forEach((l, i) => {
+    if (fg[idx[i]] || bg[idx[i]]) return;
+    const t = Math.max(0, Math.min(1, ((l[0] - c0[0]) * v[0] + (l[1] - c0[1]) * v[1] + (l[2] - c0[2]) * v[2]) / vv));
+    if (dist(l, [c0[0] + t * v[0], c0[1] + t * v[1], c0[2] + t * v[2]]) <= gap / 3) return;
+    ol[idx[i]] = 1; olCount++;
+  });
+  if (olCount >= Math.max(8, 0.25 * fgCount)) {
+    for (let i = 0; i < W * H; i++) {
+      if (!ol[i]) continue;
+      const x = i % W, y = (i - x) / W;
+      let near = false;
+      for (let dy = -1; dy <= 1 && !near; dy++) for (let dx = -1; dx <= 1 && !near; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H && fg[yy * W + xx]) near = true; }
+      if (near) hugging++;
+    }
+    if (hugging >= 0.5 * olCount) {
+      const to = contrast(img, fg, ol), ob = contrast(img, ol, bg);
+      res.outline = { color: to.meanB.slice(0, 3).map(Math.round), count: olCount, textVsOutline: to.ratio, outlineVsBg: ob.ratio, plainRatio: r.ratio };
+      res.ratio = Math.max(to.ratio, ob.ratio);
+    }
+  }
+  return res;
 }
 
 /**
@@ -180,11 +209,14 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
   // union glyphs that sit side by side on a line
   const parent = cand.map((_, i) => i);
   const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  // candidates are sorted by x over the whole screen: stop at a bound that doesn't depend on the candidate (1.3x the
+  // tallest glyph allowed), so a small shape elsewhere on screen can't end the search before a's real neighbour
   for (let i = 0; i < cand.length; i++) for (let j = i + 1; j < cand.length; j++) {
     const a = cand[i], b = cand[j];
     const gap = b.x - (a.x + a.w);
+    if (gap > 1.3 * 64) break;
     const h = Math.max(a.h, b.h);
-    if (gap > 1.3 * h) break;   // a word space after punctuation still joins; a double space splits
+    if (gap > 1.3 * h) continue;   // a word space after punctuation still joins; a double space splits
     const ov = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
     if (ov >= 0.5 * Math.min(a.h, b.h) && Math.max(a.h, b.h) <= 2.5 * Math.min(a.h, b.h)) parent[find(j)] = find(i);
   }

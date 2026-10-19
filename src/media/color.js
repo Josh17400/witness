@@ -120,6 +120,7 @@ export function dominantColors(img, { max = 8, minShare = 0.005, region = null, 
     if (into) { const n = into.count + b.count; into.color = into.color.map((v, i) => (v * into.count + b.color[i] * b.count) / n); into.count = n; }
     else out.push({ ...b });
   }
+  out.sort((a, b) => b.count - a.count);   // merging grows colours: most common first again before cutting to max
   return out.filter((o) => o.count >= total * minShare).slice(0, max).map((o) => {
     const color = o.color.map(Math.round);
     return { color, hex: hex(color), count: o.count, share: r4(o.count / total) };
@@ -152,8 +153,10 @@ export function pairsUnderCVD(colors, { types = ["protan", "deutan", "tritan"], 
 // ---------------------------------------------------------------------------
 
 /**
- * A palette from text: "#a1b2c3,#fff" (inline), Lospec .hex / .txt (one hex per line, '#' optional), GIMP .gpl
- * ("R G B name" lines), or JSON (an array of colours, or { colors: [...] }). Duplicates are dropped.
+ * A palette from text: "#a1b2c3,#fff" (inline), Lospec .hex (one RRGGBB per line, '#' optional), Paint.NET .txt
+ * (Lospec's "PAINT.NET TXT": ';' comment lines, AARRGGBB values), GIMP .gpl ("R G B name" lines), or JSON (an array
+ * of colours, or { colors: [...] }). Lines starting with ';' or '//' are comments. 8-digit values are AARRGGBB in a
+ * .txt file or after a paint.net header, else RRGGBBAA. Duplicates are dropped.
  */
 export function parsePalette(text, kind = "") {
   const s = String(text).trim();
@@ -164,11 +167,12 @@ export function parsePalette(text, kind = "") {
   } else if (kind === "gpl" || /^GIMP Palette/.test(s)) {
     for (const line of s.split(/\r?\n/)) { const m = /^\s*(\d+)\s+(\d+)\s+(\d+)/.exec(line); if (m) list.push([+m[1], +m[2], +m[3]]); }
   } else {
-    for (const tok of s.split(/[\s,;]+/).filter(Boolean)) {
-      if (tok.startsWith("//") || tok.startsWith(";")) continue;
+    const argb = kind === "txt" || /paint\.net/i.test(s);
+    const body = s.split(/\r?\n/).filter((line) => !/^\s*(;|\/\/)/.test(line)).join("\n");
+    for (const tok of body.split(/[\s,;]+/).filter(Boolean)) {
       const t = tok.replace(/^#/, "").replace(/^0x/i, "");
       if (!/^([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(t)) throw new Error(`palette: "${tok}" is not a hex colour`);
-      list.push(parseColor("#" + (t.length === 8 ? t.slice(0, 6) : t)));
+      list.push(parseColor("#" + (t.length === 8 ? (argb ? t.slice(2) : t.slice(0, 6)) : t)));
     }
   }
   const seen = new Set(), out = [];
@@ -238,7 +242,8 @@ export function colorBudget(img, max = null, { region = null } = {}) {
   const over = max != null && counts.length > max;
   let leastUsed = [];
   if (over) {
-    const keep = counts.slice(0, Math.min(counts.length, 256));
+    // merge targets come only from the colours that stay (the max most used), never from others being removed
+    const keep = counts.slice(0, max);
     leastUsed = counts.slice(-Math.min(10, counts.length - max)).reverse().map((e) => {
       let best = null, bestE = Infinity;
       for (const k of keep) { if (k === e) continue; const de = deltaE(e.color, k.color); if (de < bestE) { bestE = de; best = k; } }

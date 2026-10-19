@@ -8,6 +8,7 @@
 // frames' pixel data, like IDAT with a sequence number). fcTL and fdAT share one sequence counter starting at 0.
 // Frames after the first store only the rectangle that changed since the frame before (dispose NONE, blend
 // SOURCE), and frames identical to the one before are merged into its delay, so a mostly static clip stays small.
+// A merged delay over the 16-bit limit (65535 units) continues in repeats that store one unchanged pixel.
 
 import zlib from "node:zlib";
 import { SIGNATURE, pngChunk, crc32, isOpaque, ihdrData, filterRows, unfilter, writeRow } from "./png.js";
@@ -66,8 +67,12 @@ export function encodeAPNG(frames, { delays = null, fps = 60, plays = 0, level =
     if (!r) { stored[stored.length - 1].num += delay(i); continue; }
     stored.push({ rect: r, src: i, num: delay(i) });
   }
-  // a delay is 16 bits (over 18 minutes at 60 fps): cap it
-  for (const s of stored) s.num = Math.min(65535, s.num);
+  // a delay is 16 bits: a longer one (a long still stretch) is carried on by repeats of the same frame that store
+  // one unchanged pixel, so the clip keeps its full length
+  for (let k = 0; k < stored.length; k++) {
+    const s = stored[k];
+    if (s.num > 65535) { stored.splice(k + 1, 0, { rect: { x: 0, y: 0, w: 1, h: 1 }, src: s.src, num: s.num - 65535, repeat: true }); s.num = 65535; }
+  }
   const actl = Buffer.alloc(8);
   actl.writeUInt32BE(stored.length, 0); actl.writeUInt32BE(plays, 4);
   const parts = [SIGNATURE, pngChunk("IHDR", ihdrData(width, height, opaque)), pngChunk("acTL", actl)];

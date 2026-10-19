@@ -53,4 +53,12 @@ ok("size mismatch is an error", (() => { try { encodeAPNG([frames[0], { width: 2
   const z = scaleImage(c, 2);
   ok("scaleImage 2 is nearest-neighbour", z.width === 8 && z.data[0] === 0 && z.data[4] === 0 && z.data[8] === 200);
 }
+// a still stretch longer than the 16-bit delay: carried on in repeats, never cut to 65535 units
+{
+  const f = { width: 3, height: 2, data: new Uint8Array(24).fill(200) };
+  const enc = encodeAPNG([f, f, f], { fps: 1000, delays: [65535, 65535, 20000] });
+  const d = decodeAPNG(enc.png);
+  const total = d.frames.reduce((a, x) => a + x.delay[0], 0);
+  ok("encodeAPNG: a merged delay of 151070 units stays 151070 (65535 + 65535 + 20000 over 3 stored frames)", total === 151070 && enc.stored === 3 && d.frames.every((x) => Buffer.from(x.image).equals(Buffer.from(f.data))) && enc.rects[1].w === 1, { total, stored: enc.stored });
+}
 done("apng");
