@@ -178,7 +178,7 @@ export async function motionMeasure(m, fileFrames, opt, region) {
   } else {
     await withGame(opt, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-      if (region) gamePixels(s, "measure motion --region");
+      if (region) gamePixels(s, "measure motion --region", opt);
       fps = s.fps;
       f0 = framesOf(opt.at && opt.at !== true ? String(opt.at) : "0", fps);
       const f1 = f0 + framesOf(opt.time && opt.time !== true ? String(opt.time) : "0.5", fps);
@@ -344,7 +344,7 @@ async function alignMeasure(m, opt) {
   let res;
   await withGame(opt, async (s, cfg) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-    gamePixels(s, "measure align");
+    gamePixels(s, "measure align", opt);
     const fps = s.fps;
     const f = framesOf(opt.at && opt.at !== true ? String(opt.at) : "1", fps);
     const st = await begin(s, runOpts(opt, cfg));
@@ -431,7 +431,7 @@ async function registrationMeasure(m, opt) {
   let res;
   await withGame(opt, async (s, cfg) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-    gamePixels(s, "measure registration");
+    gamePixels(s, "measure registration", opt);
     if (!s.has("reset")) die("measure registration needs 'reset' (one pass builds the background, a second measures)");
     const fps = s.fps;
     const f0 = framesOf(opt.at && opt.at !== true ? String(opt.at) : "0", fps);

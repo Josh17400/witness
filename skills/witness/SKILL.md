@@ -111,7 +111,8 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
   follow, annotate and state-rect measures refuse device-pixel captures). A picture with two scales (a ×5 world
   under a ×4.11 UI) is read region by region (name them with `state.layers [{name, rect}]`; `doctor --scale-rect` /
   `measure scale --rect` read chosen rects). Safe areas: `--safe-insets` rewrites the page's env(safe-area-inset-*)
-  to the device's insets (doctor counts the rewrites), `--safe-overlay` draws the island and corners on screenshots;
+  to the device's insets (0 without viewport-fit=cover, as on iOS; doctor counts the uses and ⚠ names any it
+  couldn't rewrite), `--safe-overlay` draws the island and corners on screenshots;
   a HUD drawn into the canvas: run the `measure ui --safe` preset doctor names. `doctor --no-auto-unlock` tests the iPhone "no sound until a tap" bug
   (audio is frozen while suspended, as on the phone); tests assert `web.audio.state == 'running'` after
   `touch:x,y@t` (or a real `dom:tap:x,y@t`). A web build needs an AudioContext in witness mode for that check

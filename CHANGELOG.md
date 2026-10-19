@@ -151,6 +151,29 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
 - `measure scale shot.png --rect "world=0,0,1000,473; ui=0,473,1000,127"` reads each rect on its own (`✔ world …: exact
   ×5`, `✖ ui …: FRACTIONAL ×4.11: uneven: one source pixel is 4 or 5 px wide (11% are 5)`); `--layers` names the
   automatic regions; `--json`: `summary.regions`, `data.regions`. `doctor --scale-rect "…"` does the same in canvas px.
+- Scales closer than a tile can tell apart are split: a 50 px tile of ×4.11 art fits ×4 too, so a ×4 world under a
+  ×4.11 UI strip (likewise ×5 + ×4.9, ×5 + ×5.15, ×3 + ×3.1) was one ×4 region at 100% and `measure scale` passed
+  ("no pixel grid larger than 1", exit 0). Now a candidate's tiles whose changes sit off its grid across the picture
+  are refitted on their own and kept as a second scale 1-6% away: `✖ 2 scales in one picture: ×4 (whole, 78.8% of
+  the picture) · ×4.11 (fractional, 21.2%)`, rects 0,0 1000×473 and 0,473 1000×127, exit 1.
+- Each scale is read again from its regions' own pixels: two ×4 bars on a ×5 world (top and bottom 80 px) read
+  `×4 × 3.91 (fractional, 26.7%, 2 areas)` (border tiles held ×5 rows; two bands far apart also fit a pitch that
+  skips a pixel across the gap) and failed; now `×4 (whole, 26.7%, 2 areas)`, exit 0 (×4.11 bars: ×4.11, was ×4.11 ×
+  4.02). Of equally good pitches the one nearest the run lengths' estimate wins (pixelRuns read ×2.05 art as ×1.952,
+  its twin grid 2.05/1.05).
+- Thin layers: a 100 px ×4.11 column on a ×3 world was missed at any UI phase (one ×3 region, exit 0): its tiles
+  straddle the world, so the down axis didn't fit, and ×4.11 over 100 px fit ×4 across. An axis that misses is
+  refitted from the tiles on the other axis' grid (one axis is enough when the other has no runs); runs of L and L+1 px
+  (5%+ of them L+1) are never a whole ×L; a border tile goes to the grid holding more of its changes; left/right edges
+  are scored over the region's own rows. Now 900,0 100×600 (10%) ×4.11 at UI origin x 0, 3 and 905; a 100 px bottom
+  strip 0,500 1000×100; a ×2.5 strip 120 px tall whose art ends at x 750: 0,480 750×120.
+- doctor called a crisp integer-scaled canvas blurry when the game draws two scales into it (canvas 250×150 at 500×300
+  CSS px, DPR 2: exact ×4; a ×4 world, a ×4.11 UI strip): `⚠ pixels on screen …: blurry (16.63% of 4×4 cells mixed)`.
+  A failed k×k cell test is blur only with smeared or soft edges; else the regions are read: `2 scales in one
+  picture: ×4 (whole, 78.8% of the picture) · ×4.11 (fractional, 21.2%)` and `the layout's ×4 is the ×4 region's; the
+  ×4.11 region is drawn by the game at a scale of its own`. An integer layout matches only the region at exactly that
+  whole scale (×4.11 is within 3% of ×4). One crisp scale with mixed cells: `⚠ not one colour per 4×4 cell (N%
+  mixed) though no edge is smeared: the game draws at ≈×… inside the ×4 canvas`. A blurred ×4 picture is still blurry.
 
 **Safe areas in the page: --safe-insets, --safe-overlay**
 - `--safe-insets` (`launch.safeInsets: true`, with a phone or tablet `--device`): an init script rewrites every
@@ -164,6 +187,21 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   emulated" line names the flag. Checked in Chromium 156 and WebKit 27.2 on `tests/web/pages/safe.html`: a HUD with
   `padding: env(safe-area-inset-top, 7px) 0 0 env(safe-area-inset-left)` computes 59px left in landscape (0px before),
   59px top in portrait; the `<link>` sheet's `calc(20px + var(--sab))` 41px.
+- A page without `viewport-fit=cover` gets 0, as on iOS (which lays such a page out inside the safe area): it read
+  `✔ safe areas emulated … left 59` and the HUD computed 59px. Now `⚠ safe areas emulated (…): the page has no
+  viewport-fit=cover, so env(safe-area-inset-*) is 0, as on the device, where the page is letterboxed inside the safe
+  area (…; the letterbox isn't emulated here); 15 env() uses … rewritten to 0 …` (`summary.web.safe.viewportFitCover`).
+- Uses that stayed 0px in Chromium 156 and WebKit 27.2 are rewritten: `@import`ed sheets (also from a `<style>` added
+  by script: a sheet is walked again until its imports have loaded), fallbacks nested at any depth (`env(…-left,
+  max(1px, calc(2px + 3px)))`), `insertRule` on @media/@supports rules, `rule.style.paddingLeft = …` (WebKit: the
+  property setters; Chromium: a style rule's declaration is handed out wrapped), and `<style>`/inline styles in shadow
+  roots (attachShadow is watched). On `tests/web/pages/safe.html` all seven compute 59px in both engines.
+- The count is distinct uses (per declaration, selector and property): a HUD setting `style.cssText` every frame read
+  `130 env() uses … rewritten (5 in style sheets, 2 inline, 123 set from script)`; now `15 env() uses … (9 in style
+  sheets, 2 inline, 4 set from script)` on the extended page; the calls are `summary.web.safe.rewrites`.
+- Uses left unrewritten are found and named, and the line is then ⚠, never ✔: `⚠ 1 env(safe-area-inset-*) use could
+  not be rewritten and stays 0 here: @keyframes pulse 0% (style sheet) (…: use style.setProperty)`
+  (`summary.web.safe.missed {count, where}`).
 - `--safe-overlay`: the Dynamic Island, home indicator and rounded corners (approximate: corner radius 55 pt, island
   126×37 pt 11 pt from the edge, indicator 134×5 pt 8 pt up) and the inset zones tinted magenta are drawn over every
   screenshot after capture, mapped onto what was captured (`--capture screen`, `element`, or the game's own canvas
@@ -174,6 +212,13 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   desktop build: now `witness replay --config witness.web.json witness/playtests/c/replay.jsonl …` (and paths with
   spaces are quoted). doctor's "witness test --repeat 2" and "measure ui --safe" hints and effect's "run 'witness
   doctor'" carry the `--config` that was passed.
+- They also carry the launch overrides that were passed (`--device`, `--engine`, `--capture`, `--safe-insets`,
+  `--safe-overlay`, `--no-auto-unlock`, `--auto-unlock`): doctor printed `witness test --repeat 2 --config
+  zzp/witness.web.json` without its `--safe-insets`. `play start` keeps them for report.md's replay commands
+  (`witness replay --config witness.web.json --device iphone-15-landscape --engine webkit …`; they ran the config's
+  device and engine), `play brief`/`batch` put them on the tester's start line, a playtest's replay head records
+  `launch: {engine, device}` and `witness replay` warns when it replays on another browser. The `--capture` hint,
+  `witness eval --keys` (eval errors, ask, anim), `witness trace … --save` and "see 'witness doctor'" carry them too.
 
 **Adoption steps**
 1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
@@ -200,8 +245,13 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
    now describe the regions (`summary.regions`); `ok` is false when any region is fractional.
 7. *Optional, web builds with a CSS HUD:* run doctor/tests with `--device <phone> --safe-insets` (or
    `launch.safeInsets: true` in the web config) to lay the HUD out with the phone's insets, and `--safe-overlay` on
-   shots to see what the island and corners cover. Re-make old playtest reports' replay commands by hand if they used
-   `--config` (add it).
+   shots to see what the island and corners cover; a page without `viewport-fit=cover` now gets 0 insets, as on the
+   phone (add it to draw under the island). `summary.web.safe.rewritten` counts distinct uses now (smaller for a HUD
+   that sets its style every frame). Re-make old playtest reports' replay commands by hand if they used `--config`
+   or launch flags (add them).
+8. Scripts reading `measure scale` or doctor's pixels line: a UI within a few % of the world's scale and thin UI
+   columns or strips are now their own regions (`ok` false when fractional); a crisp canvas with a second scale inside
+   is no longer `blurry`.
 
 ## 0.7.0 (2026-10-19)
 

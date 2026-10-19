@@ -39,11 +39,17 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
   if (web.safeInsets) {
     const si = await web.safeInfo().catch(() => null);
     const S = web.safeInsets, b = si ? si.bySource : {};
-    safe = { emulated: !!si, preset: S.preset, insets: { top: S.top, right: S.right, bottom: S.bottom, left: S.left }, rewritten: si ? si.rewritten : 0, bySource: si ? si.bySource : null, crossOrigin: si ? si.crossOrigin : 0, overlay: !!web.safeOverlay };
+    const missed = si && si.missed ? si.missed : { count: 0, where: [] }, cover = si ? si.cover !== false : null;
+    safe = { emulated: !!si, preset: S.preset, insets: { top: S.top, right: S.right, bottom: S.bottom, left: S.left }, viewportFitCover: cover, rewritten: si ? si.rewritten : 0, rewrites: si ? si.rewrites ?? null : null, bySource: si ? si.bySource : null, crossOrigin: si ? si.crossOrigin : 0, missed: si ? missed : null, overlay: !!web.safeOverlay };
     if (!si) lines.push(["⚠", "safe areas: --safe-insets was asked for, but the page has no Witness safe-area script (attached page?)"]);
     else {
+      // rewritten: distinct places (a HUD setting the same style every frame is one)
       const where = [b.stylesheet && `${b.stylesheet} in style sheets`, b.inline && `${b.inline} inline`, b.script && `${b.script} set from script`].filter(Boolean).join(", ");
-      lines.push(["✔", `safe areas emulated (--safe-insets, ${S.preset}${S.preset.includes(S.orientation) ? "" : ` ${S.orientation}`}): env(safe-area-inset-*) = ${insetTxt(S)} CSS px; ${si.rewritten ? `${si.rewritten} env() use${si.rewritten > 1 ? "s" : ""} in the page's CSS rewritten (${where})` : "the page's CSS uses no env(safe-area-inset-*): a HUD drawn into the canvas must keep clear by itself"}`]);
+      const uses = `${si.rewritten} env() use${si.rewritten > 1 ? "s" : ""} in the page's CSS rewritten${cover ? "" : " to 0"} (${where})`;
+      const head = `safe areas emulated (--safe-insets, ${S.preset}${S.preset.includes(S.orientation) ? "" : ` ${S.orientation}`})`;
+      if (!cover) lines.push(["⚠", `${head}: the page has no viewport-fit=cover, so env(safe-area-inset-*) is 0, as on the device, where the page is letterboxed inside the safe area (${insetTxt(S)} CSS px; the letterbox isn't emulated here)${si.rewritten ? `; ${uses}` : ""}. To draw under the island and corners: <meta name="viewport" content="…, viewport-fit=cover">`]);
+      else lines.push([missed.count ? "⚠" : "✔", `${head}: env(safe-area-inset-*) = ${insetTxt(S)} CSS px; ${si.rewritten ? uses : missed.count ? "nothing rewritten" : "the page's CSS uses no env(safe-area-inset-*): a HUD drawn into the canvas must keep clear by itself"}`]);
+      if (missed.count) lines.push(["⚠", `${missed.count} env(safe-area-inset-*) use${missed.count > 1 ? "s" : ""} could not be rewritten and ${missed.count > 1 ? "stay" : "stays"} 0 here: ${missed.where.join(", ")}${missed.count > missed.where.length ? ", …" : ""} (set from script in a way Witness doesn't see, e.g. a keyframe's style.paddingLeft = … in Chromium: use style.setProperty)`]);
       if (si.crossOrigin) lines.push(["⚠", `${si.crossOrigin} cross-origin style sheet${si.crossOrigin > 1 ? "s" : ""} couldn't be read: env() in ${si.crossOrigin > 1 ? "them" : "it"} stays 0 here (serve the CSS from the game's origin)`]);
     }
   } else if (preset) lines.push(["", `safe areas are not emulated (env(safe-area-inset-*) is 0 in this page${dev.standalone ? "; on the device a Home Screen web app with viewport-fit=cover gets the insets" : ""}): --safe-insets emulates them (--safe-overlay draws the island and corners on screenshots); check a canvas HUD with \`witness measure ui --safe ${preset}${cfgFlag}\``]);
@@ -78,7 +84,12 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
       // 3% the picture couldn't be read (too few one-pixel details, or chrome around the canvas): no ✔ from it
       const lay = d.scale, rs = runs.scale;
       const agrees = rs[0] != null && rs[1] != null && Math.abs(rs[0] - lay[0]) / lay[0] <= 0.03 && Math.abs(rs[1] - lay[1]) / lay[1] <= 0.03;
-      const blurry = runs.blurry || !!(block && block.blurry);
+      // a k×k cell test that fails is blur only when edges are smeared or soft: crisp art drawn at another scale
+      // inside the canvas (a ×4.11 HUD in a ×4 canvas) mixes cells too, and is read region by region below
+      const cellsMixed = !!(block && block.blurry);
+      const mixed = !exact && !runs.blurry ? media.scaleRegions(img, { region }) : null;
+      const multi = mixed && mixed.groups.length > 1;
+      const blurry = runs.blurry || (cellsMixed && !multi && (runs.softPercent > 10 || runs.smearPercent >= 25));
       pixels = { width: img.width, height: img.height, k: block ? want : null, exact, scale: rs, layoutScale: lay, agrees, fractional: runs.fractional, blurry, softPercent: runs.softPercent, smearPercent: runs.smearPercent };
       const pct = (v) => Math.round((v - Math.floor(v)) * 1000) / 10;
       // the share of game pixels drawn one px wider, exactly, from the layout's scale (nearest-neighbour: its fraction)
@@ -86,8 +97,6 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
       const runTxt = rs[0] == null ? "no scale" : `≈×${rs[0].toFixed(3)}${Math.abs(rs[0] - (rs[1] ?? rs[0])) > 0.002 && rs[1] != null ? ` × ${rs[1].toFixed(3)}` : ""}`;
       // not one clean grid: the picture may hold two scales (a ×5 world under a UI drawn at ×4.11): region by region
       const one = (v) => Math.abs(v - 1) < 0.005;
-      const mixed = !exact && !blurry ? media.scaleRegions(img, { region }) : null;
-      const multi = mixed && mixed.groups.length > 1;
       let mark, what, extra = [];
       if (exact) { mark = "✔"; what = `exact ×${want}: every ${want}×${want} cell is one colour`; }
       else if (blurry) { mark = "⚠"; what = `blurry (${block && block.blurry ? `${block.nonUniformPercent}% of ${want}×${want} cells mixed` : `${runs.smearPercent}% of hard edges smeared over 2+ px, ${runs.softPercent}% of colour changes are soft ramps`})`; }
@@ -95,7 +104,9 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
         const kx = img.width / c.w, ky = img.height / c.h;   // capture px per canvas px
         const names = nameRegions(mixed, scaleLayers(layers, kx, ky));
         const near = (v, l) => v != null && Math.abs(v - l) / l <= 0.03;
-        const at = mixed.groups.findIndex((g) => near(g.scale[0] ?? g.scale[1], lay[0]) && near(g.scale[1] ?? g.scale[0], lay[1]));
+        // an integer layout's region is the one at exactly that whole scale (×4.11 is within 3% of ×4 but isn't it)
+        const at = d.integer ? mixed.groups.findIndex((g) => g.whole && (g.scale[0] ?? g.scale[1]) === want && (g.scale[1] ?? g.scale[0]) === want)
+          : mixed.groups.findIndex((g) => near(g.scale[0] ?? g.scale[1], lay[0]) && near(g.scale[1] ?? g.scale[0], lay[1]));
         const label = (gi) => { const nm = [...new Set(mixed.groups[gi].regions.map((i) => names[i]).filter(Boolean))].join("/"); return nm ? `${nm} (${fmtScale(mixed.groups[gi].scale)})` : fmtScale(mixed.groups[gi].scale); };
         mark = mixed.groups.some((g) => g.fractional) ? "⚠" : "✔";
         what = `${mixed.groups.length} scales in one picture: ${groupsLine(mixed, names)}`;
@@ -104,6 +115,10 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
         else extra.push(`  the layout shows the canvas at ×${lay[0]}: inside it the game draws ${mixed.groups.map((g, gi) => `${label(gi)} = ×${fx((g.scale[0] ?? g.scale[1]) / lay[0], 3)} of its canvas pixels`).join(", ")}`);
         extra.push(...regionLines(mixed, names, "    "));
         Object.assign(pixels, { agrees: at >= 0, mixed: true, layoutRegion: at >= 0 ? at : null, regions: mixed.regions.map((g, i) => ({ name: names[i] || null, rect: g.rect, share: g.share, scale: g.scale, whole: g.whole, fractional: g.fractional, group: g.group })), groups: mixed.groups.map((g) => ({ scale: g.scale, whole: g.whole, fractional: g.fractional, share: g.share })) });
+      } else if (cellsMixed) {
+        // crisp (no smeared or soft edges), one scale, but not one colour per k×k cell: the game draws at a scale of its own
+        mark = "⚠"; what = `not one colour per ${want}×${want} cell (${block.nonUniformPercent}% mixed) though no edge is smeared: the game draws at ${rs[0] == null ? "a scale too sparse to read" : runTxt} inside the ×${want} canvas${runs.fractional ? ` — uneven: one game pixel is ${runs.x.single.join(" or ")} device px` : ""}`;
+        pixels.gameScale = rs;
       } else if (!agrees && one(lay[0]) && one(lay[1]) && rs[0] != null && rs[1] != null && rs[0] > 1.05) {
         // a 1:1 canvas whose game draws its own pixels bigger: nothing to compare, the picture's scale is the game's
         mark = runs.fractional ? "⚠" : "✔";

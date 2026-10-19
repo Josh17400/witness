@@ -31,12 +31,14 @@ export function reportData(s) {
 }
 
 /** report.md: readable, most useful first. `rel` makes paths relative to the project root. */
-export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay", config = null } = {}) {
+export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay", config = null, flags = "" } = {}) {
   // link: paths for markdown links (relative to report.md itself); rel: paths for shell commands (relative to the project);
   // config: the config file the session ran with when it isn't the project's witness.json (witness.web.json): the
   // replay commands must load the same launch (a web build), so they carry --config
   const sh = (p) => (/[\s"'$&|;<>()]/.test(p) ? `"${p.replace(/"/g, '\\"')}"` : p);
   if (config) replayCmd = `${replayCmd} --config ${sh(config)}`;
+  // flags: the launch overrides the session started with (--device iphone-15-landscape --engine webkit): same viewport
+  if (flags) replayCmd += flags;
   const L = [];
   const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped" }[r.outcome] || r.outcome || "in progress";
   L.push(`# Playtest ${r.session}: ${r.game?.name || "game"} — ${outcome}`);

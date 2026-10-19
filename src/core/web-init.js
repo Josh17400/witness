@@ -209,82 +209,199 @@ export function webInit(opts) {
 // Safe-area emulation (--safe-insets / launch.safeInsets): headless engines have no notch, so env(safe-area-inset-*) is
 // 0 there. This rewrites every env(safe-area-inset-top|right|bottom|left[, fallback]) the page's CSS uses to the
 // device's inset in CSS px (the measure ui --safe preset for its orientation): rules in same-origin style sheets
-// (<style>, <link>, @import, constructed sheets; custom properties and shorthands included, through each rule's
-// cssText), inline style attributes, and CSS set from script (insertRule, replace/replaceSync, style.setProperty,
-// style.cssText). Re-applied when the DOM changes and when a sheet loads. Cross-origin sheets can't be read: counted.
+// (<style>, <link>, @import, constructed and adopted sheets, shadow roots; custom properties and shorthands included,
+// through each rule's cssText), inline style attributes, and CSS set from script (insertRule on a sheet or an
+// @media/@supports rule, replace/replaceSync, style.setProperty, style.cssText, style.paddingLeft = …). Re-applied when
+// the DOM changes and when a sheet or @import loads. A page without <meta name=viewport content="…viewport-fit=cover">
+// gets 0, as on the device (iOS keeps such a page inside the safe area). Cross-origin sheets can't be read: counted.
 // Serialized with Function.prototype.toString like webInit: self-contained.
-//   globalThis.__witnessSafe.info() -> { insets: {top, right, bottom, left}, rewritten, bySource: {stylesheet, inline,
-//     script}, crossOrigin, sheets }
+//   globalThis.__witnessSafe.info() -> { insets: {top, right, bottom, left}, cover, rewritten (distinct uses), rewrites
+//     (calls that rewrote: a HUD setting style.cssText every frame counts each), bySource: {stylesheet, inline,
+//     script}, crossOrigin, sheets, missed: {count, where: ["#hud (style sheet)", …]} }
 export function safeInsetsInit(insets) {
   const G = globalThis;
   if (G.__witnessSafe || !G.document) return;
   const px = { top: +insets.top || 0, right: +insets.right || 0, bottom: +insets.bottom || 0, left: +insets.left || 0 };
-  const S = { insets: px, rewritten: 0, bySource: { stylesheet: 0, inline: 0, script: 0 }, crossOrigin: 0, sheets: 0 };
-  // env(safe-area-inset-x) or env(safe-area-inset-x, fallback) with one level of nested parentheses in the fallback
-  const RE = /env\(\s*safe-area-inset-(top|right|bottom|left)\s*(?:,(?:[^()]|\([^()]*\))*)?\)/gi;
-  const rewrite = (text, source) => {
-    if (typeof text !== "string" || !/safe-area-inset/i.test(text)) return text;
-    let n = 0;
-    const out = text.replace(RE, (_, side) => { n++; return `${px[side.toLowerCase()]}px`; });
-    if (n) { S.rewritten += n; S.bySource[source] += n; }
+  const S = { insets: px, rewritten: 0, rewrites: 0, bySource: { stylesheet: 0, inline: 0, script: 0 }, crossOrigin: 0, sheets: 0 };
+  // viewport-fit=cover: without it iOS lays the page out inside the safe area and env(safe-area-inset-*) is 0
+  const cover = () => {
+    const m = G.document.querySelector && G.document.querySelector('meta[name="viewport" i]');
+    return !!m && /viewport-fit\s*=\s*cover/i.test(m.getAttribute("content") || "");
+  };
+  const has = (t) => typeof t === "string" && t.toLowerCase().indexOf("safe-area-inset") >= 0;
+  const ENV = /env\(\s*safe-area-inset-(top|right|bottom|left)\b/gi;
+  // every env(safe-area-inset-x[, fallback]) with its fallback's parentheses balanced (any depth: var(--x, calc(…)))
+  const replaceEnv = (text, use) => {
+    let out = "", last = 0, m;
+    ENV.lastIndex = 0;
+    while ((m = ENV.exec(text))) {
+      let depth = 0, i = m.index + 3;
+      for (; i < text.length; i++) { const ch = text[i]; if (ch === "(") depth++; else if (ch === ")" && --depth === 0) break; }
+      if (i >= text.length) break;   // unbalanced: left as it is
+      out += text.slice(last, m.index) + use(m[1].toLowerCase(), m.index);
+      last = i + 1;
+      ENV.lastIndex = last;
+    }
+    return out + text.slice(last);
+  };
+  // a use's place in a text: the selector (when the text is a rule) and the property it is in
+  const placeOf = (text, at) => {
+    const before = text.slice(0, at), open = before.lastIndexOf("{");
+    const prop = before.slice(Math.max(before.lastIndexOf(";"), open) + 1).split(":")[0].trim().toLowerCase();
+    const sel = open >= 0 ? before.slice(before.lastIndexOf("}", open) + 1, open).trim() : "";
+    return `${sel}|${prop}`;
+  };
+  // uses are counted once per place: target (a style declaration, a sheet or a rule) + selector + property (+ the
+  // n-th env() in it); a HUD that sets the same style every frame is one use
+  const uses = new WeakMap();
+  const rewrite = (text, source, target, prop = "") => {
+    if (!has(text)) return text;
+    const zero = !cover(), keys = [], nth = new Map();
+    const out = replaceEnv(text, (side, at) => {
+      const k = prop ? `|${prop}` : placeOf(text, at);
+      nth.set(k, (nth.get(k) || 0) + 1);
+      keys.push(`${k}#${nth.get(k)}`);
+      return `${zero ? 0 : px[side]}px`;
+    });
+    if (keys.length) {
+      S.rewrites += keys.length;
+      let set = target ? uses.get(target) : null;
+      if (target && !set) uses.set(target, (set = new Set()));
+      for (const k of keys) { if (set) { if (set.has(k)) continue; set.add(k); } S.rewritten++; S.bySource[source]++; }
+    }
     return out;
   };
+  const SR = G.CSSStyleRule && G.CSSStyleRule.prototype, sd = SR && Object.getOwnPropertyDescriptor(SR, "style");
   const seenSheets = new WeakSet(), crossSheets = new WeakSet();
+  const isImport = (r) => "styleSheet" in r && "href" in r && !("selectorText" in r);
+  let pending = false;
+  // a sheet is done once walked with every @import in it loaded (until then it is walked again: an import still
+  // loading has no rules yet); script changes to a done sheet are rewritten as they come in
   const walk = (rules) => {
+    let done = true;
     for (const r of Array.from(rules || [])) {
-      if (r.style && /safe-area-inset/i.test(r.style.cssText)) { const t = rewrite(r.style.cssText, "stylesheet"); try { r.style.cssText = t; } catch { /* read-only */ } }
-      if (r.styleSheet) sheet(r.styleSheet);   // @import
-      if (r.cssRules) walk(r.cssRules);         // @media, @supports, @layer, nesting
+      const st = sd && sd.get && r instanceof G.CSSStyleRule ? sd.get.call(r) : r.style;   // the declaration itself, not its wrapper (below)
+      if (st && has(st.cssText)) { const t = rewrite(st.cssText, "stylesheet", st); try { st.cssText = t; } catch { /* read-only */ } }
+      if (isImport(r)) { if (!r.styleSheet || !sheet(r.styleSheet, true)) done = false; }
+      if (r.cssRules) done = walk(r.cssRules) && done;   // @media, @supports, @layer, nesting
     }
+    return done;
   };
-  // a sheet is walked once (a <style> whose text changes is a new sheet; script changes to a sheet are rewritten as
-  // they come in)
-  const sheet = (sh) => {
-    if (seenSheets.has(sh) || crossSheets.has(sh)) return;
+  const sheet = (sh, imported = false) => {
+    if (seenSheets.has(sh) || crossSheets.has(sh)) return true;
     let rules;
-    try { rules = sh.cssRules; } catch { crossSheets.add(sh); S.crossOrigin++; return; }
-    if (rules == null) return;   // still loading
+    try { rules = sh.cssRules; } catch { crossSheets.add(sh); S.crossOrigin++; return true; }
+    if (rules == null || (imported && !rules.length)) { pending = true; return false; }   // still loading
+    if (!walk(rules)) { pending = true; return false; }
     seenSheets.add(sh);
     S.sheets++;
-    walk(rules);
+    return true;
   };
   const inline = (el) => {
     const v = el.getAttribute && el.getAttribute("style");
-    if (v && /safe-area-inset/i.test(v)) el.setAttribute("style", rewrite(v, "inline"));
+    if (has(v)) el.setAttribute("style", rewrite(v, "inline", el.style));
   };
+  // shadow roots (open or closed: attachShadow is watched; declarative ones are found on their hosts)
+  const roots = new Set();
+  const OBS = { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["style"] };
+  let observer = null;
+  const watchRoot = (root) => { if (!root || roots.has(root)) return; roots.add(root); if (observer) observer.observe(root, OBS); };
+  const scopes = () => [G.document, ...roots];
+  let retries = 0;
   const scan = (els) => {
-    const d = G.document;
-    for (const sh of Array.from(d.styleSheets || [])) sheet(sh);
-    for (const sh of Array.from(d.adoptedStyleSheets || [])) sheet(sh);
-    for (const el of els || Array.from(d.querySelectorAll ? d.querySelectorAll("[style]") : [])) inline(el);
+    pending = false;
+    for (const d of scopes()) {
+      for (const sh of Array.from(d.styleSheets || [])) sheet(sh);
+      for (const sh of Array.from(d.adoptedStyleSheets || [])) sheet(sh);
+    }
+    const look = (el) => { if (el.shadowRoot) watchRoot(el.shadowRoot); if (el.hasAttribute && el.hasAttribute("style")) inline(el); };
+    if (!els) { for (const d of scopes()) for (const el of Array.from(d.querySelectorAll ? d.querySelectorAll("*") : [])) look(el); }
+    else for (const el of els) look(el);
+    // an @import still loading: look again shortly (its load event doesn't reach the document in every engine)
+    if (pending && retries++ < 400) setTimeout(() => scan([]), 25);
+    else if (!pending) retries = 0;
   };
   // CSS set from script: rewritten on the way in
   const P = G.CSSStyleSheet && G.CSSStyleSheet.prototype;
   if (P) {
     const ins = P.insertRule;
-    if (ins) P.insertRule = function (rule, ...a) { return ins.call(this, rewrite(rule, "script"), ...a); };
+    if (ins) P.insertRule = function (rule, ...a) { return ins.call(this, rewrite(rule, "script", this), ...a); };
     const rep = P.replace, repS = P.replaceSync;
-    if (rep) P.replace = function (t) { return rep.call(this, rewrite(t, "script")); };
-    if (repS) P.replaceSync = function (t) { return repS.call(this, rewrite(t, "script")); };
+    if (rep) P.replace = function (t) { return rep.call(this, rewrite(t, "script", this)); };
+    if (repS) P.replaceSync = function (t) { return repS.call(this, rewrite(t, "script", this)); };
   }
-  const D = G.CSSStyleDeclaration && G.CSSStyleDeclaration.prototype;
-  if (D) {
-    const setP = D.setProperty;
-    D.setProperty = function (k, v, ...a) { return setP.call(this, k, rewrite(v, "script"), ...a); };
-    const ct = Object.getOwnPropertyDescriptor(D, "cssText");
-    if (ct && ct.set) Object.defineProperty(D, "cssText", { configurable: true, get: ct.get, set(v) { ct.set.call(this, rewrite(v, "script")); } });
+  const GR = G.CSSGroupingRule && G.CSSGroupingRule.prototype;   // @media / @supports / @layer blocks
+  if (GR && GR.insertRule) { const gins = GR.insertRule; GR.insertRule = function (rule, ...a) { return gins.call(this, rewrite(rule, "script", this), ...a); }; }
+  const patched = new Set();
+  for (const C of [G.CSSStyleDeclaration, G.CSSStyleProperties, G.CSS2Properties]) {
+    const D = C && C.prototype;
+    if (!D || patched.has(D)) continue;
+    patched.add(D);
+    if (Object.prototype.hasOwnProperty.call(D, "setProperty")) {
+      const setP = D.setProperty;
+      D.setProperty = function (k, v, ...a) { return setP.call(this, k, rewrite(v, "script", this, String(k).toLowerCase()), ...a); };
+    }
+    // style.cssText = … and the named properties (style.paddingLeft = …, style["padding-left"] = …)
+    for (const name of Object.getOwnPropertyNames(D)) {
+      const d = Object.getOwnPropertyDescriptor(D, name);
+      if (!d || !d.set || !d.configurable || name === "parentRule" || name === "length") continue;
+      const prop = name === "cssText" ? "" : name.includes("-") ? name : name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`).replace(/^webkit-/, "-webkit-");
+      Object.defineProperty(D, name, { configurable: true, enumerable: d.enumerable, get: d.get, set(v) { d.set.call(this, typeof v === "string" ? rewrite(v, "script", this, prop) : v); } });
+    }
   }
-  // only what changed: elements whose style attribute was set, added subtrees, and sheets not seen yet
-  new G.MutationObserver((records) => {
+  // an engine whose named properties aren't accessors (Chromium: an interceptor on each declaration) can't be patched
+  // above: a style rule's declaration is handed out wrapped (one wrapper per declaration), its sets rewritten. An
+  // element's style needs none (a set changes its style attribute, which the observer sees)
+  const accessors = [G.CSSStyleDeclaration, G.CSSStyleProperties].some((C) => C && C.prototype && Object.getOwnPropertyDescriptor(C.prototype, "paddingLeft"));
+  if (sd && sd.get && sd.configurable && !accessors && G.Proxy) {
+    const wrapped = new WeakMap();
+    const kebab = (k) => (k.includes("-") ? k : k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`).replace(/^webkit-/, "-webkit-"));
+    Object.defineProperty(SR, "style", { configurable: true, enumerable: sd.enumerable, set: sd.set, get() {
+      const decl = sd.get.call(this);
+      if (!decl || typeof decl !== "object") return decl;
+      let w = wrapped.get(decl);
+      if (!w) {
+        w = new G.Proxy(decl, {
+          get: (t, k) => { const v = t[k]; return typeof v === "function" ? v.bind(t) : v; },
+          set: (t, k, v) => { t[k] = typeof k === "string" && typeof v === "string" ? rewrite(v, "script", t, k === "cssText" ? "" : kebab(k)) : v; return true; },
+        });
+        wrapped.set(decl, w);
+      }
+      return w;
+    } });
+  }
+  const AS = G.Element && G.Element.prototype.attachShadow;
+  if (AS) G.Element.prototype.attachShadow = function (...a) { const r = AS.apply(this, a); watchRoot(r); return r; };
+  // only what changed: elements whose style attribute was set, added subtrees, and sheets not done yet
+  observer = new G.MutationObserver((records) => {
     const els = [];
     for (const r of records) {
       if (r.type === "attributes") els.push(r.target);
-      else for (const n of Array.from(r.addedNodes || [])) if (n.nodeType === 1) { els.push(n); if (n.querySelectorAll) els.push(...n.querySelectorAll("[style]")); }
+      else for (const n of Array.from(r.addedNodes || [])) if (n.nodeType === 1) { els.push(n); if (n.querySelectorAll) els.push(...n.querySelectorAll("*")); }
     }
     scan(els);
-  }).observe(G.document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["style"] });
+  });
+  observer.observe(G.document, OBS);
+  for (const r of roots) observer.observe(r, OBS);
   G.document.addEventListener("load", () => scan([]), true);   // a <link> sheet finished loading
   G.document.addEventListener("DOMContentLoaded", () => scan());
-  S.info = () => { scan([]); return { insets: S.insets, rewritten: S.rewritten, bySource: { ...S.bySource }, crossOrigin: S.crossOrigin, sheets: S.sheets }; };
+  // what is still there: env(safe-area-inset-*) left in a readable rule or a style attribute (nothing rewrote it)
+  const leftovers = () => {
+    const where = [];
+    const look = (rules, what) => {
+      for (const r of Array.from(rules || [])) {
+        if (r.style && has(r.style.cssText)) where.push(`${r.selectorText || (r.keyText ? `@keyframes ${r.parentRule && r.parentRule.name ? `${r.parentRule.name} ` : ""}${r.keyText}` : "a rule")} (${what})`);
+        if (isImport(r) && r.styleSheet) { try { look(r.styleSheet.cssRules, `@import ${String(r.href).replace(/^.*\//, "")}`); } catch { /* cross-origin */ } }
+        if (r.cssRules) look(r.cssRules, what);
+      }
+    };
+    for (const d of scopes()) {
+      const sh = d !== G.document ? " in a shadow root" : "";
+      for (const s of [...Array.from(d.styleSheets || []), ...Array.from(d.adoptedStyleSheets || [])]) { try { look(s.cssRules, `${s.href ? s.href.replace(/^.*\//, "") : "style sheet"}${sh}`); } catch { /* cross-origin */ } }
+      for (const el of Array.from(d.querySelectorAll ? d.querySelectorAll("[style]") : [])) if (has(el.getAttribute("style"))) where.push(`${el.id ? `#${el.id}` : el.tagName.toLowerCase()} (inline${sh})`);
+    }
+    return { count: where.length, where: where.slice(0, 5) };
+  };
+  S.info = () => { scan(); return { insets: S.insets, cover: cover(), rewritten: S.rewritten, rewrites: S.rewrites, bySource: { ...S.bySource }, crossOrigin: S.crossOrigin, sheets: S.sheets, missed: leftovers() }; };
   G.__witnessSafe = S;
 }

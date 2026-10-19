@@ -1,5 +1,6 @@
 // Witness core: the TCP/WebSocket server an adapter connects to, and a Session that sends
 // protocol commands (docs/PROTOCOL.md) and matches replies by id.
+import { hint } from "./expr.js";
 import net from "node:net";
 import crypto from "node:crypto";
 
@@ -25,7 +26,7 @@ export function listen({ host = "127.0.0.1", port = 0 } = {}) {
         /** Wait for the next adapter connection (and its hello). */
         nextSession(timeoutMs = 30000) {
           return new Promise((res, rej) => {
-            const timer = setTimeout(() => rej(new WitnessError(`no game connected within ${timeoutMs / 1000}s — is the Witness adapter wired in, and does the game read WITNESS_ADDR? (see 'witness doctor')`)), timeoutMs);
+            const timer = setTimeout(() => rej(new WitnessError(`no game connected within ${timeoutMs / 1000}s — is the Witness adapter wired in, and does the game read WITNESS_ADDR? (see 'witness doctor${hint.flags}')`)), timeoutMs);
             const take = (s) => s.helloP.then((h) => { clearTimeout(timer); res(s); }, (e) => { clearTimeout(timer); rej(e); });
             const s = ready.shift();
             if (s) take(s); else waiting.push(take);

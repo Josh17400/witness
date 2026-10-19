@@ -273,12 +273,23 @@ else {
   ok("safe page without --safe-insets: env() is 0 (the HUD sits under the island)", st.hudLeft === "0px" && st.barHeight === "20px" && st.safe === null, st);
   st = safeState(["--safe-insets"]);
   ok("--safe-insets, landscape: <style> padding 59px, @media right 59px, <link> custom property 21px and calc() 41px, max() 59px, inline 59px, insertRule 21px", st.hudLeft === "59px" && st.hudTop === "0px" && st.cornerRight === "59px" && st.sab === "21px" && st.barHeight === "41px" && st.barPadRight === "59px" && st.inlLeft === "59px" && st.jsPad === "21px", st);
-  ok("--safe-insets counts 8 env() uses: 5 in style sheets, 2 inline (one added later), 1 from script", st.safe && st.safe.rewritten === 8 && st.safe.bySource.stylesheet === 5 && st.safe.bySource.inline === 2 && st.safe.bySource.script === 1 && st.safe.crossOrigin === 0, st.safe);
+  const left59 = (s) => ["impLeft", "imp2Left", "nestLeft", "grpLeft", "namedLeft", "frameLeft", "shLeft"].every((k) => s[k] === "59px");
+  ok("--safe-insets: @import (also from a <style> added by script), a 2-level fallback, insertRule into @media, rule.style.paddingLeft =, style.cssText every frame, a shadow root's <style>: all 59px", left59(st), st);
+  ok("--safe-insets counts 15 distinct env() uses (the every-frame cssText once): 9 in style sheets, 2 inline (one added later), 4 from script; nothing missed; viewport-fit=cover", st.safe && st.safe.rewritten === 15 && st.safe.bySource.stylesheet === 9 && st.safe.bySource.inline === 2 && st.safe.bySource.script === 4 && st.safe.crossOrigin === 0 && st.safe.missed.count === 0 && st.safe.cover === true, st.safe);
   st = safeState(["--safe-insets", "--device", "iphone-15"]);
   ok("--safe-insets, portrait: top 59 (the fallback in env(..., 7px) unused), bottom 34, a later element's inline style 59px", st.hudTop === "59px" && st.hudLeft === "0px" && st.sab === "34px" && st.lateTop === "59px", st);
   r = witness(P("safe"), ["doctor", "--time", "0.5", "--safe-insets", "--json"], env);
   j = json(r);
-  ok("doctor --safe-insets: says the insets were emulated and how many env() uses were rewritten", j && j.summary.web.safe && j.summary.web.safe.emulated && j.summary.web.safe.rewritten === 8 && /✔ safe areas emulated \(--safe-insets, iphone-landscape\): env\(safe-area-inset-\*\) = right 59 · bottom 21 · left 59 CSS px; 8 env\(\) uses in the page's CSS rewritten \(5 in style sheets, 2 inline, 1 set from script\)/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
+  ok("doctor --safe-insets: says the insets were emulated and how many distinct env() uses were rewritten (15, not one per frame)", j && j.summary.web.safe && j.summary.web.safe.emulated && j.summary.web.safe.rewritten === 15 && j.summary.web.safe.rewrites > 15 && j.summary.web.safe.viewportFitCover === true && j.summary.web.safe.missed.count === 0 && /✔ safe areas emulated \(--safe-insets, iphone-landscape\): env\(safe-area-inset-\*\) = right 59 · bottom 21 · left 59 CSS px; 15 env\(\) uses in the page's CSS rewritten \(9 in style sheets, 2 inline, 4 set from script\)/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
+  ok("doctor --safe-insets: printed follow-up commands keep --safe-insets", j && /witness test --repeat 2 --safe-insets/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  // the same page without viewport-fit=cover (and a keyframe set by name from script, which Chromium can't rewrite)
+  st = (() => { const e = witness(P("safe-nocover"), ["eval", "--at", "0.5", "state", "--json", "--safe-insets"], env); const v = json(e); return v ? v.data.rows[0].values.state : { err: e.stdout + e.stderr }; })();
+  ok("no viewport-fit=cover: env() is 0 with --safe-insets too, as on the device", st.hudLeft === "0px" && st.barHeight === "20px" && st.impLeft === "0px" && st.safe && st.safe.cover === false && st.safe.rewritten === 15, st);
+  r = witness(P("safe-nocover"), ["doctor", "--time", "0.5", "--safe-insets", "--json"], env);
+  j = json(r);
+  const nc = j ? j.data.lines.join("\n") : r.stdout + r.stderr;
+  ok("doctor: no viewport-fit=cover is ⚠ (0 as on the device, letterboxed there), never ✔ emulated", j && j.summary.web.safe.viewportFitCover === false && /⚠ safe areas emulated \(--safe-insets, iphone-landscape\): the page has no viewport-fit=cover, so env\(safe-area-inset-\*\) is 0, as on the device, where the page is letterboxed inside the safe area/.test(nc) && /15 env\(\) uses in the page's CSS rewritten to 0/.test(nc) && !/✔ safe areas/.test(nc), nc);
+  ok("doctor: a use Witness couldn't rewrite is ⚠ with where it is", j && j.summary.web.safe.missed.count === 1 && /⚠ 1 env\(safe-area-inset-\*\) use could not be rewritten and stays 0 here: @keyframes pulse 0% \(style sheet\)/.test(nc), nc);
   r = witness(P("safe"), ["doctor", "--time", "0.5", "--json"], env);
   j = json(r);
   ok("doctor without it: not emulated, and names --safe-insets", j && !j.summary.web.safe && /safe areas are not emulated.*--safe-insets emulates them/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
@@ -315,12 +326,12 @@ else {
     j = json(r);
     ok("webgl in webkit (Windows build): WebGL 2 renders; the renderer is WebKit's generic \"Apple GPU\"", j && j.ok && j.summary.web.webgl.webgl2 === true && j.summary.web.webgl.renderer === "Apple GPU" && j.summary.web.webgl.canvasContext === "webgl2" && /WebKit's generic name/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
     st = safeState(["--safe-insets", "--engine", "webkit"]);
-    ok("--safe-insets in webkit: the same 8 rewrites and values (59px left, 41px bar, 21px var)", st.hudLeft === "59px" && st.barHeight === "41px" && st.sab === "21px" && st.inlLeft === "59px" && st.jsPad === "21px" && st.safe && st.safe.rewritten === 8, st);
+    ok("--safe-insets in webkit: the same 15 rewrites and values (59px left, 41px bar, 21px var, @import, shadow root, …)", st.hudLeft === "59px" && st.barHeight === "41px" && st.sab === "21px" && st.inlLeft === "59px" && st.jsPad === "21px" && left59(st) && st.safe && st.safe.rewritten === 15 && st.safe.missed.count === 0, st);
     r = witness(P("bridge"), ["test", "--engine", "webkit", "--device", "iphone-15", "--no-auto-unlock"], env);
     ok("shim page in webkit: test passes", r.status === 0 && /2 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
   }
   for (const d of shots) fs.rmSync(d, { recursive: true, force: true });
-  for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "mixed"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
+  for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "safe-nocover", "mixed"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);

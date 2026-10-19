@@ -77,6 +77,48 @@ ok("keyPaths", keyPaths(snap.state).some((k) => k.startsWith("state.player.hp"))
   ok("webglReport: SwiftShader is named software", c.lines[0][0] === "✔" && c.summary.software === true && /software: slower/.test(c.lines[0][1]), c.lines);
 }
 
+// ---- doctor's pixels-on-screen line: a crisp integer-scaled canvas the game draws two scales into isn't "blurry"
+{
+  const { displayReport } = await import("../src/cli/web.js");
+  const media = await import("../src/media/index.js");
+  const hash = (x, y, s) => { let n = Math.imul(x + 1, 374761393) ^ Math.imul(y + 7, 668265263) ^ Math.imul(s + 3, 2246822519); n = Math.imul(n ^ (n >>> 13), 1274126177); return (n ^ (n >>> 16)) >>> 0; };
+  const P = [[20, 24, 46], [230, 57, 70], [241, 250, 238], [168, 218, 220], [69, 123, 157], [255, 183, 3]], Q = [[250, 250, 250], [40, 40, 60], [200, 160, 40], [90, 200, 120]];
+  // a 1000×600 capture: world at ×k, rows y ≥ 473 a UI at ×f (both from the origin); blur: a 3×3 box blur over it
+  const pic = (k, f, blur = false, split = 473) => {
+    const W = 1000, H = 600, d = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = y >= split ? Q[hash(Math.floor(x / f), Math.floor(y / f), 5) % 4] : P[hash(Math.floor(x / k), Math.floor(y / k), 2) % 6]; d.set([...c, 255], (y * W + x) * 4); }
+    if (!blur) return media.encodePNG(W, H, d);
+    const o = Uint8Array.from(d);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) for (let ch = 0; ch < 3; ch++) { let s = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += d[((y + dy) * W + x + dx) * 4 + ch]; o[(y * W + x) * 4 + ch] = Math.round(s / 9); }
+    return media.encodePNG(W, H, o);
+  };
+  // canvas cw×ch shown at 500×300 CSS px, DPR 2, pixelated: exactly ×(1000 / cw)
+  const doc = async (cw, ch, png) => (await displayReport({ engine: "chromium", device: null, info: async () => ({ viewport: [800, 600], dpr: 2, canvases: [{ id: "game", w: cw, h: ch, rect: [0, 0, 500, 300], imageRendering: "pixelated" }] }), capture: async () => ({ png }) }, media));
+  const line = (r) => r.lines.find((l) => /^pixels on screen/.test(l[1])) || [];
+  const a = await doc(250, 150, pic(4, 4.11));
+  ok("doctor: ×4 canvas, ×4 world + ×4.11 UI: 2 scales, not blurry; the layout's ×4 is the ×4 region's", line(a)[0] === "⚠" && /2 scales in one picture: ×4 \(whole, 78\.8% of the picture\) · ×4\.11 \(fractional, 21\.2%\)/.test(line(a)[1]) && a.lines.some((l) => /the layout's ×4 is the ×4 region's; the ×4\.11 region is drawn by the game at a scale of its own/.test(l[1])) && !a.display.pixels.blurry && a.display.pixels.mixed && a.display.pixels.layoutRegion === 0, a.lines);
+  const b = await doc(500, 300, pic(2, 4.11));
+  ok("doctor: ×2 canvas, ×2 world + ×4.11 UI: 2 scales (was blurry, 6.39% of 2×2 cells mixed)", /2 scales in one picture: ×2 .* · ×4\.11 /.test(line(b)[1]) && !b.display.pixels.blurry && b.display.pixels.layoutRegion === 0, b.lines);
+  const c = await doc(250, 150, pic(5, 4.11));
+  ok("doctor: ×4 canvas, ×5 world + ×4.11 UI: neither region is the layout's (×4.11 isn't ×4)", /2 scales in one picture/.test(line(c)[1]) && c.lines.some((l) => /the layout shows the canvas at ×4: inside it the game draws ×5 = ×1\.25 of its canvas pixels, ×4\.11 = ×1\.028/.test(l[1])) && c.display.pixels.agrees === false, c.lines);
+  const e = await doc(250, 150, pic(4, 4, false, 472));
+  ok("doctor: one clean ×4 grid is still exact", line(e)[0] === "✔" && /exact ×4/.test(line(e)[1]), e.lines);
+  const f = await doc(250, 150, pic(4, 4, true, 472));
+  ok("doctor: a blurred ×4 picture is still blurry", line(f)[0] === "⚠" && /blurry/.test(line(f)[1]) && f.display.pixels.blurry, f.lines);
+}
+
+// ---- printed follow-up commands: the same config and the same launch overrides
+{
+  const { configFlag } = await import("../src/cli/common.js");
+  ok("configFlag: --config plus the launch overrides that were passed", configFlag({ config: "zzp/witness.web.json", "safe-insets": true }) === " --config zzp/witness.web.json --safe-insets" && configFlag({ device: "iphone-15", engine: "webkit", capture: "element", "no-auto-unlock": true }) === " --device iphone-15 --engine webkit --capture element --no-auto-unlock" && configFlag({ config: "my dir/w.json" }) === ' --config "my dir/w.json"' && configFlag({}) === "", configFlag({ config: "zzp/witness.web.json", "safe-insets": true }));
+  const { hint } = await import("../src/core/expr.js");
+  hint.flags = " --config w.web.json";
+  let msg = "";
+  try { evaluate("state.nope.x", snap); } catch (e) { msg = e.message; }
+  hint.flags = "";
+  ok("expression errors name 'witness eval --keys' with the same config", /witness eval --keys --config w\.web\.json/.test(msg), msg);
+}
+
 // ---- chart v2 helpers: comparing two runs, positions, conventions
 {
   const c = compareSeries([0, 1, 2, 3], [1, 2, 3, 4], [1, 2, 5, 3]);

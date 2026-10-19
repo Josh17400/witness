@@ -187,6 +187,20 @@ ok("observation shows hp, goal, near, map, orders", /hp 10\/10/.test(txt) && /go
 ok("observation stays small", txt.length < 2400, txt.length);
 const br = makeBrief({ cli: 'node "C:/w/bin/witness.js"', configDir: "C:/game", name: "t7", goal: "win", persona: "breaker", minutes: 3, model: "haiku" });
 ok("brief has the exact commands", br.includes('node "C:/w/bin/witness.js" play start --name t7 --config "C:/game" --goal "win" --persona breaker --model haiku') && br.includes("play end -s t7") === false && br.includes('./t7 end --fun') && br.includes('./t7 "<orders>"') && /bug hunter/.test(br));
+// launch overrides (--device/--engine/…) reach the tester's start line and report.md's replay commands
+{
+  const { launchFlags } = await import("../../src/cli/common.js");
+  const { reportMarkdown } = await import("../../src/play/report.js");
+  const fl = launchFlags({ device: "iphone-15-landscape", engine: "webkit", "safe-insets": true, config: "witness.web.json" });
+  ok("launchFlags: the launch overrides only", fl === " --device iphone-15-landscape --engine webkit --safe-insets", fl);
+  const bl = makeBrief({ cli: "witness", configDir: "C:/game/witness.web.json", name: "t8", launch: fl });
+  ok("brief: the start line carries the launch overrides", bl.includes('play start --name t8 --config "C:/game/witness.web.json" --device iphone-15-landscape --engine webkit --safe-insets'), bl.slice(0, 600));
+  const rep = { session: "t1", outcome: "ended", seed: 1, frames: 60, gameSeconds: 1, wallSeconds: 2, stats: { orders: 0, ordersFailed: 0 }, replay: { file: "witness/playtests/t1/replay.jsonl" }, notes: [{ frame: 30, t: 0.5, text: "a coin" }], timeline: [], orders: [], errors: [], shots: [], deaths: [], dialogues: [], fights: [], stuck: [] };
+  const md = reportMarkdown(rep, { config: "witness.web.json", flags: fl }).split("\n").filter((l) => l.startsWith("witness replay"));
+  ok("report.md: replay commands carry --config and the launch overrides", md.length === 2 && md.every((l) => l.startsWith("witness replay --config witness.web.json --device iphone-15-landscape --engine webkit --safe-insets witness/playtests/t1/replay.jsonl")), md);
+  const rec = new ReplayRecorder({ launch: { engine: "webkit", device: "iphone-15-landscape" } });
+  ok("replay head records the browser it ran in", JSON.parse(rec.text(1).split("\n")[0]).launch.device === "iphone-15-landscape");
+}
 ok("util compass/editDistance/singular", compass([1, -1]) === "NE" && compass([0, 1]) === "S" && editDistance("atack", "attack") === 1 && singular("wolves") === "wolf" && singular("enemies") === "enemy");
 
 // ---- the autopilot in a simulated top-down world (no game process)

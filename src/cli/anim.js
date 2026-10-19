@@ -7,7 +7,7 @@ import path from "node:path";
 import { begin, stepTo } from "../core/runner.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { analyzeAnim } from "../core/anim.js";
-import { evaluate } from "../core/expr.js";
+import { evaluate, hint } from "../core/expr.js";
 import { parseRect } from "./see.js";
 import { die, withGame, gamePixels, runOpts, media, printLogs, framesOf, shotImage, envelope, emit, fmtT } from "./common.js";
 
@@ -63,7 +63,7 @@ async function stateAnim(opt) {
     const sample = await sampleExprs(s, st, [expr], frameGrid(f0, f1, 1));
     printLogs(await s.drainLogs());
     if (sample.errors[0] && sample.errors[0].count === sample.frames.length) die(`--of ${expr}: ${sample.errors[0].message}`);
-    if (sample.missing[0] === sample.frames.length) die(`--of ${expr}: undefined on every frame (f${f0}..f${f1}): check the path with 'witness eval --keys'`);
+    if (sample.missing[0] === sample.frames.length) die(`--of ${expr}: undefined on every frame (f${f0}..f${f1}): check the path with 'witness eval --keys${hint.flags}'`);
     const labels = sample.values[0].map((v) => (v == null ? null : typeof v === "object" ? JSON.stringify(v) : v));
     const a = analyzeAnim(labels, sample.frames);
     const f = formatAnim(a, { fps, what: expr, first: f0, last: f1 });
@@ -88,7 +88,7 @@ async function boxAnim(files, opt) {
   } else {
     await withGame(opt, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-      gamePixels(s, "measure anim --region / --follow");
+      gamePixels(s, "measure anim --region / --follow", opt);
       fps = s.fps;
       f0 = framesOf(opt.at !== undefined && opt.at !== true ? String(opt.at) : opt.from !== undefined && opt.from !== true ? String(opt.from) : "0", fps);
       const f1 = f0 + framesOf(opt.time && opt.time !== true ? String(opt.time) : "2", fps);

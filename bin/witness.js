@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_NAME } from "../src/core/launch.js";
 import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay } from "../src/core/runner.js";
-import { evaluate, fmt, keyPaths, ExprError, usesPrev } from "../src/core/expr.js";
+import { evaluate, fmt, keyPaths, ExprError, usesPrev, hint } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
 import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
 import { prune, pruneRegistry, fmtBytes } from "../src/core/clean.js";
@@ -59,7 +59,7 @@ Common options:
   Browser games (launch.url): --device iphone-15|iphone-15-safari|iphone-15-pro-max|iphone-se|ipad[-landscape]
   (viewport, DPR, touch, mobile, user agent, platform, 5 touch points, portrait screen size) · --safe-insets
   (launch.safeInsets): the page's env(safe-area-inset-*) rewritten to the device's insets (iPhone 15 portrait top 59 /
-  bottom 34, landscape left/right 59 / bottom 21 CSS px; a Safari tab 0) · --safe-overlay (launch.safeOverlay): the
+  bottom 34, landscape left/right 59 / bottom 21 CSS px; a Safari tab 0; 0 without viewport-fit=cover) · --safe-overlay (launch.safeOverlay): the
   island, home indicator and rounded corners drawn over screenshots after capture · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a
   tap) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
   dom:tap:x,y@t / dom:click / dom:key:space (real browser input) · expressions web.audio.state, web.dpr
@@ -337,8 +337,8 @@ const CMD_HELP = {
   uneven pixels and the exact share drawn wider, or smoothing blur, from the layout; the capture at device pixels
   confirms it, or says it couldn't be read; a picture with two scales, e.g. a ×5 world under a ×4.11 UI layer, is
   read region by region, named from state.layers [{name, rect}] or state.ui, and compared with the layout region that
-  matches it; --scale-rect reads rects in canvas px one by one); with --safe-insets whether the insets were emulated
-  and how many env() uses were rewritten; WebGL 1/2 in the engine, its renderer (SwiftShader = software) and the
+  matches it; --scale-rect reads rects in canvas px one by one); with --safe-insets whether the insets were emulated,
+  how many env() uses were rewritten (distinct places), ⚠ any it couldn't rewrite and a page without viewport-fit=cover; WebGL 1/2 in the engine, its renderer (SwiftShader = software) and the
   context the game's canvas draws with; the AudioContexts and the audio policy. With
   --no-auto-unlock it first checks the iPhone unlock: audio suspended at start, then a tap at the canvas centre, a
   click, space and enter, and which one resumed it (or ⚠ it stayed suspended: silent on iPhone; or ⚠ no AudioContext
@@ -541,6 +541,12 @@ const commands = {
     await withGame(opt, async (s, cfg, root) => {
       const r = loadReplay(resolveReplay(pos[0] || "last", cfg, root));
       console.log(`▶ replay ${path.basename(r.file)}: ${r.frames} frames, ${fmtT(r.duration)}, seed ${r.seed}${r.marks.length ? `, marks: ${r.marks.map((m) => `${m.label}@${fmtT(m.t)}`).join(" ")}` : ""}`);
+      // a playtest records the browser it ran in: another device means another viewport (touch points, layout)
+      if (r.launch && s.web) {
+        const now = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null };
+        const txt = (l) => `${l.engine} · ${l.device || "desktop"}`;
+        if (now.engine !== r.launch.engine || now.device !== r.launch.device) console.log(`⚠ recorded on ${txt(r.launch)}, replaying on ${txt(now)}: the viewport differs (touch coordinates, layout); add${r.launch.device ? ` --device ${r.launch.device}` : " --device none"} --engine ${r.launch.engine}`);
+      }
       const st = await begin(s, { replay: r });
       const frames = opt.at ? timeList(opt.at, []).map((t) => framesOf(t, s.fps, r.dts)) : [...r.marks.map((m) => m.frame), r.frames];
       const watch = opt.watch ? splitTop(String(opt.watch)) : [];
@@ -656,6 +662,7 @@ function printTest(res, root) {
 const [cmd, ...rest] = process.argv.slice(2);
 const { pos, opt } = parseArgs(rest);
 CLI.json = !!opt.json;
+hint.flags = configFlag(opt);   // printed follow-up commands load the same config, device and engine
 try {
   if (!cmd || cmd === "-h" || cmd === "--help") commands.help([]);
   else if (cmd === "-v" || cmd === "--version") commands.version();

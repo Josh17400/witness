@@ -11,6 +11,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { makeBrief, PERSONAS, configArg } from "./brief.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
 import { readEntry, pidAlive } from "./registry.js";
+import { launchFlags } from "../cli/common.js";
 
 const r1 = (x) => Math.round(x * 10) / 10;
 
@@ -61,7 +62,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
     const persona = PERSONAS[g.persona] ? g.persona : PERSONAS[opt.persona] ? opt.persona : "newbie";
     const mins = +(g.minutes ?? minutes);
     const brief = makeBrief({
-      cli, configDir: configArg(root, file), name, goal: g.goal, persona, minutes: mins, game: `"${cfg.name || "the game"}"`, profile: pc.profile,
+      cli, configDir: configArg(root, file), launch: launchFlags(opt), name, goal: g.goal, persona, minutes: mins, game: `"${cfg.name || "the game"}"`, profile: pc.profile,
       controls: cfg.play && cfg.play.controls ? describeControls(pc) : "", seed: g.seed ?? (opt.seed !== undefined && opt.seed !== true ? +opt.seed : null),
       scene: g.scene ?? (opt.scene && opt.scene !== true ? String(opt.scene) : null), params: g.params ?? (opt.params && opt.params !== true ? String(opt.params) : null),
       model: g.model || (opt.model && opt.model !== true ? String(opt.model) : "sonnet"), live: !!(g.live ?? opt.live), extra: (cfg.play && cfg.play.brief) || null,

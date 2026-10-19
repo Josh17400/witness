@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { begin, loadReplay } from "../core/runner.js";
-import { fmt } from "../core/expr.js";
+import { fmt, hint } from "../core/expr.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { summarize } from "../core/signal.js";
 import { die, say, withGame, runOpts, media, printLogs, splitTop, framesOf, fmtT, envelope, compactSeriesJSON, resolveReplay, emit, shotImage } from "./common.js";
@@ -164,7 +164,7 @@ export function respawnFrames(frames, vals, dvals) {
 function loadSaved(file, exprs) {
   let j;
   try { j = JSON.parse(fs.readFileSync(path.resolve(file), "utf8")); } catch (e) { die(`--against ${file}: ${e.message}`); }
-  if (!j || j.command !== "trace" || !j.data || !j.data.series) die(`--against ${file}: not a saved trace (make one with 'witness trace ... --save ${file}')`);
+  if (!j || j.command !== "trace" || !j.data || !j.data.series) die(`--against ${file}: not a saved trace (make one with 'witness trace ...${hint.flags} --save ${file}')`);
   const missing = exprs.filter((x) => !(x in j.data.series));
   if (missing.length) die(`--against ${file}: it has no series for ${missing.join(", ")} (it has: ${Object.keys(j.data.series).join(", ")})`);
   const byF = exprs.map((x) => new Map(j.data.series[x].map((p) => [p[2], p[1]])));

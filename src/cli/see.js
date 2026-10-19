@@ -105,7 +105,7 @@ async function singleShots(opt) {
   const results = [];
   await withGame(opt, async (s, cfg, root) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-    if (fr.crop || fr.follow || opt.annotate || (opt.scale && opt.scale !== true)) gamePixels(s, "shot --crop / --follow / --annotate / --scale");
+    if (fr.crop || fr.follow || opt.annotate || (opt.scale && opt.scale !== true)) gamePixels(s, "shot --crop / --follow / --annotate / --scale", opt);
     const fps = s.fps;
     const tokens = timeList(opt.at, [opt.time && opt.time !== true ? String(opt.time) : "1"]);
     const items = tokens.map((t) => ({ t, f: framesOf(t, fps) })).sort((a, b) => a.f - b.f);
@@ -180,7 +180,7 @@ async function sheetShots(opt) {
   let out;
   await withGame(opt, async (s, cfg, root) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-    if (fr.crop || fr.follow || (opt.scale && opt.scale !== true)) gamePixels(s, "shot --sheet --crop / --follow / --scale");
+    if (fr.crop || fr.follow || (opt.scale && opt.scale !== true)) gamePixels(s, "shot --sheet --crop / --follow / --scale", opt);
     const fps = s.fps;
     // --sheet --at 1,1.4,2: a sheet of chosen moments
     const moments = opt.at !== undefined && opt.at !== true && opt.from === undefined && opt.auto === undefined ? [...new Set(timeList(opt.at, []).map((t) => framesOf(t, fps)))].sort((a, b) => a - b) : null;
@@ -277,7 +277,7 @@ async function clipShots(opt) {
   let out;
   await withGame(opt, async (s, cfg, root) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-    if (fr.crop || fr.follow) gamePixels(s, "shot --clip --crop / --follow");
+    if (fr.crop || fr.follow) gamePixels(s, "shot --clip --crop / --follow", opt);
     const fps = s.fps;
     const f0 = framesOf(opt.from !== undefined && opt.from !== true ? String(opt.from) : "0", fps);
     const f1 = framesOf(opt.to !== undefined && opt.to !== true ? String(opt.to) : `${f0 + 2 * fps}f`, fps);

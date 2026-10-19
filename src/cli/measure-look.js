@@ -38,7 +38,7 @@ async function getFrames(m, files, opt, gameCoords = null, { second = null } = {
   await withGame(opt, async (s, cfg0, root0) => {
     cfg = cfg0; root = root0;
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-    if (gameCoords) gamePixels(s, gameCoords);
+    if (gameCoords) gamePixels(s, gameCoords, opt);
     const f = framesOf(val(opt.at) || "1", s.fps);
     for (const w of wins) {
       const st = await begin(s, runOpts(w ? { ...opt, window: w } : { ...opt, window: undefined }, cfg));
@@ -721,7 +721,7 @@ async function figureMeasure(m, c, files, opt) {
     if (scenes.length * sets.length * ats.length > 24) die(`${scenes.length * sets.length * ats.length} shots: keep scenes × params × times at 24 or fewer`);
     await withGame({ ...opt, params: undefined, scene: undefined }, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
-      gamePixels(s, "measure figure");
+      gamePixels(s, "measure figure", opt);
       const base = runOpts({ ...opt, params: undefined, scene: undefined }, cfg);
       for (const scene of scenes) for (const params of sets) {
         const frames = [...new Set(ats.map((t) => framesOf(t, s.fps)))].sort((a, b) => a - b);

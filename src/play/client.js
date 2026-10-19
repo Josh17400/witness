@@ -11,6 +11,7 @@ import { makeBrief, PERSONAS, configArg } from "./brief.js";
 import { prune, pruneRegistry, fmtBytes } from "../core/clean.js";
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
+import { launchFlags } from "../cli/common.js";
 
 export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the game and report back (docs/PLAYTEST.md)
 
@@ -134,7 +135,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         horizon: opt.horizon && opt.horizon !== true ? +opt.horizon : undefined, pauseAfter: opt["pause-after"] && opt["pause-after"] !== true ? +opt["pause-after"] : undefined,
       };
       // a config file other than the project's witness.json (--config witness.web.json): report.md's replay commands name it
-      const spec = { name, token, root, cfg, configFile: file && !/(^|[\\/])witness\.json$/i.test(file) ? file : null, opts, state: "starting", created: new Date().toISOString() };
+      const spec = { name, token, root, cfg, configFile: file && !/(^|[\\/])witness\.json$/i.test(file) ? file : null, launchFlags: launchFlags(opt), opts, state: "starting", created: new Date().toISOString() };
       fs.writeFileSync(path.join(dir, "session.json"), JSON.stringify(spec, null, 1));
       writeEntry({ name, dir, root, started: spec.created, state: "starting" });
       const out = fs.openSync(path.join(dir, "daemon.log"), "a");
@@ -254,7 +255,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       const pc = resolvePlayConfig(cfg.play || {}, { keys: cfg.play && cfg.play.keys });
       let params = opt.params && opt.params !== true ? String(opt.params) : null;
       console.log(makeBrief({
-        cli, configDir: configArg(root, file), name: opt.name && opt.name !== true ? String(opt.name) : "t1", goal: opt.goal && opt.goal !== true ? String(opt.goal) : null,
+        cli, configDir: configArg(root, file), launch: launchFlags(opt), name: opt.name && opt.name !== true ? String(opt.name) : "t1", goal: opt.goal && opt.goal !== true ? String(opt.goal) : null,
         persona: opt.persona && opt.persona !== true ? String(opt.persona) : "newbie", minutes: opt.minutes ? +opt.minutes : 4, game: `"${cfg.name || "the game"}"`,
         profile: pc.profile, controls: cfg.play && cfg.play.controls ? describeControls(pc) : "", seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : null,
         scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params, model: opt.model && opt.model !== true ? String(opt.model) : null, live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, extra: opt.extra && opt.extra !== true ? String(opt.extra) : (cfg.play && cfg.play.brief) || null,

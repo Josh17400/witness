@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { begin, stepTo, loadReplay } from "../core/runner.js";
-import { evaluate, fmt, usesPrev } from "../core/expr.js";
+import { evaluate, fmt, usesPrev, hint } from "../core/expr.js";
 import { diffStates } from "../core/compare.js";
 import { describeState } from "../core/schema.js";
 import { sampleExprs, frameGrid } from "../core/sample.js";
@@ -93,7 +93,7 @@ export function errorLines(exprs, sample) {
   exprs.forEach((x, i) => {
     const e = sample.errors[i], n = sample.frames.length;
     if (e) out.push(`✖ ${x}: ${e.message.replace(/^"[^"]*": /, "")} (${e.count === n ? `all ${n} samples` : `${e.count} of ${n} samples, first at f${e.f}`})`);
-    else if (sample.missing[i] === n) out.push(`✖ ${x}: undefined on every sample (no such field? check the path with 'witness eval --keys')`);
+    else if (sample.missing[i] === n) out.push(`✖ ${x}: undefined on every sample (no such field? check the path with 'witness eval --keys${hint.flags}')`);
   });
   return out;
 }

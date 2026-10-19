@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- ?nocover: the same page without viewport-fit=cover (iOS: env(safe-area-inset-*) is 0, the page sits inside the safe area) -->
+  <script>if (/nocover/.test(location.search)) document.querySelector('meta[name="viewport"]').content = "width=device-width, initial-scale=1";</script>
   <title>Safe areas</title>
   <!-- a full-screen game canvas with a DOM HUD that keeps clear of the notch with env(safe-area-inset-*) -->
   <style>
@@ -11,7 +13,12 @@
     #hud { position: fixed; left: 0; top: 0; padding: env(safe-area-inset-top, 7px) 0 0 env(safe-area-inset-left); }
     #hud b { display: block; width: 120px; height: 24px; background: #fd3; }
     @media (min-width: 1px) { #corner { position: fixed; right: env(safe-area-inset-right); top: 0; width: 40px; height: 40px; background: #3df; } }
+    /* a fallback nested two levels deep */
+    #nest { position: fixed; padding-left: env(safe-area-inset-left, max(1px, calc(2px + 3px))); }
+    #named { position: fixed; }
+    @keyframes pulse { from { opacity: 1; } to { opacity: 0.5; } }
   </style>
+  <style>@import url(safe-import.css);</style>
   <link rel="stylesheet" href="safe.css">
 </head>
 <body>
@@ -21,6 +28,7 @@
   <div id="bar"></div>
   <div id="inl" style="position: fixed; left: 0; top: 50%; margin-left: env(safe-area-inset-left); width: 30px; height: 30px; background: #f3d"></div>
   <div id="js"></div>
+  <div id="imp"></div><div id="imp2"></div><div id="nest"></div><div id="grp"></div><div id="named"></div><div id="frame"></div><div id="host"></div>
   <script type="module" src="safe.js"></script>
 </body>
 </html>

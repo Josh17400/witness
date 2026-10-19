@@ -1,0 +1,2 @@
+/* @import'ed by safe.html's second <style> */
+#imp { position: fixed; padding-left: env(safe-area-inset-left); }

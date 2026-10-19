@@ -70,7 +70,7 @@ export async function runDaemon(dir) {
   let frame = 0, world = null, finalizing = false, server = null;
   const timeline = [], orders = [], notes = [], shots = [], errors = [], pending = [], trail = [];
   let parseErrors = 0, lastLogFrame = 0, firstLook = true;
-  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name });
+  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null } : null });
   const dts = (k) => Array(k).fill(1 / fps);
 
   // ---- live mode: one loop owns the game and steps it continuously, paced to real time; commands steer it
@@ -429,7 +429,7 @@ export async function runDaemon(dir) {
       fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(r, null, 1));
       const rel = (p) => path.relative(spec.root, p).replace(/\\/g, "/");
       const link = (p) => path.relative(dir, p).replace(/\\/g, "/");
-      fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, { rel, link, replayCmd: "witness replay", config: spec.configFile ? rel(spec.configFile) : null }));
+      fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, { rel, link, replayCmd: "witness replay", config: spec.configFile ? rel(spec.configFile) : null, flags: spec.launchFlags || "" }));
       const S2 = r.stats;
       summary = `${outcome.toUpperCase()} after ${r1(world.t)}s game time · ${S2.orders} orders · fights ${r.fights.length} (${S2.fightsWon} won) · deaths ${S2.deaths} · stuck ${S2.stuck} · notes ${notes.length}${errors.length ? ` · ${errors.length} game errors` : ""}`;
     } catch (e) { log(`report failed: ${e.stack || e.message}`); summary = `report failed: ${e.message}`; }

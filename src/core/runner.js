@@ -92,7 +92,7 @@ export function loadReplay(file) {
   const startOf = [0];
   for (let i = 0; i < dts.length; i++) startOf[i + 1] = startOf[i] + dts[i];
   const marks = markFrames.map((m) => ({ ...m, t: startOf[m.frame] }));
-  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length };
+  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, launch: head.launch || null, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length };
 }
 
 /**

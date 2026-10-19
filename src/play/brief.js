@@ -15,11 +15,11 @@ const q = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
 /** A brief's start line --config: the folder, or the file itself when it isn't named witness.json. */
 export const configArg = (root, file) => (file && !/[\\/]witness\.json$/i.test(file) ? file : root).replace(/\\/g, "/");
 
-export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie", minutes = 4, game = "the game", profile = "topdown", controls = "", seed, scene, params, extra, model, live = false, watch = false, turns = false }) {
+export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie", minutes = 4, game = "the game", profile = "topdown", controls = "", seed, scene, params, extra, model, live = false, watch = false, turns = false, launch = "" }) {
   const P = PERSONAS[persona] ? persona : "newbie";
   const W = `${cli} play`;
   const S = name.replace(/[^\w.-]+/g, "_");   // the session's short command (registry.writeShim)
-  const start = [`${W} start --name ${name}`, `--config ${q(configDir)}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, watch ? (live ? "--watch" : "--watch --turns") : live ? "--live" : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
+  const start = [`${W} start --name ${name}`, `--config ${q(configDir)}${launch || ""}`, goal ? `--goal ${q(goal)}` : null, `--persona ${P}`, model ? `--model ${model}` : null, watch ? (live ? "--watch" : "--watch --turns") : live ? "--live" : null, seed != null ? `--seed ${seed}` : null, scene ? `--scene ${q(scene)}` : null, params ? `--params ${q(typeof params === "string" ? params : JSON.stringify(params))}` : null].filter(Boolean).join(" ");
   const card = profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
     : profile === "fps" ? `goto <thing|x,y> · go forward|back|left|right [cells] · go <n|s|e|w…> [cells] · explore [dir] · follow <thing>
 fight [thing] [retreat 30%] [kite N] [hold] · flee · look <dir|thing> · reload · weapon <n>

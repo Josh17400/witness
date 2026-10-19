@@ -25,11 +25,21 @@ export function secs(t, fps) { try { return secondsOf(t, fps); } catch (e) { die
 /** A count of frames from a user duration ("0.5" s or "30f"), at least `min`. */
 export const durFrames = (t, fps, min = 1) => Math.max(min, framesOf(t, fps));
 
-/** " --config <what was passed>" for follow-up commands printed to the user (they must load the same config), else "". */
+const shq = (c) => (/[\s"'$&|;<>(){}]/.test(c) ? `"${c.replace(/"/g, '\\"')}"` : c);
+/** The launch flags that were passed (" --device iphone-15 --engine webkit --safe-insets"), else "". */
+export const launchFlags = (opt) => {
+  if (!opt) return "";
+  let f = "";
+  for (const k of ["device", "engine", "capture"]) if (opt[k] !== undefined && opt[k] !== true) f += ` --${k} ${shq(String(opt[k]))}`;
+  for (const k of ["no-auto-unlock", "auto-unlock", "safe-insets", "safe-overlay"]) if (opt[k]) f += ` --${k}`;
+  return f;
+};
+/** " --config <what was passed>" plus the launch flags that were passed, for follow-up commands printed to the user
+ *  (they must load the same config and launch the same device and engine), else "". */
 export const configFlag = (opt) => {
-  if (!opt || !opt.config || opt.config === true) return "";
-  const c = String(opt.config);
-  return ` --config ${/[\s"'$&|;<>()]/.test(c) ? `"${c.replace(/"/g, '\\"')}"` : c}`;
+  if (!opt) return "";
+  const c = opt.config && opt.config !== true ? ` --config ${shq(String(opt.config))}` : "";
+  return c + launchFlags(opt);
 };
 
 export function loadConfig(opt) {
@@ -93,9 +103,9 @@ export async function withGame(opt, fn) {
  * Commands that place game-pixel coordinates (crops, follows, entity boxes, state.ui rects, positions) on a
  * screenshot: refuse when --capture element|screen made the screenshots device-pixel pictures of the page.
  */
-export function gamePixels(s, what) {
+export function gamePixels(s, what, opt = null) {
   const mode = s && s.web && s.web.captureMode;
-  if (mode && mode !== "canvas") die(`${what} works in game pixels, but --capture ${mode} makes screenshots of the page at device pixels (DPR ${s.web.device ? s.web.device.dpr : 1}, a different size and origin): run it without --capture (launch.capture "canvas", the game's own pixels), or use the device-pixel PNG from witness shot --capture ${mode} with measure scale`);
+  if (mode && mode !== "canvas") die(`${what} works in game pixels, but --capture ${mode} makes screenshots of the page at device pixels (DPR ${s.web.device ? s.web.device.dpr : 1}, a different size and origin): run it without --capture (launch.capture "canvas", the game's own pixels), or use the device-pixel PNG from witness shot --capture ${mode}${configFlag({ ...opt, capture: undefined })} with measure scale`);
 }
 
 export function runOpts(opt, cfg) {

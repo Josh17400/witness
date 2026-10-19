@@ -189,7 +189,7 @@ export function evaluate(src, snap, prev = null, ctx = null) {
     if (e instanceof ExprError) throw e;
     const m = /Cannot read propert(?:y|ies) of (undefined|null) \(reading '([^']+)'\)/.exec(e.message);
     if (m && !prev && /(^|[^\w$.])prev\b/.test(src)) throw new ExprError(`"${src}": prev is null here (the first sample has no previous frame)`);
-    if (m) throw new ExprError(`"${src}": something before .${m[2]} is ${m[1] === "null" ? "null" : "missing"} in this snapshot — check the path with 'witness eval --keys'`);
+    if (m) throw new ExprError(`"${src}": something before .${m[2]} is ${m[1] === "null" ? "null" : "missing"} in this snapshot — check the path with 'witness eval --keys${hint.flags}'`);
     throw new ExprError(`"${src}": ${e.message}`);
   }
 }
@@ -255,6 +255,9 @@ export function fmt(v, max = 80) {
   if (s === undefined) s = "undefined";
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
+
+/** Flags printed commands carry (" --config witness.web.json --device iphone-15"): set once by the CLI. */
+export const hint = { flags: "" };
 
 /** List key paths of a snapshot (for 'witness eval --keys'), sampling arrays. */
 export function keyPaths(obj, prefix = "state", depth = 0, out = []) {
