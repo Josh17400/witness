@@ -25,6 +25,13 @@ export function secs(t, fps) { try { return secondsOf(t, fps); } catch (e) { die
 /** A count of frames from a user duration ("0.5" s or "30f"), at least `min`. */
 export const durFrames = (t, fps, min = 1) => Math.max(min, framesOf(t, fps));
 
+/** " --config <what was passed>" for follow-up commands printed to the user (they must load the same config), else "". */
+export const configFlag = (opt) => {
+  if (!opt || !opt.config || opt.config === true) return "";
+  const c = String(opt.config);
+  return ` --config ${/[\s"'$&|;<>()]/.test(c) ? `"${c.replace(/"/g, '\\"')}"` : c}`;
+};
+
 export function loadConfig(opt) {
   if (opt.cmd) {
     // ad-hoc launch: the whole command line goes to the shell as one string
@@ -37,14 +44,14 @@ export function loadConfig(opt) {
   return { cfg: browserOverrides(found.config, opt), root: found.root, file: found.file };
 }
 
-/** --device / --engine / --no-auto-unlock / --capture: browser launch options from the command line (they win over
+/** --device / --engine / --no-auto-unlock / --capture / --safe-insets / --safe-overlay: browser launch options from the command line (they win over
  *  witness.json launch.device / engine / audioUnlock / capture). */
 export function browserOverrides(cfg, opt) {
   const want = { device: opt.device, engine: opt.engine, capture: opt.capture };
-  const any = Object.values(want).some((v) => v !== undefined) || opt["no-auto-unlock"] || opt["auto-unlock"];
+  const any = Object.values(want).some((v) => v !== undefined) || opt["no-auto-unlock"] || opt["auto-unlock"] || opt["safe-insets"] || opt["safe-overlay"];
   if (!any) return cfg;
   for (const [k, v] of Object.entries(want)) if (v === true) die(`--${k} needs a value (e.g. --device iphone-15, --engine webkit, --capture element)`);
-  if (!cfg.launch || !cfg.launch.url) die(`--device, --engine, --capture and --no-auto-unlock are for browser games (${CONFIG_NAME} launch.url); this launch is ${cfg.launch && cfg.launch.attach ? "attach" : "a command"}`);
+  if (!cfg.launch || !cfg.launch.url) die(`--device, --engine, --capture, --no-auto-unlock, --safe-insets and --safe-overlay are for browser games (${CONFIG_NAME} launch.url); this launch is ${cfg.launch && cfg.launch.attach ? "attach" : "a command"}`);
   const launch = { ...cfg.launch };
   if (want.device !== undefined) {
     const d = String(want.device);
@@ -55,6 +62,8 @@ export function browserOverrides(cfg, opt) {
   if (want.capture !== undefined) launch.capture = String(want.capture);
   if (opt["no-auto-unlock"]) launch.audioUnlock = false;
   else if (opt["auto-unlock"]) launch.audioUnlock = true;
+  if (opt["safe-insets"]) launch.safeInsets = true;
+  if (opt["safe-overlay"]) launch.safeOverlay = true;
   return { ...cfg, launch };
 }
 

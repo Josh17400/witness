@@ -49,6 +49,22 @@ ok("mock daemon exited", !pidAlive(mockPid));
 r = witness(["play", "do", "wait 1", "-s", "m"], { cwd: mdir, env });
 ok("orders to an ended session explain themselves", r.code === 1 && /isn't running/.test(r.out), r.out);
 
+// ---- --config witness.web.json: report.md's replay commands carry the same config (they ran the desktop one before)
+{
+  const cdir = path.join(tmp, "two"); fs.mkdirSync(cdir);
+  fs.writeFileSync(path.join(cdir, "witness.json"), JSON.stringify({ name: "desktop", launch: { command: "no-such-desktop-build" } }));
+  fs.writeFileSync(path.join(cdir, "witness.web.json"), JSON.stringify({ name: "web", launch: { command: process.execPath, args: [path.join(root, "tests", "mock-game.mjs")] } }));
+  r = witness(["play", "start", "--name", "c", "--config", "witness.web.json"], { cwd: cdir, env });
+  ok("play start --config FILE", r.code === 0, r.out);
+  witness(["play", "note", "a coin", "-s", "c"], { cwd: cdir, env });
+  r = witness(["play", "end", "-s", "c"], { cwd: cdir, env });
+  const md = fs.readFileSync(path.join(findDir(cdir, "c"), "report.md"), "utf8");
+  const lines = md.split("\n").filter((l) => l.startsWith("witness replay"));
+  ok("report.md: every replay command names --config witness.web.json", lines.length === 2 && lines.every((l) => l.startsWith("witness replay --config witness.web.json witness/playtests/c/replay.jsonl")), md);
+  r = witness(["replay", "--config", "witness.web.json", "witness/playtests/c/replay.jsonl"], { cwd: cdir, env });
+  ok("report.md's replay command, run as printed, replays exactly", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out);
+}
+
 // ---- arena: a scripted fake agent plays the whole game through the CLI
 const arena = path.join(root, "examples", "arena");
 const adir = path.join(tmp, "arena-out");

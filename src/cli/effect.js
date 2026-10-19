@@ -9,7 +9,7 @@ import { fmt } from "../core/expr.js";
 import { parseWitnessInput } from "../core/input-spec.js";
 import { WitnessError } from "../core/session.js";
 import { frameAt } from "../core/runner.js";
-import { die, withGame, runOpts, media, printLogs, splitTop, fmtT, shotImage, envelope, emit } from "./common.js";
+import { die, withGame, runOpts, media, printLogs, splitTop, fmtT, shotImage, envelope, emit, configFlag } from "./common.js";
 
 const fail = (msg) => { throw new WitnessError(msg); };
 
@@ -132,7 +132,7 @@ function report(r, opt) {
   const ordered = (ds) => [...ds.filter((d) => !late(d)), ...ds.filter(late)];
   const lines = [];
   lines.push(`${r.firstLabel} at frame ${fIn} (t=${fmtT(fIn / fps)}), compared with the same run without it${r.base ? ` (both runs: ${r.base})` : ""}:`);
-  if (r.pre.length || r.prePix || r.preAudio) lines.push(`  ⚠ the two runs already differ at f${fIn}, before the input acts (${[r.pre.length ? `${r.pre.length} state paths` : "", r.prePix ? "pixels" : "", r.preAudio ? "audio" : ""].filter(Boolean).join(", ")}): the game isn't deterministic, so the numbers below can't be trusted — run 'witness doctor'`);
+  if (r.pre.length || r.prePix || r.preAudio) lines.push(`  ⚠ the two runs already differ at f${fIn}, before the input acts (${[r.pre.length ? `${r.pre.length} state paths` : "", r.prePix ? "pixels" : "", r.preAudio ? "audio" : ""].filter(Boolean).join(", ")}): the game isn't deterministic, so the numbers below can't be trusted — run 'witness doctor${configFlag(opt)}'`);
   const st = ordered(r.stateChanges);
   lines.push(r.stateF != null
     ? `  state   first differs at f${r.stateF} (${after(r.stateF)}): ${st.slice(0, 4).map(chg).join(", ")}${st.length > 4 ? ` (+${st.length - 4} more)` : ""}`

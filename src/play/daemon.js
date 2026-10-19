@@ -429,7 +429,7 @@ export async function runDaemon(dir) {
       fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(r, null, 1));
       const rel = (p) => path.relative(spec.root, p).replace(/\\/g, "/");
       const link = (p) => path.relative(dir, p).replace(/\\/g, "/");
-      fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, { rel, link, replayCmd: "witness replay" }));
+      fs.writeFileSync(path.join(dir, "report.md"), reportMarkdown(r, { rel, link, replayCmd: "witness replay", config: spec.configFile ? rel(spec.configFile) : null }));
       const S2 = r.stats;
       summary = `${outcome.toUpperCase()} after ${r1(world.t)}s game time · ${S2.orders} orders · fights ${r.fights.length} (${S2.fightsWon} won) · deaths ${S2.deaths} · stuck ${S2.stuck} · notes ${notes.length}${errors.length ? ` · ${errors.length} game errors` : ""}`;
     } catch (e) { log(`report failed: ${e.stack || e.message}`); summary = `report failed: ${e.message}`; }

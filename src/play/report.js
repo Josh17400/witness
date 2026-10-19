@@ -31,8 +31,12 @@ export function reportData(s) {
 }
 
 /** report.md: readable, most useful first. `rel` makes paths relative to the project root. */
-export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay" } = {}) {
-  // link: paths for markdown links (relative to report.md itself); rel: paths for shell commands (relative to the project)
+export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay", config = null } = {}) {
+  // link: paths for markdown links (relative to report.md itself); rel: paths for shell commands (relative to the project);
+  // config: the config file the session ran with when it isn't the project's witness.json (witness.web.json): the
+  // replay commands must load the same launch (a web build), so they carry --config
+  const sh = (p) => (/[\s"'$&|;<>()]/.test(p) ? `"${p.replace(/"/g, '\\"')}"` : p);
+  if (config) replayCmd = `${replayCmd} --config ${sh(config)}`;
   const L = [];
   const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped" }[r.outcome] || r.outcome || "in progress";
   L.push(`# Playtest ${r.session}: ${r.game?.name || "game"} — ${outcome}`);
@@ -118,10 +122,10 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
   if (r.replay && r.replay.file) {
     L.push(`The whole session is a standard Witness replay (${r.replay.frames} frames)${r.replay.calls ? `, including ${r.replay.calls} game call(s)` : ""}. Every frame replays exactly:`);
     L.push("```");
-    L.push(`${replayCmd} ${rel(r.replay.file)}                      # checks the end state matches`);
+    L.push(`${replayCmd} ${sh(rel(r.replay.file))}                      # checks the end state matches`);
     const marks = r.notes.filter((n) => n.t != null).slice(0, 6);
-    for (const n of marks) L.push(`${replayCmd} ${rel(r.replay.file)} --at ${n.t.toFixed(2)} --shot     # ${clip(oneLine(n.text), 50)}`);
-    for (const d of r.deaths.slice(0, 2)) L.push(`${replayCmd} ${rel(r.replay.file)} --at ${Math.max(0, d.t - 1).toFixed(2)} --shot     # just before death`);
+    for (const n of marks) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${n.t.toFixed(2)} --shot     # ${clip(oneLine(n.text), 50)}`);
+    for (const d of r.deaths.slice(0, 2)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${Math.max(0, d.t - 1).toFixed(2)} --shot     # just before death`);
     L.push("```");
   }
   return L.join("\n") + "\n";

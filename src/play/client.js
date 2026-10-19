@@ -109,7 +109,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
     case "_daemon": { const { runDaemon } = await import("./daemon.js"); await runDaemon(path.resolve(pos[0])); return; }
 
     case "start": {
-      const { cfg, root } = loadConfig(opt);
+      const { cfg, root, file } = loadConfig(opt);
       const name = String(opt.name && opt.name !== true ? opt.name : `play-${new Date().toISOString().replace(/[-:T]/g, "").slice(4, 14)}`);
       if (!/^[\w.-]{1,40}$/.test(name)) fail(`bad session name "${name}" (letters, digits, - _ . only)`);
       const prev = readEntry(name);
@@ -133,7 +133,8 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
         live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, speed: opt.speed && opt.speed !== true ? +opt.speed : undefined,
         horizon: opt.horizon && opt.horizon !== true ? +opt.horizon : undefined, pauseAfter: opt["pause-after"] && opt["pause-after"] !== true ? +opt["pause-after"] : undefined,
       };
-      const spec = { name, token, root, cfg, opts, state: "starting", created: new Date().toISOString() };
+      // a config file other than the project's witness.json (--config witness.web.json): report.md's replay commands name it
+      const spec = { name, token, root, cfg, configFile: file && !/(^|[\\/])witness\.json$/i.test(file) ? file : null, opts, state: "starting", created: new Date().toISOString() };
       fs.writeFileSync(path.join(dir, "session.json"), JSON.stringify(spec, null, 1));
       writeEntry({ name, dir, root, started: spec.created, state: "starting" });
       const out = fs.openSync(path.join(dir, "daemon.log"), "a");
