@@ -51,7 +51,9 @@
 //                  Reset params: "hide": [ids or types] (the reserved param) leaves those out of the picture;
 //                  "hour": h before 6 or from 20 is night (every colour × 0.3, rounded); "swap": sand and grass trade
 //                  places (a layout change, not lighting). MOCK_FIGURE=npc adds two NPCs WITHOUT ids (type "NPC", names
-//                  "Bob" at 200,40 and "Ann" at 260,140, 6×6 red squares; hidden by type).
+//                  "Bob" at 200,40 and "Ann" at 260,140, 6×6 red squares; hidden by type). MOCK_FIGURE=sort adds two
+//                  untracked props tied on y at 150,113 (5×11, red and blue): whenever anything is hidden the other one
+//                  is drawn on top (an unstable sort), so a hide diff also changes 55 px far from the hidden entity.
 import net from "node:net";
 import { encodePNG } from "../src/media/png.js";
 import { glyph } from "../src/media/font.js";
@@ -243,6 +245,11 @@ function screenshot() {
     const sand = [194, 178, 128], grass = [60, 140, 60];
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, ...(y < 90 ? (x < 40 ? (swap ? grass : sand) : [240, 244, 250]) : x < 40 ? (swap ? sand : grass) : [70, 70, 75]));
     if (NPCS && !hidden.has("NPC")) for (const n of NPCS) for (let y = n.pos[1] - 3; y < n.pos[1] + 3; y++) for (let x = n.pos[0] - 3; x < n.pos[0] + 3; x++) put(x, y, 200, 40, 40);
+    if (process.env.MOCK_FIGURE === "sort") {
+      // two props tied on y at 150,113 (5×11): an unstable sort draws the other one on top whenever anything is hidden
+      const order = hidden.size ? [[40, 40, 200], [200, 40, 40]] : [[200, 40, 40], [40, 40, 200]];
+      for (const c of order) for (let y = 113; y < 124; y++) for (let x = 150; x < 155; x++) put(x, y, ...c);
+    }
   }
   else for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 20, 24, 40);
   if (LOOK) for (let y = 100; y < 140; y++) for (let x = 170; x < 230; x++) put(x, y, 222, 205, 160);   // a sand patch in the world

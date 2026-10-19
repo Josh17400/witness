@@ -550,23 +550,37 @@ function rectSilhouette(c, img, R) {
   return any ? mask : null;
 }
 
-/** Keep the diff's connected parts nearest a screen point (the diff may hold more than one hidden thing). */
-function partNear(m, mask, W, H, x, y) {
-  let seed = -1, bd = Infinity;
-  for (let i = 0; i < W * H; i++) if (mask[i]) { const px = i % W, py = (i - px) / W, dd = (px - x) ** 2 + (py - y) ** 2; if (dd < bd) { bd = dd; seed = i; } }
-  if (seed < 0) return null;
-  const out = new Uint8Array(W * H), stack = [seed];
-  out[seed] = 1;
-  while (stack.length) {
-    const i = stack.pop(), px = i % W, py = (i - px) / W;
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {   // 2 px gaps join (a sword held apart)
-      const nx = px + dx, ny = py + dy;
-      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-      const j = ny * W + nx;
-      if (mask[j] && !out[j]) { out[j] = 1; stack.push(j); }
+/** The diff's connected regions (2 px gaps join: a sword held apart): [{ px: [indices], x, y, w, h }]. */
+export function diffRegions(mask, W, H) {
+  const seen = new Uint8Array(W * H), out = [];
+  for (let s = 0; s < W * H; s++) {
+    if (!mask[s] || seen[s]) continue;
+    const px = [], stack = [s];
+    seen[s] = 1;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    while (stack.length) {
+      const i = stack.pop(), x = i % W, y = (i - x) / W;
+      px.push(i);
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const j = ny * W + nx;
+        if (mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+      }
     }
+    out.push({ px, x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 });
   }
   return out;
+}
+
+/** Does a diff region belong to a thing at screen point (sx, sy) with screen rect R (either may be missing)? Its
+ *  bounding box overlaps R, or comes within `near` px of the point. */
+export function regionAt(g, sx, sy, R, near = 4) {
+  if (R && g.x < R.x + R.w + 1 && g.x + g.w > R.x - 1 && g.y < R.y + R.h + 1 && g.y + g.h > R.y - 1) return true;
+  if (!Number.isFinite(sx)) return false;
+  const dx = Math.max(g.x - sx, 0, sx - (g.x + g.w - 1)), dy = Math.max(g.y - sy, 0, sy - (g.y + g.h - 1));
+  return dx * dx + dy * dy <= near * near;
 }
 
 async function figureMeasure(m, c, files, opt) {
@@ -635,7 +649,8 @@ async function figureMeasure(m, c, files, opt) {
           const ents = entitiesOf(cap.snap);
           const blobs = m.findBlobs(cap.img, { threshold: 24 });
           const fit = m.fitProjection(ents, blobs, { hint: cameraHint(cap.snap) });
-          const proj = fit.ok ? fit : (() => { const h = cameraHint(cap.snap); return h ? { ax: h.scale, bx: h.ox, ay: h.scale, by: h.oy, assumed: "state.camera" } : { ax: 1, bx: 0, ay: 1, by: 0, assumed: "screen = state" }; })();
+          // one entity on one blob proves nothing (it lands on any sprite): use such a fit only from the game's camera
+          const proj = fit.ok && (fit.matched >= 2 || fit.fromHint) ? fit : (() => { const h = cameraHint(cap.snap); return h ? { ax: h.scale, bx: h.ox, ay: h.scale, by: h.oy, assumed: "state.camera" } : { ax: 1, bx: 0, ay: 1, by: 0, assumed: "screen = state" }; })();
           const toScreen = (x, y) => [proj.ax * x + proj.bx, proj.ay * y + proj.by];
           const map = cap.snap?.state?.map;
           const mapLabel = map && Array.isArray(map.rows) && +map.cell > 0 ? (x, y) => {
@@ -646,18 +661,39 @@ async function figureMeasure(m, c, files, opt) {
           const B = capsB.get(cap.f);
           const diff = B ? m.maskDiff(cap.img, B, { threshold }) : null;
           const label = `${scene ? `scene ${scene} · ` : ""}${params ? `${JSON.stringify(params)} · ` : ""}f${cap.f}`;
-          for (const t of targets) {
+          // screen point and rect of a thing in the state (box: [w, h] centred, or [dx, dy, w, h] from its pos)
+          const placeOf = (t) => {
             const [sx, sy] = Number.isFinite(t.x) ? toScreen(t.x, t.y) : [NaN, NaN];
-            let mask = null, method = null;
-            if (diff && diff.count) {
-              mask = (targets.length > 1 || byType) && Number.isFinite(sx) ? partNear(m, diff.mask, cap.img.width, cap.img.height, sx, sy) : diff.mask;
+            const R = t.rect ? { x: t.rect[0], y: t.rect[1], w: t.rect[2], h: t.rect[3] }
+              : t.box && Number.isFinite(sx) ? (t.box.length >= 4 ? { x: sx + t.box[0] * proj.ax, y: sy + t.box[1] * proj.ay, w: t.box[2] * proj.ax, h: t.box[3] * proj.ay }
+                : { x: sx - (t.box[0] * proj.ax) / 2, y: sy - (t.box[1] * proj.ay) / 2, w: t.box[0] * proj.ax, h: t.box[1] * proj.ay }) : null;
+            return { sx, sy, R };
+          };
+          // the diff's regions; those at a hidden thing (any target, or anything the hide param names) are explained
+          const regions = diff && diff.count ? diffRegions(diff.mask, cap.img.width, cap.img.height) : [];
+          const hiddenSet = new Set(hide.map(String));
+          const hiddenPlaces = without ? [] : (cap.snap?.state?.entities || []).filter((e) => e && (hiddenSet.has(String(e.id)) || (e.id == null && hiddenSet.has(String(e.type ?? e.kind))))).map((e) => placeOf(figureTargets({ state: { entities: [e] } }, String(e.id ?? e.type ?? e.kind), evaluate)[0] || {}));
+          for (const t of targets) {
+            const { sx, sy, R } = placeOf(t);
+            let mask = null, method = null, elsewhere = null;
+            if (regions.length) {
+              // keep the region(s) at the entity's position or box; others are reported (a draw-order change far
+              // away, e.g. an unstable sort reordering tied sprites, must not grow the silhouette)
+              let mine = regions.filter((g) => regionAt(g, sx, sy, R)), fallback = false;
+              if (!mine.length && Number.isFinite(sx)) {
+                const d2 = (g) => Math.min(...g.px.map((i) => { const x = i % cap.img.width, y = (i - x) / cap.img.width; return (x - sx) ** 2 + (y - sy) ** 2; }));
+                mine = [regions.reduce((a, g) => (d2(g) < d2(a) ? g : a))]; fallback = true;
+              }
+              if (!mine.length) mine = regions;   // no position or box: the whole diff
+              mask = new Uint8Array(cap.img.width * cap.img.height);
+              for (const g of mine) for (const i of g.px) mask[i] = 1;
+              const others = regions.filter((g) => !mine.includes(g) && !targets.some((o) => { if (o === t) return false; const q = placeOf(o); return regionAt(g, q.sx, q.sy, q.R); }) && !hiddenPlaces.some((p) => regionAt(g, p.sx, p.sy, p.R)));
+              if (others.length) elsewhere = { pixels: others.reduce((a, g) => a + g.px.length, 0), regions: others.sort((a, b) => b.px.length - a.px.length).map((g) => [g.x, g.y, g.w, g.h]) };
               method = without ? `with/without diff (--without ${without.label})` : `with/without diff (reset param hide: ${JSON.stringify(hide)}${byType ? Number.isFinite(sx) ? `: no id, so every ${targets0.find((t) => t.id == null).type} was hidden; the part at its position kept` : `: no id, so every ${targets0.find((t) => t.id == null).type} was hidden and it has no position: the diff may hold the others` : ""})`;
+              if (regions.length > 1 && Number.isFinite(sx)) method += fallback ? `, the region nearest its position ${Math.round(sx)},${Math.round(sy)} (none touches it)` : `, the region${mine.length > 1 ? "s" : ""} at its ${R ? "box" : "position"}`;
             }
             const note = runB && !(diff && diff.count) ? (without ? "--without changed no pixels" : `the game ignored the hide param (${JSON.stringify(hide)})`) : null;
-            if (!mask && (t.rect || (t.box && Number.isFinite(sx)))) {
-              const R = t.rect ? { x: t.rect[0], y: t.rect[1], w: t.rect[2], h: t.rect[3] }
-                : t.box.length >= 4 ? { x: sx + t.box[0] * proj.ax, y: sy + t.box[1] * proj.ay, w: t.box[2] * proj.ax, h: t.box[3] * proj.ay }
-                  : { x: sx - (t.box[0] * proj.ax) / 2, y: sy - (t.box[1] * proj.ay) / 2, w: t.box[0] * proj.ax, h: t.box[1] * proj.ay };
+            if (!mask && R) {
               mask = rectSilhouette(c, cap.img, R);
               if (mask) method = `${t.rect ? "rect" : "box"} ${Math.round(R.x)},${Math.round(R.y)} ${Math.round(R.w)}×${Math.round(R.h)} minus the ground's colours (a guess: edge pixels that match the ground drop out${note ? `; ${note}` : ""})`;
             }
@@ -666,7 +702,7 @@ async function figureMeasure(m, c, files, opt) {
               if (mask) method = `the sprite at its state position ${Math.round(sx)},${Math.round(sy)} (${proj.assumed ? proj.assumed : "fitted to the entities"}; a guess: edge pixels that match the ground drop out${note ? `; ${note}` : ""})`;
             }
             if (!mask) { shots.push({ label, target: t.label, error: `no silhouette for ${t.label}${note ? ` (${note})` : ""}: give it a box/rect in the state, support the reset param "hide", or pass --without` }); continue; }
-            shots.push({ label, img: cap.img, mask, method, target: t.label, mapLabel, scene, params, f: cap.f });
+            shots.push({ label, img: cap.img, mask, method, target: t.label, mapLabel, scene, params, f: cap.f, elsewhere, hint: without ? null : "draw order / unstable sort?" });
           }
         }
       }
@@ -735,6 +771,7 @@ async function figureMeasure(m, c, files, opt) {
     if (x.error) { lines.push(`  ✖ ${x.label ? `${x.label}: ` : ""}${x.error}`); continue; }
     const b = x.r.bbox;
     lines.push(`  ${x.label} · ${x.target}: ${b.w}×${b.h} px at ${b.x},${b.y}, ${x.r.figure} px, ring ${x.r.ground} px · silhouette: ${x.method}`);
+    if (x.elsewhere) { const e = x.elsewhere, g = e.regions[0], n = e.regions.length; lines.push(`    ⚠ ${e.pixels} px changed elsewhere (${n === 1 ? "1 region:" : `${n} regions, largest`} ${g[2]}×${g[3]} at ${g[0]},${g[1]})${x.hint ? `: ${x.hint}` : ""} Left out of the silhouette.`); }
     // the small surfaces judged together come first: they decide when nothing else is big enough
     for (const s of [...x.r.surfaces.filter((q) => q.combined), ...x.r.surfaces.filter((q) => !q.combined)].slice(0, 8)) lines.push(`    ${fmtS(s)}`);
     if (x.r.surfaces.length > 8) lines.push(`    … ${x.r.surfaces.length - 8} more surfaces (--json)`);
@@ -752,8 +789,8 @@ async function figureMeasure(m, c, files, opt) {
   const env = envelope("measure figure", {
     ok: !failing.length && !errors && judged.length > 0,
     verdict: !judged.length ? "no surface judged" : failing.length ? `${failing.length} surface${failing.length > 1 ? "s" : ""} under ${min}:1 (median edge): ${failing.slice(0, 4).map((f) => `${f.surface} ${f.median}:1 at ${f.shot}`).join(", ")}` : errors ? `${errors} shot${errors > 1 ? "s" : ""} without a silhouette` : `edge contrast ≥ ${min}:1 (median) on every surface in ${good.length} shot${good.length > 1 ? "s" : ""}`,
-    summary: { shots: good.length, errors, surfaces: judged.length, failing: failing.length, min, worstRatio: lowest("ratio", "worst"), worstMedianRatio: lowest("ratio", "median"), worstDeltaE: lowest("deltaE", "worst"), worstMedianDeltaE: lowest("deltaE", "median"), worstSurface: worstS ? sName(worstS) : null },
-    data: { edge, merge, minShare: minShareF, shots: results.map((x) => (x.error ? { shot: x.label, target: x.target, error: x.error } : { shot: x.label, target: x.target, scene: x.scene ?? null, params: x.params ?? null, frame: x.f ?? null, silhouette: x.method, bbox: x.r.bbox, figurePixels: x.r.figure, ringPixels: x.r.ground, surfaces: x.r.surfaces, all: x.r.all })), failing },
+    summary: { shots: good.length, errors, warnings: good.filter((x) => x.elsewhere).length, surfaces: judged.length, failing: failing.length, min, worstRatio: lowest("ratio", "worst"), worstMedianRatio: lowest("ratio", "median"), worstDeltaE: lowest("deltaE", "worst"), worstMedianDeltaE: lowest("deltaE", "median"), worstSurface: worstS ? sName(worstS) : null },
+    data: { edge, merge, minShare: minShareF, shots: results.map((x) => (x.error ? { shot: x.label, target: x.target, error: x.error } : { shot: x.label, target: x.target, scene: x.scene ?? null, params: x.params ?? null, frame: x.f ?? null, silhouette: x.method, ...(x.elsewhere ? { elsewhere: x.elsewhere } : {}), bbox: x.r.bbox, figurePixels: x.r.figure, ringPixels: x.r.ground, surfaces: x.r.surfaces, all: x.r.all })), failing },
     files: written,
   });
   return emit(env, lines.join("\n"), opt);

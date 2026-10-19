@@ -13,6 +13,16 @@ Fixes reported by a C++/SDL3 game that adopted 0.7.0 (desktop and Emscripten web
   it (play start/brief/check/suggest/batch, doctor, test, clean); `play brief` and `play batch` pass the same file
   on to the tester's start line. A missing path is an error instead of a silent search from its parent.
 
+**measure figure**
+- With `hide: [id]` the silhouette is now only the with/without diff region(s) at the entity's state position (or
+  overlapping its box/rect), as type hides already did; it was the whole diff, so a hide that also re-sorted two
+  tied sprites far away (an unstable `std::sort` on equal y) turned a hero into a 119×55 "silhouette". Other regions
+  not at a hidden entity are reported: `⚠ 55 px changed elsewhere (1 region: 5×11 at 150,113): draw order /
+  unstable sort? Left out of the silhouette.`; `--json`: `data.shots[].elsewhere {pixels, regions: [[x,y,w,h]]}`,
+  `summary.warnings`.
+- A projection fitted from a single entity on a single sprite is no longer trusted (one entity lands on any blob:
+  the player was mapped onto the far-away prop): screen = state, or `state.camera`, unless 2+ entities agree.
+
 **Adoption steps**
 1. *Optional:* a second build (web next to desktop): put its config in `witness.web.json` and run commands with
    `--config witness.web.json`.

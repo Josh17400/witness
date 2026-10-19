@@ -270,8 +270,9 @@ const CMD_HELP = {
       Per surface: WCAG ratio and ΔE worst / p10 / median, % of its edge under --min, the worst pixel and colours;
       surfaces are named by state.map tiles, --surfaces colours (ΔE < 15; used first when most surfaces match them, so
       a param that moves the ground keeps true names), or by position from an earlier shot of the same scene and frame
-      (day → night: other colours, same places). An entity without an id is hidden by type: its diff is cut to the
-      part at its position. ✖ when a surface's median < --min; nothing judged is ✖ too. --expect "worstMedianRatio >= 3".
+      (day → night: other colours, same places). Only the diff region(s) at the entity's position or box are its
+      silhouette (an entity without an id is hidden by type: the part at its position); ⚠ "N px changed elsewhere"
+      names other regions a hide changed (draw order / an unstable sort of tied sprites). ✖ when a surface's median < --min; nothing judged is ✖ too. --expect "worstMedianRatio >= 3".
       --out: each figure and its ground ring, red where the edge is under --min.
   colorblind [shot.png] [--at 1] [--type protan|deutan|tritan|achroma|all] [--colors name=#hex,...] [--types Wolf,Guard]
      [--a <mask> --b <mask>] [--min-de 20] [--out dir] [--no-images]

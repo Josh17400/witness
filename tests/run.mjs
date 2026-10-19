@@ -600,6 +600,12 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
     // an entity without an id is hidden by type (every NPC goes): the diff is cut to the part at its position
     r = cli(["measure", "figure", "--of", "Bob", "--at", "0.1", "--json"], { MOCK_FIGURE: "npc" });
     ok("measure figure --of Bob (no id): hidden by type, only Bob's 6×6 = 36 px kept, not Ann's too", (() => { const d = J(r)?.data.shots[0]; return d && d.figurePixels === 36 && d.bbox.x === 197 && /every NPC was hidden; the part at its position kept/.test(d.silhouette); })(), r.stdout.slice(0, 600) + r.stderr);
+    // hiding by id also re-sorted two tied props far away (MOCK_FIGURE=sort): only the region at the player is the
+    // silhouette (149 px, 15×15 at 33,83), the 5×11 = 55 px elsewhere is reported, not merged into a 122×41 box
+    r = cli(["measure", "figure", "--of", "Player", "--at", "0.1", "--json"], { MOCK_FIGURE: "sort" });
+    ok("measure figure hide:[id]: only the diff region at the entity; 55 px elsewhere warned (draw order)", (() => { const d = J(r)?.data.shots[0]; return d && d.figurePixels === 149 && d.bbox.w === 15 && d.bbox.h === 15 && d.bbox.x === 33 && d.elsewhere && d.elsewhere.pixels === 55 && d.elsewhere.regions.length === 1 && d.elsewhere.regions[0].join() === "150,113,5,11" && J(r).summary.warnings === 1; })(), r.stdout.slice(0, 900) + r.stderr);
+    r = cli(["measure", "figure", "--of", "Player", "--at", "0.1"], { MOCK_FIGURE: "sort" });
+    ok("measure figure hide:[id]: the text names the other region and the likely cause", /⚠ 55 px changed elsewhere \(1 region: 5×11 at 150,113\): draw order \/ unstable sort\?/.test(r.stdout), r.stdout + r.stderr);
     r = cli(["measure", "figure", "--of", "Player", "--params", '{"hour":12}', "--at", "0.1", "--min", "1.05", "--expect", "worstMedianRatio >= 1.1"], { MOCK_FIGURE: "1" });
     ok("measure figure --min / --expect: every surface over 1.05, worst median 1.11", r.status === 0 && /✔ expect worstMedianRatio >= 1.1: got 1.11/.test(r.stdout), r.stdout + r.stderr);
     // no hide support: a box in the state (MOCK_ALIGN) or the sprite found at its state position; exact on a flat floor
