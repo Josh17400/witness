@@ -40,7 +40,7 @@ export async function withGame(opt, fn) {
   if (opt.build) runBuild(cfg, root, { quiet: !!opt.json });
   let g;
   try {
-    g = await openGame(cfg, root, { attach: !!opt.attach, port: opt.port ? +opt.port : undefined, timeout: opt.timeout ? +opt.timeout : undefined, quiet: !!opt.json });
+    g = await openGame(cfg, root, { attach: !!opt.attach, port: opt.port ? +opt.port : undefined, timeout: opt.timeout ? +opt.timeout : undefined, quiet: !!opt.json, env: opt.__env });
   } catch (e) {
     die(e.message);
   }
@@ -66,6 +66,8 @@ export function runOpts(opt, cfg) {
     params = { ...params, window: [+m[1], +m[2]] };
   }
   if (opt.dpi && opt.dpi !== true) params = { ...params, dpi: +opt.dpi };
+  // reserved: "camera": "hold" asks the game to keep its camera still this run (pixel registration, foot slide)
+  if (opt["hold-camera"]) params = { ...params, camera: "hold" };
   return {
     seed: opt.seed !== undefined ? +opt.seed : cfg.seed ?? 1,
     scene: opt.scene && opt.scene !== true ? String(opt.scene) : undefined,

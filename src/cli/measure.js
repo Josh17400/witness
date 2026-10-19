@@ -69,7 +69,9 @@ async function pixelMeasure(what, files, opt) {
     return motionMeasure(m, files.map(read), opt, region);
   } else if (what === "align") {
     return alignMeasure(m, opt);
-  } else die("usage: witness measure scale|box|contrast|motion|align|curve|jump|move|hitstop ...  (witness help measure)");
+  } else if (what === "registration" || what === "slide") {
+    return registrationMeasure(m, opt);
+  } else die("usage: witness measure scale|box|contrast|motion|align|registration|curve|jump|move|hitstop ...  (witness help measure)");
 }
 
 async function motionMeasure(m, fileFrames, opt, region) {
@@ -77,7 +79,7 @@ async function motionMeasure(m, fileFrames, opt, region) {
   const named = ["auto", "first", "median"].includes(bgOpt);
   const bgImage = named ? null : (() => { const p = path.resolve(bgOpt); if (!fs.existsSync(p)) die(`no such image: ${bgOpt}`); return fs.readFileSync(p); })();
   const camOpt = opt.camera && opt.camera !== true ? String(opt.camera) : "auto";
-  if (!["auto", "static", "moving"].includes(camOpt)) die("--camera is auto, static or moving");
+  if (!["auto", "static", "moving", "state"].includes(camOpt)) die("--camera is auto, static, moving or state");
   const threshold = +(opt.threshold || 16);
   const minObject = opt["min-size"] && opt["min-size"] !== true ? Math.max(1, +opt["min-size"]) : 6;
   const copy = (im) => ({ width: im.width, height: im.height, data: Uint8Array.from(im.data) });
@@ -115,19 +117,26 @@ async function motionMeasure(m, fileFrames, opt, region) {
       // pass 1: every frame in order: the camera's motion, and the frames a plate is built from
       const want = new Set(m.medianSampleIndices(N).map((i) => f0 + i));
       const picks = [], pickIdx = [], steps = [], positions = [[0, 0]];
-      let prev = null;
+      let prev = null, stateCam0 = null;
       let st = await begin(s, runOpts(opt, cfg));
       for (let f = f0; f <= f1; f++) {
         await stepTo(s, st, f);
         const im = await grab();
-        if (prev && camOpt !== "static") {
+        if (camOpt === "state") {
+          // the game's own camera: exact, no estimation
+          const h = cameraHint(await s.snapshot());
+          if (!h) die("--camera state needs state.camera = { pos: [x, y], zoom? } in the snapshot");
+          if (f === f0) stateCam0 = h;
+          const p = [-(h.ox - stateCam0.ox), -(h.oy - stateCam0.oy)];
+          if (f > f0) { const q = positions[positions.length - 1]; steps.push({ i: f - f0, dx: p[0] - q[0], dy: p[1] - q[1], score: 0 }); positions.push(p); }
+        } else if (prev && camOpt !== "static") {
           const sh = m.estimateShift(prev, im, { region });
           steps.push({ i: f - f0, dx: -sh.dx, dy: -sh.dy, score: sh.score });
           const p = positions[positions.length - 1];
           positions.push([p[0] - sh.dx, p[1] - sh.dy]);
         } else if (prev) positions.push([0, 0]);
         if (want.has(f)) { picks.push(copy(im)); pickIdx.push(f - f0); }
-        if (camOpt !== "static") prev = copy(im);
+        if (camOpt !== "static" && camOpt !== "state") prev = copy(im);
         else if (!prev) prev = true;
       }
       await s.drainLogs();
@@ -302,6 +311,108 @@ async function alignMeasure(m, opt) {
       matches: fit.all.map((q) => ({ id: q.entity.id, type: q.entity.type, at: q.at, sprite: [r3(q.blob.cx), r3(q.blob.cy)], bbox: q.blob.bbox, dist: q.dist })),
       hitboxes: hb.map((h) => ({ id: h.entity.id, type: h.entity.type, box: h.box, art: h.art, verdict: h.verdict })),
     } : { reason: fit.reason },
+  });
+  emit(env, lines.join("\n"), opt);
+}
+
+// ------------------------------------------------------------------ registration: the sprite against its state position
+
+/**
+ * measure registration --pos "state.player.pos" --at 1 --time 1 [--input ...] [--hold-camera]
+ * Per frame: the sprite nearest the state position (projected with state.camera, else as pixels), its centroid's
+ * offset from that position (registration), and its lowest row (the feet): how the feet move in the world against
+ * how the body moves (planted feet stay put while the body walks; gliding feet move with it).
+ */
+async function registrationMeasure(m, opt) {
+  const posExpr = opt.pos && opt.pos !== true ? String(opt.pos) : null;
+  if (!posExpr) die('usage: witness measure registration --pos "state.player.pos" --at 1 --time 1 --input "right@0-2" [--hold-camera]');
+  const { evaluate } = await import("../core/expr.js");
+  let res;
+  await withGame(opt, async (s, cfg) => {
+    if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    if (!s.has("reset")) die("measure registration needs 'reset' (one pass builds the background, a second measures)");
+    const fps = s.fps;
+    const f0 = framesOf(opt.at && opt.at !== true ? String(opt.at) : "0", fps);
+    const f1 = f0 + framesOf(opt.time && opt.time !== true ? String(opt.time) : "1", fps);
+    if (f1 - f0 > 600) die("registration screenshots every frame: keep --time under 10 s");
+    const copy = (im) => ({ width: im.width, height: im.height, data: Uint8Array.from(im.data) });
+    // pass 1: the frames a clean plate is built from, and the camera (from the state when it says, else estimated)
+    const N = f1 - f0 + 1, want = new Set(m.medianSampleIndices(N).map((i) => f0 + i));
+    const picks = [], pickIdx = [], cams = [];
+    let st = await begin(s, runOpts(opt, cfg));
+    let prev = null, est = [[0, 0]];
+    for (let f = f0; f <= f1; f++) {
+      await stepTo(s, st, f);
+      const snap = await s.snapshot(), im = copy(await shotImage(await s.screenshot()));
+      cams.push(cameraHint(snap));
+      if (prev && !cams[0]) { const sh = m.estimateShift(prev, im); const p = est[est.length - 1]; est.push([p[0] - sh.dx, p[1] - sh.dy]); }
+      if (want.has(f)) { picks.push(im); pickIdx.push(f - f0); }
+      prev = im;
+    }
+    await s.drainLogs();
+    // camera offsets in screen pixels, relative to the first frame
+    const offs = cams[0] ? cams.map((c) => [-(c.ox - cams[0].ox), -(c.oy - cams[0].oy)]) : est;
+    const moving = offs.some((o) => o[0] || o[1]);
+    const plate = moving ? null : m.medianPlate(picks);
+    const mosaic = moving ? m.mosaicPlate(picks, pickIdx.map((i) => offs[i])) : null;
+    // pass 2: per frame, the blob nearest the projected state position
+    st = await begin(s, runOpts(opt, cfg));
+    const rows = [];
+    for (let f = f0; f <= f1; f++) {
+      await stepTo(s, st, f);
+      const snap = await s.snapshot(), im = await shotImage(await s.screenshot());
+      let p;
+      try { p = evaluate(posExpr, snap); } catch (e) { die(`--pos: ${e.message}`); }
+      const pos = Array.isArray(p) ? p : p && Array.isArray(p.pos) ? p.pos : null;
+      if (!pos) die(`--pos "${posExpr}" gave ${JSON.stringify(p)} at f${f}, not a position [x, y]`);
+      const h = cams[f - f0] || { scale: 1, ox: 0, oy: 0 };
+      const sx = h.scale * pos[0] + h.ox, sy = h.scale * pos[1] + h.oy;
+      const k = f - f0;
+      const mask = moving ? m.maskAgainstMosaic(im, mosaic, offs[k], null, 16) : (() => { const mm = new Uint8Array(im.width * im.height); for (let i = 0, o = 0; i < mm.length; i++, o += 4) if (Math.abs(im.data[o] - plate.data[o]) > 16 || Math.abs(im.data[o + 1] - plate.data[o + 1]) > 16 || Math.abs(im.data[o + 2] - plate.data[o + 2]) > 16) mm[i] = 1; return mm; })();
+      const comps = m.components(mask, im.width, im.height, { minPixels: 6 });
+      let best = null;
+      for (const c of comps) { const d = Math.hypot(c.cx - sx, c.cy - sy); if (d < 48 && (!best || d < best.d)) best = { c, d }; }
+      if (!best) { rows.push({ f, state: [sx, sy], missing: true }); continue; }
+      const c = best.c, y = c.bbox.y + c.bbox.h - 1;
+      let x0 = -1, x1 = -1;
+      for (let x = c.bbox.x; x < c.bbox.x + c.bbox.w; x++) if (mask[y * im.width + x]) { if (x0 < 0) x0 = x; x1 = x; }
+      rows.push({ f, state: [sx, sy], world: [pos[0] * h.scale, pos[1] * h.scale], cam: offs[k], centroid: [c.cx, c.cy], foot: [(x0 + x1) / 2, y], count: c.count });
+    }
+    printLogs(await s.drainLogs());
+    res = { fps, f0, f1, rows, moving, fromState: !!cams[0] };
+  });
+  const { rows, fps, moving, fromState } = res;
+  const seen = rows.filter((q) => !q.missing);
+  if (seen.length < 2) die(`the sprite near ${posExpr} was found in only ${seen.length} frame(s): is it drawn there? (try measure align; a sprite that never moves is part of the clean background, so it can't be measured here)`);
+  const reg = seen.map((q) => [q.centroid[0] - q.state[0], q.centroid[1] - q.state[1]]);
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const sd = (a) => { const mu = mean(a); return Math.sqrt(mean(a.map((v) => (v - mu) ** 2))); };
+  const rx = reg.map((v) => v[0]), ry = reg.map((v) => v[1]);
+  // feet vs body, in world pixels (camera removed), frame to frame
+  let movingFrames = 0, planted = 0, gliding = 0;
+  const steps = [];
+  for (let i = 1; i < seen.length; i++) {
+    const a = seen[i - 1], b = seen[i];
+    if (b.f !== a.f + 1) continue;
+    const body = Math.hypot(b.world[0] - a.world[0], b.world[1] - a.world[1]);
+    const fx = (b.foot[0] + b.cam[0]) - (a.foot[0] + a.cam[0]), fy = (b.foot[1] + b.cam[1]) - (a.foot[1] + a.cam[1]);
+    if (body < 0.25) continue;
+    movingFrames++;
+    const ratio = Math.hypot(fx, fy) / body;   // 0: the foot stays put in the world; 1: it moves with the body
+    if (ratio < 0.25) planted++; else if (ratio > 0.75) gliding++;
+    steps.push({ f: b.f, body: r3(body), foot: [r3(fx), r3(fy)] });
+  }
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const lines = [];
+  lines.push(`registration of ${posExpr} f${res.f0}..f${res.f1} (${seen.length} frames with its sprite${moving ? `, camera ${fromState ? "from state.camera" : "estimated"} and removed` : ", camera still"}):`);
+  lines.push(`  sprite centre vs state position: offset [${r2(mean(rx))}, ${r2(mean(ry))}] px on average, spread ±[${r2(sd(rx))}, ${r2(sd(ry))}] (range x ${r2(Math.min(...rx))}..${r2(Math.max(...rx))}, y ${r2(Math.min(...ry))}..${r2(Math.max(...ry))}) ${Math.max(sd(rx), sd(ry)) <= 0.75 ? "✔ stays registered" : "✖ drifts against its state position"}`);
+  if (movingFrames) lines.push(`  feet (the sprite's lowest row) while the body moves: planted in ${planted} of ${movingFrames} frames, gliding with the body in ${gliding}${gliding > 0.75 * movingFrames ? " → no planted frames: the feet slide (no walk cycle, or one that doesn't match the speed)" : planted ? " → the walk plants its feet" : ""}`);
+  else lines.push("  the body doesn't move in this window: nothing to say about foot slide");
+  if (rows.some((q) => q.missing)) lines.push(`  ⚠ no sprite near the state position at ${rows.filter((q) => q.missing).length} frame(s)`);
+  const env = envelope("measure registration", {
+    verdict: lines[1].trim(),
+    summary: { frames: seen.length, offset: [r2(mean(rx)), r2(mean(ry))], spread: [r2(sd(rx)), r2(sd(ry))], movingFrames, planted, gliding },
+    data: { expr: posExpr, fps, cameraMoving: moving, cameraFromState: fromState, frames: rows.map((q) => (q.missing ? { f: q.f, missing: true } : { f: q.f, state: q.state.map(r3), centroid: q.centroid.map(r3), foot: q.foot.map(r3), cam: q.cam })), steps },
   });
   emit(env, lines.join("\n"), opt);
 }

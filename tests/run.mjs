@@ -10,6 +10,7 @@ import { diffStates } from "../src/core/compare.js";
 import { analyzeJump, analyzeMove, frozenSpans, response, lag, stutters, summarize } from "../src/core/signal.js";
 import { matchSounds, alignSoundEvents, soundFrame } from "../src/core/soundmatch.js";
 import { windowsOf } from "../src/cli/window.js";
+import { parseVariant, compareRect } from "../src/cli/ab.js";
 import { parseWitnessInput } from "../src/core/input-spec.js";
 import { loadReplay, frameAt } from "../src/core/runner.js";
 import { detect, listAdapters } from "../src/core/init.js";
@@ -144,6 +145,18 @@ ok("bad time: a clear error", (() => { try { frameAt("soon", 60); return false; 
   const w = windowsOf(res);
   ok("windowsOf: contiguous runs with their sizes", JSON.stringify(w) === JSON.stringify([{ from: 1, to: 3, frames: 3 }, { from: 5, to: 6, frames: 2 }, { from: 9, to: 9, frames: 1 }]), w);
   ok("windowsOf: a step of 2 frames", JSON.stringify(windowsOf([0, 2, 4].map((v) => ({ v, step: 2, ok: true })))) === JSON.stringify([{ from: 0, to: 4, frames: 3 }]));
+}
+
+// ---- ab: variants and rect comparison
+{
+  const v = parseVariant('LIFT=1; params={"rig":2}; scene=boss; seed=3; input=j@1; cmd=node g.mjs', "a");
+  ok("ab variant: env, params, scene, seed, input, cmd", v.env.LIFT === "1" && v.params.rig === 2 && v.scene === "boss" && v.seed === 3 && v.input === "j@1" && v.cmd === "node g.mjs");
+  ok("ab variant: plain env pairs separated by spaces", (() => { const w = parseVariant("A=1 B=2", "a"); return w.env.A === "1" && w.env.B === "2"; })());
+  const mk = (c) => ({ width: 4, height: 2, data: Uint8Array.from({ length: 32 }, (_, i) => (i % 4 === 3 ? 255 : c)) });
+  const a = mk(0), b = mk(0);
+  for (const i of [0, 1]) { b.data[i * 4] = 255; b.data[i * 4 + 1] = 255; b.data[i * 4 + 2] = 255; }
+  const c = compareRect(a, b, { x: 0, y: 0, w: 4, h: 2 });
+  ok("ab rect: 2 of 8 px white: 25%, luma +63.75 overall, +255 on the changed, bbox x0..1", c.changed === 2 && c.percent === 25 && c.lumaDelta === 63.75 && c.lumaDeltaChanged === 255 && c.bbox.w === 2 && c.bbox.h === 1, c);
 }
 
 // ---- sound ↔ event matching (listen)
@@ -363,6 +376,23 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   ok("align: coin 12 drawn 6 px left is flagged; hitboxes vs art", /#12 Coin 6 px left/.test(r.stdout) && /Player box 15×15 vs art 15×15 ✔/.test(r.stdout) && /Coin ×5 box 16×16 vs art 11×11 ✖ hitbox larger than the art/.test(r.stdout), r.stdout + r.stderr);
   r = cli(["shot", "--at", "0.5", "--annotate", "--out", path.join(work, "ann.png"), "--json"]);
   ok("shot --annotate: every entity labelled, positions fitted to the sprites", (() => { const j = J(r)?.data.shots[0]; return j && j.annotated === 6 && j.fit && j.fit.ax === 1 && fs.existsSync(path.join(work, "ann.png")); })(), r.stdout.slice(0, 400) + r.stderr);
+
+  // witness ab: the same scenario twice with one difference (reset params, env), compared in a rect
+  r = cli(["ab", "--a", 'params={"big":false}', "--b", 'params={"big":true}', "--at", "0.5", "--rect", "20,70,40,40", "--state", "--out", path.join(work, "ab"), "--json"]);
+  ok("ab: radius 7 → 9 is 149 → 253 px: 104 changed, each +154.15 luma, in the right bbox", (() => { const q = J(r)?.summary; return q && q.changedPixels === 104 && q.lumaDeltaChanged === 154.15 && q.lumaDelta === 10.02 && q.bbox.x === 31 && q.bbox.w === 19 && q.stateChanges === 0 && fs.existsSync(path.join(work, "ab", "ab-f30.png")); })(), r.stdout.slice(0, 500) + r.stderr);
+  r = cli(["ab", "--a", "MOCK_ALIGN=", "--b", "MOCK_ALIGN=1", "--at", "0.5", "--from", "0.2", "--to", "0.6", "--every", "6f", "--rect", "140,80,40,30", "--out", path.join(work, "ab2")]);
+  ok("ab: an env difference runs two processes; the coin moved -6,0; a filmstrip of both", /two game processes/.test(r.stdout) && /moved -6,0 x=149 y=88 17×11/.test(r.stdout) && /changed px per frame 112, 112, 112, 112, 112/.test(r.stdout) && fs.existsSync(path.join(work, "ab2", "ab-sheet.png")), r.stdout + r.stderr);
+  r = cli(["ab", "--a", "input=right@0-0.5", "--b", "input=left@0-0.5", "--at", "0.5", "--state", "--json"]);
+  ok("ab: an input difference, and the state diff between A and B", (() => { const j = J(r); const m0 = j?.data.moments[0]; return m0 && m0.state.some((d) => d.path === "state.player.pos" && d.a[0] === 100 && d.b[0] === 0); })(), r.stdout.slice(0, 500) + r.stderr);
+  // a frozen camera (the reserved reset param), the game's own camera, and registration against the state
+  r = cli(["measure", "motion", "--hold-camera", "--at", "0", "--time", "36f", "--input", "right@0-1, down@0-1", "--json"], { MOCK_CAMERA: "1" });
+  ok("--hold-camera: the game keeps its camera still, so screen motion is world motion", (() => { const j = J(r)?.data; return j && j.camera && !j.camera.moving && j.objects[0].net.join() === "72,72"; })(), r.stdout.slice(0, 400) + r.stderr);
+  r = cli(["measure", "motion", "--camera", "state", "--at", "0", "--time", "36f", "--input", "right@0-1, down@0-1", "--json"], { MOCK_CAMERA: "1" });
+  ok("motion --camera state: the camera from state.camera (the f30 step exact), world motion [2,2]", (() => { const j = J(r)?.data; return j && j.camera.moving && j.camera.uneven.length === 1 && j.camera.uneven[0].i === 30 && j.objects[0].meanStep === 2.828; })(), r.stdout.slice(0, 400) + r.stderr);
+  r = cli(["measure", "registration", "--pos", "state.player.pos", "--at", "0", "--time", "36f", "--input", "right@0-1, down@0-1", "--json"], { MOCK_CAMERA: "1" });
+  ok("registration: the sprite sits on its state position (offset 0, spread 0); a disc's feet glide", (() => { const q = J(r)?.summary; return q && q.offset.join() === "0,0" && q.spread.join() === "0,0" && q.gliding === 36 && q.planted === 0; })(), r.stdout.slice(0, 400) + r.stderr);
+  r = cli(["shot", "--sheet", "--at", "0.2,0.5,1.1", "--out", path.join(work, "mom.png"), "--input", "right@0-1", "--json"]);
+  ok("shot --sheet --at: a sheet of chosen moments", (() => { const q = J(r)?.summary; return q && q.frames.join() === "12,30,66" && q.cols === 3; })(), r.stdout.slice(0, 300) + r.stderr);
 
   // shots: --json, diff regions (B11), crops, sheets, key frames
   const s1 = path.join(work, "a.png"), s2 = path.join(work, "b.png");

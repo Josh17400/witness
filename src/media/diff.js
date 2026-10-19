@@ -277,7 +277,7 @@ function visualize({ A, B, w, h, mask, delta, skip, result, moreBoxes, title }) 
   const W = Math.max(3 * vw + 2 * gap + pad * 2, 720), H = header + label + vh + pad;
   const g = new Raster(W, H, BG);
   const ox = Math.round((W - (3 * vw + 2 * gap)) / 2), oy = header + label;
-  const panels = [[A, "A (reference)"], [B, "B (now)"], [base, "changes"]];
+  const panels = [[A, "A"], [B, "B"], [base, "changes"]];
   panels.forEach(([img, name], p) => {
     const px = ox + p * (vw + gap);
     g.drawImage(img, { dx: px, dy: oy, dw: vw, dh: vh, smooth: k < 1 ? "bilinear" : "nearest" });
@@ -288,7 +288,7 @@ function visualize({ A, B, w, h, mask, delta, skip, result, moreBoxes, title }) 
   // header
   const r = result;
   const fmtN = (n) => n.toLocaleString("en-US");
-  g.text(g.fitText(title, W - 300), pad, 22, { scale: 2, bold: true, color: TEXT, baseline: "middle" });
+  g.text(g.fitText(title, W - 300, { scale: 2 }), pad, 22, { scale: 2, bold: true, color: TEXT, baseline: "middle" });
   const pct = r.changedPercent, shownPct = pct >= 10 ? pct.toFixed(1) : pct >= 0.1 ? pct.toFixed(2) : pct >= 0.001 ? pct.toFixed(3) : "<0.001";
   const verdict = r.changedPixels === 0 ? (r.shift ? "only the camera moved" : "identical") : `${shownPct}% changed`;
   g.text(verdict, W - pad, 22, { scale: 2, bold: true, color: r.changedPixels === 0 ? GOOD : "#ff2bd6", align: "right", baseline: "middle" });

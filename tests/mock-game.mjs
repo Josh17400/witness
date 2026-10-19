@@ -21,6 +21,8 @@
 //   MOCK_SOUNDS=1  j plays an 80 ms noise burst, but only on odd presses (a planted cooldown bug); landing plays a
 //                  120 ms 660 Hz tone; coins ding. Each sound is announced with an {"event": "sound"} line;
 //                  MOCK_SOUNDS=quiet plays the same sounds without the lines (an adapter without sound events).
+//   reset params: {"big": true} draws the player with radius 9 instead of 7 (an A/B difference);
+//                  {"camera": "hold"} (the reserved camera-hold param) keeps MOCK_CAMERA's camera still
 //   MOCK_PNG=1     screenshots come back as format "png" (like Unity, or the JS adapter's screenshotFormat "png")
 import net from "node:net";
 import { encodePNG } from "../src/media/png.js";
@@ -37,12 +39,14 @@ let edges = [], freeze = 0, xAt = null, lagged = false, jPresses = 0, coyote = 0
 const LEDGE = !!process.env.MOCK_LEDGE, CAMERA = !!process.env.MOCK_CAMERA, ALIGN = !!process.env.MOCK_ALIGN;
 const ZOOM = +process.env.MOCK_ZOOM || 1;
 // MOCK_CAMERA: the camera scrolls 2 px a frame, with one 3 px step (frame 29 → 30): a planted 1 px hitch
-const camX = () => 2 * frame + (frame >= 30 ? 1 : 0);
+const camX = () => (holdCamera ? 0 : 2 * frame + (frame >= 30 ? 1 : 0));
 const camY = ZOOM > 1 ? 40 : 0;   // zoomed in, the camera looks a little lower so the coins stay in view
 const groundY = (x) => (LEDGE && x >= 200 ? 150 : 90);
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
-function reset(seed = 1) {
+let bigPlayer = false, holdCamera = false;
+function reset(seed = 1, params = {}) {
+  bigPlayer = !!params.big; holdCamera = params.camera === "hold";
   rngState = seed || 1; frame = 0; time = 0; queue = []; keys = new Set(); audioBuf = []; score = 0;
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
@@ -143,7 +147,7 @@ function screenshot() {
   // screen = (world - camera) × zoom; MOCK_ALIGN draws coin 12 six screen pixels left of its state position
   const blob = (p, r, c, dx = 0) => { const R = r * ZOOM, sx = Math.round((p[0] - cam) * ZOOM) + dx, sy = Math.round((p[1] - (CAMERA ? camY : 0)) * ZOOM); for (let y = -R; y <= R; y++) for (let x = -R; x <= R; x++) if (x * x + y * y <= R * R) put(sx + x, sy + y, ...c); };
   coins.forEach((c) => blob(c.pos, 5, [255, 210, 60], ALIGN && c.id === 12 ? -6 : 0));
-  blob(player.pos, 7, [80, 200, 255]);
+  blob(player.pos, bigPlayer ? 9 : 7, [80, 200, 255]);
   if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
   if (LAG && xAt != null && frame - xAt >= 5) for (let y = 10; y < 20; y++) for (let x = 300; x < 310; x++) put(x, y, 255, 255, 255);
   if (process.env.MOCK_PNG) return { width: W, height: H, format: "png", data: Buffer.from(encodePNG(W, H, px)).toString("base64") };
@@ -175,7 +179,7 @@ sock.on("data", (d) => {
     const reply = (o) => sock.write(JSON.stringify({ id: m.id, ok: true, ...o }) + "\n");
     const fail = (e) => sock.write(JSON.stringify({ id: m.id, ok: false, error: e }) + "\n");
     switch (m.cmd) {
-      case "reset": reset(m.seed); audioSent = 0; noiseSeed = 7; reply({}); break;
+      case "reset": reset(m.seed, m.params || {}); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
       case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}) } }); break;

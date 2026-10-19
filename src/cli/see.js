@@ -178,8 +178,10 @@ async function sheetShots(opt) {
   await withGame(opt, async (s, cfg, root) => {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
     const fps = s.fps;
-    const f0 = framesOf(opt.from !== undefined && opt.from !== true ? String(opt.from) : "0", fps);
-    const f1 = framesOf(opt.to !== undefined && opt.to !== true ? String(opt.to) : `${f0 + fps}f`, fps);
+    // --sheet --at 1,1.4,2: a sheet of chosen moments
+    const moments = opt.at !== undefined && opt.at !== true && opt.from === undefined && opt.auto === undefined ? [...new Set(timeList(opt.at, []).map((t) => framesOf(t, fps)))].sort((a, b) => a - b) : null;
+    const f0 = moments ? moments[0] : framesOf(opt.from !== undefined && opt.from !== true ? String(opt.from) : "0", fps);
+    const f1 = moments ? moments[moments.length - 1] : framesOf(opt.to !== undefined && opt.to !== true ? String(opt.to) : `${f0 + fps}f`, fps);
     if (f1 < f0) die("--to must not be before --from");
     const m = await media();
     const auto = opt.auto !== undefined ? (opt.auto === true ? 9 : Math.round(+opt.auto)) : 0;
@@ -210,8 +212,8 @@ async function sheetShots(opt) {
       if (keep) { out = await compose(m, fr, frames.map((f) => keep.get(f)), frames, { s, cfg, root, opt, f0, f1, fps, scores, auto }); printLogs(await s.drainLogs()); return; }
     } else {
       const every = opt.every && opt.every !== true ? Math.max(1, framesOf(String(opt.every), fps)) : Math.max(1, Math.ceil((f1 - f0) / 11));
-      frames = [];
-      for (let f = f0; f <= f1; f += every) frames.push(f);
+      frames = moments || [];
+      if (!moments) for (let f = f0; f <= f1; f += every) frames.push(f);
       if (frames.length > MAX_CELLS) die(`${frames.length} frames is too many for one readable sheet (max ${MAX_CELLS}): raise --every (e.g. --every ${Math.ceil((f1 - f0) / (MAX_CELLS - 1))}f) or shorten --from..--to`);
     }
     // capture the chosen frames (pass 2 for --auto: same seed and input, so the same frames)
@@ -234,7 +236,8 @@ async function compose(m, fr, caps, frames, { s, cfg, root, opt, f0, f1, fps, sc
   const pct = (f) => (scores && scores.has(f) && area ? ` ${(100 * scores.get(f) / area).toFixed(1)}%` : "");
   const cells = imgs.map((img, i) => ({ img, label: `f${frames[i]} +${frames[i] - frames[0]}f${auto ? pct(frames[i]) : ""}` }));
   const title = `${s.hello.name}: ${auto ? `${frames.length} key frames of` : `${frames.length} frames`} f${f0}..f${f1}${describeFraming(fr) ? ` (${describeFraming(fr)})` : ""}`;
-  const sub = auto ? "the frames that change most vs the frame before · label: frame, +offset, % changed" : `every ${frames.length > 1 ? frames[1] - frames[0] : 0}f at ${fps} fps · label: frame, +offset`;
+  const regular = frames.every((f, i) => i < 2 || f - frames[i - 1] === frames[1] - frames[0]);
+  const sub = auto ? "the frames that change most vs the frame before · label: frame, +offset, % changed" : regular ? `every ${frames.length > 1 ? frames[1] - frames[0] : 0}f at ${fps} fps · label: frame, +offset` : `chosen moments at ${fps} fps · label: frame, +offset`;
   const sheet = m.contactSheet(cells, { cols: opt.cols && opt.cols !== true ? +opt.cols : undefined, title, subtitle: sub });
   const file = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, "sheet.png"));
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -243,7 +246,7 @@ async function compose(m, fr, caps, frames, { s, cfg, root, opt, f0, f1, fps, sc
   const how = [`${L.cols}×${L.rows} grid`, `each ${imgs[0].width}×${imgs[0].height}${L.scale < 1 ? ` shown at ${Math.round(L.scale * 100)}%` : ""}`, describeFraming(fr)].filter(Boolean).join(", ");
   const text = auto
     ? `✔ ${frames.length} key frame${frames.length === 1 ? "" : "s"} of f${f0}..f${f1} (biggest picture changes): ${frames.map((f) => `f${f}${pct(f)}`).join(", ")}\n  → ${file} (${how})`
-    : `✔ ${frames.length} frames f${frames[0]}..f${frames[frames.length - 1]}${frames.length > 1 ? ` every ${frames[1] - frames[0]}f` : ""} → ${file} (${how})`;
+    : `✔ ${frames.length} frames ${regular ? `f${frames[0]}..f${frames[frames.length - 1]}${frames.length > 1 ? ` every ${frames[1] - frames[0]}f` : ""}` : frames.map((f) => `f${f}`).join(", ")} → ${file} (${how})`;
   const json = envelope("shot --sheet", {
     verdict: text.split("\n")[0].replace(/^✔ /, ""),
     summary: { frames, cols: L.cols, rows: L.rows, cell: [imgs[0].width, imgs[0].height] },

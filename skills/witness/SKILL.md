@@ -59,6 +59,8 @@ witness shot --at 1,4 --input "right@0-3"      # PNGs: OPEN THEM with your image
 witness shot --from 1 --to 1.5 --every 2f --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
 witness shot --from 0 --to 4 --auto 9          # the 9 frames where the picture changes most (key moments)
 witness shot --at 3 --diff witness/shots/before.png   # what changed: "moved +80,0", appeared, gone; camera shifts undone
+witness ab --a LIFT=0 --b LIFT=1 --input "right@0-3" --at 3.2 --rect 200,100,64,64   # A/B: changed px, luma Δ, A|B|diff, --state
+witness measure registration --pos "state.player.pos" --at 1 --time 1 --input "right@0-2" --hold-camera   # sprite vs state, foot slide
 witness listen --time 8 --input "space@1" --events "land: rose(state.player.grounded)"   # sounds vs their causes
 witness replay last --shot                     # what the human saw when they hit the bug
 witness call teleport 100 200 --at 1           # run a game command, then print the state
@@ -68,6 +70,8 @@ witness measure align --at 2                   # are sprites drawn where the sta
 witness measure scale|box|contrast ...         # pixel facts: integer scale/blur, sprite box, WCAG contrast
 ```
 
+* **A/B anything** (a flag, a rig, a mask, a param, an input): `witness ab`, never a hand-written comparison script.
+  `--hold-camera` asks games that support it (reset param `"camera": "hold"`) to keep the camera still for pixel work.
 * **Pick the tool by the question.** Changed a control → `effect` (latency) + `measure jump|move`. Timing that should "feel fair" (coyote time, buffer,
   parry, i-frames, combo windows) → `window`. Animation or juice → `shot --sheet` (and look). "When does X happen?" → `eval --when`. "What did that do?" → `eval --diff` or
   `effect`. A rule that must always hold → a test range (section 3). Sound wiring → `listen --events`. The numbers

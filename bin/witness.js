@@ -16,6 +16,7 @@ import { measureCommand } from "../src/cli/measure.js";
 import { effectCommand } from "../src/cli/effect.js";
 import { listenCommand } from "../src/cli/listen.js";
 import { windowCommand } from "../src/cli/window.js";
+import { abCommand } from "../src/cli/ab.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -29,6 +30,7 @@ const HELP = `Witness ${VERSION} — let Claude see, hear and prove any game
   witness trace --watch "a, b"        values over time: per-series table (frames, per-frame steps) + chart PNG
   witness effect --input "space@1"    what an input causes and how many frames later (state, pixels, audio)
   witness window --input "space@{t}"  sweep an input's timing: where it still works (coyote, buffer, parry windows)
+  witness ab --a ENV=0 --b ENV=1      the same scenario twice with one difference, compared (pixels in a rect, state)
   witness shot --at 1,4               screenshots; --sheet/--auto filmstrips, --crop/--follow/--zoom, --diff ref.png
   witness listen --time 8             hear the game: sounds tied to their causes, audio report + PNGs
   witness measure <what> ...          numbers: jump, move, hitstop, curve (state) · scale, box, contrast, motion (pixels)
@@ -43,6 +45,7 @@ Common options:
   --input "right@0-2, space@1, click:640,360@1.5, action:jump@2"   scripted input
   --seed 7  --scene <name>  --params '{"level":2}'  --build (run witness.json "build" first)
   --window 1920x1080  --dpi 2   (sent as reset params "window"/"dpi" for games that support them)
+  --hold-camera   reset param "camera": "hold": games that support it keep the camera still (pixel measures)
   --attach (wait for an already-running game)  --cmd "<launch command>" (no witness.json needed)
   --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
   --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
@@ -105,7 +108,8 @@ const CMD_HELP = {
                                state.camera, else a fit of the state positions to the sprites found
   Filmstrips (one picture, read it with your image tool):
   --from 1 --to 1.5 [--every 3f] --sheet [--cols 6]    a labelled grid of frames (max 48; with --crop/--follow/--zoom)
-  --from 0 --to 4 --auto 9                             the 9 frames where the picture changes most (key moments)`,
+  --from 0 --to 4 --auto 9                             the 9 frames where the picture changes most (key moments)
+  --sheet --at 1,1.4,2.2                               a sheet of chosen moments`,
   listen: `witness listen [--time 8] [--input ...] [--events "name: expr, ..."] [--within 6f] [--out dir] [--wav]
   Captures the game's audio (adapter 'audio' capability), then:
   * events vs sounds: each input press (unless --no-input-events) and each --events state change gets the sound it
@@ -117,6 +121,15 @@ const CMD_HELP = {
   * timeline.png + sounds.png (+ mix.wav).
   Games that announce sounds ({"event": "sound"}, e.g. witness.sound("jump")) get them named and checked against the
   audio (announced but silent, audible but unannounced).`,
+  ab: `witness ab --a <variant> --b <variant> [--input ...] [--at 3.2,4] [--rect x,y,w,h] [--from 3 --to 4 --every 0.1]
+              [--zoom 2] [--state] [--threshold 16]
+  Runs the same scenario as A and as B and compares them at the same frames. A variant is KEY=VALUE items joined by
+  ";": params={...} (merged into reset params), scene=..., seed=N, input=... (added to --input), cmd=... (another
+  launch command); any other KEY=VALUE is an environment variable for the game (each env/cmd variant gets its own
+  process). Per moment: changed pixels in the rect (count, %, bbox), mean luma and colour B − A (over the rect and
+  over the changed pixels), SSIM, the regions (appeared / gone / moved / changed), an A | B | changes picture, and
+  with --state the state paths that differ. --from/--to: a filmstrip of both (A over B) with the changed pixels per
+  frame. --expect works on the first moment's summary (changedPixels, lumaDelta, ...).`,
   window: `witness window --input "right@0-2, space@{t}" --t 0.9..1.3 [--step 1f] --expect "expr" [--at "{t}+0.4"]
               [--ref "fell(state.player.grounded)"]
   One run per value of {t} (seconds or frames), each checking --expect at --at ("{t}+offset" or a plain time). Prints
@@ -154,6 +167,10 @@ const CMD_HELP = {
       against state.camera, lists entities drawn away from their state position ("#12 Coin 6 px left"), entities not
       found, and hitboxes (entity "box") vs the drawn art. --clip S: a clean plate from the S seconds before, for
       textured scenes (then only things that moved are found).
+  registration --pos "state.player.pos" --at 1 --time 1 [--input ...] [--hold-camera]
+      the sprite against its state position every frame: the offset of its centre (stays registered, or drifts),
+      and its lowest row (the feet) moving in the world against the body (planted vs gliding: foot slide). The
+      camera comes from state.camera when the game exposes it, else it's estimated and removed.
   scale <shot.png> [--k 3] [--region x,y,w,h] [--tolerance 0]
       integer-scale test: is every k×k cell one colour? Finds k and the grid offset; reports blur/fractional scaling.
   box <with.png> <without.png> [--threshold 16]
@@ -170,7 +187,7 @@ const CMD_HELP = {
       --near x,y). Drives the game and screenshots every frame (needs 'reset': one pass for the camera and the
       background, one to measure), or reads PNG files.
       --background auto|first|median|<file.png>  (auto: median for 8+ frames; median needs movers to move their own
-      size) · --camera auto|static|moving · --min-size 6 (smallest object, px) · --threshold 16`,
+      size) · --camera auto|static|moving|state (state: the game's state.camera, exact) · --min-size 6 (smallest object, px) · --threshold 16`,
   doctor: `witness doctor [--time 3]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
@@ -340,6 +357,7 @@ const commands = {
   measure: measureCommand,
   effect: effectCommand,
   window: windowCommand,
+  ab: abCommand,
 
   async replay(pos, opt) {
     await withGame(opt, async (s, cfg, root) => {

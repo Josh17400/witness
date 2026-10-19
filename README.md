@@ -16,6 +16,7 @@ witness test --repeat 2                          # every step must repeat exactl
 witness eval --at 2 "state.player.hp" "count('Enemy')"
 witness eval --when "state.gate.open" --input "e@2"   # the exact frame something happens
 witness effect --input "space@1"                 # what an input causes, and how many frames later (state, pixels, audio)
+witness ab --a LIFT=0 --b LIFT=1 --at 3.2 --rect 200,100,64,64   # A/B runs: changed pixels, luma Δ, A | B | diff, state
 witness measure jump --y "state.player.pos[1]" --input "space@1"   # apex, airtime, hang, gravity: feel as numbers
 witness trace --watch "state.player.pos[1], state.score" --time 4 --input "space@1"   # → table + chart PNG
 witness shot --from 1 --to 1.5 --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
