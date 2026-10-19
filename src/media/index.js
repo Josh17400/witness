@@ -33,3 +33,4 @@ export {
   components, trackObjects, trackReport, estimateShift, cameraPath, summarizeCamera, mosaicPlate, maskAgainstMosaic,
 } from "./track.js";
 export { cropImage, zoomImage, frameDiffScore, pickKeyFrames, contactSheet } from "./sheet.js";
+export { findBlobs, fitProjection, hitboxes, annotate } from "./align.js";

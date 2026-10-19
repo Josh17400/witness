@@ -67,7 +67,9 @@ async function pixelMeasure(what, files, opt) {
     out(envelope("measure contrast", { verdict: `contrast ${r.ratio.toFixed(2)}:1, ΔE ${r.deltaE.toFixed(1)}`, summary: { ratio: r.ratio, deltaE: r.deltaE, lumA: r.lumA, lumB: r.lumB }, data: r }), [`contrast ${r.ratio.toFixed(2)}:1 (WCAG: 3 for large shapes, 4.5 for text) · ΔE ${r.deltaE.toFixed(1)} · luminance ${r.lumA.toFixed(3)} vs ${r.lumB.toFixed(3)} · ${r.countA} vs ${r.countB} px`]);
   } else if (what === "motion") {
     return motionMeasure(m, files.map(read), opt, region);
-  } else die("usage: witness measure scale|box|contrast|motion|curve|jump|move|hitstop ...  (witness help measure)");
+  } else if (what === "align") {
+    return alignMeasure(m, opt);
+  } else die("usage: witness measure scale|box|contrast|motion|align|curve|jump|move|hitstop ...  (witness help measure)");
 }
 
 async function motionMeasure(m, fileFrames, opt, region) {
@@ -206,6 +208,102 @@ function reportMotion(r, opt, f0, fps) {
     lines.push(...(rows.length > 60 ? [...rows.slice(0, 30), `  … ${rows.length - 60} frames (--json) …`, ...rows.slice(-30)] : rows));
   }
   return { env, text: lines.join("\n") };
+}
+
+// ------------------------------------------------------------------ align: state ↔ pixels
+
+/** Entities of a snapshot as { id, type, x, y, box, screen }, optionally only some types. */
+export function entitiesOf(snap, types = null) {
+  const ents = Array.isArray(snap?.state?.entities) ? snap.state.entities : [];
+  const want = types ? new Set(types) : null;
+  return ents.map((e) => {
+    const p = Array.isArray(e.pos) ? e.pos : e && typeof e === "object" && "x" in e ? [e.x, e.y] : null;
+    return { id: e.id, type: e.type ?? e.kind ?? "?", x: p ? +p[0] : NaN, y: p ? +p[1] : NaN, box: e.box, screen: e.screen, raw: e };
+  }).filter((e) => !want || want.has(e.type));
+}
+
+/** The projection a state.camera convention implies: screen = (world - camera.pos) × zoom. */
+export function cameraHint(snap) {
+  const c = snap?.state?.camera;
+  if (!c || !Array.isArray(c.pos)) return null;
+  const z = Number.isFinite(+c.zoom) && +c.zoom > 0 ? +c.zoom : 1;
+  return { scale: z, ox: -c.pos[0] * z, oy: -c.pos[1] * z };
+}
+
+async function alignMeasure(m, opt) {
+  const types = opt.types && opt.types !== true ? String(opt.types).split(",").map((t) => t.trim()).filter(Boolean) : null;
+  let res;
+  await withGame(opt, async (s, cfg) => {
+    if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
+    const fps = s.fps;
+    const f = framesOf(opt.at && opt.at !== true ? String(opt.at) : "1", fps);
+    const st = await begin(s, runOpts(opt, cfg));
+    await stepTo(s, st, f);
+    const img = await shotImage(await s.screenshot());
+    const snap = await s.snapshot();
+    printLogs(await s.drainLogs());
+    const ents = entitiesOf(snap, types);
+    if (!ents.length) die(`no entities${types ? ` of type ${types.join(", ")}` : ""} with a position in state.entities at f${f}`);
+    // a clean plate from the frames before (--clip S): for textured scenes; finds what moved, not the scenery
+    let plate = null;
+    if (opt.clip && opt.clip !== true) {
+      const n = Math.min(240, Math.max(4, framesOf(String(opt.clip), fps)));
+      if (f - n < 0) die(`--clip ${opt.clip} reaches before frame 0 (at f${f})`);
+      const frames = [];
+      const st2 = await begin(s, runOpts(opt, cfg));
+      for (let k = f - n; k <= f; k++) { await stepTo(s, st2, k); const im = await shotImage(await s.screenshot()); frames.push({ width: im.width, height: im.height, data: Uint8Array.from(im.data) }); }
+      const cam = m.cameraPath(frames);
+      if (cam.moving) {
+        const mos = m.mosaicPlate(frames, cam.positions);
+        const off = cam.positions[cam.positions.length - 1], P = mos.plate, data = new Uint8Array(img.width * img.height * 4);
+        for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) { const q = ((y + off[1] - mos.origin[1]) * P.width + x + off[0] - mos.origin[0]) * 4, o = (y * img.width + x) * 4; for (let c = 0; c < 4; c++) data[o + c] = P.data[q + c]; }
+        plate = { width: img.width, height: img.height, data };
+      } else plate = m.medianPlate(frames);
+      await s.drainLogs();
+    }
+    const blobs = m.findBlobs({ width: img.width, height: img.height, data: Uint8Array.from(img.data) }, { threshold: +(opt.threshold || 24), plate });
+    const hint = cameraHint(snap);
+    const fit = m.fitProjection(ents, blobs, { tol: +(opt.tol || 2.5), hint });
+    res = { f, fps, img: { width: img.width, height: img.height }, ents, blobs: blobs.length, hint, fit, hb: fit.ok ? m.hitboxes(fit) : [] };
+  });
+  const { f, fit, hint, hb, img } = res;
+  const name = (e) => `#${e.id} ${e.type}`;
+  const lines = [];
+  const sgn = (v) => (v >= 0 ? `+ ${r3(v)}` : `− ${r3(-v)}`);
+  if (!fit.ok) lines.push(`✖ state → screen: ${fit.reason} (f${f}, ${res.ents.length} entities, ${res.blobs} sprite-sized blobs)`);
+  else {
+    const onScreen = fit.total - fit.missing.filter((q) => q.at[0] < 0 || q.at[1] < 0 || q.at[0] >= img.width || q.at[1] >= img.height).length;
+    const good = fit.residual != null && fit.residual <= 1 && (fit.fromHint ? fit.matched >= 1 : fit.matched >= Math.max(2, Math.round(onScreen * 0.5)));
+    lines.push(`state → screen at f${f}: x' = ${fit.ax.toFixed(3)}·x ${sgn(fit.bx)}, y' = ${fit.ay.toFixed(3)}·y ${sgn(fit.by)} (${fit.matched} of ${fit.total} entities on a sprite, residual ${fit.residual} px) ${good ? "✔" : "⚠"}${fit.fromHint ? " — from state.camera, confirmed by the sprites found (too few to fit alone)" : ""}`);
+    if (hint) {
+      const same = Math.abs(hint.scale - fit.ax) < 0.02 && Math.abs(hint.ox - fit.bx) <= 1 && Math.abs(hint.oy - fit.by) <= 1;
+      lines.push(`  state.camera says x' = ${hint.scale}·x ${sgn(hint.ox)}, y' = ${hint.scale}·y ${sgn(hint.oy)}: ${same ? "✔ the same" : "✖ different: the camera in the state doesn't match what's drawn"}`);
+    }
+    const dir = (dx, dy) => [Math.abs(dx) >= 1 ? `${Math.abs(r3(dx))} px ${dx < 0 ? "left" : "right"}` : "", Math.abs(dy) >= 1 ? `${Math.abs(r3(dy))} px ${dy < 0 ? "up" : "down"}` : ""].filter(Boolean).join(" and ");
+    if (fit.offsets.length) lines.push(`  drawn away from its state position: ${fit.offsets.slice(0, 8).map((o) => `${name(o.entity)} ${dir(o.dx, o.dy)}`).join(" · ")}  (a sprite anchor or art offset? the cause of "it hit me but I wasn't touching it")`);
+    const off = fit.missing.filter((q) => q.at[0] < 0 || q.at[1] < 0 || q.at[0] >= img.width || q.at[1] >= img.height);
+    const lost = fit.missing.filter((q) => !off.includes(q));
+    if (lost.length) lines.push(`  not found near where the state puts them: ${lost.slice(0, 8).map((q) => `${name(q.entity)} (expected x=${Math.round(q.at[0])} y=${Math.round(q.at[1])})`).join(" · ")}  (${opt.clip ? "with --clip only things that moved during the clip are found" : "not drawn, hidden, drawn as part of the scenery, or the same colour as the background"})`);
+    if (off.length) lines.push(`  off screen: ${off.length} (${[...new Set(off.map((q) => q.entity.type))].slice(0, 6).join(", ")})`);
+    if (hb.length) {
+      const groups = new Map();
+      for (const h of hb) { const k = `${h.entity.type}|${h.box}|${h.art}|${h.verdict}`; groups.set(k, (groups.get(k) || []).concat(h)); }
+      lines.push(`  hitboxes: ${[...groups.values()].map((g) => `${g[0].entity.type}${g.length > 1 ? ` ×${g.length}` : ""} box ${g[0].box.join("×")} vs art ${g[0].art.join("×")} ${g[0].verdict === "matches the art" ? "✔" : `✖ ${g[0].verdict}`}`).join(" · ")}`);
+    }
+  }
+  const env = envelope("measure align", {
+    ok: fit.ok,
+    verdict: lines[0].replace(/^✖ /, ""),
+    summary: fit.ok ? { ax: fit.ax, bx: fit.bx, ay: fit.ay, by: fit.by, residual: fit.residual, matched: fit.matched, total: fit.total, offsets: fit.offsets.length, missing: fit.missing.length, hitboxMismatches: hb.filter((h) => h.verdict !== "matches the art").length } : {},
+    data: fit.ok ? {
+      frame: f, cameraHint: hint,
+      offsets: fit.offsets.map((o) => ({ id: o.entity.id, type: o.entity.type, dx: o.dx, dy: o.dy })),
+      missing: fit.missing.map((q) => ({ id: q.entity.id, type: q.entity.type, at: q.at })),
+      matches: fit.all.map((q) => ({ id: q.entity.id, type: q.entity.type, at: q.at, sprite: [r3(q.blob.cx), r3(q.blob.cy)], bbox: q.blob.bbox, dist: q.dist })),
+      hitboxes: hb.map((h) => ({ id: h.entity.id, type: h.entity.type, box: h.box, art: h.art, verdict: h.verdict })),
+    } : { reason: fit.reason },
+  });
+  emit(env, lines.join("\n"), opt);
 }
 
 // ------------------------------------------------------------------ state measures (sampled every frame)

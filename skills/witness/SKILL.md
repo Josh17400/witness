@@ -63,6 +63,8 @@ witness listen --time 8 --input "space@1" --events "land: rose(state.player.grou
 witness replay last --shot                     # what the human saw when they hit the bug
 witness call teleport 100 200 --at 1           # run a game command, then print the state
 witness measure motion --at 1 --time 1 --input "right@0-2"   # every mover: speed, jitter, stutter, flicker; camera scroll + hitches
+witness shot --at 2 --annotate                 # every entity boxed + labelled (#5 Wolf hp=3 state=windup) on the shot
+witness measure align --at 2                   # are sprites drawn where the state says? art offsets, hitbox vs art
 witness measure scale|box|contrast ...         # pixel facts: integer scale/blur, sprite box, WCAG contrast
 ```
 

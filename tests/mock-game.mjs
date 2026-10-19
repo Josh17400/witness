@@ -10,8 +10,12 @@
 //                  still works in the step the ground disappears and the 4 after it (5 frames); jump buffer: a press
 //                  up to 4 frames before the landing step jumps on landing. state.player gains vy, vx, grounded, jumps.
 //   MOCK_LEDGE=1   (with MOCK_JUMP) the floor at y=90 ends at x=200; past it the player falls to y=150
+//   MOCK_ALIGN=1   coin 12 is drawn 6 px left of its state position; entities carry a hitbox "box": the player's
+//                  [15, 15] matches its art, the coins' [16, 16] is bigger than their 11 px art
+//   MOCK_ZOOM=2    everything is drawn twice as big: screen = (world - camera) × 2
 //   MOCK_CAMERA=1  a textured world; the camera scrolls right 2 px per frame, with one 3 px step into frame 30;
-//                  state.camera.pos = [x, 0] (sprites are drawn at world x - camera x)
+//                  state.camera = { pos: [x, 0], zoom } (sprites are drawn at (world - camera) × zoom);
+//                  MOCK_CAMERA=flat keeps the plain background
 //   MOCK_LAG=1     x: the state reacts 3 frames after the press (state.lagged), the picture 5 frames after (a white
 //                  square at 300,10), and a beep starts in the press frame's own audio (+1f)
 //   MOCK_SOUNDS=1  j plays an 80 ms noise burst, but only on odd presses (a planted cooldown bug); landing plays a
@@ -30,9 +34,11 @@ let player, coins, score;
 let leakT = 0;
 const JUMP = !!process.env.MOCK_JUMP, LAG = !!process.env.MOCK_LAG, SOUNDS = process.env.MOCK_SOUNDS || "";
 let edges = [], freeze = 0, xAt = null, lagged = false, jPresses = 0, coyote = 0, buffer = 0;
-const LEDGE = !!process.env.MOCK_LEDGE, CAMERA = !!process.env.MOCK_CAMERA;
+const LEDGE = !!process.env.MOCK_LEDGE, CAMERA = !!process.env.MOCK_CAMERA, ALIGN = !!process.env.MOCK_ALIGN;
+const ZOOM = +process.env.MOCK_ZOOM || 1;
 // MOCK_CAMERA: the camera scrolls 2 px a frame, with one 3 px step (frame 29 → 30): a planted 1 px hitch
 const camX = () => 2 * frame + (frame >= 30 ? 1 : 0);
+const camY = ZOOM > 1 ? 40 : 0;   // zoomed in, the camera looks a little lower so the coins stay in view
 const groundY = (x) => (LEDGE && x >= 200 ? 150 : 90);
 const rng = () => { rngState = (rngState * 1103515245 + 12345) & 0x7fffffff; return rngState / 0x7fffffff; };
 
@@ -41,8 +47,9 @@ function reset(seed = 1) {
   pointer = { x: 0, y: 0, down: false }; fingers = new Map();
   player = { id: 1, type: "Player", pos: [40, 90], hp: 3 };
   if (JUMP) Object.assign(player, { vx: 0, vy: 0, grounded: true, jumps: 0 });
+  if (ALIGN) player.box = [15, 15];   // matches the 15 px disc it's drawn as
   edges = []; freeze = 0; xAt = null; lagged = false; jPresses = 0; coyote = 0; buffer = 0;
-  coins = Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)] }));
+  coins = Array.from({ length: 5 }, (_, i) => ({ id: 10 + i, type: "Coin", pos: [80 + i * 40, i === 0 ? 90 : 60 + ((seed * 7 + i * 13) % 61)], ...(ALIGN ? { box: [16, 16] } : {}) }));   // MOCK_ALIGN: a hitbox bigger than the 11 px art
 }
 
 function stepOnce(dt) {
@@ -129,12 +136,13 @@ function screenshot() {
   const px = Buffer.alloc(W * H * 4);
   const put = (x, y, r, g, b) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const i = (y * W + x) * 4; px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255; };
   const cam = CAMERA ? camX() : 0;
-  if (CAMERA) {
+  if (CAMERA && process.env.MOCK_CAMERA !== "flat") {
     // a textured world (4×4 blocks) seen through the camera, so scrolling is visible
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const h = (Math.imul((x + cam) >> 2, 73856093) ^ Math.imul(y >> 2, 19349663)) >>> 0; put(x, y, 20 + (h & 63), 24 + ((h >> 6) & 63), 40 + ((h >> 12) & 63)); }
   } else for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 20, 24, 40);
-  const blob = (p, r, c) => { for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= r * r) put(Math.round(p[0]) - cam + x, Math.round(p[1]) + y, ...c); };
-  coins.forEach((c) => blob(c.pos, 5, [255, 210, 60]));
+  // screen = (world - camera) × zoom; MOCK_ALIGN draws coin 12 six screen pixels left of its state position
+  const blob = (p, r, c, dx = 0) => { const R = r * ZOOM, sx = Math.round((p[0] - cam) * ZOOM) + dx, sy = Math.round((p[1] - (CAMERA ? camY : 0)) * ZOOM); for (let y = -R; y <= R; y++) for (let x = -R; x <= R; x++) if (x * x + y * y <= R * R) put(sx + x, sy + y, ...c); };
+  coins.forEach((c) => blob(c.pos, 5, [255, 210, 60], ALIGN && c.id === 12 ? -6 : 0));
   blob(player.pos, 7, [80, 200, 255]);
   if (process.env.MOCK_LEAK) put(2, 2, leakT % 256, 0, 0);
   if (LAG && xAt != null && frame - xAt >= 5) for (let y = 10; y < 20; y++) for (let x = 300; x < 310; x++) put(x, y, 255, 255, 255);
@@ -170,7 +178,7 @@ sock.on("data", (d) => {
       case "reset": reset(m.seed); audioSent = 0; noiseSeed = 7; reply({}); break;
       case "input": queue.push(...m.events); reply({}); break;
       case "step": { const n = m.frames || 1; for (let i = 0; i < n; i++) stepOnce(m.dts ? m.dts[i] : m.dt || 1 / FPS); reply({ frame, time }); break; }
-      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(CAMERA ? { camera: { pos: [camX(), 0] } } : {}) } }); break;
+      case "snapshot": reply({ frame, time, state: { score, scene: "level1", player, pointer, touches: fingers.size, entities: [player, ...coins], ...(LAG ? { lagged } : {}), ...(CAMERA ? { camera: { pos: [camX(), camY], zoom: ZOOM } } : {}) } }); break;
       case "screenshot": reply(screenshot()); break;
       case "audio": reply(audio()); break;
       case "call":

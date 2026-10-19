@@ -354,6 +354,16 @@ const J = (res) => { try { return JSON.parse(res.stdout); } catch { return null;
   r = cli(["measure", "motion", "--at", "0", "--time", "36f", "--input", "right@0-1, down@0-1", "--json"], { MOCK_CAMERA: "1" });
   ok("motion v2: camera 73 px over 36 frames, the 3 px step at f30 flagged", (() => { const c = J(r)?.data.camera; return c && c.moving && c.total[0] === 73 && c.total[1] === 0 && c.uneven.length === 1 && c.uneven[0].i === 30 && c.uneven[0].got[0] === 3 && c.steps.filter((q) => q.dx !== 2).length === 1; })(), r.stdout.slice(0, 600) + r.stderr);
   ok("motion v2: the player's world motion is [2, 2] px/f with the camera removed", (() => { const o = J(r)?.data.objects; return o && o.length === 1 && o[0].meanStep === 2.828 && o[0].net[0] === 72 && o[0].net[1] === 72 && o[0].jitter === 0 && o[0].stutters.length === 0; })(), r.stdout.slice(0, 900));
+  // measure align: state ↔ pixels (pixel space, camera + zoom, a planted art offset and hitboxes), shot --annotate
+  r = cli(["measure", "align", "--at", "0.5", "--json"]);
+  ok("align: the mock is drawn in pixel space (identity, residual 0)", (() => { const q = J(r)?.summary; return q && q.ax === 1 && q.bx === 0 && q.ay === 1 && q.by === 0 && q.residual === 0 && q.matched === 6; })(), r.stdout.slice(0, 400) + r.stderr);
+  r = cli(["measure", "align", "--at", "10f", "--json"], { MOCK_CAMERA: "flat", MOCK_ZOOM: "2" });
+  ok("align: camera offset and ×2 zoom recovered, and state.camera agrees", (() => { const j = J(r); return j && j.summary.ax === 2 && j.summary.bx === -40 && j.summary.ay === 2 && j.summary.by === -80 && j.data.cameraHint.scale === 2 && j.data.cameraHint.ox === -40; })(), r.stdout.slice(0, 400) + r.stderr);
+  r = cli(["measure", "align", "--at", "0.5"], { MOCK_ALIGN: "1" });
+  ok("align: coin 12 drawn 6 px left is flagged; hitboxes vs art", /#12 Coin 6 px left/.test(r.stdout) && /Player box 15×15 vs art 15×15 ✔/.test(r.stdout) && /Coin ×5 box 16×16 vs art 11×11 ✖ hitbox larger than the art/.test(r.stdout), r.stdout + r.stderr);
+  r = cli(["shot", "--at", "0.5", "--annotate", "--out", path.join(work, "ann.png"), "--json"]);
+  ok("shot --annotate: every entity labelled, positions fitted to the sprites", (() => { const j = J(r)?.data.shots[0]; return j && j.annotated === 6 && j.fit && j.fit.ax === 1 && fs.existsSync(path.join(work, "ann.png")); })(), r.stdout.slice(0, 400) + r.stderr);
+
   // shots: --json, diff regions (B11), crops, sheets, key frames
   const s1 = path.join(work, "a.png"), s2 = path.join(work, "b.png");
   cli(["shot", "--at", "0.5", "--out", s1, "--input", "right@0-1"]);

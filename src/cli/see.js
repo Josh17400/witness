@@ -52,6 +52,47 @@ export async function frameImage(m, shot, snap, fr) {
 
 const describeFraming = (fr) => [fr.follow ? `${fr.size.join("×")} around ${fr.follow}` : fr.crop ? `crop ${fr.crop.x},${fr.crop.y} ${fr.crop.w}×${fr.crop.h}` : "", fr.zoom > 1 ? `×${fr.zoom}` : ""].filter(Boolean).join(", ");
 
+/**
+ * Boxes and labels for the entities of a snapshot, in screen pixels of `img`: from each entity's own `screen`, else
+ * --project "<expr of e>", else the state.camera convention, else a fit of state positions to the sprites found.
+ * Returns { items, how, fit }.
+ */
+export async function annotationItems(m, img, snap, opt) {
+  const { entitiesOf, cameraHint } = await import("./measure.js");
+  const types = opt.types && opt.types !== true ? String(opt.types).split(",").map((t) => t.trim()).filter(Boolean) : null;
+  const ents = entitiesOf(snap, types);
+  const fields = opt.fields && opt.fields !== true ? String(opt.fields).split(",").map((f) => f.trim()).filter(Boolean) : ["hp", "state"];
+  const label = (e) => [`#${e.id} ${e.type}`, ...fields.filter((f) => e.raw && e.raw[f] != null && typeof e.raw[f] !== "object").map((f) => `${f}=${typeof e.raw[f] === "number" ? +(+e.raw[f]).toFixed(2) : e.raw[f]}`)].join(" ");
+  let proj = null, how = "", fit = null;
+  if (opt.project && opt.project !== true) {
+    let fn;
+    try { fn = new Function("e", "state", `return (${String(opt.project)});`); } catch (e) { die(`--project: ${e.message}`); }   // eslint-disable-line no-new-func
+    proj = (e) => { const v = fn(e.raw, snap.state); return Array.isArray(v) ? v : v && "x" in v ? [v.x, v.y] : null; };
+    how = `--project ${opt.project}`;
+  } else {
+    const hint = cameraHint(snap);
+    if (hint && !opt.fit) { proj = (e) => [hint.scale * e.x + hint.ox, hint.scale * e.y + hint.oy]; how = `state.camera (x' = ${hint.scale}·x ${hint.ox >= 0 ? "+" : "−"} ${Math.abs(hint.ox)})`; }
+    else {
+      fit = m.fitProjection(ents, m.findBlobs(img), { hint });
+      if (fit.ok) { proj = (e) => [fit.ax * e.x + fit.bx, fit.ay * e.y + fit.by]; how = `fitted to the sprites: x' = ${fit.ax}·x ${fit.bx >= 0 ? "+" : "−"} ${Math.abs(fit.bx)}, y' = ${fit.ay}·y ${fit.by >= 0 ? "+" : "−"} ${Math.abs(fit.by)} (${fit.matched}/${fit.total}, residual ${fit.residual} px)`; }
+      else { proj = (e) => [e.x, e.y]; how = `state positions as pixels (no fit: ${fit.reason})`; }
+    }
+  }
+  const scale = fit && fit.ok ? Math.abs(fit.ax) : (() => { const h = cameraHint(snap); return h ? h.scale : 1; })();
+  const blobOf = new Map((fit && fit.ok ? fit.all : []).map((q) => [q.entity.id, q.blob]));
+  const items = [];
+  for (const e of ents) {
+    let x, y, w = 0, h = 0;
+    if (Array.isArray(e.screen) && e.screen.length >= 2) { [x, y] = e.screen; w = e.screen[2] || 0; h = e.screen[3] || 0; if (w && h) { items.push({ x, y, w, h, label: label(e), group: e.type }); continue; } }
+    else { const p = Number.isFinite(e.x) ? proj(e) : null; if (!p) continue; [x, y] = p; }
+    const bx = Array.isArray(e.box) ? e.box : null;
+    if (bx && bx.length >= 2) { w = (bx.length >= 4 ? bx[2] : bx[0]) * scale; h = (bx.length >= 4 ? bx[3] : bx[1]) * scale; items.push({ x: x - w / 2, y: y - h / 2, w, h, label: label(e), group: e.type }); }
+    else if (blobOf.has(e.id)) { const b = blobOf.get(e.id).bbox; items.push({ x: b.x, y: b.y, w: b.w, h: b.h, label: label(e), group: e.type }); }
+    else items.push({ x, y, w: 0, h: 0, label: label(e), group: e.type });
+  }
+  return { items, how, fit, count: ents.length };
+}
+
 export async function shotCommand(pos, opt) {
   const ranged = opt.from !== undefined || opt.to !== undefined || opt.auto !== undefined || opt.sheet;
   return ranged ? sheetShots(opt) : singleShots(opt);
@@ -74,7 +115,18 @@ async function singleShots(opt) {
       if (items.length > 1 && !file.includes("{t}")) file = file.replace(/\.png$/i, "-{t}.png");
       file = file.replace("{t}", /f$/i.test(it.t) ? `f${it.f}` : String(it.t).replace(".", "_"));
       const shot = await s.screenshot(opt.scale ? +opt.scale : undefined);
-      const snap = fr.follow ? await s.snapshot() : null;
+      const snap = fr.follow || opt.annotate ? await s.snapshot() : null;
+      if (opt.annotate) {
+        // entity boxes and labels from the state, drawn over the full frame
+        const full = await shotImage(shot);
+        const A = await annotationItems(m, full, snap, opt);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, m.annotate(full, A.items, { zoom: fr.zoom > 1 ? fr.zoom : null, title: `${s.hello.name} f${it.f}: ${A.items.length} entities · ${A.how}` }));
+        const r = { frame: it.f, t: +(it.f / fps).toFixed(3), file, annotated: A.items.length, projection: A.how, fit: A.fit && A.fit.ok ? { ax: A.fit.ax, bx: A.fit.bx, ay: A.fit.ay, by: A.fit.by, residual: A.fit.residual } : null };
+        if (!opt.json) say(`✔ f${it.f} (${fmtT(it.f / fps)}) → ${file}  (${A.items.length} entities boxed and labelled; positions from ${A.how})`);
+        results.push(r);
+        continue;
+      }
       const { img, rect } = await frameImage(m, shot, snap, fr);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, m.encodePNG(img.width, img.height, img.data));

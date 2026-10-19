@@ -462,6 +462,9 @@ ones.
 | game logs (info level) | the game's own words in the timeline ("You block Wolf#3's bite. It staggers!"); error logs wake the tester and go to the report |
 | platformer: player `onGround`, `vel`, `size`; map `=` one-way, `^` hazard; entity `stompable: false` and a harmless `state` (`hidden`…) | jump planning; stopping before enemies it can't jump on |
 | fps: player `look` or `yaw`/`pitch`, `ammo`; entity `los` | aiming, line of sight, reload |
+| `state.camera = {pos: [x, y], zoom?}` (pos = the world point at the screen's top-left; screen = (world − pos) × zoom) | `shot --annotate` boxes in the right place; `measure align` checks the drawing against it |
+| entity `screen: [x, y, w, h]` (screen pixels) | exact annotation boxes for games with any projection (3D included) |
+| entity `box: [w, h]` or `[x, y, w, h]` (the hitbox, state units) | `measure align` compares hitboxes with the drawn art ("hitbox larger than the art") |
 
 ### Make your game playtest-friendly (in priority order)
 

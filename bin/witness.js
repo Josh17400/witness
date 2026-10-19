@@ -96,6 +96,9 @@ const CMD_HELP = {
   --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)
   --zoom 3                     crisp nearest-neighbour enlargement (small sprites)
   --diff ref.png [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16]      changed % and every changed region's box
+  --annotate [--types Wolf,Player] [--fields hp,state] [--project "[e.pos[0]*2, e.pos[1]*2]"] [--fit]
+                               boxes and labels for every entity, placed by its "screen", else --project, else
+                               state.camera, else a fit of the state positions to the sprites found
   Filmstrips (one picture, read it with your image tool):
   --from 1 --to 1.5 [--every 3f] --sheet [--cols 6]    a labelled grid of frames (max 48; with --crop/--follow/--zoom)
   --from 0 --to 4 --auto 9                             the 9 frames where the picture changes most (key moments)`,
@@ -140,6 +143,11 @@ const CMD_HELP = {
       start/end/min/max with frames, per-frame steps, rise 10–90%, settle (2%), overshoot, still spans, stutter
       (single steps that break a smooth motion), lag behind --vs (frames, by cross-correlation of the steps)
   From pixels:
+  align [--at 1] [--types Wolf,Coin] [--clip 0.5]
+      state ↔ pixels: fits screen = a·state + b per axis to the sprites found (no projection needed), checks it
+      against state.camera, lists entities drawn away from their state position ("#12 Coin 6 px left"), entities not
+      found, and hitboxes (entity "box") vs the drawn art. --clip S: a clean plate from the S seconds before, for
+      textured scenes (then only things that moved are found).
   scale <shot.png> [--k 3] [--region x,y,w,h] [--tolerance 0]
       integer-scale test: is every k×k cell one colour? Finds k and the grid offset; reports blur/fractional scaling.
   box <with.png> <without.png> [--threshold 16]
