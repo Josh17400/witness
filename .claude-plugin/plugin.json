@@ -1,6 +1,6 @@
 {
   "name": "witness",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Witness: let Claude see, hear and prove any game. Headless scripted tests, state queries, charts, screenshots, audio analysis and replays, with adapters for C/C++, Rust, Go, C#, Unity, Godot, Java, Python, Lua/LÖVE, JS/TS.",
   "author": { "name": "Josh17400" },
   "homepage": "https://github.com/Josh17400/witness",

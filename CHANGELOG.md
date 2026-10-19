@@ -3,7 +3,7 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
-## 0.7.2 (unreleased)
+## 0.7.2 (2026-10-19)
 
 **play: goto a target inside a wall** (reported by Embervale: `goto 172,-100`, a cell in the Inn's front wall beside
 its door, was "stuck at cell (172,-101) heading S for 3.2s", twice, then "learned a wall, replanned → gave up", and
