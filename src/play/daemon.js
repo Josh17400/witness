@@ -17,7 +17,7 @@ import { parseOrders, OrderError } from "./orders.js";
 import { ReplayRecorder } from "./recorder.js";
 import { reportData, coveragePNG, writeReports, addLateFeedback } from "./report.js";
 import { DeadWatch } from "./deadwatch.js";
-import { updateEntry } from "./registry.js";
+import { updateEntry, writeJson } from "./registry.js";
 import { r1, clip, oneLine } from "./util.js";
 import { PERSONAS } from "./brief.js";
 import { UntilWatch } from "./until.js";
@@ -33,7 +33,7 @@ export async function runDaemon(dir) {
   const spec = JSON.parse(fs.readFileSync(specFile, "utf8"));
   const logFile = path.join(dir, "daemon.log");
   const log = (m) => { try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${m}\n`); } catch { /* disk */ } };
-  const setStatus = (patch) => { Object.assign(spec, patch); fs.writeFileSync(specFile, JSON.stringify(spec, null, 1)); try { updateEntry(spec.name, { ...patch, dir }); } catch { /* registry */ } };
+  const setStatus = (patch) => { Object.assign(spec, patch); writeJson(specFile, spec); try { updateEntry(spec.name, { ...patch, dir }); } catch { /* registry */ } };
   const opts = spec.opts || {};
   const wall0 = Date.now();
   // the hard real-time cap: --wall-minutes (spec.opts.wallMinutes; "minutes" in sessions started by 0.7.1)

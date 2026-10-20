@@ -15,6 +15,8 @@ Fixes from Embervale adopting 0.7.3.
 - **`witness clean` keeps recent playtests and can preview.** A playtest written in the last 24 hours stays even past
   `keep` (a judge may still cite its report); only `--all` or `play clean <name>` removes it. New `--dry-run` lists
   what would go and removes nothing. Configurable as witness.json `"retention": {"playtests": {"hours": N}}`.
+- **Playtest files are written whole.** session.json and the machine-wide registry entries are written to a temp file
+  and renamed, so a command reading one mid-write (a tester's order, `play list`) no longer sees half a file.
 - CHANGELOG 0.7.3 adoption step 5 now covers games that map key names to their engine themselves.
 
 **Adoption steps**

@@ -32,7 +32,12 @@ export const validName = (n) => typeof n === "string" && /^[\w.-]{1,40}$/.test(n
 const file = (name) => path.join(REG_DIR, `${name.replace(/[^\w.-]+/g, "_")}.json`);
 
 export function readEntry(name) { try { return JSON.parse(fs.readFileSync(file(name), "utf8")); } catch { return null; } }
-export function writeEntry(e) { fs.mkdirSync(REG_DIR, { recursive: true }); fs.writeFileSync(file(e.name), JSON.stringify(e, null, 1)); }
+/** Write JSON whole: a temp file renamed over the old one, so a reader never sees it half written (a rename refused on Windows while it is open: written in place). */
+export function writeJson(f, v) {
+  const t = `${f}.${process.pid}.tmp`, txt = JSON.stringify(v, null, 1);
+  try { fs.writeFileSync(t, txt); fs.renameSync(t, f); } catch { try { fs.rmSync(t, { force: true }); } catch { /* gone */ } fs.writeFileSync(f, txt); }
+}
+export function writeEntry(e) { fs.mkdirSync(REG_DIR, { recursive: true }); writeJson(file(e.name), e); }
 export function updateEntry(name, patch) { const e = readEntry(name) || { name }; Object.assign(e, patch); writeEntry(e); return e; }
 export function removeEntry(name) { for (const f of [file(name), shimPath(name), `${shimPath(name)}.cmd`]) { try { fs.unlinkSync(f); } catch { /* gone */ } } }
 

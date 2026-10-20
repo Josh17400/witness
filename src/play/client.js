@@ -6,7 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, entryLive, MAX_SESSIONS, MAX_WEB_SESSIONS, removeEntry, writeShim, shimCommand, isTester, readBatchLock, validName, clearStaleBatchLock, localTime } from "./registry.js";
+import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, entryLive, MAX_SESSIONS, MAX_WEB_SESSIONS, removeEntry, writeShim, shimCommand, isTester, readBatchLock, validName, clearStaleBatchLock, localTime, writeJson } from "./registry.js";
 import { makeBrief, PERSONAS, configArg, cmdRoot, launchArgs } from "./brief.js";
 import { prune, pruneRegistry, fmtBytes } from "../core/clean.js";
 import { budgetLimits } from "../core/budget.js";
@@ -196,7 +196,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       try { new UntilWatch({ until: opts.until, gameHours: opts.gameHours, clock: opts.clock || (cfg.play && cfg.play.clock) || null }); } catch (err) { fs.rmSync(dir, { recursive: true, force: true }); fail(err.message); }
       // a config file other than the project's witness.json (--config witness.web.json): report.md's replay commands name it
       const spec = { name, token, root, cfg, configFile: file && !/(^|[\\/])witness\.json$/i.test(file) ? file : null, launchFlags: launchArgs(opt), opts, state: "starting", created: new Date().toISOString() };
-      fs.writeFileSync(path.join(dir, "session.json"), JSON.stringify(spec, null, 1));
+      writeJson(path.join(dir, "session.json"), spec);
       writeEntry({ name, dir, root, started: spec.created, state: "starting", web });
       const out = fs.openSync(path.join(dir, "daemon.log"), "a");
       const child = spawn(process.execPath, [path.join(ROOT, "bin", "witness.js"), "play", "_daemon", dir], { detached: true, windowsHide: true, stdio: ["ignore", out, out], cwd: root, env: { ...process.env } });
