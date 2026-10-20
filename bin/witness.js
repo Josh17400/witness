@@ -20,7 +20,7 @@ import { effectCommand } from "../src/cli/effect.js";
 import { listenCommand } from "../src/cli/listen.js";
 import { windowCommand } from "../src/cli/window.js";
 import { abCommand } from "../src/cli/ab.js";
-import { parseArgs } from "../src/cli/args.js";
+import { parseArgs, unknownFlags } from "../src/cli/args.js";
 import { describeWeb, displayReport, unlockProbe, audioReport, webglReport } from "../src/cli/web.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -73,9 +73,9 @@ browser (WITNESS_MAX_BROWSERS); a launch over it waits, then gives up after 90 s
 Run 'witness help <command>' for details. Protocol: docs/PROTOCOL.md`;
 
 const CMD_HELP = {
-  clean: `witness clean [--all] [--playtests|--replays|--shots|--movies]
+  clean: `witness clean [--all] [--dry-run] [--playtests|--replays|--shots|--movies]
   Generated files are pruned automatically (on play start and test; 'test' says what it removed) to witness.json
-  "retention", default {"playtests": {"keep": 5, "days": 7}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3},
+  "retention", default {"playtests": {"keep": 5, "days": 7, "hours": 24}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3},
   "movies": {"days": 3}}: the newest N stay unless older than the days limit. Plain 'witness clean' applies those limits now; --all deletes
   every playtest, recording and generated screenshot (running playtests are never touched). Only what Witness wrote is
   removed: in the shots folder its own names (shot*.png, sheet.png, trace*.png, mismatch-*, ...) and files listed in
@@ -83,7 +83,8 @@ const CMD_HELP = {
   witness/movies (Godot --write-movie): its .avi/.png/.wav go, the folder and its .gdignore stay.
   Other files stay, and witness/refs (named baselines: shot --save-ref) is never pruned. A "shots"/"replays" folder
   outside the project, the project folder itself or the Witness install is refused. 'witness play clean t1' deletes
-  one playtest once you've acted on it.`,
+  one playtest once you've acted on it. A playtest written in the last "hours" (24) always stays unless --all.
+  --dry-run lists what would go and removes nothing.`,
   test: `witness test [files...] [--name <substring>] [--json]
   Test files (default folder: "tests" in ${CONFIG_NAME}, usually witness/) are *.witness.json or *.witness.mjs:
     [{ "name": "coin pickup", "seed": 1, "input": "right@0-1.5",
@@ -476,11 +477,12 @@ const commands = {
   async clean(pos, opt) {
     const { cfg, root } = loadConfig(opt);
     const only = opt.playtests ? "playtests" : opt.replays ? "replays" : opt.shots ? "shots" : opt.movies ? "movies" : null;
-    const r = prune(cfg, root, { all: !!opt.all, only });
-    const k = only && only !== "playtests" ? 0 : pruneRegistry();
-    if (opt.json) { printJSON(envelope("clean", { verdict: `removed ${r.removed.length} item(s)`, summary: { removed: r.removed.length, bytes: r.bytes }, data: { removed: r.removed, bytes: r.bytes, registry: k, warnings: r.warnings } })); return; }
+    const dry = !!opt["dry-run"], r = prune(cfg, root, { all: !!opt.all, only, dryRun: dry });
+    const k = dry || (only && only !== "playtests") ? 0 : pruneRegistry();
+    const verb = dry ? "would remove" : "removed";
+    if (opt.json) { printJSON(envelope("clean", { verdict: `${verb} ${r.removed.length} item(s)`, summary: { removed: r.removed.length, bytes: r.bytes, dryRun: dry }, data: { removed: r.removed, bytes: r.bytes, registry: k, warnings: r.warnings, dryRun: dry } })); return; }
     for (const w of r.warnings) console.log(`⚠ ${w}`);
-    console.log(r.removed.length ? `removed ${r.removed.length} item(s), ${fmtBytes(r.bytes)}:` : "nothing to remove");
+    console.log(r.removed.length ? `${verb} ${r.removed.length} item(s), ${fmtBytes(r.bytes)}:` : "nothing to remove");
     for (const p of r.removed.slice(0, 20)) console.log(`  ${path.relative(root, p) || p}`);
     if (r.removed.length > 20) console.log(`  … and ${r.removed.length - 20} more`);
   },
@@ -679,6 +681,9 @@ function printTest(res, root) {
 
 const [cmd, ...rest] = process.argv.slice(2);
 const { pos, opt } = parseArgs(rest, cmd);
+// --t is window's flag; every other command takes the moment as --at (shot --t 2 used to shoot at the default 1 s)
+if (cmd !== "window" && opt.t !== undefined && opt.at === undefined) { opt.at = opt.t; delete opt.t; }
+if (commands[cmd]) for (const u of unknownFlags(opt)) console.error(`⚠ unknown flag --${u.flag} (ignored)${u.suggest ? `: did you mean --${u.suggest}?` : ""}`);
 CLI.json = !!opt.json;
 hint.flags = configFlag(opt);   // printed follow-up commands load the same config, device and engine
 try {

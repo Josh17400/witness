@@ -11,6 +11,9 @@ export const MAX_WEB_SESSIONS = Math.max(1, +(process.env.WITNESS_PLAY_MAX_WEB |
 /** A `claude -p` tester run by `play batch` (it sets this): no --force, --all, clean or batch from inside one. */
 export const isTester = () => !!process.env.WITNESS_PLAY_TESTER;
 
+/** An ISO timestamp as this machine's local "YYYY-MM-DD HH:MM" (registry times are stored in UTC). */
+export const localTime = (iso) => { const d = new Date(iso); return isNaN(d) ? String(iso).slice(0, 16) : d.toLocaleString("sv").slice(0, 16); };
+
 export function pidAlive(pid) {
   if (!pid) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }

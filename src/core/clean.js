@@ -2,7 +2,7 @@
 // bug is being looked at and dead weight after, so old ones are pruned automatically (on `play start` and `test`),
 // and `witness clean` / `witness play clean` remove them on demand.
 // Limits come from witness.json "retention" (any part may be left out):
-//   { "playtests": { "keep": 5, "days": 7 }, "replays": { "keep": 10, "days": 14 }, "shots": { "days": 3 }, "movies": { "days": 3 } }
+//   { "playtests": { "keep": 5, "days": 7, "hours": 24 }, "replays": { "keep": 10, "days": 14 }, "shots": { "days": 3 }, "movies": { "days": 3 } }
 // Only what Witness itself wrote is ever removed: in the shots folder the files it names by default (shot.png,
 // sheet.png, trace-xy.png, mismatch-*.png, ...) and those listed in its manifest (.witness-generated: test step
 // shots, in subfolders too, --out files and measure pictures there); in the replays folder *.jsonl recordings and their .state.json. Anything else (a
@@ -22,7 +22,9 @@ export const MANIFEST = ".witness-generated";
 /** Names Witness gives its outputs in the shots folder (top level): shot-2_5.png, trace-xy.png, ab/, listen/, x-diff.png ... */
 export const GENERATED = /^(shot|sheet|clip|trace|effect|heatmap|mismatch|replay|figure|ui|colorblind|palette|ab|listen)([-_.]|$)|-diff\.png$/i;
 
-export const RETENTION = { playtests: { keep: 5, days: 7 }, replays: { keep: 10, days: 14 }, shots: { days: 3 }, movies: { days: 3 } };
+// playtests.hours: a playtest written within that many hours always stays (a judge may still cite its report), only
+// --all or `play clean <name>` removes it
+export const RETENTION = { playtests: { keep: 5, days: 7, hours: 24 }, replays: { keep: 10, days: 14 }, shots: { days: 3 }, movies: { days: 3 } };
 export const MOVIES_DIR = "witness/movies";
 const MOVIE = /\.(avi|png|wav)$/i;
 
@@ -32,7 +34,9 @@ function sizeOf(p) {
   let n = 0; for (const e of fs.readdirSync(p)) n += sizeOf(path.join(p, e));
   return n;
 }
-function remove(p, out) { const n = sizeOf(p); try { fs.rmSync(p, { recursive: true, force: true }); out.removed.push(p); out.bytes += n; } catch { /* in use */ } }
+function remove(p, out) { const n = sizeOf(p); try { if (!out.dry) fs.rmSync(p, { recursive: true, force: true }); out.removed.push(p); out.bytes += n; } catch { /* in use */ } }
+// a playtest's age: its folder or report, whichever changed last
+const playtestAgeDays = (p) => Math.min(ageDays(p), ...["report.md", "report.json"].map((f) => (fs.existsSync(path.join(p, f)) ? ageDays(path.join(p, f)) : Infinity)));
 const ageDays = (p) => { try { return (Date.now() - fs.statSync(p).mtimeMs) / 864e5; } catch { return 0; } };
 const entries = (dir) => { try { return fs.readdirSync(dir).map((n) => path.join(dir, n)); } catch { return []; } };
 const limits = (cfg) => {
@@ -86,10 +90,10 @@ const manifest = (dir) => { try { return new Set(fs.readFileSync(path.join(dir, 
 /**
  * Prune generated files under a project root. opts: {all} removes everything generated (playtests, replays, shots,
  * movies), {only: "playtests"|"replays"|"shots"|"movies"} limits it to one kind, {keep: [playtest folders]} are never
- * removed but count toward "keep" (a batch's own reports). Returns {removed: [paths], bytes, warnings: [why a folder was skipped]}.
+ * removed but count toward "keep" (a batch's own reports), {dryRun} only lists what would go. Returns {removed: [paths], bytes, warnings: [why a folder was skipped]}.
  */
-export function prune(cfg, root, { all = false, only = null, keep = [] } = {}) {
-  const out = { removed: [], bytes: 0, warnings: [] }, L = limits(cfg), live = liveDirs(), kept = new Set(keep.map((p) => path.resolve(p)));
+export function prune(cfg, root, { all = false, only = null, keep = [], dryRun = false } = {}) {
+  const out = { removed: [], bytes: 0, warnings: [], dry: dryRun }, L = limits(cfg), live = liveDirs(), kept = new Set(keep.map((p) => path.resolve(p)));
   const isLive = (p) => live.has(path.resolve(p)), isKept = (p) => kept.has(path.resolve(p));
   const want = (k) => !only || only === k;
   const guarded = (key, def) => {
@@ -99,7 +103,7 @@ export function prune(cfg, root, { all = false, only = null, keep = [] } = {}) {
   };
   if (want("playtests")) {
     const dirs = entries(path.join(root, "witness", "playtests")).filter((p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
-    if (all) dirs.filter((p) => !isLive(p) && !isKept(p)).forEach((p) => remove(p, out)); else pruneList(dirs, L.playtests, out, isLive, isKept);
+    if (all) dirs.filter((p) => !isLive(p) && !isKept(p)).forEach((p) => remove(p, out)); else pruneList(dirs, L.playtests, out, isLive, (p) => isKept(p) || playtestAgeDays(p) * 24 < L.playtests.hours);
   }
   const dir = want("replays") ? guarded("replays", "witness/replays") : null;
   if (dir) {
@@ -126,10 +130,10 @@ export function prune(cfg, root, { all = false, only = null, keep = [] } = {}) {
       if (!inside(p, shots) || path.resolve(p) === refs || inside(p, refs) || !fs.existsSync(p)) continue;
       if (!(all || ageDays(p) > L.shots.days)) continue;
       remove(p, out);
-      for (let d = path.dirname(p); inside(d, shots); d = path.dirname(d)) { try { fs.rmdirSync(d); } catch { break; } }
+      if (!out.dry) for (let d = path.dirname(p); inside(d, shots); d = path.dirname(d)) { try { fs.rmdirSync(d); } catch { break; } }
     }
     // the manifest keeps only names still there
-    if (listed.size) {
+    if (listed.size && !out.dry) {
       const keep = [...listed].filter((n) => fs.existsSync(path.join(shots, n)));
       try { if (keep.length) fs.writeFileSync(path.join(shots, MANIFEST), keep.map((n) => `${n}\n`).join("")); else fs.rmSync(path.join(shots, MANIFEST), { force: true }); } catch { /* busy */ }
     }
@@ -137,6 +141,7 @@ export function prune(cfg, root, { all = false, only = null, keep = [] } = {}) {
   const movies = want("movies") ? path.resolve(root, MOVIES_DIR) : null;
   if (movies && !unsafeDir(movies, root)) for (const p of entries(movies)) if (MOVIE.test(p) && (all || ageDays(p) > L.movies.days)) remove(p, out);
   out.removed = out.removed.filter((p) => !p.endsWith(".state.json") || !out.removed.includes(p.slice(0, -11)));
+  delete out.dry;
   return out;
 }
 

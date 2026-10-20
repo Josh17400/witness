@@ -823,5 +823,6 @@ at, so Witness keeps them from piling up:
 - The same pruning runs automatically on every `play start` (playtests) and `witness test` (everything), and finished
   session entries and their short commands leave the machine-wide registry after a day.
 - Limits come from witness.json `"retention"`; defaults:
-  `{"playtests": {"keep": 5, "days": 7}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3}}`
-  (the newest `keep` stay unless older than `days`).
+  `{"playtests": {"keep": 5, "days": 7, "hours": 24}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3}}`
+  (the newest `keep` stay unless older than `days`; a playtest written in the last `hours` always stays, except on
+  `--all`). `witness clean --dry-run` lists what would go.

@@ -891,7 +891,7 @@ try {
   fs.mkdirSync(path.join(proj, "witness", "shots"), { recursive: true });
   fs.mkdirSync(path.join(proj, "witness", "replays"), { recursive: true });
   fs.writeFileSync(path.join(proj, "witness.json"), JSON.stringify({ name: "c", launch: { command: "node", args: ["x.mjs"] }, retention: { playtests: { keep: 3 } } }));
-  for (let i = 0; i < 6; i++) { const d = path.join(proj, "witness", "playtests", `p${i}`); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, "replay.jsonl"), "x".repeat(100)); old(d, i * 0.1); }
+  for (let i = 0; i < 6; i++) { const d = path.join(proj, "witness", "playtests", `p${i}`); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, "replay.jsonl"), "x".repeat(100)); old(d, 2 + i * 0.1); }   // past the 24 h a fresh playtest always stays
   const stale = path.join(proj, "witness", "playtests", "stale"); fs.mkdirSync(stale); old(stale, 30);
   fs.writeFileSync(path.join(proj, "witness", "shots", "shot-old.png"), "x"); old(path.join(proj, "witness", "shots", "shot-old.png"), 5);
   fs.writeFileSync(path.join(proj, "witness", "shots", "shot-new.png"), "x");

@@ -10,7 +10,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { makeBrief, PERSONAS, configArg, cmdRoot, launchArgs } from "./brief.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
-import { readEntry, pidAlive, shimPath, shimCommand, acquireBatchLock, validName, LOCK_BEAT_MS } from "./registry.js";
+import { readEntry, pidAlive, shimPath, shimCommand, acquireBatchLock, validName, LOCK_BEAT_MS, localTime } from "./registry.js";
 import { prune, fmtBytes } from "../core/clean.js";
 import { budgetLimits } from "../core/budget.js";
 import { UntilWatch, fmtHours } from "./until.js";
@@ -144,7 +144,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
 
   // one batch machine-wide (each is up to 2 games plus 2 claude processes); a dead holder's lock doesn't count
   const lock = acquireBatchLock({ root, goals: runs.length });
-  if (!lock.ok) { console.error(`✖ another playtest batch is running (pid ${lock.holder.pid}${lock.holder.started ? `, since ${String(lock.holder.started).slice(0, 16).replace("T", " ")}` : ""}${lock.holder.root ? `, ${lock.holder.root}` : ""}): wait for it to finish`); process.exit(1); }
+  if (!lock.ok) { console.error(`✖ another playtest batch is running (pid ${lock.holder.pid}${lock.holder.started ? `, since ${localTime(lock.holder.started)}` : ""}${lock.holder.root ? `, ${lock.holder.root}` : ""}): wait for it to finish`); process.exit(1); }
   process.on("exit", () => lock.release());
   const beat = setInterval(() => lock.beat(), LOCK_BEAT_MS); beat.unref();   // untouched for 2 min = stale (a killed batch)
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "witness-batch-"));   // the testers' working folder (empty)

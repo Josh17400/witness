@@ -126,13 +126,23 @@ try {
   ok("batch lock: a second batch is refused while the first holds it", a.ok && !b.ok && b.holder.pid === process.pid && !!reg.readBatchLock());
   pruneRegistry();
   ok("batch lock: registry pruning leaves it alone", fs.existsSync(reg.batchLockPath()));
-  for (let i = 0; i < 7; i++) fs.mkdirSync(path.join(pt, `old${i}`));
+  // two days old: past the 24 h a fresh playtest is always kept
+  const twoDays = (Date.now() - 2 * 864e5) / 1000;
+  for (let i = 0; i < 7; i++) { fs.mkdirSync(path.join(pt, `old${i}`)); fs.utimesSync(path.join(pt, `old${i}`), twoDays - i, twoDays - i); }
   r = cli(["play", "start", "--name", "n4", "--cmd", "node -e 1", "--game-hours", "4"], { cwd: proj });
   ok("start: no pruning while a batch holds the lock", fs.readdirSync(pt).filter((n) => n.startsWith("old")).length === 7, `${fs.readdirSync(pt)}\n${r.out}`);
   a.release();
   ok("batch lock: released", !fs.existsSync(reg.batchLockPath()) && !reg.readBatchLock());
   r = cli(["play", "start", "--name", "n5", "--cmd", "node -e 1", "--game-hours", "4"], { cwd: proj });
   ok("start: prunes again once the batch is done (keep 5)", fs.readdirSync(pt).filter((n) => n.startsWith("old")).length === 5, `${fs.readdirSync(pt)}\n${r.out}`);
+  // playtests from the last 24 h stay past "keep" (a judge may still cite them); --dry-run lists without removing
+  for (let i = 0; i < 6; i++) fs.mkdirSync(path.join(pt, `fresh${i}`));
+  r = cli(["clean", "--playtests", "--cmd", "node -e 1"], { cwd: proj });
+  ok("clean: playtests from the last 24 h are kept past keep 5", fs.readdirSync(pt).filter((n) => n.startsWith("fresh")).length === 6 && fs.readdirSync(pt).filter((n) => n.startsWith("old")).length === 0, `${fs.readdirSync(pt)}\n${r.out}`);
+  for (let i = 0; i < 6; i++) fs.utimesSync(path.join(pt, `fresh${i}`), twoDays - i, twoDays - i);
+  r = cli(["clean", "--playtests", "--dry-run", "--cmd", "node -e 1"], { cwd: proj });
+  ok("clean --dry-run: lists what would go, removes nothing", r.code === 0 && /would remove \d+ item/.test(r.out) && fs.readdirSync(pt).filter((n) => n.startsWith("fresh")).length === 6, `${fs.readdirSync(pt)}\n${r.out}`);
+  for (const n of fs.readdirSync(pt)) if (n.startsWith("fresh")) fs.rmSync(path.join(pt, n), { recursive: true, force: true });
   fs.writeFileSync(reg.batchLockPath(), JSON.stringify({ pid: process.pid, started: "2001-01-01T00:00:00.000Z" }));
   const c = reg.acquireBatchLock();
   ok("batch lock: a lock from before the boot is stale", c.ok); c.release();

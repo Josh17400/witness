@@ -3,6 +3,25 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.4 (2026-10-20)
+
+Fixes from Embervale adopting 0.7.3.
+
+- **Unknown flags are named, not silently ignored.** Any `--flag` no command knows prints
+  `⚠ unknown flag --sead (ignored): did you mean --seed?` on stderr (the command still runs). `--t` means `--at` on
+  every command except `window` (where `--t` is the time range): `shot --t 2 --diff …` used to shoot at the default
+  1 s. A test checks that every flag the code reads is on the known list.
+- **`play list` (and the batch-lock message) show local time.** They showed the stored UTC time with no label.
+- **`witness clean` keeps recent playtests and can preview.** A playtest written in the last 24 hours stays even past
+  `keep` (a judge may still cite its report); only `--all` or `play clean <name>` removes it. New `--dry-run` lists
+  what would go and removes nothing. Configurable as witness.json `"retention": {"playtests": {"hours": N}}`.
+- CHANGELOG 0.7.3 adoption step 5 now covers games that map key names to their engine themselves.
+
+**Adoption steps**
+1. Nothing required. Scripts that relied on `shot --t` being ignored now shoot at that time.
+2. *Optional:* `witness clean --dry-run` before a clean; set `"retention": {"playtests": {"hours": N}}` to keep fresh
+   reports longer or shorter (0 = the old behaviour).
+
 ## 0.7.3 (2026-10-20)
 
 An audit release: process safety on a shared machine, correctness fixes across the CLI, and adapter fixes. Each item
@@ -123,7 +142,9 @@ C# adapters are re-synced, and the Godot example writes and checks its replay's 
    Unity (`Runtime/Witness.cs`, `Runtime/WitnessBridge.cs`), Godot (`addons/witness/Witness.gd`), Godot C#
    (`WitnessNode.cs` and `Witness.cs`), Go, Java, Lua (`witness.lua`, `witness_love.lua`), Python (`witness.py`), Rust.
    Nothing breaks without it; you miss the fixes above (UTF-8, flushing, end states, key aliases).
-5. **Game code that checks for the key name `super`** (C++/Rust/Go adapters) must check `meta`.
+5. **Game code that checks for the key name `super`** (C++/Rust/Go adapters) must check `meta`. That includes a game
+   that maps Witness key names to its engine's keys itself (e.g. a C++ table to SDL): add `meta` (keep `super` if you
+   like), or replays that press it do nothing.
 6. **Godot:** change `--write-movie user://witness.avi` in witness.json to `witness/movies/witness.avi`, create an
    empty `witness/movies/.gdignore`, and add `movies/*` and `!movies/.gdignore` to `witness/.gitignore` (new projects
    get all three from `witness init`). A game that quits by itself (`get_tree().quit()`) while recording replays: call

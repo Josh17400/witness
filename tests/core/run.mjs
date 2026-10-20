@@ -6,7 +6,7 @@ import net from "node:net";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs } from "../../src/cli/args.js";
+import { parseArgs, KNOWN_FLAGS } from "../../src/cli/args.js";
 import { splitRange } from "../../src/cli/window.js";
 import { loadReplay } from "../../src/core/runner.js";
 import { listen, Session } from "../../src/core/session.js";
@@ -34,6 +34,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const b = parseArgs(["--repeat", "x.witness.json"], "test"), c = parseArgs(["--repeat", "3", "x.witness.json"], "test");
   ok("args: --repeat takes a number only", b.opt.repeat === true && b.pos[0] === "x.witness.json" && c.opt.repeat === "3" && c.pos[0] === "x.witness.json", JSON.stringify([b, c]));
   ok("args: --fit is a flag for shot, a value for measure", parseArgs(["--annotate", "--fit", "--at", "1"], "shot").opt.fit === true && parseArgs(["ui", "--fit", "cover"], "measure").opt.fit === "cover");
+  // every opt.<name> / opt["name"] / get("name") the code reads is a known flag, so the typo warning never fires on a real one
+  const src = [];
+  const walk = (d) => { for (const n of fs.readdirSync(d)) { const p = path.join(d, n); if (fs.statSync(p).isDirectory()) walk(p); else if (/\.m?js$/.test(n)) src.push(fs.readFileSync(p, "utf8")); } };
+  walk(path.join(here, "..", "..", "src")); walk(path.join(here, "..", "..", "bin"));
+  const read = new Set(src.flatMap((t) => [...t.matchAll(/\bopt\.([a-z][a-z0-9]*)\b(?!\()|\bopt\["([a-z][a-z0-9-]*)"\]|\b(?:get|val)\("([a-z][a-z0-9-]*)"\)/g)].map((m) => m[1] || m[2] || m[3])));
+  const missing = [...read].filter((k) => !KNOWN_FLAGS.has(k) && !k.startsWith("no-"));
+  ok("args: every flag the code reads is in KNOWN_FLAGS", !missing.length, missing.join(" "));
   ok("args: --watch takes a value except for play", parseArgs(["--watch", "state.x"], "trace").opt.watch === "state.x" && parseArgs(["start", "--watch", "--goal", "g"], "play").opt.watch === true);
   const pic = parseArgs(["ui", "--picture", "shot.png"], "measure"), dom = parseArgs(["palette", "--dominant", "a.png"], "measure");
   ok("args: --picture/--dominant/--write/--clean/--no-* never eat the next word", pic.opt.picture === true && pic.pos[1] === "shot.png" && dom.pos[1] === "a.png"
@@ -385,6 +392,12 @@ const tinyCfg = (dir, extraLaunch = {}) => { fs.mkdirSync(dir, { recursive: true
   cli(["shot", "--at", "0.2"], {}, proj);
   const self = cli(["shot", "--at", "0.5", "--diff", path.join(proj, "witness", "shots", "shot.png")], {}, proj);
   ok("shot --diff of its own output path is refused", self.status === 1 && /compared with itself/.test(self.stderr), self.stdout + self.stderr);
+  // a moment flag the command doesn't take: shot --t is --at; a typo is named, with the closest flag
+  const viaT = cli(["shot", "--t", "0.5", "--diff", "start", "--json"], {}, proj), viaAt = cli(["shot", "--at", "0.5", "--diff", "start", "--json"], {}, proj);
+  let jt = null, ja = null; try { jt = JSON.parse(viaT.stdout); ja = JSON.parse(viaAt.stdout); } catch { /* shown */ }
+  ok("shot --t is taken as --at", jt && ja && jt.summary.changedPercent === ja.summary.changedPercent && !/unknown flag/.test(viaT.stderr), viaT.stdout + viaT.stderr);
+  const typo = cli(["shot", "--at", "0.5", "--sead", "1"], {}, proj);
+  ok("an unknown flag is warned about, with a suggestion", /unknown flag --sead \(ignored\): did you mean --seed\?/.test(typo.stderr), typo.stderr);
   const none = cli(["shot", "--at", "0.2", "--diff", "nope"], {}, proj);
   ok("shot --diff <unknown name>: says how to save one", none.status === 1 && /--save-ref nope/.test(none.stderr), none.stderr);
 }

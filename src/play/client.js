@@ -6,7 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, entryLive, MAX_SESSIONS, MAX_WEB_SESSIONS, removeEntry, writeShim, shimCommand, isTester, readBatchLock, validName, clearStaleBatchLock } from "./registry.js";
+import { readEntry, writeEntry, updateEntry, listEntries, liveEntries, pidAlive, entryLive, MAX_SESSIONS, MAX_WEB_SESSIONS, removeEntry, writeShim, shimCommand, isTester, readBatchLock, validName, clearStaleBatchLock, localTime } from "./registry.js";
 import { makeBrief, PERSONAS, configArg, cmdRoot, launchArgs } from "./brief.js";
 import { prune, pruneRegistry, fmtBytes } from "../core/clean.js";
 import { budgetLimits } from "../core/budget.js";
@@ -318,7 +318,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       if (opt.clean && clearStaleBatchLock()) console.log("removed a stale batch lock (its batch was killed)");
       const rows = listEntries();
       if (!rows.length) { console.log("no playtest sessions"); return; }
-      for (const e of rows.slice(0, 30)) console.log(`  ${e.live ? "●" : "○"} ${e.name.padEnd(16)} ${String(e.state || "?").padEnd(8)} ${e.started ? e.started.slice(0, 16).replace("T", " ") : ""}  ${e.summary || ""}${e.dir ? `\n      ${e.dir}` : ""}`);
+      for (const e of rows.slice(0, 30)) console.log(`  ${e.live ? "●" : "○"} ${e.name.padEnd(16)} ${String(e.state || "?").padEnd(8)} ${e.started ? localTime(e.started) : ""}  ${e.summary || ""}${e.dir ? `\n      ${e.dir}` : ""}`);
       return;
     }
     case "clean": {

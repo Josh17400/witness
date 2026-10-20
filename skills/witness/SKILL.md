@@ -215,7 +215,8 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 7. **Fix**, then **turn each bug into a test** (section 3), and playtest again if the change affects feel.
 8. **Clean up**: once you've acted on a report, `witness play clean t1` deletes that playtest (replay, shots,
    report). Old playtests, recordings and screenshots are also pruned automatically on `play start` and `test`
-   (witness.json `"retention"`; `witness clean` applies it now, `--all` removes everything generated). Don't leave
+   (witness.json `"retention"`; `witness clean` applies it now, `--dry-run` previews, `--all` removes everything generated; a
+   playtest from the last 24 h always stays). Don't leave
    piles of PNGs and replays on the user's disk. witness/shots is scratch output: keep reference pictures with
    `shot --save-ref <name>` (witness/refs, never pruned), not in witness/shots.
 
