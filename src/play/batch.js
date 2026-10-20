@@ -92,7 +92,7 @@ export function claudeCommand(env = process.env, platform = process.platform) {
     // (or an .exe it wraps): the target is the last match that isn't node.exe (node.exe beside it is only the runtime)
     let txt = ""; try { txt = fs.readFileSync(f, "utf8"); } catch { /* unreadable */ }
     const ms = [...txt.matchAll(/"%~?dp0%?\\?([^"%]+\.(m?js|cjs|exe))"/gi)].filter((m) => !/(^|[\\/])node\.exe$/i.test(m[1])).reverse();
-    for (const m of ms) { const t = path.join(d, m[1]); if (fs.existsSync(t)) return /exe$/i.test(m[2]) ? [t] : [process.execPath, t]; }
+    for (const m of ms) { const t = path.join(d, ...m[1].split(/[\\/]/)); if (fs.existsSync(t)) return /exe$/i.test(m[2]) ? [t] : [process.execPath, t]; }
   }
   return ["claude"];
 }
