@@ -404,6 +404,8 @@ function wl.record(opts)
         love.event.pump()
         for name, a, b, c, d, e, f in love.event.poll() do
           if name == "quit" and (not love.quit or not love.quit()) then
+            -- <file>.state.json: the state play ended in, so `witness replay` can prove it replays exactly
+            if opts.snapshot then pcall(function() witness.write_end_state(opts.snapshot()) end) end
             witness.stop_recording()
             return a or 0
           end

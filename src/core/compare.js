@@ -146,8 +146,12 @@ export class Matcher {
   constructor() { this.refs = new Map(); }
   has(label) { return this.refs.has(label); }
 
-  /** Store the first capture for `label`, or compare to it. Returns {first, ok, problems: [string], shots?: [a, b]}. */
-  async check(label, cap, where = "") {
+  /**
+   * Store the first capture for `label`, or compare to it. Returns {first, ok, problems: [string], shots?: [a, b]}.
+   * release: this is the label's last comparison (the last --repeat pass): drop the reference's full screenshot and
+   * audio after it, so a long suite doesn't hold every step's pictures in memory to the end.
+   */
+  async check(label, cap, where = "", { release = false } = {}) {
     const ref = this.refs.get(label);
     const cur = {
       state: JSON.stringify(cap.snap?.state ?? null),
@@ -174,6 +178,8 @@ export class Matcher {
       problems.push(ad ? `audio differs${ad.seconds != null ? ` from ${ad.seconds.toFixed(4)} s into the capture` : ""}${ad.lengths[0] !== ad.lengths[1] ? ` (lengths ${ad.lengths[0]} vs ${ad.lengths[1]} frames)` : ""}, max sample difference ${ad.maxDiff.toPrecision(3)}`
         : "audio differs");
     }
-    return { first: false, ok: !problems.length, problems, shots: problems.some((p) => p.startsWith("screenshot")) ? [ref.shot, cur.shot] : undefined };
+    const shots = problems.some((p) => p.startsWith("screenshot")) ? [ref.shot, cur.shot] : undefined;
+    if (release) this.refs.delete(label);
+    return { first: false, ok: !problems.length, problems, shots };
   }
 }

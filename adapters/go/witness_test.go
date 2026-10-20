@@ -17,6 +17,7 @@ func TestNormalizeKey(t *testing.T) {
 	for in, want := range map[string]string{
 		"Return": "enter", "Left Shift": "shift", "ArrowUp": "up", "KeyA": "a", "Digit7": "7",
 		" ": "space", "F5": "f5", "Escape": "escape", "ControlLeft": "ctrl", "right": "right",
+		"Super": "meta", "SuperLeft": "meta", "Meta": "meta", "Left GUI": "meta",
 	} {
 		if got := NormalizeKey(in); got != want {
 			t.Errorf("NormalizeKey(%q) = %q, want %q", in, got, want)
@@ -213,6 +214,31 @@ func TestRecordTouch(t *testing.T) {
 	want := `{"dt":0.5,"f":0,"in":[{"id":0,"phase":"down","type":"touch","x":10,"y":20}]}`
 	if len(lines) != 2 || lines[1] != want {
 		t.Errorf("got %q\nwant %s", lines, want)
+	}
+}
+
+func TestRecordEndState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "end.jsonl")
+	r, err := Record(path, "end", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Frame(0.25)
+	r.Frame(0.5)
+	if err := r.EndState(map[string]any{"x": 7}); err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	b, err := os.ReadFile(path + ".state.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"frame":2,"state":{"x":7},"time":0.75}`; string(b) != want {
+		t.Errorf("got %s\nwant %s", b, want)
+	}
+	var nilRec *Recorder
+	if nilRec.EndState(1) != nil {
+		t.Error("EndState on a nil recorder must be a no-op")
 	}
 }
 

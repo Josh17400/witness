@@ -94,6 +94,7 @@ func _demo_frame(delta: float) -> void:
 		var p: Vector2 = player["pos"]
 		print("demo finished: t=%.3fs seed=%d score=%d player=(%.4f, %.4f) coins=%d" % [demo["t"], Witness.seed, score, p.x, p.y, coins.size()])
 		demo = {}
+		Witness.stop_recording()   # writes the replay's end state (<file>.state.json), which witness replay checks
 		get_tree().quit()
 		return
 	demo["t"] += delta

@@ -1,6 +1,6 @@
 // Witness play: `witness play batch` runs tester agents itself, as headless Claude Code processes (`claude -p`), one
-// per goal, at most 2 at once. For agents that can't spawn subagents (workflow subagents have no Agent tool): the
-// batch is a plain command. Each tester gets the same brief `play brief` prints, may run only the witness commands
+// per goal, at most 2 at once (1 for a web game: each is a headless browser), one batch machine-wide. For agents that
+// can't spawn subagents (workflow subagents have no Agent tool): the batch is a plain command (run it in the background). Each tester gets the same brief `play brief` prints, may run only the witness commands
 // (Bash limited to them, plus Read for screenshots, permission mode dontAsk), and uses the user's Claude Code login
 // (ANTHROPIC_API_KEY is removed from its environment). Nothing is left running: a wall-clock timeout per tester, the
 // session stopped after each tester, and Ctrl-C kills every tester and its session.
@@ -8,10 +8,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { makeBrief, PERSONAS, configArg } from "./brief.js";
+import { makeBrief, PERSONAS, configArg, cmdRoot, launchArgs } from "./brief.js";
 import { resolvePlayConfig, describeControls } from "./config.js";
-import { readEntry, pidAlive, shimPath, shimCommand } from "./registry.js";
-import { launchFlags } from "../cli/common.js";
+import { readEntry, pidAlive, shimPath, shimCommand, acquireBatchLock, validName, LOCK_BEAT_MS } from "./registry.js";
+import { prune, fmtBytes } from "../core/clean.js";
+import { budgetLimits } from "../core/budget.js";
 import { UntilWatch, fmtHours } from "./until.js";
 
 const r1 = (x) => Math.round(x * 10) / 10;
@@ -27,6 +28,8 @@ export function readGoals(file) {
   return txt.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((goal) => ({ goal }));
 }
 
+/** The play commands a tester may run (the brief's, plus the order card): no batch, clean, stop --all, list --clean. */
+export const TESTER_COMMANDS = ["start", "do", "look", "next", "shot", "note", "end", "status", "orders"];
 /**
  * The `claude -p` arguments for one tester: the model, low effort, Bash limited to the witness commands, no prompts.
  * The brief's order command is the session shim's absolute path (no cd: dontAsk denies a cd outside the working
@@ -39,7 +42,7 @@ export function testerArgs({ model = "sonnet", effort = "low", cliJs, name }) {
   // Git Bash's /c/... form of the same path (a tester that rewrites it, or copies `pwd`): dontAsk matches rules textually
   const msys = /^[A-Za-z]:\//.test(abs) ? `/${abs[0].toLowerCase()}${abs.slice(2)}` : null;
   const forms = [abs, `"${abs}"`, ...(msys ? [msys, `"${msys}"`] : []), `./${name}`];
-  const allow = [`Bash(${wit}:*)`, `Bash(${wit} *)`, ...forms.flatMap((f) => [`Bash(${f}:*)`, `Bash(${f} *)`, `Bash(${f})`]), "Bash(cd:*)", "Read"];
+  const allow = [...TESTER_COMMANDS.flatMap((c) => [`Bash(${wit} ${c}:*)`, `Bash(${wit} ${c} *)`]), ...forms.flatMap((f) => [`Bash(${f}:*)`, `Bash(${f} *)`, `Bash(${f})`]), "Bash(cd:*)", "Read"];
   return ["-p", "--model", model, "--effort", effort, "--tools", "Bash,Read", "--allowedTools", ...allow, "--add-dir", path.dirname(shimPath(name)), "--permission-mode", "dontAsk",
     "--setting-sources", "project,local", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--output-format", "json"];
 }
@@ -71,11 +74,27 @@ export function nudge(brief, b, name) {
   return `${brief}\n\nIMPORTANT, A PREVIOUS ATTEMPT WAS BLOCKED: ${b.command ? `\`${b.command}\` was denied` : "a command was denied"} (there is no permission prompt here, so a denied command just fails). Only the exact command forms listed under COMMANDS are allowed. Run each one on its own, starting with the full path, for example:\n  ${S} "explore"\n  ${S} look\nUse the path exactly as shown (not a /c/... form), no cd, no && or ;, no other programs; note and feedback text in single quotes with no backticks. That attempt's session was stopped: begin again with the start command.`;
 }
 
-/** The claude binary: `claude`, or WITNESS_CLAUDE (a path; a .js/.mjs file runs with node — tests use a fake tester). */
-function claudeCommand() {
-  const c = process.env.WITNESS_CLAUDE;
-  if (!c) return ["claude"];
-  return /\.m?js$/i.test(c) ? [process.execPath, c] : [c];
+/**
+ * The claude binary: `claude`, or WITNESS_CLAUDE (a path; a .js/.mjs file runs with node — tests use a fake tester).
+ * Windows: spawn() can't run npm's claude.cmd without a shell (and a shell would mangle the quoted --allowedTools), so
+ * claude.exe is looked up on PATH, else the script inside claude.cmd is run with node.
+ */
+export function claudeCommand(env = process.env, platform = process.platform) {
+  const c = env.WITNESS_CLAUDE;
+  if (c) return /\.m?js$/i.test(c) ? [process.execPath, c] : [c];
+  if (platform !== "win32") return ["claude"];
+  const dirs = String(env.PATH || env.Path || "").split(";").filter(Boolean);
+  for (const d of dirs) { const f = path.join(d, "claude.exe"); if (fs.existsSync(f)) return [f]; }
+  for (const d of dirs) {
+    const f = path.join(d, "claude.cmd");
+    if (!fs.existsSync(f)) continue;
+    // npm's shim: IF EXIST "%dp0%\node.exe" (…) first, then … "%_prog%"  "%dp0%\node_modules\@anthropic-ai\claude-code\cli.js" %*
+    // (or an .exe it wraps): the target is the last match that isn't node.exe (node.exe beside it is only the runtime)
+    let txt = ""; try { txt = fs.readFileSync(f, "utf8"); } catch { /* unreadable */ }
+    const ms = [...txt.matchAll(/"%~?dp0%?\\?([^"%]+\.(m?js|cjs|exe))"/gi)].filter((m) => !/(^|[\\/])node\.exe$/i.test(m[1])).reverse();
+    for (const m of ms) { const t = path.join(d, m[1]); if (fs.existsSync(t)) return /exe$/i.test(m[2]) ? [t] : [process.execPath, t]; }
+  }
+  return ["claude"];
 }
 
 /**
@@ -83,14 +102,18 @@ function claudeCommand() {
  *  [--wall-minutes M] [--until "<expr>"] [--game-hours N] [--timeout M] [--scene S] [--params J] [--live]`
  */
 export async function playBatch(opt, { loadConfig, ROOT }) {
-  const { cfg, root, file } = loadConfig(opt);
+  const L = loadConfig(opt), { cfg, file } = L, root = cmdRoot(opt, L.root);
   if (!opt.goals || opt.goals === true) { console.error("✖ --goals FILE is required (one goal per line, or a JSON list of {goal, persona, scene, params, minutes, until, gameHours, wallMinutes})"); process.exit(1); }
   let goals;
   try { goals = readGoals(path.resolve(String(opt.goals))); } catch (e) { console.error(`✖ can't read --goals: ${e.message}`); process.exit(1); }
   if (!goals.length) { console.error("✖ no goals in the file"); process.exit(1); }
   const cliJs = path.join(ROOT, "bin", "witness.js").replace(/\\/g, "/");
   const cli = `node "${cliJs}"`;
-  const parallel = Math.max(1, Math.min(2, +(opt.parallel || 2)));
+  // a web game's session is a headless browser: one tester at a time (the session limit allows one web session); never
+  // more games at once than the machine-wide heavy-process budget allows (WITNESS_MAX_PROCS; the rest would only queue)
+  const web = !!(cfg.launch && cfg.launch.url && !cfg.launch.attach);
+  const procs = budgetLimits().max;
+  const parallel = web ? 1 : Math.max(1, Math.min(2, +(opt.parallel || 2), procs || Infinity));
   const val = (k) => (opt[k] !== undefined && opt[k] !== true ? opt[k] : null);
   const minutes = opt.minutes ? +opt.minutes : 3;   // GAME minutes (the tester's budget)
   const wallDefault = val("wall-minutes") != null ? +val("wall-minutes") : null;   // a hard wall-clock stop per session
@@ -107,7 +130,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
     const wall = wallCapFor({ wall: g.wallMinutes != null ? +g.wallMinutes : wallDefault, minutes: mins, until, gameHours });
     const model = g.model || (val("model") != null ? String(val("model")) : "sonnet");
     const brief = makeBrief({
-      cli, configDir: configArg(root, file), launch: launchFlags(opt), name, goal: g.goal, persona, minutes: mins, game: `"${cfg.name || "the game"}"`, profile: pc.profile,
+      cli, configDir: configArg(root, file), launch: launchArgs(opt), name, goal: g.goal, persona, minutes: mins, game: `"${cfg.name || "the game"}"`, profile: pc.profile,
       controls: cfg.play && cfg.play.controls ? describeControls(pc) : "", seed: g.seed ?? (val("seed") != null ? +val("seed") : null),
       scene: g.scene ?? (val("scene") != null ? String(val("scene")) : null), params: g.params ?? (val("params") != null ? String(val("params")) : null),
       model, live: !!(g.live ?? opt.live), extra: (cfg.play && cfg.play.brief) || null, until, gameHours, wallMinutes: wall, clock: val("clock") != null ? String(val("clock")) : null,
@@ -115,20 +138,26 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
     const timeoutMin = +(opt.timeout || wall + 3);
     return { i: i + 1, name, goal: g.goal, persona, minutes: mins, until, gameHours, wall, model, brief, timeoutMin };
   });
+  for (const r of runs) if (!validName(r.name)) { console.error(`✖ goal #${r.i}: bad session name "${r.name}" (letters, digits, - _ . only, not all dots)`); process.exit(1); }
   for (const r of runs) { try { new UntilWatch({ until: r.until, gameHours: r.gameHours, clock }); } catch (e) { console.error(`✖ goal #${r.i}: ${e.message}`); process.exit(1); } }
   if (opt["dry-run"]) { for (const r of runs) console.log(`#${r.i} ${r.name}: claude ${testerArgs({ model: r.model, effort: opt.effort || "low", cliJs, name: r.name }).join(" ")}  (brief: ${r.brief.length} chars; ${budgetText(r)}, tester timeout ${r.timeoutMin} wall min)`); return; }
 
+  // one batch machine-wide (each is up to 2 games plus 2 claude processes); a dead holder's lock doesn't count
+  const lock = acquireBatchLock({ root, goals: runs.length });
+  if (!lock.ok) { console.error(`✖ another playtest batch is running (pid ${lock.holder.pid}${lock.holder.started ? `, since ${String(lock.holder.started).slice(0, 16).replace("T", " ")}` : ""}${lock.holder.root ? `, ${lock.holder.root}` : ""}): wait for it to finish`); process.exit(1); }
+  process.on("exit", () => lock.release());
+  const beat = setInterval(() => lock.beat(), LOCK_BEAT_MS); beat.unref();   // untouched for 2 min = stale (a killed batch)
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "witness-batch-"));   // the testers' working folder (empty)
-  const env = { ...process.env };
+  const env = { ...process.env, WITNESS_PLAY_TESTER: "1" };
   for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]) delete env[k];   // the user's login, not a key
   const children = new Map();   // run → child
   const stopSession = (name) => {
     const e = readEntry(name);
-    if (e && e.pid && pidAlive(e.pid) && e.state !== "ended") spawnSync(process.execPath, [cliJs, "play", "stop", "-s", name], { windowsHide: true, stdio: "ignore", timeout: 30000 });
+    if (e && e.pid && pidAlive(e.pid) && e.state !== "ended") spawnSync(process.execPath, [cliJs, "play", "stop", "-s", name], { windowsHide: true, stdio: "ignore", timeout: 60000 });   // a starting one: stop waits up to 20 s for its port
   };
   let interrupted = false;
   const cleanup = () => { for (const [r, ch] of children) { killTree(ch.pid); stopSession(r.name); } children.clear(); };
-  const onSig = () => { interrupted = true; console.error("\n✖ interrupted: stopping the testers and their sessions"); cleanup(); try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* busy */ } process.exit(130); };
+  const onSig = () => { interrupted = true; console.error("\n✖ interrupted: stopping the testers and their sessions"); cleanup(); try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* busy */ } lock.release(); process.exit(130); };
   process.on("SIGINT", onSig); process.on("SIGTERM", onSig);
 
   const budget = budgetText(runs[0]);
@@ -140,6 +169,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
     const ch = spawn(claudeBin, [...claudePre, ...testerArgs({ model: r.model, effort: opt.effort || "low", cliJs, name: r.name })], { cwd: work, env: { ...env, WITNESS_PLAY_SESSION: r.name }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" });
     children.set(r, ch);
     let out = "", err = "", timedOut = false;
+    ch.stdout.setEncoding("utf8"); ch.stderr.setEncoding("utf8");   // decoded across chunks (multibyte characters stay whole)
     ch.stdout.on("data", (d) => { out += d; });
     ch.stderr.on("data", (d) => { err += d; });
     ch.on("error", (e) => { err += `\n${e.message}`; });
@@ -152,9 +182,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
       r.code = code; r.timedOut = timedOut; r.wallSec = (r.wallSec || 0) + (Date.now() - t0) / 1000; r.denials = null;   // elapsed (r.wall is the --wall-minutes cap)
       try { const j = JSON.parse(out.trim().split(/\r?\n/).filter((l) => l.startsWith("{")).pop() || "{}"); r.reply = j.result ?? null; r.cost = (r.cost || 0) + (j.total_cost_usd || 0); r.turns = j.num_turns ?? null; r.isError = !!j.is_error; r.denials = j.permission_denials || null; } catch { r.reply = out.trim().slice(-600) || null; }
       r.stderr = err.trim().slice(-800);
-      const e = readEntry(r.name);
-      r.dir = e && e.dir ? e.dir : null;
-      try { r.report = r.dir ? JSON.parse(fs.readFileSync(path.join(r.dir, "report.json"), "utf8")) : null; } catch { r.report = null; }
+      Object.assign(r, attemptResult(r.name, t0));
       resolve();
     });
   });
@@ -176,17 +204,37 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
   };
   const queue = runs.slice();
   await Promise.all(Array.from({ length: Math.min(parallel, runs.length) }, async () => { while (queue.length && !interrupted) await runOne(queue.shift()); }));
-  process.off("SIGINT", onSig); process.off("SIGTERM", onSig);
+  process.off("SIGINT", onSig); process.off("SIGTERM", onSig); clearInterval(beat);
   try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* busy */ }
+  lock.release();
 
   const base = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(root, "witness", "playtests"));
   fs.mkdirSync(base, { recursive: true });
+  // retention once, after the testers (their starts don't prune while the lock is held): this batch's own reports
+  // count toward "keep" but are never removed, however big the batch
+  try {
+    const pr = prune(cfg, root, { only: "playtests", keep: runs.map((r) => r.dir).filter(Boolean) });
+    if (pr.removed.length) console.log(`▸ removed ${pr.removed.length} older playtest${pr.removed.length === 1 ? "" : "s"} (${fmtBytes(pr.bytes)}; witness.json "retention")`);
+    for (const w of pr.warnings) console.log(`⚠ ${w}`);
+  } catch { /* best effort */ }
   const mdFile = path.join(base, `batch-${stamp}.md`);
   fs.writeFileSync(mdFile, batchMarkdown(runs, { base, model: runs[0].model, effort: opt.effort || "low", minutes, budget }));
   console.log(`\nSummary:`);
   for (const r of runs) console.log(`  #${r.i} ${r.goal}\n     ${batchLine(r)}${r.dir ? `\n     report: ${path.join(r.dir, "report.md")}` : ""}`);
   const cost = runs.reduce((a, r) => a + (r.cost || 0), 0);
   console.log(`\n${runs.filter((r) => r.report).length}/${runs.length} reports${cost ? ` · tester cost $${cost.toFixed(2)} (shown by claude; covered by a subscription login)` : ""} · ${mdFile}`);
+}
+
+/**
+ * One attempt's session folder and report, by its name: an entry or report.json from before the attempt started (an
+ * earlier batch, the blocked first attempt) under the same name isn't its result. → {dir, report}
+ */
+export function attemptResult(name, t0) {
+  const e = readEntry(name), fresh = (ms) => ms >= t0 - 2000;
+  const dir = e && e.dir && fresh(Date.parse(e.started || 0)) ? e.dir : null;
+  let report = null;
+  try { const f = dir && path.join(dir, "report.json"); report = f && fresh(fs.statSync(f).mtimeMs) ? JSON.parse(fs.readFileSync(f, "utf8")) : null; } catch { /* none yet */ }
+  return { dir, report };
 }
 
 /**

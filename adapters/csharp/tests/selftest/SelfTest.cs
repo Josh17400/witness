@@ -64,11 +64,17 @@ internal static class SelfTest
         Eq("space", WitnessKeys.Normalize("Spacebar"), "ConsoleKey.Spacebar");
         Eq("d", WitnessKeys.Normalize("D"), "plain letter D");
         Eq("f8", WitnessKeys.Normalize("F8"), "function key");
+        Eq("meta", WitnessKeys.Normalize("LeftCommand"), "Unity KeyCode.LeftCommand is the OS key 'meta'");
+        Eq("meta", WitnessKeys.Normalize("LeftWindows"), "MonoGame Keys.LeftWindows");
+        Eq("meta", WitnessKeys.Normalize("Meta"), "Godot Key.Meta");
+        Eq("meta", WitnessKeys.Normalize("Super"), "'super' (old C++/Rust/Go spelling)");
         ConsoleKey ck;
         Eq(true, WitnessKeys.TryParse("right", out ck) && ck == ConsoleKey.RightArrow, "TryParse right → RightArrow");
         Eq(true, WitnessKeys.TryParse("1", out ck) && ck == ConsoleKey.D1, "TryParse 1 → D1 (not the value 1)");
         Eq(true, WitnessKeys.TryParse("space", out ck) && ck == ConsoleKey.Spacebar, "TryParse space → Spacebar");
         Eq(true, WitnessKeys.TryParse("f12", out ck) && ck == ConsoleKey.F12, "TryParse f12");
+        Eq(true, WitnessKeys.TryParse("meta", out ck) && ck == ConsoleKey.LeftWindows, "TryParse meta → LeftWindows");
+        Eq(true, WitnessKeys.TryParse("super", out ck) && ck == ConsoleKey.LeftWindows, "TryParse super → LeftWindows");
         Eq(false, WitnessKeys.TryParse("nosuchkey", out ck), "TryParse unknown fails");
 
         // PCM: synchronized with simulated time; tails carry over
@@ -185,9 +191,25 @@ internal static class SelfTest
                     evs.Add(WitnessEvent.TouchEvent(0, 5, 6, WitnessTouchPhase.Up));
                     evs.Add(new WitnessEvent { Type = "mouse", X = 5, Y = 6, Button = 0, Down = false, FromTouch = true });
                 }
+                if (f == 44)
+                {
+                    // an end state written before play goes on (a vetoed quit) is dropped by the next recorded frame
+                    Eq(true, Witness.WriteEndState(new Dictionary<string, object> { { "x", 1 } }), "WriteEndState mid-recording");
+                    Eq(true, System.IO.File.Exists(record + ".state.json"), "mid-recording end state written");
+                }
                 Witness.RecordFrame(1.0 / 60, evs);
             }
+            Eq(false, System.IO.File.Exists(record + ".state.json"), "a stale end state is deleted when another frame is recorded");
+            // every line is on disk before StopRecording: a crash loses nothing
+            using (var fs = new System.IO.FileStream(record, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
+            using (var sr = new System.IO.StreamReader(fs))
+                Eq(46, sr.ReadToEnd().Split('\n').Length - 1, "frames flushed as they are recorded");
+            Eq(true, Witness.WriteEndState(new Dictionary<string, object> { { "x", 7 } }), "WriteEndState while recording");
             Witness.StopRecording();
+            var end = (Dictionary<string, object>)WitnessJson.Parse(System.IO.File.ReadAllText(record + ".state.json"));
+            Eq(45L, end["frame"], "end state: frames recorded");
+            Eq(7L, ((Dictionary<string, object>)end["state"])["x"], "end state: the game state");
+            System.IO.File.Delete(record + ".state.json");
             var lines = System.IO.File.ReadAllLines(record);
             Eq(46, lines.Length, "replay has a header + 45 frames");
             var head = (Dictionary<string, object>)WitnessJson.Parse(lines[0]);
@@ -202,6 +224,7 @@ internal static class SelfTest
         {
             Witness.RecordFrame(0.016);
             Eq(false, Witness.Recording, "not recording without WITNESS_RECORD");
+            Eq(false, Witness.WriteEndState(new Dictionary<string, object>()), "no end state without a recording");
         }
 
         // Sound events: the line shape, a no-op while disconnected, and the frame stamp through a real step

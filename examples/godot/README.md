@@ -19,16 +19,17 @@ node ../../bin/witness.js test
 ```
 
 `witness.json` launches
-`godot --path . --rendering-driver opengl3 --fixed-fps 60 --write-movie user://witness.avi`:
+`godot --path . --rendering-driver opengl3 --fixed-fps 60 --write-movie witness/movies/witness.avi`:
 
 * `--fixed-fps 60`: one engine iteration = one exact 1/60 s step (required);
 * `--write-movie`: Movie Maker mode, so audio is mixed frame-by-frame: each `audio` reply is
   exactly the simulated time long and the same run gives byte-identical audio after any other
-  (a few MB AVI in `user://`, overwritten each launch);
+  (an MJPEG AVI in `witness/movies/`, tens of MB per minute, overwritten each launch; Godot
+  creates no folders, so the folder and its `.gdignore` are kept in git, and `witness clean` prunes the movies);
 * a real renderer, for screenshots. The window is borderless and moved off-screen.
 
 If `godot` isn't on PATH (Windows), pass the console binary:
-`--cmd "\"C:\path\Godot_v4.7.2-stable_win64_console.exe\" --path . --rendering-driver opengl3 --fixed-fps 60 --write-movie user://witness.avi"`.
+`--cmd "\"C:\path\Godot_v4.7.2-stable_win64_console.exe\" --path . --rendering-driver opengl3 --fixed-fps 60 --write-movie witness/movies/witness.avi"`.
 Quick headless check, with no screenshots and no synced audio:
 `--cmd "godot --path . --headless --fixed-fps 60"`.
 
@@ -41,4 +42,6 @@ node ../../bin/witness.js replay witness/replays/demo.jsonl --watch "state.playe
 
 `--demo` is a scripted 2-second session (hold right from 0 to 1.2 s, F8 at 0.5 s) whose key
 events go through `Input.parse_input_event`, so the recorder sees them like a human's. The
-replay ends on exactly the x position the demo prints.
+replay ends on exactly the x position the demo prints. The demo calls `Witness.stop_recording()`
+before it quits, which writes the recording's end state (`demo.jsonl.state.json`): the replay
+then says it ended in exactly that state.

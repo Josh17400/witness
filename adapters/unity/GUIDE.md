@@ -40,8 +40,10 @@ Build a player and let Witness launch it:
 * `-logFile -` sends the player log to stdout, so Witness shows it when something fails.
 * The scenes the game loads (and the one `reset` reloads) must be in the Build Settings list.
 
-**Editor attach** (iterate without building): add the scripting define `WITNESS_ATTACH`, run
-`witness attach` (it waits on 127.0.0.1:7357), then press Play. The Editor UI freezes between
+**Editor attach** (iterate without building): add the scripting define `WITNESS_ATTACH`, run any
+command with `--attach` (`witness doctor --attach`, `witness test --attach`; or set
+`"launch": {"attach": true}` in `witness.json`): it waits on 127.0.0.1:7357 instead of launching
+the game. Then press Play. The Editor UI freezes between
 commands while Witness drives it; that's expected. Remove the define when done.
 
 ## 3. How witness mode drives Unity (nothing to restructure)
@@ -171,10 +173,25 @@ resolution you want: `WitnessBridge.Hello.Width = 1280; Hello.Height = 720;`.
 ## 9. Replay recording
 
 Run the player normally with `WITNESS_RECORD=run.jsonl` (and optionally `WITNESS_SEED`): the bridge
-records each frame's unscaled delta, key presses/releases and touches (Input System keyboard and
-`Touchscreen.current`, or the old Input Manager's `Input.touches`), F8 adds a mark, and the file is
-flushed on quit. Seed with `Witness.Seed`. `witness replay run.jsonl` replays it with the recorded
-per-frame dts. Touches are written in the hello's logical pixels (top-left origin) with small finger
+writes one replay frame per **fixed step** (`Time.fixedDeltaTime`, the unit witness mode steps: one
+FixedUpdate + one Update per frame), with the key presses/releases and touches (Input System keyboard
+and `Touchscreen.current`, or the old Input Manager's keys and `Input.touches`) of each rendered frame;
+F8 adds a mark. A frame's steps are written when it ends (so a crash loses at most that frame). On quit
+it writes `run.jsonl.state.json` (the snapshot the game ended in), and `witness replay run.jsonl`
+checks the replay ends in exactly that state. Seed with `Witness.Seed`.
+
+A replay line is one FixedUpdate + one Update with its input applied before both, so the bridge puts
+a frame's input where live play first saw it: the old Input Manager (updated in EarlyUpdate, before
+FixedUpdate) on the frame's first fixed step, the Input System (default dynamic update, in PreUpdate:
+after FixedUpdate, before Update) on its last. Exact replays need one fixed step per rendered frame
+(`Application.targetFrameRate` = the fixed rate; pin it when you record replays you'll assert on):
+then input read in Update, and input read in FixedUpdate with the old Input Manager, replay on the
+same step as live. Remaining gaps: Input System input read in FixedUpdate replays one step early
+(live, it reached FixedUpdate on the next frame); with several steps per frame, Update logic runs
+once per step instead of once per frame; input of a frame with no fixed step rides on the next
+frame's first step.
+
+Touches are written in the hello's logical pixels (top-left origin) with small finger
 ids (0 = first finger down); a touch Unity reports as `Canceled` is recorded as `cancel`, not `up`.
 The mouse Unity simulates from touches is not recorded: on replay the
 mouse fallback recreates it.

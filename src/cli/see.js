@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { begin, stepTo } from "../core/runner.js";
 import { evaluate } from "../core/expr.js";
+import { REFS_DIR, markGenerated } from "../core/clean.js";
 import {
   die, say, withGame, gamePixels, runOpts, media, printLogs, timeList, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
@@ -14,6 +15,30 @@ export function parseRect(s, what = "a region") {
   const v = String(s).split(",").map(Number);
   if (v.length !== 4 || v.some((x) => !Number.isFinite(x)) || v[2] <= 0 || v[3] <= 0) die(`${what} is x,y,w,h (got ${s})`);
   return { x: v[0], y: v[1], w: v[2], h: v[3] };
+}
+const samePath = (a, b) => (process.platform === "win32" ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+/** --save-ref <name>: a baseline name (letters, digits, . _ -), ".png" optional. */
+export function refName(v) {
+  const n = v === true ? "" : String(v).replace(/\.png$/i, "");
+  if (!/^[\w.-]+$/.test(n)) die(`--save-ref wants a name like title-screen (saved as ${REFS_DIR}/<name>.png), got ${v === true ? "nothing" : v}`);
+  return n;
+}
+/**
+ * --diff <name | file.png>: a name without a folder is a baseline saved with --save-ref (witness/refs/<name>.png)
+ * when one exists (names may hold dots: title.v2); else a path, and a bare name without an extension must be a
+ * baseline. Dies when it doesn't exist.
+ */
+export function refPath(spec, cfg, root) {
+  if (spec === true) die("--diff wants a reference: a name saved with --save-ref, or a PNG file");
+  const s = String(spec);
+  if (/^[\w.-]+$/.test(s)) {
+    const f = path.resolve(root, REFS_DIR, `${s}.png`);
+    if (fs.existsSync(f)) return f;
+    if (!/\.\w{2,4}$/.test(s)) die(`no reference named "${s}" (looked for ${f}): save one first with  witness shot --at <t> --save-ref ${s}`);
+  }
+  const f = path.resolve(s);
+  if (!fs.existsSync(f)) die(`no such image: ${s}`);
+  return f;
 }
 /** "x,y,w,h; x,y,w,h" -> rects. */
 export const parseRects = (s) => String(s).split(";").map((r) => r.trim()).filter(Boolean).map((r) => parseRect(r, "an --ignore region"));
@@ -94,8 +119,10 @@ export async function annotationItems(m, img, snap, opt) {
 }
 
 export async function shotCommand(pos, opt) {
-  if (opt.clip) return clipShots(opt);
   const ranged = opt.from !== undefined || opt.to !== undefined || opt.auto !== undefined || opt.sheet;
+  // a baseline is one picture at a time: a sheet or clip would land in the (pruned) shots folder, not witness/refs
+  if (opt["save-ref"] !== undefined && (opt.clip || ranged)) die(`--save-ref saves single shots only (witness shot --at <t> --save-ref <name>), not --${opt.clip ? "clip" : opt.sheet ? "sheet" : opt.auto !== undefined ? "auto" : "from/--to"}: those go to the shots folder, which is pruned`);
+  if (opt.clip) return clipShots(opt);
   return ranged ? sheetShots(opt) : singleShots(opt);
 }
 
@@ -110,12 +137,24 @@ async function singleShots(opt) {
     const tokens = timeList(opt.at, [opt.time && opt.time !== true ? String(opt.time) : "1"]);
     const items = tokens.map((t) => ({ t, f: framesOf(t, fps) })).sort((a, b) => a.f - b.f);
     const m = await media();
+    // the reference is read BEFORE anything is written: --diff of the default output path compared the new shot with itself
+    const ref = opt.diff ? refPath(opt.diff, cfg, root) : null;
+    const refBuf = ref ? fs.readFileSync(ref) : null;
+    const saveRef = opt["save-ref"] !== undefined ? refName(opt["save-ref"]) : null;
     const st = await begin(s, runOpts(opt, cfg));
     for (const it of items) {
       await stepTo(s, st, it.f);
+      const tTag = /f$/i.test(it.t) ? `f${it.f}` : String(it.t).replace(".", "_");
       let file = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, items.length > 1 ? "shot-{t}.png" : "shot.png"));
       if (items.length > 1 && !file.includes("{t}")) file = file.replace(/\.png$/i, "-{t}.png");
-      file = file.replace("{t}", /f$/i.test(it.t) ? `f${it.f}` : String(it.t).replace(".", "_"));
+      file = file.replace("{t}", tTag);
+      if (saveRef) {
+        // a named baseline: witness/refs/<name>.png, never pruned (the shots folder is); one per --at time with several
+        const rf = path.resolve(root, REFS_DIR, `${saveRef}${items.length > 1 ? `-${tTag}` : ""}.png`);
+        if (ref && samePath(rf, ref)) die(`--save-ref ${saveRef} would overwrite the --diff reference ${ref}`);
+        file = rf;
+      }
+      if (ref && samePath(file, ref)) die(`--diff ${opt.diff} is the file this shot would be written to (${file}): it would be compared with itself. Keep references apart: witness shot --save-ref <name> (witness/refs/<name>.png), then --diff <name>`);
       const shot = await s.screenshot(opt.scale ? +opt.scale : undefined);
       const snap = fr.follow || opt.annotate ? await s.snapshot() : null;
       if (opt.annotate) {
@@ -124,6 +163,7 @@ async function singleShots(opt) {
         const A = await annotationItems(m, full, snap, opt);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, m.annotate(full, A.items, { zoom: fr.zoom > 1 ? fr.zoom : null, title: `${s.hello.name} f${it.f}: ${A.items.length} entities · ${A.how}` }));
+        markGenerated(path.resolve(root, cfg.shots), file);
         const r = { frame: it.f, t: +(it.f / fps).toFixed(3), file, annotated: A.items.length, projection: A.how, fit: A.fit && A.fit.ok ? { ax: A.fit.ax, bx: A.fit.bx, ay: A.fit.ay, by: A.fit.by, residual: A.fit.residual } : null };
         if (!opt.json) say(`✔ f${it.f} (${fmtT(it.f / fps)}) → ${file}  (${A.items.length} entities boxed and labelled; positions from ${A.how})`);
         results.push(r);
@@ -132,20 +172,21 @@ async function singleShots(opt) {
       const { img, rect } = await frameImage(m, shot, snap, fr);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, m.encodePNG(img.width, img.height, img.data));
-      const r = { frame: it.f, t: +(it.f / fps).toFixed(3), file, width: img.width, height: img.height, source: rect };
+      markGenerated(path.resolve(root, cfg.shots), file);
+      const r = { frame: it.f, t: +(it.f / fps).toFixed(3), file, width: img.width, height: img.height, source: rect, ...(saveRef ? { ref: path.basename(file, ".png") } : {}) };
       const dev = s.web && s.web.captureMode && s.web.captureMode !== "canvas" ? `  (${img.width}×${img.height} device px: ${s.web.captureMode} capture at DPR ${s.web.device ? s.web.device.dpr : 1}, not game pixels)` : "";
       if (!opt.json) say(`✔ f${it.f} (${fmtT(it.f / fps)}) → ${file}${rect || fr.zoom > 1 ? `  (${img.width}×${img.height}: ${describeFraming(fr)})` : ""}${dev}`);
       if (opt.diff) {
         // regions never compared: --ignore "x,y,w,h; ..." plus witness.json "diff": { "ignore": ["x,y,w,h", ...] }
         const cfgIgnore = cfg.diff && Array.isArray(cfg.diff.ignore) ? cfg.diff.ignore.map((q) => parseRect(q, "witness.json diff.ignore")) : [];
         const ignore = [...cfgIgnore, ...(opt.ignore && opt.ignore !== true ? parseRects(opt.ignore) : [])];
-        const ref = path.resolve(String(opt.diff));
-        if (!fs.existsSync(ref)) die(`no such image: ${opt.diff}`);
         let d;
-        try { d = m.diffImages(fs.readFileSync(ref), { width: img.width, height: img.height, data: img.data }, { threshold: +(opt.threshold || 16), ignore, align: !opt["no-align"], resize: !!opt.resize, title: `diff vs ${path.basename(ref)}` }); }
+        try { d = m.diffImages(refBuf, { width: img.width, height: img.height, data: img.data }, { threshold: +(opt.threshold || 16), ignore, align: !opt["no-align"], resize: !!opt.resize, title: `diff vs ${path.basename(ref)}` }); }
         catch (e) { if (/sizes differ/.test(e.message)) die(`${e.message.replace(/^diffImages: /, "")}: the reference ${path.basename(ref)} and the shot have different sizes (add --resize to compare anyway, or shoot with the same --window/--crop/--zoom)`); throw e; }
-        const dfile = file.replace(/\.png$/i, "-diff.png");
-        fs.writeFileSync(dfile, d.png);
+        // next to the shot; a shot saved as a reference keeps its diff picture in the shots folder, not witness/refs
+        const dfile = saveRef ? path.resolve(root, cfg.shots, `${path.basename(file, ".png")}-diff.png`) : file.replace(/\.png$/i, "-diff.png");
+        fs.mkdirSync(path.dirname(dfile), { recursive: true });
+        fs.writeFileSync(dfile, d.png); markGenerated(path.resolve(root, cfg.shots), dfile);
         const desc = (b) => (b.kind === "moved" && b.from ? `moved ${b.moved[0] >= 0 ? "+" : ""}${b.moved[0]},${b.moved[1] >= 0 ? "+" : ""}${b.moved[1]}: x=${b.from.x} y=${b.from.y} → x=${b.x} y=${b.y} ${b.w}×${b.h}`
           : b.kind === "moved" && b.within ? `moved ${b.moved[0] >= 0 ? "+" : ""}${b.moved[0]},${b.moved[1] >= 0 ? "+" : ""}${b.moved[1]} inside x=${b.x} y=${b.y} ${b.w}×${b.h}`
           : `${b.kind} x=${b.x} y=${b.y} ${b.w}×${b.h} (${b.pixels} px)`);
@@ -246,6 +287,7 @@ async function compose(m, fr, caps, frames, { s, cfg, root, opt, f0, f1, fps, sc
   const file = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, "sheet.png"));
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, sheet.png);
+  markGenerated(path.resolve(root, cfg.shots), file);
   const L = sheet.layout;
   const how = [`${L.cols}×${L.rows} grid`, `each ${imgs[0].width}×${imgs[0].height}${L.scale < 1 ? ` shown at ${Math.round(L.scale * 100)}%` : ""}`, describeFraming(fr)].filter(Boolean).join(", ");
   const text = auto
@@ -329,6 +371,7 @@ async function clipShots(opt) {
     const clipFile = path.resolve(typeof opt.clip === "string" ? opt.clip : opt.out && opt.out !== true ? String(opt.out) : path.join(root, cfg.shots, "clip.png"));
     fs.mkdirSync(path.dirname(clipFile), { recursive: true });
     fs.writeFileSync(clipFile, enc.png);
+    markGenerated(path.resolve(root, cfg.shots), clipFile);
     const kept = pick.map((i) => frames[i]);
     // what the file plays: the sum of the delays written (the last kept frame is often before --to)
     const seconds = enc.delays.reduce((a, [n, d]) => a + n / d, 0);

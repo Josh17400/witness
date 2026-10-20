@@ -8,8 +8,8 @@ import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay }
 import { evaluate, fmt, keyPaths, ExprError, usesPrev, hint } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
 import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
-import { prune, pruneRegistry, fmtBytes } from "../src/core/clean.js";
-import { CLI, die, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay, configFlag } from "../src/cli/common.js";
+import { prune, pruneRegistry, fmtBytes, markGenerated } from "../src/core/clean.js";
+import { CLI, die, say, forgetDie, DieError, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay, configFlag } from "../src/cli/common.js";
 import { parseNamedRects, stateLayers } from "../src/cli/scale-regions.js";
 import { evalCommand } from "../src/cli/ask.js";
 import { traceCommand } from "../src/cli/trace.js";
@@ -20,6 +20,7 @@ import { effectCommand } from "../src/cli/effect.js";
 import { listenCommand } from "../src/cli/listen.js";
 import { windowCommand } from "../src/cli/window.js";
 import { abCommand } from "../src/cli/ab.js";
+import { parseArgs } from "../src/cli/args.js";
 import { describeWeb, displayReport, unlockProbe, audioReport, webglReport } from "../src/cli/web.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -66,16 +67,23 @@ Common options:
   --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
   --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
 Times are seconds, or frames with an "f": --at 90f, --every 1f, space@60f. "+2f" = 2 frames after the input's frame.
+Machine-wide limit: at most 3 games/browsers run at once (WITNESS_MAX_PROCS; 0 = no limit), 1 of them a headless
+browser (WITNESS_MAX_BROWSERS); a launch over it waits, then gives up after 90 s (WITNESS_BUDGET_WAIT).
 
 Run 'witness help <command>' for details. Protocol: docs/PROTOCOL.md`;
 
 const CMD_HELP = {
-  clean: `witness clean [--all] [--playtests|--replays|--shots]
-  Generated files are pruned automatically (on play start and test) to witness.json "retention", default
-  {"playtests": {"keep": 5, "days": 7}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3}}: the newest
-  N stay unless older than the days limit. Plain 'witness clean' applies those limits now; --all deletes every
-  playtest, recording and screenshot (running playtests are never touched). 'witness play clean t1' deletes one
-  playtest once you've acted on it.`,
+  clean: `witness clean [--all] [--playtests|--replays|--shots|--movies]
+  Generated files are pruned automatically (on play start and test; 'test' says what it removed) to witness.json
+  "retention", default {"playtests": {"keep": 5, "days": 7}, "replays": {"keep": 10, "days": 14}, "shots": {"days": 3},
+  "movies": {"days": 3}}: the newest N stay unless older than the days limit. Plain 'witness clean' applies those limits now; --all deletes
+  every playtest, recording and generated screenshot (running playtests are never touched). Only what Witness wrote is
+  removed: in the shots folder its own names (shot*.png, sheet.png, trace*.png, mismatch-*, ...) and files listed in
+  its .witness-generated manifest (test step shots, --out files there); in replays *.jsonl and their .state.json.
+  witness/movies (Godot --write-movie): its .avi/.png/.wav go, the folder and its .gdignore stay.
+  Other files stay, and witness/refs (named baselines: shot --save-ref) is never pruned. A "shots"/"replays" folder
+  outside the project, the project folder itself or the Witness install is refused. 'witness play clean t1' deletes
+  one playtest once you've acted on it.`,
   test: `witness test [files...] [--name <substring>] [--json]
   Test files (default folder: "tests" in ${CONFIG_NAME}, usually witness/) are *.witness.json or *.witness.mjs:
     [{ "name": "coin pickup", "seed": 1, "input": "right@0-1.5",
@@ -95,7 +103,9 @@ const CMD_HELP = {
   "match": "label" — the first capture of a label (state, digest, screenshot, audio) is the reference; every later
   capture of that label in this run must be identical (e.g. the same fight run twice, or a plain start after other tests).
   --repeat N   run the whole selection N times in one game process; every step must equal the same step of pass 1
-               (state, digest, screenshot and audio): the strongest determinism check. --no-shots / --no-audio skip those.`,
+               (state, digest, screenshot and audio): the strongest determinism check. --no-shots / --no-audio skip those.
+  An adapter without 'reset' gets a fresh game process for every test (not possible with --attach: one test at a
+  time there); measure steps need 'reset'.`,
   eval: `witness eval [--at 0.5,2,90f] "expr" ["expr2" ...] [--input ...] [--json]
   --keys      every path in the snapshot: vectors inline, long arrays elided, entities grouped by type with the union
               of their fields (Wolf ×3: hp ∈ 1..3, state ∈ {idle, chase}); "~" marks paths that changed since frame 0
@@ -142,8 +152,10 @@ const CMD_HELP = {
                                --crop/--follow/--annotate/--scale (game pixels) are refused with it
   --crop x,y,w,h | --follow "state.player.pos" [--size 96 | 96x64]   a region (follow: centred on a position)
   --zoom 3                     crisp nearest-neighbour enlargement (small sprites)
-  --diff ref.png [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16] [--resize] [--no-align]
-                               what changed vs a reference: %, SSIM, and each region as appeared / gone / moved
+  --save-ref <name>            save the shot as a named baseline, witness/refs/<name>.png (never pruned; commit it)
+  --diff <name | ref.png> [--ignore "x,y,w,h; x,y,w,h"] [--threshold 16] [--resize] [--no-align]
+                               what changed vs a reference (a --save-ref name, or a file; never the shot's own
+                               output path): %, SSIM, and each region as appeared / gone / moved
                                (+dx,+dy) / changed; a camera shift is found and undone first; A │ B │ changes picture.
                                Ignore regions also from witness.json "diff": {"ignore": ["x,y,w,h"]}; gate with
                                --expect "ssim >= 0.99" or "changedPercent < 0.5"
@@ -346,19 +358,6 @@ const CMD_HELP = {
 };
 
 // ------------------------------------------------------------------ args & output
-function parseArgs(argv) {
-  const pos = [], opt = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith("--")) {
-      const k = a.slice(2), nxt = argv[i + 1];
-      if (nxt !== undefined && !nxt.startsWith("--") && !/^-[a-z]/i.test(nxt)) { opt[k] = nxt; i++; } else opt[k] = true;
-    } else if (a === "-o") opt.out = argv[++i];
-    else if (a === "-s") opt.s = argv[++i];
-    else pos.push(a);
-  }
-  return { pos, opt };
-}
 // ------------------------------------------------------------------ commands
 const commands = {
   async doctor(pos, opt) {
@@ -367,7 +366,7 @@ const commands = {
     const ok = (m) => report.push(`✔ ${m}`), bad = (m) => report.push(`✖ ${m}`), warn = (m) => report.push(`⚠ ${m}`);
     const mark = ([m, t]) => report.push(m ? `${m} ${t}` : `  ${t}`);
     let webSummary = null;
-    await withGame(opt, async (s) => {
+    await withGame(opt, async (s, cfg, root) => {
       const h = s.hello;
       ok(`connected over ${s.conn.kind}: "${h.name}" (${h.engine || "?"}, ${h.language || "?"}), protocol ${h.protocol}, ${s.fps} fps${h.size ? `, ${h.size.join("×")}` : ""}`);
       if (h.protocol !== 1) warn(`protocol ${h.protocol} — this CLI speaks v1`);
@@ -376,7 +375,7 @@ const commands = {
       report.push(`  capabilities: ${all.map((c) => (caps.includes(c) ? c : `(${c})`)).join(" ")}`);
       if (caps.includes("input")) report.push(`  touch: ${h.touch ? "native (hello.touch: finger events only, no mouse fallback)" : "finger 0 also arrives as the mouse (set hello.touch if the game handles touch itself)"}`);
       for (const need of ["step", "snapshot"]) if (!caps.includes(need)) bad(`missing required capability '${need}'`);
-      if (!caps.includes("reset")) warn("no 'reset': Witness restarts the game for every run (slower)");
+      if (!caps.includes("reset")) warn("no 'reset': witness test restarts the game for each test (slower); commands that compare several runs in one process (window, effect, ab, heatmap over several runs, measure motion/registration/figure, measure steps in tests, this determinism check) need it");
       if (h.calls && h.calls.length) report.push(`  calls: ${h.calls.map((c) => `${c.name}${c.args ? ` ${c.args}` : ""}`).join(" · ")}`);
       // browser launches: the engine and device; with --no-auto-unlock the audio unlock probe runs first (an unlock
       // lasts for the page's life, as in a browser, so it must happen before the determinism runs compare audio)
@@ -458,8 +457,12 @@ const commands = {
         const au = await s.web.audio();
         if (au) webSummary.audio = { state: au.state, contexts: au.contexts.length, blocked: au.blocked };
       }
+      // every run's logs (read before each reset, which may clear the adapter's buffer)
       const logs = await s.drainLogs();
-      if (logs.some((l) => l.level === "error")) warn(`the game logged ${logs.filter((l) => l.level === "error").length} error(s) during the checks`);
+      if (logs.some((l) => l.level === "error")) warn(`the game logged ${logs.filter((l) => l.level === "error").length} error(s) during the checks: ${logs.filter((l) => l.level === "error").slice(0, 3).map((l) => `${l.frame != null ? `f${l.frame} ` : ""}${String(l.message).slice(0, 100)}`).join(" · ")}`);
+      // project copies of the skills (witness init without the plugin) go stale when Witness updates
+      const { staleSkillCopies } = await import("../src/core/init.js");
+      for (const c of staleSkillCopies(root, VERSION)) warn(`${path.relative(root, c.file)} is a stale copy of the Witness skill (${c.why}): delete its folder; with the Witness plugin installed that's all (the plugin provides the skill), else run  witness init  again to write a fresh copy (files that exist are kept)`);
     });
     const failed = report.some((l) => l.startsWith("✖"));
     if (opt.json) printJSON(envelope("doctor", { ok: !failed, verdict: failed ? "doctor found problems" : "all good", summary: { problems: report.filter((l) => l.startsWith("✖")).length, warnings: report.filter((l) => l.startsWith("⚠")).length, deterministic: report.some((l) => /^✔ deterministic/.test(l)) ? true : report.some((l) => /NOT deterministic/.test(l)) ? false : null, ...(webSummary ? { web: webSummary } : {}) }, data: { lines: report } }));
@@ -472,10 +475,11 @@ const commands = {
 
   async clean(pos, opt) {
     const { cfg, root } = loadConfig(opt);
-    const only = opt.playtests ? "playtests" : opt.replays ? "replays" : opt.shots ? "shots" : null;
+    const only = opt.playtests ? "playtests" : opt.replays ? "replays" : opt.shots ? "shots" : opt.movies ? "movies" : null;
     const r = prune(cfg, root, { all: !!opt.all, only });
     const k = only && only !== "playtests" ? 0 : pruneRegistry();
-    if (opt.json) { printJSON(envelope("clean", { verdict: `removed ${r.removed.length} item(s)`, summary: { removed: r.removed.length, bytes: r.bytes }, data: { removed: r.removed, bytes: r.bytes, registry: k } })); return; }
+    if (opt.json) { printJSON(envelope("clean", { verdict: `removed ${r.removed.length} item(s)`, summary: { removed: r.removed.length, bytes: r.bytes }, data: { removed: r.removed, bytes: r.bytes, registry: k, warnings: r.warnings } })); return; }
+    for (const w of r.warnings) console.log(`⚠ ${w}`);
     console.log(r.removed.length ? `removed ${r.removed.length} item(s), ${fmtBytes(r.bytes)}:` : "nothing to remove");
     for (const p of r.removed.slice(0, 20)) console.log(`  ${path.relative(root, p) || p}`);
     if (r.removed.length > 20) console.log(`  … and ${r.removed.length - 20} more`);
@@ -483,7 +487,12 @@ const commands = {
 
   async test(pos, opt) {
     const { cfg, root } = loadConfig(opt);
-    try { prune(cfg, root); } catch { /* best effort: old playtests, recordings and screenshots */ }
+    // best effort: old playtests, recordings and generated screenshots (never witness/refs); said, so nothing vanishes silently
+    try {
+      const pr = prune(cfg, root);
+      if (pr.removed.length) say(`▸ cleaned up ${pr.removed.length} old generated file${pr.removed.length === 1 ? "" : "s"} (${fmtBytes(pr.bytes)}; witness.json "retention", see 'witness help clean'): ${pr.removed.slice(0, 3).map((p) => path.relative(root, p) || p).join(", ")}${pr.removed.length > 3 ? ", …" : ""}`);
+      for (const w of pr.warnings) say(`⚠ ${w}`);
+    } catch { /* best effort */ }
     const files = findTestFiles(root, cfg, pos);
     if (!files.length) die(`no test files found (looked for *.witness.json / *.witness.mjs in ${path.resolve(root, cfg.tests)})`);
     let tests = [];
@@ -496,20 +505,29 @@ const commands = {
     const matcher = new Matcher();
     const matchMedia = { shot: !opt["no-shots"], audio: !opt["no-audio"] };
     const schedule = [];
-    for (let p = 1; p <= repeat; p++) for (const t of tests) schedule.push(repeat > 1 ? { ...t, name: `${t.name}  [pass ${p}/${repeat}]` } : t);
+    for (let p = 1; p <= repeat; p++) for (const t of tests) schedule.push(repeat > 1 ? { ...t, name: `${t.name}  [pass ${p}/${repeat}]`, _lastPass: p === repeat } : t);
     await withGame(opt, async (s, c, r, g) => {
-      for (const t of schedule) {
+      // without 'reset', every test after the first gets a fresh game process (docs/PROTOCOL.md §3); a game Witness
+      // didn't launch (--attach) can't be restarted, so only one test can run on it
+      const restart = !s.has("reset") && schedule.length > 1;
+      if (restart && (opt.attach || (c.launch && c.launch.attach))) die(`the adapter has no 'reset' and the game was attached (--attach), so Witness can't restart it between tests: run one test at a time (--name, no --repeat), or add 'reset' to the adapter`);
+      if (restart) say(`▸ the adapter has no 'reset': each test runs in a fresh game process (slower)`);
+      for (const [i, t] of schedule.entries()) {
+        if (restart && i > 0) {
+          try { s = await g.restart(); }
+          catch (e) { results.push({ name: t.name, file: t.file, ok: false, expects: { passed: 0, failed: 0 }, failures: [{ kind: "error", message: `couldn't restart the game: ${e.message}` }] }); if (!opt.json) printTest(results[results.length - 1], root); break; }
+        }
         let res;
         try { res = await runTest(s, t, { shotDir, onShot: writeShot, matcher, matchAll: repeat > 1, matchMedia }); }
-        catch (e) { res = { name: t.name, file: t.file, ok: false, expects: { passed: 0, failed: 0 }, failures: [{ kind: "error", message: e.message }] }; }
+        catch (e) { forgetDie(e); res = { name: t.name, file: t.file, ok: false, expects: { passed: 0, failed: 0 }, failures: [{ kind: "error", message: e.message }] }; }
         results.push(res);
+        for (const f of res.shots || []) markGenerated(shotDir, f);
         if (!opt.json) printTest(res, root);
         if (s.closed) {
           if (!opt.json) console.log("✖ the game crashed or disconnected — remaining tests skipped");
           if (!opt.json) { const tail = g.output().trim().split("\n").slice(-12).join("\n"); if (tail) console.log(`--- last game output ---\n${tail}`); }
           break;
         }
-        if (!s.has("reset") && schedule.indexOf(t) < schedule.length - 1) console.log("⚠ the adapter has no 'reset', so later tests continue from this state");
       }
     });
     const failed = results.filter((r) => !r.ok).length;
@@ -595,7 +613,7 @@ const commands = {
     const dir = path.resolve(root, cfg.replays);
     const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => path.join(dir, f)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs) : [];
     if (!files.length) { console.log(`no replays in ${dir} — play the game with WITNESS_RECORD=${path.join(cfg.replays, "session.jsonl")} set (press F8 to mark moments)`); return; }
-    files.forEach((f, i) => { try { const r = loadReplay(f); console.log(`  #${i + 1} ${path.basename(f)}  ${fmtT(r.duration)}  seed ${r.seed}${r.marks.length ? `  marks: ${r.marks.map((m) => `${m.label}@${fmtT(m.t)}`).join(" ")}` : ""}`); } catch (e) { console.log(`  #${i + 1} ${path.basename(f)}  (unreadable: ${e.message})`); } });
+    files.forEach((f, i) => { try { const r = loadReplay(f, { quiet: true }); console.log(`  #${i + 1} ${path.basename(f)}  ${fmtT(r.duration)}  seed ${r.seed}${r.marks.length ? `  marks: ${r.marks.map((m) => `${m.label}@${fmtT(m.t)}`).join(" ")}` : ""}${r.warnings.length ? "  (cut short: the last line is incomplete)" : ""}`); } catch (e) { console.log(`  #${i + 1} ${path.basename(f)}  (unreadable: ${e.message})`); } });
   },
 
   async call(pos, opt) {
@@ -660,7 +678,7 @@ function printTest(res, root) {
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
-const { pos, opt } = parseArgs(rest);
+const { pos, opt } = parseArgs(rest, cmd);
 CLI.json = !!opt.json;
 hint.flags = configFlag(opt);   // printed follow-up commands load the same config, device and engine
 try {
@@ -670,6 +688,7 @@ try {
   else if (commands[cmd]) await commands[cmd](pos, opt);
   else die(`unknown command '${cmd}'\n\n${HELP}`);
 } catch (e) {
+  if (e instanceof DieError) { console.error(`✖ ${e.message}`); process.exit(e.code); }
   if (e instanceof WitnessError || e instanceof ExprError) die(e.message);
   throw e;
 }

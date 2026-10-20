@@ -10,11 +10,12 @@
   "priority": 20,
   "install": [
     { "from": "Witness.gd", "to": "addons/witness/Witness.gd" },
-    { "from": "witness_logger.gd", "to": "addons/witness/witness_logger.gd" }
+    { "from": "witness_logger.gd", "to": "addons/witness/witness_logger.gd" },
+    { "from": "movies.gdignore", "to": "witness/movies/.gdignore" }
   ],
   "launch": {
     "command": "godot",
-    "args": ["--path", ".", "--rendering-driver", "opengl3", "--fixed-fps", "60", "--write-movie", "user://witness.avi"]
+    "args": ["--path", ".", "--rendering-driver", "opengl3", "--fixed-fps", "60", "--write-movie", "witness/movies/witness.avi"]
   },
   "guide": "GUIDE.md",
   "verified": "local"

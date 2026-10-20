@@ -213,7 +213,9 @@ world := NewWorld(rec.Seed()) // the recorded seed (WITNESS_SEED or the clock)
 ```
 
 Write one `Frame(dt)` per simulation step, with the dt that step used. Lines are flushed every
-frame. Play it back with `witness replay last`.
+frame. Play it back with `witness replay last`. At the end of play, before `Close`,
+`rec.EndState(snapshot)` writes `<file.jsonl>.state.json` (the state the recording ended in) and
+the replay then checks it ends in exactly that state.
 
 Touch: give fingers small ids (0 = first finger down; map Ebitengine's `ebiten.TouchID` or SDL
 finger ids to slots and reuse a slot after its finger lifts, e.g. with
@@ -343,5 +345,5 @@ witness shot --at 1       # look at the PNG
 | `witness.Image`, `witness.FromRGBA(*image.RGBA)` | screenshots |
 | `witness.Info/Warn/Error/Log` | logs (errors fail tests) |
 | `witness.Sound(name, witness.Volume(v), witness.At(x, y))` | announce a sound (optional) |
-| `RecordFromEnv`, `Record`, `(*Recorder).Seed/Key/Mouse/Touch/Input/Mark/Frame/Close` | replays |
+| `RecordFromEnv`, `Record`, `(*Recorder).Seed/Key/Mouse/Touch/Input/Mark/Frame/EndState/Close` | replays |
 | `witness.Seed()`, `witness.NormalizeKey()` | helpers |

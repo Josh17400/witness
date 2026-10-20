@@ -62,7 +62,8 @@ witness heatmap playtests                      # where testers spent time and di
 witness shot --at 1,4 --input "right@0-3"      # PNGs: OPEN THEM with your image tool and look
 witness shot --from 1 --to 1.5 --every 2f --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
 witness shot --from 0 --to 4 --auto 9          # the 9 frames where the picture changes most (key moments)
-witness shot --at 3 --diff witness/shots/before.png   # what changed: "moved +80,0", appeared, gone; camera shifts undone
+witness shot --at 3 --save-ref before            # a named baseline: witness/refs/before.png (never pruned; commit it)
+witness shot --at 3 --diff before              # what changed vs it: "moved +80,0", appeared, gone; camera shifts undone
 witness ab --a LIFT=0 --b LIFT=1 --input "right@0-3" --at 3.2 --rect 200,100,64,64   # A/B: changed px, luma Δ, A|B|diff, --state
 witness measure registration --pos "state.player.pos" --at 1 --time 1 --input "right@0-2" --hold-camera   # sprite vs state, foot slide
 witness listen --time 8 --input "space@1" --events "land: rose(state.player.grounded)"   # sounds vs their causes
@@ -196,9 +197,13 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    best play at nearly Haiku's speed; `model: "haiku"` is cheaper but plays shallowly, so keep it for simple games).
    The tester runs the commands itself; don't play for it. **No Agent tool** (a workflow subagent): `witness play
    batch --goals goals.txt --minutes 3 --wall-minutes 15` (3 game minutes, a hard stop after 15 real ones) launches the testers itself as headless `claude -p` processes (Sonnet, low
-   effort, Bash limited to the witness commands, the user's login), at most 2 at once, and prints one summary (also
-   `witness/playtests/batch-<time>.md`). Use `--parallel 1` when the machine is busy. A tester stopped by a permission
-   denial shows as `blocked: permission denied (<command>)` (it is retried once).
+   effort, Bash limited to the witness play commands, the user's login), at most 2 at once (1 for a web game), and prints
+   one summary (also `witness/playtests/batch-<time>.md`). **Run the batch in the background** (Bash
+   `run_in_background`): it takes many minutes, past the Bash tool's 120 s. One batch runs machine-wide at a time (a
+   second is refused). Use `--parallel 1` when the machine is busy. A tester stopped by a permission denial shows as
+   `blocked: permission denied (<command>)` (it is retried once). Testers can't run `batch`, `clean`, `--force` or
+   `--all`, or touch another session (`WITNESS_PLAY_TESTER`). `--cmd "<launch>"` carries into every brief and into
+   report.md's replay commands.
    **Games with a day clock:** `--game-hours 4` (brief, batch, start) plays 4 in-game hours, given `play.clock` in
    witness.json (an expression giving in-game hours that keeps increasing: include the day, `"state.day*24 + state.hour"`); `--until "<expr>"` plays
    until any state condition. Orders stop there and the tester ENDs (outcome `until reached`).
@@ -211,11 +216,14 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 8. **Clean up**: once you've acted on a report, `witness play clean t1` deletes that playtest (replay, shots,
    report). Old playtests, recordings and screenshots are also pruned automatically on `play start` and `test`
    (witness.json `"retention"`; `witness clean` applies it now, `--all` removes everything generated). Don't leave
-   piles of PNGs and replays on the user's disk.
+   piles of PNGs and replays on the user's disk. witness/shots is scratch output: keep reference pictures with
+   `shot --save-ref <name>` (witness/refs, never pruned), not in witness/shots.
 
 * Several testers give a broader picture: different `--persona`s (`newbie`, `explorer`, `speedrunner`, `breaker`,
-  `fighter`) and different `--name`s. **Run at most 2 at once** (each is a game process; `WITNESS_PLAY_MAX`).
-* **Never leave sessions running.** `witness play list` shows them; `witness play stop --all` ends them. Sessions
+  `fighter`) and different `--name`s. **Run at most 2 at once** (each is a game process; `WITNESS_PLAY_MAX`), and one
+  web-game session (a headless browser; `WITNESS_PLAY_MAX_WEB`, default 1).
+* **Never leave sessions running.** `witness play list` shows them; `witness play stop --all` ends them (a session
+  that doesn't answer on its port is marked ended, never killed by PID alone: check the named PID yourself). Sessions
   also end themselves after 5 idle minutes, 20 wall-clock minutes (`--wall-minutes`; batch scales it to `--minutes`),
   when the game exits or hangs (said with the exit code / time and its last lines), or when the hero stays dead while
   presses change nothing for 20 game seconds (outcome `stuck dead`: check the respawn key, `play.controls.confirm`;
@@ -230,6 +238,11 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 * "NOT deterministic": find the unseeded RNG, wall-clock read, thread race or unordered map
   iteration. `doctor` shows which state fields differ.
 * A command "didn't answer": the game is blocked (an infinite loop, or waiting on real time).
+* "waiting for a free slot": the machine already runs 3 Witness games/browsers (1 headless browser) — another
+  agent's tests or playtests. It waits, then gives up after 90 s ("no free slot after ..."), inside the Bash tool's
+  default 120 s. To wait longer, set WITNESS_BUDGET_WAIT=<seconds> and give the Bash call a longer timeout to match.
+  Don't start more in parallel; finish or stop (`witness play stop --all`) what you started. Limits:
+  WITNESS_MAX_PROCS / WITNESS_MAX_BROWSERS.
 * Engines you can't launch headlessly (editor-based): `witness <cmd> --attach`, then start
   the game with the adapter active.
 * The protocol (for writing a new adapter): `${CLAUDE_PLUGIN_ROOT}/docs/PROTOCOL.md`.

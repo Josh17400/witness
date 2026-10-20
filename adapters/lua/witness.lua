@@ -799,8 +799,26 @@ function witness.record_frame(dt, events)
   if #all > 0 then line["in"] = witness.array(all) end
   if r.mark then line.mark, r.mark = r.mark, nil end
   r.file:write(witness.encode(line), "\n")
+  r.file:flush() -- every line: a crash must not take the last frames with it
   r.f = r.f + 1
-  if r.f % 60 == 0 then r.file:flush() end
+  r.t = (r.t or 0) + (tonumber(dt) or 0)
+end
+
+--- Write <recording>.state.json: the state the recording ended in ({frame, time, state}), which
+--- `witness replay` compares field by field to the replay's final state. Call it once at the end
+--- of play (after the last record_frame, before stop_recording) with what your snapshot returns.
+--- Returns false (and does nothing) unless recording.
+function witness.write_end_state(state)
+  local r = A.recorder
+  if not r then return false end
+  local file, err = io.open(r.path .. ".state.json", "w")
+  if not file then
+    io.stderr:write("[witness] can't write " .. r.path .. ".state.json: " .. tostring(err) .. "\n")
+    return false
+  end
+  file:write(witness.encode({ frame = r.f, time = r.t or 0, state = state }))
+  file:close()
+  return true
 end
 
 --- Flag the current moment in the replay (bind it to F8). Does nothing unless recording.
@@ -808,7 +826,7 @@ function witness.mark(label)
   if A.recorder then A.recorder.mark = tostring(label or "F8") end
 end
 
---- Flush and close the replay file (call on quit; also safe to skip, lines are flushed often).
+--- Close the replay file (call on quit; also safe to skip: every line is flushed as it is written).
 function witness.stop_recording()
   if A.recorder then A.recorder.file:close(); A.recorder = nil end
 end

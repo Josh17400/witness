@@ -13,11 +13,17 @@ const framesAt = (t, fps) => { try { return frameAt(t, fps); } catch (e) { retur
 
 const MAX_RUNS = 600;
 
+/** "a..b" (seconds with decimals, or frames: "0.9..1.3", "50f..80f") -> ["a", "b"], or null. */
+export function splitRange(s) {
+  const parts = String(s).split("..").map((x) => x.trim());
+  return parts.length === 2 && parts[0] && parts[1] ? parts : null;
+}
+
 /** "a..b" -> [a, b] as frames. */
 function parseRange(s, fps) {
-  const m = /^\s*([^.]+?)\s*\.\.\s*([^.]+?)\s*$/.exec(String(s));
-  if (!m) fail(`--t wants a range like 0.9..1.3 or 50f..80f (got ${s})`);
-  return [framesAt(m[1], fps), framesAt(m[2], fps)];
+  const p = splitRange(s);
+  if (!p) fail(`--t wants a range like 0.9..1.3 or 50f..80f (got ${s})`);
+  return [framesAt(p[0], fps), framesAt(p[1], fps)];
 }
 
 /** "{t}+0.4" / "{t}-5f" / "2.5" -> a function of the swept frame. */

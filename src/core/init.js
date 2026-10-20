@@ -64,6 +64,37 @@ export function detect(project, adapters) {
   return scores;
 }
 
+const versionOf = (root) => { try { return JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version; } catch { return "?"; } };
+
+/** Witness running from Claude Code's plugin folder (~/.claude/plugins/...), not a checkout or an npm install. */
+export const isInstalledPlugin = (root) => /[\\/]\.claude[\\/]plugins[\\/]/i.test(path.resolve(root) + path.sep);
+
+const STAMP = /<!-- witness-skill (\S+) cli=(.*?) -->/;
+/** A project copy of a skill notes the Witness version and CLI path it was made from, after the front matter. */
+export function stampSkill(text, version, cli) {
+  const line = `<!-- witness-skill ${version} cli=${cli} -->`;
+  const m = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(text);
+  return m ? `${m[0]}${line}\n${text.slice(m[0].length)}` : `${line}\n${text}`;
+}
+
+/**
+ * Project copies of the Witness skills (.claude/skills/witness*) that are out of date: made by another version, or
+ * pointing at a CLI that is gone. [{ file, version, cli, why }].
+ */
+export function staleSkillCopies(project, version) {
+  const out = [];
+  for (const skill of ["witness", "witness-playtester"]) {
+    const file = path.join(project, ".claude", "skills", skill, "SKILL.md");
+    let text;
+    try { text = fs.readFileSync(file, "utf8"); } catch { continue; }
+    const m = STAMP.exec(text);
+    if (!m) { out.push({ file, version: null, cli: null, why: "made by Witness 0.7.2 or older (no version stamp)" }); continue; }
+    if (m[1] !== version) out.push({ file, version: m[1], cli: m[2], why: `made by Witness ${m[1]}, this is ${version}` });
+    else if (m[2] && !fs.existsSync(m[2])) out.push({ file, version: m[1], cli: m[2], why: `its CLI path ${m[2]} no longer exists` });
+  }
+  return out;
+}
+
 export async function init(project, opt, ROOT) {
   const adapters = listAdapters(ROOT);
   if (!adapters.length) { console.error("✖ no adapters are bundled with this Witness install"); process.exit(1); }
@@ -81,7 +112,7 @@ export async function init(project, opt, ROOT) {
     console.log(`▸ detected ${pick.title} (${ranked[0].why.slice(0, 3).join(", ")})${ranked[1] ? `; also possible: ${ranked.slice(1, 3).map((r) => r.adapter.id).join(", ")} (use --lang to choose)` : ""}`);
   }
 
-  const wrote = [], kept = [];
+  const wrote = [], kept = [], notes = [];
   const put = (to, content) => {
     const dest = path.join(project, to);
     if (fs.existsSync(dest) && !opt.force) { kept.push(to); return; }
@@ -109,17 +140,24 @@ export async function init(project, opt, ROOT) {
   put("witness/smoke.witness.json", JSON.stringify([
     { name: "the game boots, steps and reports state", steps: [{ at: 1, expect: ["frame >= 60", "state != null"] }] },
   ], null, 2) + "\n");
-  put("witness/.gitignore", "shots/\nreplays/\nplaytests/\n");
-  // Claude skills (project-local copies, with the CLI path filled in): the main skill and the playtester's
+  // movies/: Godot --write-movie output; the folder itself (and its .gdignore) stays in git: Godot crashes without it
+  put("witness/.gitignore", "shots/\nreplays/\nplaytests/\nmovies/*\n!movies/.gdignore\n");
+  // Claude skills (project-local copies, with the CLI path filled in): the main skill and the playtester's. An
+  // installed plugin already gives Claude these skills, and a copy would pin this version's folder (stale after the
+  // plugin updates), so none are copied then. Copies carry the version they came from (witness doctor checks it).
+  const plugin = isInstalledPlugin(ROOT);
+  if (plugin && !opt["no-skill"]) notes.push("skills: none copied — the installed Witness plugin provides them (and stays current when it updates)");
   for (const skill of ["witness", "witness-playtester"]) {
     const skillSrc = path.join(ROOT, "skills", skill, "SKILL.md");
-    if (!fs.existsSync(skillSrc) || opt["no-skill"]) continue;
+    if (!fs.existsSync(skillSrc) || opt["no-skill"] || plugin) continue;
     const cli = path.join(ROOT, "bin", "witness.js").replace(/\\/g, "/");
-    put(`.claude/skills/${skill}/SKILL.md`, fs.readFileSync(skillSrc, "utf8").replaceAll("${CLAUDE_PLUGIN_ROOT}/bin/witness.js", cli).replaceAll("${CLAUDE_PLUGIN_ROOT}", ROOT.replace(/\\/g, "/")));
+    const text = fs.readFileSync(skillSrc, "utf8").replaceAll("${CLAUDE_PLUGIN_ROOT}/bin/witness.js", cli).replaceAll("${CLAUDE_PLUGIN_ROOT}", ROOT.replace(/\\/g, "/"));
+    put(`.claude/skills/${skill}/SKILL.md`, stampSkill(text, versionOf(ROOT), cli));
   }
 
   for (const w of wrote) console.log(`  + ${w}`);
   for (const k of kept) console.log(`  = ${k} (exists; --force to overwrite)`);
+  for (const n of notes) console.log(`  · ${n}`);
   console.log(`
 ✔ Witness is set up for ${pick.title}${pick.verified === false ? "  (note: this adapter is not yet verified by automated runs)" : ""}.
 Next (Claude can do all of this):

@@ -463,7 +463,9 @@ public final class Witness {
     private static Handlers handlers;
     private static volatile Pcm pcm;
     private static Writer rec;
+    private static String recPath;
     private static int recFrame;
+    private static double recTime;
     private static String recMark;
 
     // ================================================================== lifecycle
@@ -825,6 +827,7 @@ public final class Witness {
             File f = new File(path).getAbsoluteFile();
             if (f.getParentFile() != null) f.getParentFile().mkdirs();
             rec = new OutputStreamWriter(new java.io.FileOutputStream(f), StandardCharsets.UTF_8);
+            recPath = f.getPath();
         } catch (IOException e) {
             System.err.println("[witness] can't record to '" + path + "': " + e.getMessage());
             return false;
@@ -839,6 +842,7 @@ public final class Witness {
         head.put("fps", h.fps);
         head.put("started", iso.format(new Date()));
         recFrame = 0;
+        recTime = 0;
         writeRec(Json.write(head), true);
         Runtime.getRuntime().addShutdownHook(new Thread(Witness::stopRecording, "witness-recorder-flush"));
         return true;
@@ -858,11 +862,32 @@ public final class Witness {
             sb.append(",\"in\":");
             Json.writeValue(sb, list, 0);
         }
-        boolean flush = recMark != null || recFrame % 60 == 0;
         if (recMark != null) { sb.append(",\"mark\":"); Json.writeString(sb, recMark); }
-        writeRec(sb.append('}').toString(), flush);
+        writeRec(sb.append('}').toString(), true);   // every line: a crash must not take the last frames with it
         recMark = null;
         recFrame++;
+        recTime += dt;
+    }
+
+    /**
+     * Writes &lt;recording&gt;.state.json: the state the recording ended in ({"frame", "time", "state"}), which
+     * `witness replay` compares field by field to the replay's final state. Call it right after the last
+     * recordFrame (before or after stopRecording: the path is kept) with what the snapshot handler returns.
+     * No-op (false) unless this run recorded.
+     */
+    public static synchronized boolean writeEndState(Object state) {
+        if (recPath == null) return false;
+        Map<String, Object> o = new LinkedHashMap<>();
+        o.put("frame", recFrame);
+        o.put("time", recTime);
+        o.put("state", state);
+        try (Writer w = new OutputStreamWriter(new java.io.FileOutputStream(recPath + ".state.json"), StandardCharsets.UTF_8)) {
+            w.write(Json.write(o));
+            return true;
+        } catch (IOException e) {
+            System.err.println("[witness] can't write " + recPath + ".state.json: " + e.getMessage());
+            return false;
+        }
     }
 
     /** Flags the current frame in the replay (the game calls this on F8). */

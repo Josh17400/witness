@@ -641,7 +641,7 @@ const KEYS = (() => {
   for (let i = 1; i <= 12; i++) k[`f${i}`] = [`F${i}`, `F${i}`, 111 + i];
   return k;
 })();
-const KEY_ALIASES = { esc: "escape", return: "enter", control: "ctrl", option: "alt", cmd: "meta", " ": "space", arrowleft: "left", arrowright: "right", arrowup: "up", arrowdown: "down", "-": "minus", "=": "equal", ",": "comma", ".": "period", "/": "slash", ";": "semicolon", "'": "quote", "[": "bracketleft", "]": "bracketright", "\\": "backslash", "`": "backquote", del: "delete", pgup: "pageup", pgdn: "pagedown" };
+const KEY_ALIASES = { esc: "escape", return: "enter", control: "ctrl", option: "alt", cmd: "meta", command: "meta", super: "meta", win: "meta", windows: "meta", " ": "space", arrowleft: "left", arrowright: "right", arrowup: "up", arrowdown: "down", "-": "minus", "=": "equal", ",": "comma", ".": "period", "/": "slash", ";": "semicolon", "'": "quote", "[": "bracketleft", "]": "bracketright", "\\": "backslash", "`": "backquote", del: "delete", pgup: "pageup", pgdn: "pagedown" };
 const normKey = (name) => { const n = String(name).toLowerCase(); return KEY_ALIASES[n] || n; };
 // DOM KeyboardEvent -> Witness key name (used by the recorder)
 const CODE_TO_NAME = (() => { const m = {}; for (const [n, [, code]] of Object.entries(KEYS)) m[code] = n; Object.assign(m, { ShiftRight: "shift", ControlRight: "ctrl", AltRight: "alt", MetaRight: "meta", NumpadEnter: "enter" }); return m; })();
@@ -1036,7 +1036,17 @@ async function nodeRecordSink(file) {
   if (dir && dir !== file) fs.mkdirSync(dir, { recursive: true });
   const fd = fs.openSync(file, "w");
   const flush = () => { if (rec.lines.length) { fs.writeSync(fd, rec.lines.join("\n") + "\n"); rec.lines = []; } };
-  process.on("exit", flush);
+  // <file>.state.json: the state play ended in, which `witness replay` checks the replay ends in exactly (a clean
+  // exit or Ctrl+C only, not a crash; a synchronous snapshot handler only: 'exit' can't await)
+  const endState = (code) => {
+    if ((code !== 0 && code !== 130) || !H.snapshot) return;
+    try {
+      const st = H.snapshot();
+      if (st && typeof st.then === "function") return;
+      fs.writeFileSync(`${file}.state.json`, JSON.stringify({ frame: rec.frame, state: jsonSafe(st) }));
+    } catch (e) { process.stderr.write(`[witness] no end state for the replay: ${e && e.message}\n`); }
+  };
+  process.on("exit", (code) => { flush(); endState(code); });
   for (const sig of ["SIGINT", "SIGTERM"]) process.once(sig, () => { flush(); process.exit(130); });
   return { flush };
 }
@@ -1166,9 +1176,10 @@ async function connect(addr, onMessage, onClose) {
         s.once("error", rej);
       });
       sock.setNoDelay(true);
+      sock.setEncoding("utf8");   // a StringDecoder: a multibyte char split across chunks stays whole
       let buf = "";
       sock.on("data", (d) => {
-        buf += d.toString("utf8");
+        buf += d;
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, nl); buf = buf.slice(nl + 1); if (line.trim()) onMessage(line); }
       });

@@ -160,6 +160,7 @@ export function similarity(a, b) {
 export function loopSeam(x, sr, a, b) {
   const ia = Math.round(a * sr), ib = Math.round(b * sr), w = Math.round(0.02 * sr);
   if (ib - ia < 2 * w) throw new RangeError("loopSeam: the loop is shorter than 40 ms");
+  if (ia < 0 || ib > x.length) throw new RangeError(`loopSeam: ${a}..${b} s is outside the ${+(x.length / sr).toFixed(3)} s of audio`);
   const rms = (s, e) => { let q = 0; for (let i = s; i < e; i++) q += x[i] * x[i]; return Math.sqrt(q / Math.max(1, e - s)); };
   const zcr = (s, e) => { let z = 0; for (let i = s + 1; i < e; i++) if ((x[i] >= 0) !== (x[i - 1] >= 0)) z++; return (z * sr) / (2 * Math.max(1, e - s)); };
   const startR = rms(ia, ia + w), endR = rms(ib - w, ib);

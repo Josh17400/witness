@@ -33,7 +33,7 @@ Witness="*res://addons/witness/Witness.gd"
 { "name": "mygame",
   "launch": { "command": "godot",
               "args": ["--path", ".", "--rendering-driver", "opengl3", "--fixed-fps", "60",
-                       "--write-movie", "user://witness.avi"] },
+                       "--write-movie", "witness/movies/witness.avi"] },
   "tests": "witness", "seed": 1, "timeout": 60 }
 ```
 
@@ -42,10 +42,15 @@ Witness="*res://addons/witness/Witness.gd"
 * `--fixed-fps 60` (**required**): every engine iteration becomes exactly one 1/60 s step of
   physics and process, with no wall clock involved. Match the project's
   `physics/common/physics_ticks_per_second`.
-* `--write-movie user://witness.avi` (recommended): Movie Maker mode makes the AudioServer mix
-  exactly 1/60 s of audio per frame, so captured audio is exact and identical across resets
-  (section 8). It writes a small MJPEG file in `user://`, overwritten each launch. Leave it out
-  if you don't need audio.
+* `--write-movie witness/movies/witness.avi` (recommended): Movie Maker mode makes the AudioServer
+  mix exactly 1/60 s of audio per frame, so captured audio is exact and identical across resets
+  (section 8). The price is a video: an MJPEG AVI (one JPEG per frame plus PCM audio, in one file: tens of
+  MB per minute of game time), overwritten each launch. A relative path is relative to the project
+  folder; `witness/movies/` keeps it where `witness clean` prunes it, and `witness init` creates
+  that folder with a `.gdignore` (keep it: Godot opens the file before any script runs and creates
+  no folders; without the folder recent Godot versions fail at startup, older ones write no movie
+  and log an engine error every frame, and the autoload then creates the folder and asks for a
+  rerun). Leave the flag out if you don't need audio.
 * `--rendering-driver opengl3` (or the project's renderer): needed for screenshots and Movie
   Maker. For the fastest runs with no screenshots or audio, use `["--path", ".", "--headless",
   "--fixed-fps", "60"]`; `screenshot` is then not advertised. On Linux CI, wrap the whole
@@ -245,6 +250,13 @@ per physics frame with full-precision dt, every key, mouse, wheel and touch even
 Touches are recorded as `touch` events (`ScreenTouch` → down/up, `ScreenDrag` → move, with
 `pressure` when the device reports one other than 1); mouse events Godot emulated from touch
 (`device == -1`) are skipped, because on replay the emulation recreates them from the touches.
+Every line is flushed as it is written, so a crash keeps the whole recording. When the window
+closes it writes `<file.jsonl>.state.json` (the snapshot the game ended in) and `witness replay`
+checks the replay ends in exactly that state; a game that quits itself calls
+`Witness.stop_recording()` before `get_tree().quit()`. With `auto_accept_quit = false` (a "Save
+before quitting?" dialog) a close request writes the end state and holds the frames after it: if the
+game then quits, the replay ends at the close request; `stop_recording()` (the dialog's Quit) writes
+them and a fresh end state; after a minute of play (Cancel) they are written and the end state dropped.
 It seeds the global RNG with `WITNESS_SEED` (or a clock-based seed) in `_enter_tree`, before
 the main scene loads; read it from `Witness.seed`. `godot --path . -- --demo` in the example is
 a scripted session that CI records and replays exactly.

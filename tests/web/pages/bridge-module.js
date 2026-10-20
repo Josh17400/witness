@@ -55,7 +55,9 @@
       case "reset": reset(m.seed ?? 1); render(); return ok({});
       case "input": for (const e of m.events || []) g.queue.push(e); return ok({});
       case "step": { const n = Math.max(1, m.frames | 0); for (let i = 0; i < n; i++) step(Array.isArray(m.dts) ? m.dts[i] || 1 / 60 : m.dt || 1 / 60); return ok({ frame: g.frame, time: g.time }); }
-      case "snapshot": return ok({ frame: g.frame, time: g.time, state: { player: { pos: [g.x, g.y] }, taps: g.taps, audio: audio.state, grows, entities: [{ id: 1, type: "Player", pos: [g.x, g.y] }] } });
+      // "grew", not the count: grows follow the number of commands received (every 10th call), which isn't game state
+      // (doctor's runs, and the logs read before each reset, change it)
+      case "snapshot": return ok({ frame: g.frame, time: g.time, state: { player: { pos: [g.x, g.y] }, taps: g.taps, audio: audio.state, grew: grows > 0, entities: [{ id: 1, type: "Player", pos: [g.x, g.y] }] } });
       case "logs": return ok({ logs: g.logs.splice(0) });
       case "quit": ok({}); W.close(); return undefined;
       default: return reply({ id: m.id, ok: false, error: `unknown command '${m.cmd}'` });

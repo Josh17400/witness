@@ -4,6 +4,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { witness, playSession } from "./agent.mjs";
 
@@ -41,6 +43,9 @@ ok("play end summary", r.code === 0 && /ENDED after/.test(r.out) && /report:/.te
 let rep = report(mockDir);
 ok("report.json contents", rep.status === "finished" && rep.stats.pickups === 5 && rep.stats.parseErrors === 1 && rep.notes.length === 1 && rep.feedback.fun === 3 && rep.replay.calls === 1, JSON.stringify(rep.stats));
 ok("report.md written", /Playtest m: Mock Coins/.test(fs.readFileSync(path.join(mockDir, "report.md"), "utf8")));
+// 0.7.3: a --cmd session's replay commands carry the same --cmd (there's no witness.json to find the game)
+const mReplays = fs.readFileSync(path.join(mockDir, "report.md"), "utf8").split("\n").filter((l) => l.startsWith("witness replay"));
+ok("report.md: a --cmd session's replay commands repeat --cmd", mReplays.length >= 1 && mReplays.every((l) => l.includes(` --cmd "node \\"${mockCmd.slice(6, -1)}\\""`)), mReplays.join("\n"));
 const rl = fs.readFileSync(path.join(mockDir, "replay.jsonl"), "utf8");
 ok("replay records the call", /"calls":\[\["teleport",100,60\]\]/.test(rl), rl.slice(0, 500));
 r = witness(["replay", path.join(mockDir, "replay.jsonl"), "--cmd", mockCmd], { cwd: mdir, env });
@@ -57,10 +62,21 @@ ok("orders to an ended session explain themselves", r.code === 1 && /isn't runni
   r = witness(["play", "start", "--name", "c", "--config", "witness.web.json"], { cwd: cdir, env });
   ok("play start --config FILE", r.code === 0, r.out);
   witness(["play", "note", "a coin", "-s", "c"], { cwd: cdir, env });
+  // 0.7.3: a request body arriving in two chunks split inside a multibyte character still decodes (it became U+FFFD)
+  const sj = sessionJson(findDir(cdir, "c")), text = "héllo wörld ✓ ünïcode";
+  const body = Buffer.from(JSON.stringify({ token: sj.token, cmd: "note", args: { text, kind: "idea" } })), cut = body.indexOf(Buffer.from("é")) + 1;
+  const reply = await new Promise((resolve) => {
+    const req = http.request({ host: "127.0.0.1", port: sj.port, method: "POST", path: "/", headers: { "content-type": "application/json", "content-length": body.length } }, (res) => { let d = ""; res.setEncoding("utf8"); res.on("data", (x) => { d += x; }); res.on("end", () => resolve(d)); });
+    req.on("error", (e) => resolve(e.message));
+    req.write(body.subarray(0, cut)); setTimeout(() => req.end(body.subarray(cut)), 150);
+  });
+  ok("daemon: a body split inside a UTF-8 character is answered", /noted \(idea\)/.test(reply), reply);
   r = witness(["play", "end", "-s", "c"], { cwd: cdir, env });
+  const cnotes = report(findDir(cdir, "c")).notes.map((n) => n.text);
+  ok("daemon: … and the note's text is intact", cnotes.includes(text) && !cnotes.some((t) => t.includes("\uFFFD")), JSON.stringify(cnotes));
   const md = fs.readFileSync(path.join(findDir(cdir, "c"), "report.md"), "utf8");
   const lines = md.split("\n").filter((l) => l.startsWith("witness replay"));
-  ok("report.md: every replay command names --config witness.web.json", lines.length === 2 && lines.every((l) => l.startsWith("witness replay --config witness.web.json witness/playtests/c/replay.jsonl")), md);
+  ok("report.md: every replay command names --config witness.web.json", lines.length === 3 && lines.every((l) => l.startsWith("witness replay --config witness.web.json witness/playtests/c/replay.jsonl")), md);
   r = witness(["replay", "--config", "witness.web.json", "witness/playtests/c/replay.jsonl"], { cwd: cdir, env });
   ok("report.md's replay command, run as printed, replays exactly", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out);
 }
@@ -144,6 +160,17 @@ r = witness(["play", "do", "goto Wolf#3", "-s", "alive"], { cwd: arena, env });
 let liveOut = r.out;
 for (let i = 0; i < 12 && /⏩ running|⚠/.test(liveOut) && !/✔|✖/.test(liveOut.split("\n").slice(0, 3).join("\n")); i++) liveOut = witness(["play", "next", "-s", "alive"], { cwd: arena, env }).out;
 ok("live arena: the goto finishes across check-ins", /✔ done: (goto Wolf#3 — )?(arrived|Wolf#3 is gone)/.test(liveOut) || /✔ your order "goto Wolf#3" finished/.test(liveOut), liveOut);
+// 0.7.3: list --clean during a long-running command: the ping is answered at once (it queued behind the command, timed
+// out after 3 s and got a healthy session killed)
+{
+  const slow = spawn(process.execPath, [path.join(root, "bin", "witness.js"), "play", "next", "-s", "alive", "--for", "15"], { cwd: arena, env: { ...process.env, ...env }, windowsHide: true, stdio: "ignore" });
+  const done = new Promise((res) => slow.on("close", (code) => res(code)));
+  await new Promise((res) => setTimeout(res, 600));
+  const t0 = Date.now();
+  r = witness(["play", "list", "--clean"], { cwd: arena, env });
+  ok("list --clean during a running command: the session isn't touched, and the ping didn't wait", !/isn't answering|killed/.test(r.out) && /● alive/.test(r.out) && Date.now() - t0 < 2500, `${Date.now() - t0} ms\n${r.out}`);
+  ok("list --clean during a running command: the command finishes normally", (await done) === 0);
+}
 const aliveDir = path.join(adir, "alive");
 r = witness(["play", "end", "-s", "alive"], { cwd: arena, env });
 const arep = report(aliveDir);

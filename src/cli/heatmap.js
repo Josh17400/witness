@@ -56,6 +56,7 @@ export async function heatmapCommand(pos, opt) {
     const seeds = !files.length && opt.seeds && opt.seeds !== true ? timeList(opt.seeds, []).map(Number) : null;
     if (seeds && seeds.some((x) => !Number.isFinite(x))) die(`--seeds is a list of numbers (got ${opt.seeds})`);
     const plan = files.length ? files.map((f) => ({ file: f, replay: loadReplay(f) })) : (seeds || [null]).map((seed) => ({ seed }));
+    if (plan.length > 1 && !s.has("reset")) die(`heatmap over ${plan.length} ${files.length ? "replays" : "seeds"} runs them one after another in one game process, which needs the adapter's 'reset' (else each starts where the last ended): add 'reset', or run one at a time`);
     const runs = [];
     let lastSnap = null, posUsed = posExpr, deathUsed = opt.deaths && opt.deaths !== true ? String(opt.deaths) : null, deathAuto = false;
     for (const p of plan) {

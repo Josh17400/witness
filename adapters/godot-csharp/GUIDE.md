@@ -152,13 +152,21 @@ image is the current frame.
 
 ## 9. Replay recording
 
-Run the game normally with `WITNESS_RECORD=run.jsonl`: the node records each frame's delta and key /
-mouse-button / touch events (`InputEventScreenTouch` → touch down/up, or cancel when `Canceled`,
-`InputEventScreenDrag` → move;
-F8 adds a mark) and flushes on exit. Emulated events (`Device == -1`: the mouse Godot makes from
-touch, or touch made from the mouse) are skipped, because the replay makes Godot emulate them again.
-Seed with `Witness.Seed`. Physics in normal play may tick 0 or 2 times per frame; record with
-`--fixed-fps 60` for replays that match exactly.
+Run the game normally with `WITNESS_RECORD=run.jsonl`: the node writes one replay frame per **physics
+tick** (its delta; the unit witness mode steps), with the key / mouse (buttons, wheel, motion) / touch
+events seen since the previous tick (`InputEventScreenTouch` → touch down/up, or cancel when
+`Canceled`, `InputEventScreenDrag` → move; F8 adds a mark). Every line is flushed as it is written, so
+a crash keeps the whole recording. Emulated events (`Device == -1`: the mouse Godot makes from touch,
+or touch made from the mouse) are skipped, because the replay makes Godot emulate them again.
+When the window closes it writes `run.jsonl.state.json` (the snapshot the game ended in) and
+`witness replay run.jsonl` checks the replay ends in exactly that state; a game that quits with
+`GetTree().Quit()` calls `WitnessNode.EndRecording()` first. With `AutoAcceptQuit = false` (a "Save
+before quitting?" dialog) a close request writes the end state and holds the frames after it: if the
+game then quits, the replay ends at the close request; `EndRecording()` (the dialog's Quit) writes them
+and a fresh end state; after a minute of play (Cancel) they are written and the end state dropped. Seed with
+`Witness.Seed`. Physics in
+normal play may tick 0 or 2 times per rendered frame, and `_Process` runs once per tick on replay;
+record with `--fixed-fps 60` (one tick per frame) when `_Process` logic must match exactly too.
 
 ## 10. Determinism pitfalls (Godot)
 

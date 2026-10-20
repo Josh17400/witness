@@ -156,8 +156,10 @@ witness mode.
 Normal play with `WITNESS_RECORD=run.jsonl`: `Witness.start(hello, null)` opens it; once per frame
 call `Witness.recordFrame(dt, eventsThisFrame)` with `Witness.Event.key(name, down)`,
 `Witness.Event.mouse(x, y, button, down)` (down null = a move), `Witness.Event.touch(id, x, y, phase)`;
-`Witness.mark("F8")` on F8; `Witness.stopRecording()` on exit (a shutdown hook also flushes).
-Seed with `Witness.seed()`. `witness replay run.jsonl` plays it back.
+`Witness.mark("F8")` on F8; `Witness.stopRecording()` on exit (lines are flushed as written, so a
+crash keeps them all). Seed with `Witness.seed()`. `witness replay run.jsonl` plays it back. On exit,
+`Witness.writeEndState(game.state())` writes `run.jsonl.state.json` (the state the recording ended
+in) and the replay then checks it ends in exactly that state.
 
 Touch recording: record real fingers in logical pixels with small ids (0 = first finger down) and
 never the mouse events a platform synthesizes from them (JavaFX: skip `MouseEvent.isSynthesized()`;

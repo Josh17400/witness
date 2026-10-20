@@ -206,8 +206,10 @@ with nothing in sight. Default: `play.guardMode` if set, else `block` if a block
 of view can still be targeted (`goto Gate` uses the last known position). Something already picked up or killed says
 so instead of "not here".
 
-**Chaining.** `;`, `then`, `and then`, `after that`, `next`, or newlines: `talk guard; choose 1; pickup potion`.
-The chain stops at the first failure. Commas never split (`12,5` is a cell).
+**Chaining.** `;`, `then`, `and then`, `after that`, or newlines: `talk guard; choose 1; pickup potion`. `next`
+chains only as `next,`, `. Next` or at the start of an order (`goto Inn, next, talk guard`), so `talk to the next guard`
+and `fight next wolf` stay one order; a bare `next` piece is dropped. The chain stops at the first failure. Commas
+never split otherwise (`12,5` is a cell).
 
 **Errors** are one line plus a hint:
 * parse errors (exit 2): `✖ "atack wolf": unknown order "atack" — did you mean "attack"?`
@@ -265,7 +267,8 @@ player, stats, near[], farther, remembered[], dialogue, goal, notice, dead, won,
 
 The Agent tool is the normal way to spawn testers, but only a main session has it: a workflow subagent (an engineer
 agent inside a workflow) can't spawn subagents. `witness play batch` launches the testers itself, as headless Claude
-Code processes:
+Code processes. **Run it in the background** (Bash `run_in_background`, or `&` and read its output later): a batch takes
+many minutes, far past the 120 s an agent's Bash tool waits for a command.
 
 ```bash
 witness play batch --goals goals.txt --minutes 3 --wall-minutes 15   # one tester per goal: 3 GAME minutes, hard stop after 15 real ones
@@ -284,11 +287,16 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   fits its budget: max(20, 4 × minutes) (`--minutes 240` → 960), or 30 with `--until` / `--game-hours`; `play brief`
   adds the same to its start line when it's over the daemon's default 20.
 * **Each tester** gets the brief `play brief` would print (session names `b<MMDDhhmm>-1`, `-2` …) and runs as
-  `claude -p --model sonnet --effort low --tools Bash,Read --allowedTools "Bash(node \"…/witness.js\" play:*)" …
+  `claude -p --model sonnet --effort low --tools Bash,Read --allowedTools "Bash(node \"…/witness.js\" play do:*)" …
   --add-dir <registry> --permission-mode dontAsk --setting-sources project,local --strict-mcp-config
   --no-session-persistence --output-format json`, with the brief on stdin, in an empty scratch folder. Bash is limited
   to the witness commands and the session's short command; anything else is denied without a prompt. Read lets it open
-  screenshots. It uses the user's Claude Code login: `ANTHROPIC_API_KEY` is removed from its environment.
+  screenshots. It uses the user's Claude Code login: `ANTHROPIC_API_KEY` is removed from its environment. The allowed
+  play commands are only `start`, `do`, `look`, `next`, `shot`, `note`, `end`, `status` and `orders` (plus the short
+  command). The tester runs with `WITNESS_PLAY_TESTER=1`, under which `play batch`, `play clean`, `start --force`,
+  `end`/`stop --all` and a `-s`/`--session`/`--name` other than its own session are refused.
+* **`--cmd`** (and `--config`) carry into every brief's start line and into report.md's replay commands; with `--cmd`,
+  a `--config <folder>` is the project root (a tester runs from an empty scratch folder).
 * **One command per order, by its full path.** The brief's order command is the session's short command by its
   absolute path (`C:/Users/me/AppData/Local/Temp/witness-play/b10191200-1 "goto Inn"`, quoted when the path has
   spaces): no `cd`. In dontAsk mode Claude Code denies a `cd` outside the tester's working folder even when
@@ -304,7 +312,13 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   note or feedback text as command substitution, so the brief asks for that text in single quotes, with no backticks or
   `$`). The tester's line and its batch-file section then say `· N commands denied (<first>)` and list them, plus
   `END was denied (no feedback recorded)` when the END itself was (the batch then stopped the session).
-* **At most 2 at once** (`--parallel 1` or `2`; each tester is a claude process plus a game and a daemon).
+* **At most 2 at once** (`--parallel 1` or `2`; each tester is a claude process plus a game and a daemon), never more
+  than the machine-wide game budget (`WITNESS_MAX_PROCS`), and **one at a time for a web game** (each session is a
+  headless browser).
+* **One batch machine-wide.** A lock (`<registry>/locks/batch.json`) refuses a second batch while one runs; a lock
+  whose batch died (its pid gone, from before a reboot, or untouched for 2 minutes) is taken over, and
+  `play list --clean` removes it. While a batch runs, `play start` doesn't prune old playtests; the batch prunes once
+  at the end, and its own reports always stay (they count toward `retention.playtests.keep`).
 * **Nothing is left running:** each tester has a wall-clock timeout (`--timeout` minutes, default
   above); its session is stopped when it exits (the report is written either way); Ctrl-C kills
   every tester (the whole process tree) and stops its session.
@@ -707,10 +721,18 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
   outcome `stuck dead`, a shot, the last inputs and the state in report.json `stuckDead` and report.md, instead of the
   tester spending its turns on respawn. A game whose respawn takes longer than that with no countdown in the state
   (arena/MOBA timers of 25–60 s) needs `stuckDead` raised above it (say 70), or a `respawnTimer` in the state.
-* **Process cap.** `start` refuses when `WITNESS_PLAY_MAX` sessions (default 2) are already live machine-wide, unless
-  `--force`. Each session is one game plus one light daemon. `play suggest` runs a game too but isn't counted.
+* **Process cap.** `start` refuses when `WITNESS_PLAY_MAX` sessions (default 2) are already live machine-wide, or
+  `WITNESS_PLAY_MAX_WEB` web-game sessions (default 1: each is a headless browser), unless `--force` (not for a batch
+  tester). Entries that don't answer (a crash, a reboot) are checked first and don't hold a slot. Each session is one
+  game plus one light daemon. Every game or browser launch, playtests included, also takes a slot of the machine-wide
+  budget (`WITNESS_MAX_PROCS`, default 3; `WITNESS_MAX_BROWSERS`, default 1): a daemon waits up to
+  `WITNESS_BUDGET_WAIT` seconds (default 90) for one, and `start` shows its "waiting for a free slot" line.
+  `play suggest` runs a game too but isn't counted as a session.
 * **Cleanup.** `witness play list` shows what's alive. `witness play stop --all` ends every live session.
-  `witness play list --clean` kills unresponsive ones and forgets entries older than a week or whose folder was deleted.
+  `witness play list --clean` marks unresponsive ones ended and forgets entries older than a day or whose folder was
+  deleted. A PID alone is never killed: `stop`, `end` and `list --clean` kill a daemon or game only after it answered
+  on its token-checked port (a PID may belong to another program after a crash or reboot); one that doesn't answer is
+  marked ended and named, so you can check it yourself. A session still starting is told to stop as soon as it's up.
 * `witness init` adds `playtests/` to `witness/.gitignore`.
 
 ## The report

@@ -393,6 +393,11 @@ if (adapters.length) {
 // ---- end-to-end against the mock game
 // e2e runs work in a scratch folder, so generated files (witness/shots/...) never land in the repo
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "witness-work-"));
+// the machine-wide heavy-process budget (src/core/budget.js) gets its own folder for the mock-game block only: these
+// runs are sequential, one light node process at a time, and other agents' launches must not make them wait. It is
+// dropped again before the sub-suites (headless browsers, playtests), which must count against the real budget.
+const ownBudget = !process.env.WITNESS_BUDGET_DIR;
+if (ownBudget) process.env.WITNESS_BUDGET_DIR = path.join(work, "budget");
 const cli = (args, env = {}) => spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), ...args, "--cmd", `"${process.execPath}" "${path.join(here, "mock-game.mjs")}"`], { encoding: "utf8", timeout: 120000, cwd: work, env: { ...process.env, ...env } });
 let r = cli(["doctor"]);
 ok("e2e doctor all good", r.status === 0 && /all good/.test(r.stdout), r.stdout + r.stderr);
@@ -888,17 +893,18 @@ try {
   fs.writeFileSync(path.join(proj, "witness.json"), JSON.stringify({ name: "c", launch: { command: "node", args: ["x.mjs"] }, retention: { playtests: { keep: 3 } } }));
   for (let i = 0; i < 6; i++) { const d = path.join(proj, "witness", "playtests", `p${i}`); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, "replay.jsonl"), "x".repeat(100)); old(d, i * 0.1); }
   const stale = path.join(proj, "witness", "playtests", "stale"); fs.mkdirSync(stale); old(stale, 30);
-  fs.writeFileSync(path.join(proj, "witness", "shots", "old.png"), "x"); old(path.join(proj, "witness", "shots", "old.png"), 5);
-  fs.writeFileSync(path.join(proj, "witness", "shots", "new.png"), "x");
+  fs.writeFileSync(path.join(proj, "witness", "shots", "shot-old.png"), "x"); old(path.join(proj, "witness", "shots", "shot-old.png"), 5);
+  fs.writeFileSync(path.join(proj, "witness", "shots", "shot-new.png"), "x");
+  fs.writeFileSync(path.join(proj, "witness", "shots", "mine.png"), "x"); old(path.join(proj, "witness", "shots", "mine.png"), 50);   // not Witness's: kept
   fs.writeFileSync(path.join(proj, "witness", "replays", "a.jsonl"), "{}"); fs.writeFileSync(path.join(proj, "witness", "replays", "a.jsonl.state.json"), "{}");
   old(path.join(proj, "witness", "replays", "a.jsonl"), 20);
   const c1 = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "clean"], { cwd: proj, encoding: "utf8", timeout: 30000 });
   const left = fs.readdirSync(path.join(proj, "witness", "playtests")).sort().join(",");
   ok("e2e clean prunes to retention (keep 3, drop stale, old shots and recordings with their end state)",
-    c1.status === 0 && left === "p0,p1,p2" && !fs.existsSync(path.join(proj, "witness", "shots", "old.png")) && fs.existsSync(path.join(proj, "witness", "shots", "new.png")) &&
+    c1.status === 0 && left === "p0,p1,p2" && !fs.existsSync(path.join(proj, "witness", "shots", "shot-old.png")) && fs.existsSync(path.join(proj, "witness", "shots", "shot-new.png")) && fs.existsSync(path.join(proj, "witness", "shots", "mine.png")) &&
     !fs.existsSync(path.join(proj, "witness", "replays", "a.jsonl")) && !fs.existsSync(path.join(proj, "witness", "replays", "a.jsonl.state.json")), left + "\n" + c1.stdout + c1.stderr);
   const c2 = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "clean", "--all"], { cwd: proj, encoding: "utf8", timeout: 30000 });
-  ok("e2e clean --all removes every generated file", c2.status === 0 && fs.readdirSync(path.join(proj, "witness", "playtests")).length === 0 && fs.readdirSync(path.join(proj, "witness", "shots")).length === 0, c2.stdout + c2.stderr);
+  ok("e2e clean --all removes every generated file (and only those)", c2.status === 0 && fs.readdirSync(path.join(proj, "witness", "playtests")).length === 0 && fs.readdirSync(path.join(proj, "witness", "shots")).join(",") === "mine.png", c2.stdout + c2.stderr);
 }
 // ---- witness.json with a single-backslash Windows path
 fs.mkdirSync(path.join(tmp, "cc"));
@@ -922,11 +928,32 @@ ok("config control character refused", r.status !== 0 && /control character/.tes
   ok("--config with a missing file: a clear error", m.status !== 0 && /--config .*nope\.json: no such file/.test(m.stdout + m.stderr), m.stdout + m.stderr);
 }
 fs.rmSync(tmp, { recursive: true, force: true });
+if (ownBudget) delete process.env.WITNESS_BUDGET_DIR;   // web/play sub-suites: the machine-wide budget (and no stray <work>/budget)
 fs.rmSync(work, { recursive: true, force: true });
 
-// agent playtest harness (separate runners: unit tests without processes, then end-to-end CLI/daemon runs, then
-// session budgets (--until, --game-hours, --wall-minutes) and play batch with a fake claude)
-for (const suite of ["unit", "e2e", "budget"]) {
+// WITNESS_TEST_SKIP=play,web,python leaves those sub-suites out (they start browsers and daemons: one at a time)
+const skip = new Set(String(process.env.WITNESS_TEST_SKIP || "").split(",").map((x) => x.trim()).filter(Boolean));
+
+// core regressions (0.7.3 audit: process cleanup, budget, pruning, args, replays, transports)
+{
+  const m = spawnSync(process.execPath, [path.join(here, "core", "run.mjs")], { encoding: "utf8", timeout: 600000 });
+  ok("core suite", m.status === 0, (m.stdout + m.stderr).slice(-2500));
+  const counts = /(\d+) passed, (\d+) failed/.exec(m.stdout || "");
+  if (counts) console.log(`  core: ${counts[0]}`);
+}
+
+// JS adapter regressions (one short-lived child game each): UTF-8 split across TCP chunks, OS-key aliases → "meta"
+for (const t of ["utf8-split", "key-aliases"]) {
+  const f = path.join(here, "js-adapter", `${t}.mjs`);
+  if (!fs.existsSync(f)) continue;
+  const m = spawnSync(process.execPath, [f], { encoding: "utf8", timeout: 60000 });
+  ok(`js adapter ${t}`, m.status === 0, (m.stdout + m.stderr).slice(-1500));
+}
+
+// agent playtest harness (separate runners: unit tests without processes, process-safety guards (light processes and
+// one mock game), then end-to-end CLI/daemon runs, then session budgets (--until, --game-hours, --wall-minutes) and
+// play batch with a fake claude)
+for (const suite of skip.has("play") ? [] : ["unit", "safety", "e2e", "budget"]) {
   const f = path.join(here, "play", `${suite}.mjs`);
   if (!fs.existsSync(f)) continue;
   const m = spawnSync(process.execPath, [f], { encoding: "utf8", timeout: 600000 });
@@ -937,7 +964,7 @@ for (const suite of ["unit", "e2e", "budget"]) {
 
 // web / WASM: device profiles, audio unlock, the Emscripten bridge (browser parts skip without Playwright, the native
 // bridge build without a C compiler)
-{
+if (!skip.has("web")) {
   const m = spawnSync(process.execPath, [path.join(here, "web", "run.mjs")], { encoding: "utf8", timeout: 1200000 });
   ok("web suite", m.status === 0, (m.stdout + m.stderr).slice(-2500));
   const counts = /(\d+) passed, (\d+) failed/.exec(m.stdout || "");
@@ -948,7 +975,8 @@ for (const suite of ["unit", "e2e", "budget"]) {
 {
   const f = path.join(here, "python", "test_idle.py");
   const py = ["python3", "python", "py"].find((p) => { const v = spawnSync(p, ["--version"], { encoding: "utf8", timeout: 15000 }); return v.status === 0 && /Python 3/.test(v.stdout + v.stderr); });
-  if (fs.existsSync(f) && py) {
+  if (skip.has("python")) console.log("  python adapter: skipped (WITNESS_TEST_SKIP)");
+  else if (fs.existsSync(f) && py) {
     const m = spawnSync(py, [f], { encoding: "utf8", timeout: 120000 });
     ok("python adapter idle hook", m.status === 0, (m.stdout + m.stderr).slice(-1500));
     const counts = /(\d+) passed, (\d+) failed/.exec(m.stdout || "");

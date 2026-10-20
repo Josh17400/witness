@@ -229,6 +229,10 @@ Plain Lua / other engines: queue events with `witness.record_key(key, down)`,
 `witness.record_touch(id, x, y, phase, pressure)` or `witness.record_event(ev)` during the frame
 (an f8 key marks instead), then call `witness.record_frame(dt)`; mouse events with `from_touch`
 or `istouch` set are skipped, and touch pressure is written only when it isn't 1.
+Every line is flushed as it is written, so a crash keeps the whole recording. At the end of play
+`witness.write_end_state(state)` writes `<file.jsonl>.state.json` (the state the recording ended in;
+`witness_love` does it on quit with your `snapshot`), and `witness replay` then checks the replay ends
+in exactly that state. `witness.stop_recording()` closes the file.
 
 ## 11. Determinism pitfalls (Lua / LÖVE)
 
@@ -255,9 +259,10 @@ or `istouch` set are skipped, and touch pressure is written only when it isn't 1
   sketch.
 * **PICO-8**: carts can't open sockets, so there's no adapter. The workable bridge is
   GPIO/serial: in a web export, `pico8_gpio` (128 bytes shared with JavaScript) can carry
-  input and state through the Witness JS adapter, with the cart polling GPIO each frame. Or use
-  `printh` + `stat(30)`/`stat(31)` stdin with `pico8 -run` and the stdio transport. Neither is
-  shipped. For real coverage, port the game logic to Lua and test it under `witness.lua`.
+  input and state through the Witness JS adapter, with the cart polling GPIO each frame.
+  (`printh` and `stat(30)`/`stat(31)` stdin with `pico8 -run` would need a stdio transport, which
+  the `witness` CLI doesn't have: it only speaks TCP and WebSocket.) This bridge isn't shipped. For
+  real coverage, port the game logic to Lua and test it under `witness.lua`.
 * **Solar2D / Playdate**: same pattern as Defold (Solar2D has LuaSocket). Playdate has no sockets.
 
 ## 13. Verify

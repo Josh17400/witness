@@ -4,9 +4,10 @@
 // and screenshots of what the screen shows at device pixels (capture "element" / "screen").
 // Playwright is an OPTIONAL dependency, resolved from the game project first, then from Witness.
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { WitnessError } from "./session.js";
+import { track, untrack } from "./procs.js";
 import { resolveDevice, contextOptions, safeInsetsFor } from "./devices.js";
 import { webInit, safeInsetsInit } from "./web-init.js";
 
@@ -27,24 +28,14 @@ async function loadPlaywright(root) {
   throw new WitnessError("browser games need Playwright: run 'npm i -D playwright && npx playwright install chromium' in your project (or in the Witness folder, or point WITNESS_PLAYWRIGHT at a folder that has it)");
 }
 
-async function waitForUrl(url, ms) {
+async function waitForUrl(url, ms, child = null) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
+    if (child && child.exitCode) throw new WitnessError(`the dev server exited (code ${child.exitCode}) before answering at ${url}`);   // 0: a launcher that left it running
     try { const r = await fetch(url); if (r.status < 500) return true; } catch { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 300));
   }
   throw new WitnessError(`the dev server never answered at ${url}`);
-}
-
-// The server runs behind a shell, and killing the shell alone leaves the real server running
-// (and holding its port, so the next run talks to a dying server). Make kill() take the whole tree.
-function killTree(child) {
-  child.kill = () => {
-    if (child.exitCode !== null || child.pid == null) return false;
-    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-    else { try { process.kill(-child.pid, "SIGTERM"); } catch { /* already gone */ } }
-    return true;
-  };
 }
 
 /** launch.{engine, device, audioUnlock, capture} checked and resolved: {engine, device, policy, capture}. */
@@ -82,11 +73,12 @@ export async function openBrowserGame(launch, root, addr, keep) {
   try {
     if (launch.server) {
       const s = typeof launch.server === "string" ? { command: launch.server } : launch.server;
-      server = spawn(s.command, { cwd: path.resolve(root, s.cwd || "."), shell: true, windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
-      killTree(server);
+      // the server runs behind a shell, and killing the shell alone leaves the real server running (and holding its
+      // port): tracked, so kill() takes the whole tree, and it dies with the CLI however that ends (src/core/procs.js)
+      server = track(spawn(s.command, { cwd: path.resolve(root, s.cwd || "."), shell: true, windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] }));
       server.stdout.on("data", keep);
       server.stderr.on("data", keep);
-      await waitForUrl(s.wait || launch.url, (s.timeout || 60) * 1000);
+      await waitForUrl(s.wait || launch.url, (s.timeout || 60) * 1000, server);
     }
     const pwInfo = await loadPlaywright(root);
     const type = pwInfo.pw[opts.engine];
@@ -108,7 +100,7 @@ export async function openBrowserGame(launch, root, addr, keep) {
   } catch (e) {
     // the caller never sees these on failure, so close them here (no stray browsers or servers)
     if (browser) await browser.close().catch(() => {});
-    if (server) server.kill();
+    if (server) { server.kill(); untrack(server); }
     throw e;
   }
 }

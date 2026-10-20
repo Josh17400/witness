@@ -14,8 +14,9 @@ import { lookMeasure } from "./measure-look.js";
 import { formatAnim } from "./anim.js";
 import { parseNamedRects, readRect, rectVerdict, fmtScale, nameRegions, groupsLine, regionLines, stateLayers } from "./scale-regions.js";
 import {
-  die, withGame, gamePixels, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit,
+  die, withGame, gamePixels, runOpts, media, printLogs, splitTop, framesOf, fmtT, shotImage, envelope, emit, DieError,
 } from "./common.js";
+import { ExprError } from "../core/expr.js";
 
 const r3 = (x) => (x == null ? x : Math.round(x * 1000) / 1000);
 const ms = (frames, fps) => `${Math.round((frames * 1000) / fps)} ms`;
@@ -34,7 +35,12 @@ export async function measureCommand(pos, opt) {
     });
     return emit(res.env, res.text, opt);
   }
-  return pixelMeasure(what, files, opt);
+  // a picture the media code can't use (not a PNG, two sizes that don't match, an empty mask) is a message, not a stack trace
+  try { return await pixelMeasure(what, files, opt); }
+  catch (e) {
+    if (e instanceof WitnessError || e instanceof DieError || e instanceof ExprError || !(e instanceof Error) || e instanceof ReferenceError || e instanceof SyntaxError || e instanceof TypeError) throw e;   // bugs keep their stack
+    die(`measure ${what}: ${e.message.replace(/^\w+: /, "")}${process.env.WITNESS_DEBUG ? `\n${e.stack}` : ""}`);
+  }
 }
 
 // ------------------------------------------------------------------ pixel measures

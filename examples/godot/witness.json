@@ -3,7 +3,7 @@
   "launch": {
     "command": "godot",
     "args": ["--path", ".", "--rendering-driver", "opengl3", "--fixed-fps", "60",
-             "--write-movie", "user://witness.avi"]
+             "--write-movie", "witness/movies/witness.avi"]
   },
   "tests": "witness",
   "seed": 1,

@@ -60,9 +60,13 @@ function tokenize(s) {
   return out;
 }
 
-/** Split "a; b then c" into orders (not on commas: "12,5" is a coordinate). */
+/**
+ * Split "a; b then c" into orders (not on commas: "12,5" is a coordinate). "next" only where it can't be a word of the
+ * order: "next," / ". Next" / at an order's start ("talk to the next guard" is one order). A bare "next" piece
+ * ("explore; next") is dropped, and so is a trailing comma ("goto Inn, next, talk guard").
+ */
 export function splitChain(text) {
-  return String(text).split(/\s*(?:;|\n|\band then\b|\bthen\b|\bafter that\b|\bnext\b,?)\s*/i).map((s) => s.trim().replace(/[.!]+$/, "")).filter(Boolean);
+  return String(text).split(/\s*(?:;|\n|\band then\b|\bthen\b|\bafter that\b|\bnext\s*,|[.!]\s+next\b)\s*/i).map((s) => s.trim().replace(/^next\s+/i, "").replace(/[.!,]+$/, "").trim()).filter((s) => s && !/^next$/i.test(s));
 }
 
 function suggestVerb(word) {

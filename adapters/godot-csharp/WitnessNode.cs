@@ -42,6 +42,7 @@ public partial class WitnessNode : Node
     private static readonly Dictionary<string, Func<List<object>, object>> CallTable = new Dictionary<string, Func<List<object>, object>>();
     private static readonly HashSet<Key> HeldKeys = new HashSet<Key>();
 
+    private static WitnessNode _instance;
     private WitnessHandlers _handlers;
     private WitnessCommand _step;
     private double[] _dts;
@@ -56,6 +57,8 @@ public partial class WitnessNode : Node
     private MouseButtonMask _buttons;
     private readonly Dictionary<int, Vector2> _fingers = new Dictionary<int, Vector2>();   // finger id -> last position
     private readonly List<WitnessEvent> _recordEvents = new List<WitnessEvent>();
+    private bool _closeHeld;   // after a vetoed close request: frames go to _held (see _Notification)
+    private readonly List<KeyValuePair<double, List<WitnessEvent>>> _held = new List<KeyValuePair<double, List<WitnessEvent>>>();
 
     /// <summary>Registers a custom command for `witness call name args`. Safe to call again after a scene reload.</summary>
     public static void RegisterCall(string name, string args, string help, Func<List<object>, object> fn)
@@ -66,13 +69,16 @@ public partial class WitnessNode : Node
 
     public override void _Ready()
     {
+        _instance = this;
         if (!Witness.Active)
         {
+            // Recording: one replay frame per physics tick (0..n per rendered frame), the unit witness mode steps.
+            // Recording rendered frames instead replays physics at the wrong rate.
             bool recording = Witness.StartRecording(HelloWithDefaults());
-            SetProcess(recording);
-            SetPhysicsProcess(false);
+            SetProcess(false);
+            SetPhysicsProcess(recording);
             SetProcessInput(recording);
-            if (recording) ProcessPriority = int.MaxValue;
+            if (recording) ProcessPhysicsPriority = int.MinValue;   // first in the tick: input since the last tick drives it
             return;
         }
         ProcessMode = ProcessModeEnum.Always;
@@ -108,19 +114,63 @@ public partial class WitnessNode : Node
         Witness.StopRecording();   // .NET's ProcessExit doesn't fire when Godot quits
     }
 
+    // The window is closing (the scene is still whole, unlike in _ExitTree): write <recording>.state.json, the state
+    // the recording ended in, so `witness replay` can prove it replays exactly. Games that quit with GetTree().Quit()
+    // call WitnessNode.EndRecording() first. A game that vetoes the close (AutoAcceptQuit = false, "Save before
+    // quitting?") may play on: write the end state now and hold the frames that follow. Quitting (any way) drops
+    // them, so the replay ends at the close request; EndRecording() writes them and a fresh end state; a minute of
+    // play writes them and the core drops the stale end state.
+    public override void _Notification(int what)
+    {
+        if (what != NotificationWMCloseRequest || Witness.Active || !Witness.Recording) return;
+        if (GetTree().AutoAcceptQuit) { EndRecording(); return; }
+        FlushHeld();
+        WriteEndState();
+        _closeHeld = true;
+    }
+
+    // Writes the frames held since a vetoed close request (the game played on, or EndRecording()).
+    private void FlushHeld()
+    {
+        _closeHeld = false;
+        foreach (var h in _held) Witness.RecordFrame(h.Key, h.Value);
+        _held.Clear();
+    }
+
+    private static void WriteEndState()
+    {
+        try { if (_instance != null && IsInstanceValid(_instance) && _instance.IsInsideTree()) Witness.WriteEndState(_instance.TakeSnapshot()); }
+        catch (Exception e) { GD.PushWarning("[witness] no end state for the replay: " + e.Message); }
+    }
+
+    /// <summary>Normal play with WITNESS_RECORD: writes the end state and closes the replay. Call it before GetTree().Quit().</summary>
+    public static void EndRecording()
+    {
+        if (!Witness.Recording) return;
+        if (_instance != null && IsInstanceValid(_instance)) _instance.FlushHeld();
+        WriteEndState();
+        Witness.StopRecording();
+    }
+
     public override void _PhysicsProcess(double delta)
     {
+        if (!Witness.Active)
+        {
+            if (_closeHeld)
+            {
+                _held.Add(new KeyValuePair<double, List<WitnessEvent>>(delta, new List<WitnessEvent>(_recordEvents)));
+                if (_held.Count > Engine.PhysicsTicksPerSecond * 60) FlushHeld();   // it played on after the vetoed close
+            }
+            else Witness.RecordFrame(delta, _recordEvents);
+            _recordEvents.Clear();
+            return;
+        }
         if (_step != null && !_frameInputDone) ApplyFrameInput();
     }
 
     public override void _Process(double delta)
     {
-        if (!Witness.Active)
-        {
-            Witness.RecordFrame(delta, _recordEvents);
-            _recordEvents.Clear();
-            return;
-        }
+        if (!Witness.Active) return;
         if (!_started && !Start()) return;
         if (_step != null)
         {
@@ -175,7 +225,15 @@ public partial class WitnessNode : Node
         {
             int button = mb.ButtonIndex == MouseButton.Left ? 0 : mb.ButtonIndex == MouseButton.Middle ? 1 : 2;
             _recordEvents.Add(new WitnessEvent { Type = "mouse", X = mb.Position.X, Y = mb.Position.Y, Button = button, Down = mb.Pressed });
+            return;
         }
+        if (mb != null && mb.Pressed && (mb.ButtonIndex == MouseButton.WheelUp || mb.ButtonIndex == MouseButton.WheelDown))
+        {
+            _recordEvents.Add(new WitnessEvent { Type = "wheel", Dy = (mb.ButtonIndex == MouseButton.WheelDown ? 100 : -100) * (mb.Factor > 0 ? mb.Factor : 1) });
+            return;
+        }
+        var mm = e as InputEventMouseMotion;
+        if (mm != null) _recordEvents.Add(new WitnessEvent { Type = "mouse", X = mm.Position.X, Y = mm.Position.Y });   // hover/aim: a move, no button
     }
 
     // ------------------------------------------------------------------ session
@@ -364,7 +422,7 @@ public partial class WitnessNode : Node
             case "wheel":
             {
                 MouseButton dir = e.Dy < 0 ? MouseButton.WheelUp : MouseButton.WheelDown;
-                float factor = (float)Math.Max(1, Math.Abs(e.Dy) / 100);
+                float factor = e.Dy != 0 ? (float)(Math.Abs(e.Dy) / 100) : 1f;   // the recorded dy is ±100 * Factor (a trackpad's 0.2 -> 20)
                 Input.ParseInputEvent(new InputEventMouseButton { Position = _mouse, GlobalPosition = _mouse, ButtonIndex = dir, Pressed = true, Factor = factor });
                 Input.ParseInputEvent(new InputEventMouseButton { Position = _mouse, GlobalPosition = _mouse, ButtonIndex = dir, Pressed = false, Factor = factor });
                 break;

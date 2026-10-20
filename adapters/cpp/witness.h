@@ -1057,10 +1057,14 @@ const char *witness_key_normalize(const char *name, char *out, size_t size) {
         {"leftcontrol", "ctrl"}, {"rightcontrol", "ctrl"}, {"controlleft", "ctrl"}, {"controlright", "ctrl"},
         {"lalt", "alt"}, {"ralt", "alt"}, {"leftalt", "alt"}, {"rightalt", "alt"}, {"altleft", "alt"},
         {"altright", "alt"}, {"option", "alt"}, {"altgr", "alt"}, {"del", "delete"}, {"ins", "insert"},
-        {"keypadenter", "enter"}, {"pgup", "pageup"}, {"pgdn", "pagedown"}, {"back", "backspace"}, {"leftsuper", "super"},
-        {"rightsuper", "super"}, {"lsuper", "super"}, {"rsuper", "super"}, {"meta", "super"},
-        {"metaleft", "super"}, {"metaright", "super"}, {"leftgui", "super"}, {"rightgui", "super"},
-        {"lgui", "super"}, {"rgui", "super"}, {"command", "super"}, {"windows", "super"}};
+        {"keypadenter", "enter"}, {"pgup", "pageup"}, {"pgdn", "pagedown"}, {"back", "backspace"},
+        /* the OS key is "meta" (as in the JS and Godot adapters); "super"/"gui"/"command"/"windows" spellings map to it */
+        {"super", "meta"}, {"leftsuper", "meta"}, {"rightsuper", "meta"}, {"lsuper", "meta"}, {"rsuper", "meta"},
+        {"superleft", "meta"}, {"superright", "meta"}, {"metaleft", "meta"}, {"metaright", "meta"},
+        {"leftmeta", "meta"}, {"rightmeta", "meta"}, {"lmeta", "meta"}, {"rmeta", "meta"}, {"gui", "meta"},
+        {"leftgui", "meta"}, {"rightgui", "meta"}, {"lgui", "meta"}, {"rgui", "meta"}, {"cmd", "meta"},
+        {"command", "meta"}, {"leftcommand", "meta"}, {"rightcommand", "meta"}, {"windows", "meta"},
+        {"leftwindows", "meta"}, {"rightwindows", "meta"}, {"lwin", "meta"}, {"rwin", "meta"}};
     char tmp[64];
     size_t i, n = 0;
     if (!out || !size) return out;

@@ -434,7 +434,10 @@ namespace WitnessKit
         private static WitnessHello _hello;
         private static WitnessHandlers _handlers;
         private static TextWriter _rec;
+        private static string _recPath;
+        private static bool _endStateWritten;   // stale once another frame is recorded (a vetoed quit: play went on)
         private static int _recFrame;
+        private static double _recTime;
         private static string _recMark;
         private static readonly List<WitnessEvent> RecQueue = new List<WitnessEvent>();
 
@@ -819,6 +822,8 @@ namespace WitnessKit
                 string dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path));
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
                 _rec = new StreamWriter(path, false, new UTF8Encoding(false)) { NewLine = "\n" };
+                _recPath = path;
+                _endStateWritten = false;
             }
             catch (Exception e)
             {
@@ -834,6 +839,7 @@ namespace WitnessKit
             _rec.WriteLine(WitnessJson.Write(head));
             _rec.Flush();
             _recFrame = 0;
+            _recTime = 0;
             AppDomain.CurrentDomain.ProcessExit += (s, e) => StopRecording();
             return true;
         }
@@ -873,10 +879,17 @@ namespace WitnessKit
             lock (rec)
             {
                 rec.WriteLine(sb.ToString());
-                if (_recMark != null || _recFrame % 60 == 0) rec.Flush();
+                rec.Flush();   // every line: a crash must not take the last frames with it
             }
             _recMark = null;
             _recFrame++;
+            _recTime += dt;
+            if (_endStateWritten)
+            {
+                // the game played on after writing its end state (quit vetoed): that state is no longer the end
+                _endStateWritten = false;
+                try { File.Delete(_recPath + ".state.json"); } catch (Exception) { /* best effort */ }
+            }
         }
 
         /// <summary>
@@ -906,6 +919,21 @@ namespace WitnessKit
         public static void Mark(string label = "F8")
         {
             if (_rec != null) _recMark = label ?? "mark";
+        }
+
+        /// <summary>
+        /// Writes &lt;recording&gt;.state.json: the game state the recording ended in ({"frame", "time", "state"}),
+        /// which `witness replay` compares field by field to the replay's final state. Call it right after the
+        /// last RecordFrame (before or after StopRecording: the path is kept) with what the Snapshot handler
+        /// returns. A frame recorded after it deletes it again (stale). No-op (false) unless this run recorded.
+        /// </summary>
+        public static bool WriteEndState(object state)
+        {
+            string path = _recPath;
+            if (path == null) return false;
+            var o = new Dictionary<string, object> { { "frame", _recFrame }, { "time", _recTime }, { "state", state } };
+            try { File.WriteAllText(path + ".state.json", WitnessJson.Write(o), new UTF8Encoding(false)); _endStateWritten = _rec != null; return true; }
+            catch (Exception e) { Console.Error.WriteLine("[witness] can't write " + path + ".state.json: " + e.Message); return false; }
         }
 
         public static void StopRecording()
@@ -1109,6 +1137,11 @@ namespace WitnessKit
             { "lcontrol", "ctrl" }, { "rcontrol", "ctrl" }, { "control", "ctrl" }, { "controlkey", "ctrl" }, { "lctrl", "ctrl" }, { "rctrl", "ctrl" },
             { "leftalt", "alt" }, { "rightalt", "alt" }, { "lalt", "alt" }, { "ralt", "alt" }, { "altgr", "alt" }, { "menu", "alt" },
             { "lmenu", "alt" }, { "rmenu", "alt" }, { "leftoption", "alt" }, { "rightoption", "alt" },
+            // the OS key is "meta" (as in the JS and Godot adapters): Unity LeftCommand/LeftWindows, MonoGame LeftWindows
+            { "super", "meta" }, { "leftmeta", "meta" }, { "rightmeta", "meta" }, { "leftcommand", "meta" }, { "rightcommand", "meta" },
+            { "leftwindows", "meta" }, { "rightwindows", "meta" }, { "lwin", "meta" }, { "rwin", "meta" }, { "leftapple", "meta" },
+            { "rightapple", "meta" }, { "command", "meta" }, { "cmd", "meta" }, { "windows", "meta" }, { "leftsuper", "meta" },
+            { "rightsuper", "meta" }, { "superleft", "meta" }, { "superright", "meta" }, { "lsuper", "meta" }, { "rsuper", "meta" },
         };
 
         private static readonly Dictionary<string, string[]> FromWitness = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
@@ -1120,6 +1153,8 @@ namespace WitnessKit
             { "shift", new[] { "LeftShift", "Shift", "LShift", "ShiftKey" } },
             { "ctrl", new[] { "LeftControl", "LeftCtrl", "Ctrl", "Control", "LControl", "ControlKey" } },
             { "alt", new[] { "LeftAlt", "Alt", "LAlt", "LMenu", "Menu" } },
+            { "meta", new[] { "Meta", "LeftMeta", "LeftCommand", "LeftWindows", "LWin", "Super" } },
+            { "super", new[] { "Meta", "LeftMeta", "LeftCommand", "LeftWindows", "LWin", "Super" } },
         };
 
         /// <summary>Engine key name (e.g. KeyCode.RightArrow.ToString()) → Witness name ("right").</summary>

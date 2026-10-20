@@ -16,7 +16,7 @@ extends Node
 ##   * Witness.seed is the seed to use for randomness (from reset, or the replay when recording).
 ##
 ## Launch for exact timing:  godot --path . --fixed-fps 60
-## ...plus frame-exact audio: --rendering-driver opengl3 --write-movie user://witness.avi
+## ...plus frame-exact audio: --rendering-driver opengl3 --write-movie witness/movies/witness.avi
 ## When WITNESS_ADDR is unset and --witness wasn't passed, this node disables itself: zero cost.
 
 const PROTOCOL := 1
@@ -85,6 +85,10 @@ var _recorder: FileAccess
 var _rec_frame := 0
 var _rec_events: Array = []
 var _rec_mark := ""
+var _rec_time := 0.0
+var _end_state_written := false   # stale (deleted) once another frame is written
+var _close_held := false   # after a vetoed close request: frames go to _held (see _notification)
+var _held: Array = []   # [delta, events, mark] per held frame
 
 const _KEYS := {
 	"enter": KEY_ENTER, "escape": KEY_ESCAPE, "space": KEY_SPACE, "tab": KEY_TAB,
@@ -92,6 +96,7 @@ const _KEYS := {
 	"left": KEY_LEFT, "right": KEY_RIGHT, "up": KEY_UP, "down": KEY_DOWN, "delete": KEY_DELETE,
 	"home": KEY_HOME, "end": KEY_END, "pageup": KEY_PAGEUP, "pagedown": KEY_PAGEDOWN,
 	"insert": KEY_INSERT, "meta": KEY_META,
+	"super": KEY_META, "win": KEY_META, "windows": KEY_META, "command": KEY_META, "cmd": KEY_META,
 }
 const _PAD := {
 	"a": JOY_BUTTON_A, "b": JOY_BUTTON_B, "x": JOY_BUTTON_X, "y": JOY_BUTTON_Y,
@@ -148,6 +153,37 @@ func _ready() -> void:
 	_capture.buffer_length = 30.0
 	AudioServer.add_bus_effect(0, _capture)
 	_movie = OS.has_feature("movie")
+	if _movie:
+		_check_movie_dir()
+
+
+## Movie Maker opens its file before any script runs and creates no folders: a missing one (the
+## launch's --write-movie witness/movies/...) means no movie file and an engine error every frame
+## (recent Godot versions don't get this far: they fail at startup).
+func _check_movie_dir() -> void:
+	var movie: String = Engine.get_write_movie_path()
+	if movie == "":
+		return
+	if movie.is_relative_path():
+		movie = "res://" + movie   # what Godot's movie writer does with a relative path
+	var dir := ProjectSettings.globalize_path(movie.get_base_dir())
+	if not DirAccess.dir_exists_absolute(dir):
+		DirAccess.make_dir_recursive_absolute(dir)
+		push_error("Witness: the --write-movie folder %s was missing, so Godot could not open the movie file (created it now: run again)" % dir)
+
+
+## The window is closing (the scene is still whole, unlike in _exit_tree): end the recording. A game that
+## vetoes the close (auto_accept_quit = false, "Save before quitting?") may play on: write the end state now
+## and hold the frames that follow. Quitting (any way) drops them, so the replay ends at the close request;
+## stop_recording() writes them and a fresh end state; a minute of play writes them and drops the end state.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST and recording:
+		if get_tree().auto_accept_quit:
+			stop_recording()
+		else:
+			_flush_held()
+			_write_end_state()
+			_close_held = true
 
 
 func _exit_tree() -> void:
@@ -214,6 +250,49 @@ func mark(label := "F8") -> void:
 	_rec_mark = label
 
 
+## Normal play with WITNESS_RECORD: write <file>.state.json (the snapshot the recording ended in, which
+## `witness replay` compares to the replay's end) and close the replay. Closing the window does this;
+## a game that quits itself calls Witness.stop_recording() before get_tree().quit().
+func stop_recording() -> void:
+	if _recorder == null:
+		return
+	_flush_held()
+	_write_end_state()
+	_end_state_written = false
+	_recorder.close()
+	_recorder = null
+	recording = false
+	set_physics_process(false)
+
+
+# Writes the frames held since a vetoed close request (the game played on, or stop_recording()).
+func _flush_held() -> void:
+	_close_held = false
+	var held := _held
+	_held = []
+	var events := _rec_events
+	var mark_now := _rec_mark
+	for h in held:
+		_rec_events = h[1]
+		_rec_mark = h[2]
+		_record_physics_frame(h[0])
+	_rec_events = events
+	_rec_mark = mark_now
+
+
+# Same precision as _send (the snapshot `witness replay` compares it with exactly): full precision on one
+# side only reads 3.3333332538604736 vs 3.33333325386047 and fails an exact replay.
+func _write_end_state() -> void:
+	var path := OS.get_environment("WITNESS_RECORD") + ".state.json"
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(_safe({"frame": _rec_frame, "time": _rec_time, "state": _snapshot()}), "", true))
+		f.close()
+		_end_state_written = true
+	else:
+		push_warning("Witness: can't write the end state %s (%s)" % [path, error_string(FileAccess.get_open_error())])
+
+
 ## Announce a sound the game just started ("jump", "coin") so `witness listen` can name it and tie
 ## it to its cause: one protocol "sound" event, sent at once and stamped with the frame being
 ## simulated. volume 0..1 (negative = not given); pos: a Vector2 in viewport pixels, or null.
@@ -261,6 +340,9 @@ func _connect() -> bool:
 	if OS.has_feature("web"):
 		_blocking = false
 		_ws = WebSocketPeer.new()
+		# the 64 KiB defaults fail any bigger message: a screenshot reply is megabytes of base64
+		_ws.inbound_buffer_size = 4 << 20
+		_ws.outbound_buffer_size = 64 << 20
 		if _ws.connect_to_url("ws://%s:%d/" % addr) != OK:
 			push_error("Witness: can't open ws://%s:%d/" % addr)
 			return false
@@ -283,7 +365,9 @@ func _connect() -> bool:
 func _send(obj: Dictionary) -> void:
 	var line := JSON.stringify(_safe(obj), "", true) + "\n"
 	if _ws:
-		_ws.send_text(line)
+		var err := _ws.send_text(line)
+		if err != OK:
+			push_error("Witness: can't send a %d-character message over the WebSocket (%s)" % [line.length(), error_string(err)])
 	elif _peer:
 		_peer.put_data(line.to_utf8_buffer())
 
@@ -912,7 +996,7 @@ func _audio() -> Dictionary:
 			stereo.append_array(_silence(want - stereo.size()))
 		_audio_sent += want
 	else:
-		_warn_once("audio", "Witness: audio is captured in real time; add --write-movie user://witness.avi (with a rendering driver) for frame-exact audio")
+		_warn_once("audio", "Witness: audio is captured in real time; add --write-movie witness/movies/witness.avi (with a rendering driver) for frame-exact audio")
 	var bytes: PackedByteArray
 	if OS.has_feature("double"):   # double-precision builds: Vector2 holds float64
 		var f := PackedFloat32Array()
@@ -1107,6 +1191,13 @@ func _on_window_input(event: InputEvent) -> void:
 
 
 func _record_physics_frame(delta: float) -> void:
+	if _close_held:
+		_held.append([delta, _rec_events, _rec_mark])
+		_rec_events = []
+		_rec_mark = ""
+		if _held.size() > _fps * 60:
+			_flush_held()   # it played on after the vetoed close: write them (that end state goes stale)
+		return
 	var line := {"f": _rec_frame, "dt": delta}
 	if not _rec_events.is_empty():
 		line["in"] = _rec_events
@@ -1115,6 +1206,9 @@ func _record_physics_frame(delta: float) -> void:
 		line["mark"] = _rec_mark
 		_rec_mark = ""
 	_recorder.store_line(JSON.stringify(_safe(line), "", true, true))
+	_recorder.flush()   # every line: a crash must not take the last frames with it
 	_rec_frame += 1
-	if _rec_frame % 60 == 0:
-		_recorder.flush()
+	_rec_time += delta
+	if _end_state_written:   # play went on after the end state was written: it is no longer the end
+		_end_state_written = false
+		DirAccess.remove_absolute(OS.get_environment("WITNESS_RECORD") + ".state.json")

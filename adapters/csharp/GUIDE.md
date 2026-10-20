@@ -196,8 +196,10 @@ hears and flag sounds announced but silent. It does nothing outside witness mode
 Normal play with `WITNESS_RECORD=run.jsonl`: `Witness.Start(hello)` opens the file, then once per
 frame `Witness.RecordFrame(dt, eventsThisFrame)` (the same `WitnessEvent`s you'd apply), and
 `Witness.Mark("F8")` when the player presses F8. Call `Witness.StopRecording()` on exit (it also
-runs on `ProcessExit`). Seed the game with `Witness.Seed`. `witness replay run.jsonl` plays it back
-through reset + input + per-frame dts.
+runs on `ProcessExit`; lines are flushed as written, so a crash keeps them all). Seed the game with
+`Witness.Seed`. `witness replay run.jsonl` plays it back through reset + input + per-frame dts. On
+exit, `Witness.WriteEndState(game.State())` writes `run.jsonl.state.json` (the state the recording
+ended in) and the replay then checks it ends in exactly that state.
 
 Event pumps that see input one event at a time can queue it instead: `Witness.RecordEvent(e)` and
 `Witness.RecordTouch(id, x, y, WitnessTouchPhase.Down, pressure)` go into the next `RecordFrame` line

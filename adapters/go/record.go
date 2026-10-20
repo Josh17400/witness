@@ -23,6 +23,7 @@ type Recorder struct {
 	path    string
 	seed    int64
 	frame   int64
+	time    float64
 	pending []map[string]any
 	mark    string
 }
@@ -132,6 +133,21 @@ func (r *Recorder) Frame(dt float64) {
 	}
 	r.writeLine(line)
 	r.frame++
+	r.time += dt
+}
+
+// EndState writes <file.jsonl>.state.json: the state the recording ended in ({"frame", "time",
+// "state"}), which `witness replay` compares field by field to the replay's final state. Call it
+// once at the end of play, after the last Frame, with the snapshot.
+func (r *Recorder) EndState(state any) error {
+	if r == nil {
+		return nil
+	}
+	b, err := marshal(map[string]any{"frame": r.frame, "time": r.time, "state": state})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(r.path+".state.json", b, 0o644)
 }
 
 // Close flushes and closes the replay file.

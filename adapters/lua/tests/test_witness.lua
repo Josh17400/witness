@@ -147,7 +147,20 @@ w.record_frame(1 / 60, { { type = "touch", id = 0, x = 15.5, y = 22, phase = "up
                          { type = "mouse", x = 15.5, y = 22, istouch = true }, { type = "key", key = "space", down = true } })
 w.record_touch(1, 3, 4, "cancel")
 w.record_frame(1 / 60)
+local early = io.open(rec_path, "r") -- every line is on disk before stop_recording: a crash loses nothing
+local early_n = 0
+for _ in early:lines() do early_n = early_n + 1 end
+early:close()
+eq(early_n, 4, "frames flushed as they are recorded")
+eq(w.write_end_state({ x = 7 }), true, "write_end_state while recording")
 w.stop_recording()
+eq(w.write_end_state({ x = 7 }), false, "no end state after stop_recording")
+local sf = io.open(rec_path .. ".state.json", "r")
+local end_state = w.decode(sf:read("*a"))
+sf:close()
+os.remove(rec_path .. ".state.json")
+eq(end_state.frame, 3, "end state: frames recorded")
+eq(end_state.state.x, 7, "end state: the game state")
 os.getenv = real_getenv -- luacheck: ignore
 local lines = {}
 local fh = io.open(rec_path, "r")

@@ -64,6 +64,9 @@ export async function stepTo(session, state, target, dts = null) {
 export async function begin(session, { seed = 1, scene, params, input, events, replay } = {}) {
   const fps = session.fps;
   if (session.has("reset")) {
+    // adapters may clear their log buffer on reset (python, lua, godot): read it first, or the errors of the run
+    // before (a measure step's, a doctor run's) are gone before anyone looks
+    await session.pullLogs();
     // a replay restarts exactly as recorded: its seed, and its scene/params when the header has them
     await session.reset(replay ? replay.seed : seed, replay && replay.scene != null ? replay.scene : scene, replay && replay.params != null ? replay.params : params);
   }
@@ -74,9 +77,25 @@ export async function begin(session, { seed = 1, scene, params, input, events, r
   return state;
 }
 
-/** Load a replay file (docs/PROTOCOL.md §5) into {seed, dts, events, marks, duration}. */
-export function loadReplay(file) {
-  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+/**
+ * Load a replay file (docs/PROTOCOL.md §5) into {seed, dts, events, marks, duration, warnings}. A bad LAST line is a
+ * recording cut short (the game crashed mid-write): it is left out with a warning. A bad line before it is an error
+ * naming the file and line. opts.quiet: don't print the warning (it is in .warnings).
+ */
+export function loadReplay(file, { quiet = false } = {}) {
+  const raw = fs.readFileSync(file, "utf8").split(/\r?\n/);
+  const lines = [], warnings = [];
+  let last = raw.length - 1;
+  while (last >= 0 && !raw[last].trim()) last--;
+  for (let i = 0; i <= last; i++) {
+    if (!raw[i].trim()) continue;
+    try { lines.push(JSON.parse(raw[i])); }
+    catch (e) {
+      if (i < last) throw new WitnessError(`${file}:${i + 1}: not a JSON line (${e.message}): ${raw[i].slice(0, 120)}`);
+      warnings.push(`${path.basename(file)}:${i + 1}: the last line is cut short (the recording ended mid-write, e.g. a crash): left out`);
+    }
+  }
+  if (!quiet) for (const w of warnings) console.error(`⚠ ${w}`);
   const head = lines.find((l) => l.replay) || {};
   const frames = lines.filter((l) => l.f != null).sort((a, b) => a.f - b.f);
   const dts = [], events = [], markFrames = [], calls = [];
@@ -92,7 +111,7 @@ export function loadReplay(file) {
   const startOf = [0];
   for (let i = 0; i < dts.length; i++) startOf[i + 1] = startOf[i] + dts[i];
   const marks = markFrames.map((m) => ({ ...m, t: startOf[m.frame] }));
-  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, launch: head.launch || null, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length };
+  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, launch: head.launch || null, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length, warnings };
 }
 
 /**
@@ -278,7 +297,8 @@ export async function runTest(session, test, { shotDir, onShot, matcher, matchAl
         if (useShot) cap.shot = await session.screenshot();
         if (useAudio) { const a = await session.audio(); if (a && a.data) cap.audio = a; }
         for (const label of labels) {
-          const r = await matcher.check(label, cap, `"${test.name}" ${where}`);
+          // a --repeat step's reference is needed until the last pass compares it (match: labels may come back later)
+          const r = await matcher.check(label, cap, `"${test.name}" ${where}`, { release: label.startsWith("step:") && !!test._lastPass });
           if (!r.ok) {
             const what = label.startsWith("match:") ? `match "${label.slice(6)}"` : "repeat";
             for (const p of r.problems) res.failures.push({ kind: "match", at: st.at, message: `${what}: ${p}` });

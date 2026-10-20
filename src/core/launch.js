@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { listen, WitnessError } from "./session.js";
+import { acquireSlot } from "./budget.js";
+import { track, untrack } from "./procs.js";
 
 export const CONFIG_NAME = "witness.json";
 export const DEFAULT_ATTACH_PORT = 7357;
@@ -105,18 +107,52 @@ async function attachWeb(session, web) {
   }
 }
 
+const tail = (out, n = 3000) => out.join("").slice(-n);
+
 /**
- * Start (or attach to) the game and return {session, stop(), proc, output()}.
- * opts: {attach, port, timeout, env, quiet}
+ * Godot's --write-movie creates no folders, and a missing one crashes current Godot at startup: make the folder of a
+ * relative movie path (against --path, else the launch folder). user:// and res:// paths are Godot's own business.
+ */
+export function movieDirs(args, cwd) {
+  const a = (args || []).map(String), i = a.indexOf("--write-movie"), p = i >= 0 ? a[i + 1] : null;
+  if (!p || /^[a-z]+:\/\//i.test(p)) return [];
+  const j = a.indexOf("--path"), base = j >= 0 && a[j + 1] ? path.resolve(cwd, a[j + 1]) : cwd;
+  const dir = path.dirname(path.resolve(base, p));
+  try { fs.mkdirSync(dir, { recursive: true }); return [dir]; } catch { return []; }
+}
+
+/**
+ * Start (or attach to) the game and return {session, stop(), restart(), proc, output()}.
+ * opts: {attach, port, timeout, env, quiet}. A launch (not --attach) first takes a machine-wide heavy-process slot
+ * (src/core/budget.js); the game and its dev server are killed with their process trees on stop, and when the CLI
+ * exits for any reason (src/core/procs.js). restart(): stop, then launch again (a fresh process: tests on an adapter
+ * without 'reset'); the returned object is updated in place.
  */
 export async function openGame(cfg, root, opts = {}) {
   const launch = cfg.launch || {};
   const attach = opts.attach || launch.attach;
-  const srv = await listen({ port: attach ? (opts.port || launch.port || DEFAULT_ATTACH_PORT) : 0 });
+  if (!attach && !launch.url && !launch.command) throw new WitnessError(`${CONFIG_NAME} has no "launch" — add {"launch": {"command": "path/to/game", "args": []}} (or "attach": true, or "url": "..."). Run 'witness init' for a template.`);
+  const slot = attach ? null : await acquireSlot({ browser: !!launch.url, label: `${cfg.name || "game"}: witness ${process.argv.slice(2).join(" ")}`.slice(0, 160) });
+  let srv;
+  try { srv = await listen({ port: attach ? (opts.port || launch.port || DEFAULT_ATTACH_PORT) : 0 }); }
+  catch (e) { if (slot) slot.release(); throw e.code === "EADDRINUSE" ? new WitnessError(`port ${e.port || opts.port || launch.port || DEFAULT_ATTACH_PORT} is in use: another Witness is waiting there (or pass --port)`) : e; }
   const addr = `127.0.0.1:${srv.port}`;
   let proc = null, browser = null, server = null, web = null;
   const out = [];
   const keep = (d) => { out.push(d.toString()); if (out.length > 400) out.splice(0, out.length - 400); };
+  const killAll = async (grace = 2000) => {
+    if (proc) {
+      if (proc.exitCode === null && proc.signalCode === null && proc.pid != null) {
+        await new Promise((r) => { const t = setTimeout(() => { proc.kill(); r(); }, grace); proc.once("exit", () => { clearTimeout(t); r(); }); });
+      }
+      proc.kill("SIGKILL");   // the rest of its tree (posix: its process group; a no-op once it's gone on Windows)
+      untrack(proc);
+    }
+    if (browser) await browser.close().catch(() => {});
+    if (server) { server.kill(); untrack(server); }
+    srv.close();
+    if (slot) slot.release();
+  };
 
   try {
     if (attach) {
@@ -125,42 +161,48 @@ export async function openGame(cfg, root, opts = {}) {
       // Browser games: optional dev server + headless browser (see src/core/browser.js).
       const { openBrowserGame } = await import("./browser.js");
       ({ browser, server, web } = await openBrowserGame(launch, root, addr, keep));
-    } else if (launch.command) {
+    } else {
       const env = { ...process.env, ...(launch.env || {}), ...(opts.env || {}), WITNESS_ADDR: addr, WITNESS: "1" };
-      proc = spawn(launch.command, launch.args || [], {
-        cwd: path.resolve(root, launch.cwd || "."), env, shell: !!launch.shell, windowsHide: true,
+      movieDirs(launch.args, path.resolve(root, launch.cwd || "."));
+      // posix: its own process group, so a stop or Ctrl-C takes the whole tree (a shell's game, a launcher's child)
+      proc = track(spawn(launch.command, launch.args || [], {
+        cwd: path.resolve(root, launch.cwd || "."), env, shell: !!launch.shell, windowsHide: true, detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
-      });
+      }));
       proc.stdout.on("data", keep);
       proc.stderr.on("data", keep);
-      proc.on("error", (e) => keep(`[witness] failed to start: ${e.message}\n`));
-    } else {
-      throw new WitnessError(`${CONFIG_NAME} has no "launch" — add {"launch": {"command": "path/to/game", "args": []}} (or "attach": true, or "url": "..."). Run 'witness init' for a template.`);
     }
 
-    const exited = proc ? new Promise((res) => proc.on("exit", (code) => res(code))) : new Promise(() => {});
+    // the game exiting (or failing to start at all: ENOENT never emits "exit") ends the wait at once
+    const exited = proc ? new Promise((res) => { proc.on("exit", (code) => res({ code })); proc.on("error", (error) => res({ error })); }) : new Promise(() => {});
+    const next = srv.nextSession((opts.timeout || cfg.timeout || 60) * 1000);
+    next.catch(() => {});   // when the exit wins the race, its timeout must not fire later as an unhandled rejection
     const session = await Promise.race([
-      srv.nextSession((opts.timeout || cfg.timeout || 60) * 1000),
-      exited.then((code) => { throw new WitnessError(`the game exited (code ${code}) before connecting to Witness.\n--- game output ---\n${out.join("").slice(-3000)}`); }),
+      next,
+      exited.then(({ code, error }) => {
+        if (error) throw new WitnessError(`couldn't start the game: ${error.message} (launch.command ${JSON.stringify(launch.command)}${launch.cwd ? ` in ${launch.cwd}` : ""}: is it built, and is the path right?)${out.length ? `\n--- game output ---\n${tail(out)}` : ""}`);
+        throw new WitnessError(`the game exited (code ${code}) before connecting to Witness.\n--- game output ---\n${tail(out)}`);
+      }),
     ]);
     if (cfg.fps) session.hello.fps = cfg.fps;
     if (web) await attachWeb(session, web);
-    const stop = async () => {
-      await session.quit();
-      session.close();
-      if (proc && proc.exitCode === null) {
-        await new Promise((r) => { const t = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } r(); }, 2000); proc.once("exit", () => { clearTimeout(t); r(); }); });
-      }
-      if (browser) await browser.close().catch(() => {});
-      if (server) { try { server.kill(); } catch { /* gone */ } }
-      srv.close();
+    const handle = {
+      session, proc, output: () => out.join(""),
+      stop: async () => { await session.quit(); session.close(); await killAll(); },
+      restart: async () => {
+        if (attach) throw new WitnessError("can't restart a game Witness didn't launch (--attach): add 'reset' to the adapter");
+        await handle.stop();
+        // keep this restart: the fresh handle's own would update it, not the one the caller holds (3rd+ restart)
+        const { restart: _r, ...fresh } = await openGame(cfg, root, opts);
+        Object.assign(handle, fresh);
+        return handle.session;
+      },
     };
-    return { session, stop, proc, output: () => out.join("") };
+    return handle;
   } catch (e) {
-    if (proc && proc.exitCode === null) { try { proc.kill(); } catch { /* gone */ } }
-    if (browser) await browser.close().catch(() => {});
-    if (server) { try { server.kill(); } catch { /* gone */ } }
-    srv.close();
+    await killAll(0).catch(() => {});
+    // what the game (or the page) printed is often the reason it never connected
+    if (e instanceof WitnessError && out.length && !/--- game output ---/.test(e.message)) e.message += `\n--- game output ---\n${tail(out)}`;
     throw e;
   }
 }

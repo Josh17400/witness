@@ -3,6 +3,140 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.3 (2026-10-20)
+
+An audit release: process safety on a shared machine, correctness fixes across the CLI, and adapter fixes. Each item
+names the audit finding it closes (H = high, M = medium).
+
+**Machine safety: a heavy-process budget, and no orphaned games** (a PC once crashed from ~100 headless browsers)
+- Every launch (a game command or a headless browser; not `--attach`) takes a slot of a machine-wide budget first:
+  `WITNESS_MAX_PROCS` (default 3; 0 = no limit) and, for browsers, `WITNESS_MAX_BROWSERS` (default 1). Slot files
+  live in `<tmpdir>/witness-budget` (`WITNESS_BUDGET_DIR` moves it) and name their owner by pid and the OS start time
+  of that pid, so a crashed owner's slot is taken back and a reused pid doesn't keep one. A launch over the limit
+  says `▸ waiting for a free slot …` once and gives up after `WITNESS_BUDGET_WAIT` seconds (default 90, under the
+  120 s an agent's Bash tool waits). Play daemons, `check` and `suggest` inherit it; `play start` waits for a daemon
+  that is queueing and shows its waiting line; `play batch` never runs more testers than `WITNESS_MAX_PROCS`.
+- (H4) A `die()` inside a running command now stops the game (graceful quit, then the whole process tree) before
+  exiting; exit and SIGINT/SIGTERM/SIGHUP handlers clean up too. Games and dev servers are killed with their process
+  trees (`taskkill /T` on Windows, the process group on posix; a game gets its own group on posix).
+
+**play: never kill by PID alone; tester guards; one batch at a time** (H1, H2, H3, M2, M10)
+- (H1, H2) `play end`/`stop`/`list --clean` kill a daemon or game only after it answered a `ping` on its token-checked
+  port with its own pid (answered before the daemon's command queue, so a busy session still answers). An entry that
+  doesn't answer is marked ended and its pid named, not killed (after a crash or reboot that pid may be another
+  program); a slow one is left running. Entries from before the last boot aren't live, and stale entries no longer
+  hold a slot against `WITNESS_PLAY_MAX`. Stopping a session that is still starting asks it to stop as soon as it's
+  up, and says what happened.
+- (H3) `play clean <name>` only deletes a playtest folder of this project (names `[\w.-]{1,40}`, not all dots).
+- (M2) At most `WITNESS_PLAY_MAX_WEB` web-game sessions (default 1: each is a headless browser); a batch runs a web
+  game one tester at a time. Batch testers run with `WITNESS_PLAY_TESTER=1` and may only run `play start`, `do`,
+  `look`, `next`, `shot`, `note`, `end`, `status` and `orders` for their own session (`batch`, `clean`, `--force`,
+  `--all` and another `-s` are refused). One `play batch` runs machine-wide (a lock in `<registry>/locks/`, taken
+  over when its batch died). Help, PLAYTEST.md and the skill say to run a batch in the background.
+- (M10) While a batch runs, `play start` doesn't prune old playtests; the batch prunes once at the end and its own
+  reports always stay (they count toward `retention.playtests.keep`; `prune()` takes `keep: [folders]`). A tester's
+  result ignores an older entry or report under the same name.
+- (M11) `next` chains orders only as `next,`, `. Next` or a leading `next`: `talk to the next guard` and `fight next
+  wolf` are one order again.
+- (M12) `--cmd` (and `--config`) carry into `play brief`, batch briefs and report.md's replay commands; with `--cmd`,
+  `--config <folder>` is the project root (a batch tester runs from an empty folder).
+- Also: the Windows `.cmd` short command handles quoted orders (`"fight wolf"`); brief arguments with `$`, a backtick
+  or a backslash are single-quoted; the idle timer can't end a session mid-command; on Windows the batch finds an npm
+  install of `claude` (`claude.cmd` → its `cli.js`); `play start` and `play batch` say what retention pruned.
+
+**CLI fixes**
+- (H5) Decimal ranges work: `--t 0.9..1.3`, `--loop 0.5..4.25`.
+- (H6) Multibyte UTF-8 split across TCP chunks decodes intact (the CLI's NDJSON reader, the play daemon and client,
+  the batch, the JS adapter); a WebSocket handshake split across packets works, and one without a key gets a 400.
+- (M1) A launch command that doesn't exist fails at once with the reason; launch errors and timeouts show the tail of
+  the game's output (browser `[page error]` lines too); a dev server that exits fails at once.
+- (M3) Named baselines: `shot --save-ref <name>` writes `witness/refs/<name>.png`, never pruned (commit it), and
+  `--diff <name>` compares with it. `--diff` reads the reference before anything is written, and a shot whose output
+  is the reference is refused (it used to overwrite it and pass).
+- (M4) Pruning removes only what Witness wrote: its own output names in the shots folder plus files listed in a
+  `.witness-generated` manifest (test step shots, also in subfolders, `--out` files and measure pictures); in replays
+  only `*.jsonl` and their `.state.json`. A user's picture in witness/shots stays. A shots/replays folder outside the
+  project, the project itself or the Witness install is refused with a warning. `test` says what it pruned.
+- (M16, core part) `witness/movies` (Godot `--write-movie`): its `.avi`/`.png`/`.wav` files are pruned (retention
+  `"movies": {"days": 3}`, `witness clean --movies`); the folder and its `.gdignore` stay. A launch creates the folder
+  of a relative `--write-movie` path first (current Godot crashes at startup when it is missing), and `witness init`'s
+  `witness/.gitignore` ignores `movies/*` but keeps `movies/.gdignore`.
+- (M5) Flags that never take a value (`--json`, `--all`, every `--no-*`, …) no longer eat the next word
+  (`witness test --json a.witness.json` runs that file); `--repeat`/`--auto` take a value only when it's a number,
+  and so does `--fun` (`play note --fun "great jump"` vs `play end --fun 4`).
+- (M6) Logs are read from the adapter before every reset (some adapters clear them on reset), so measure steps and
+  doctor keep their errors; doctor lists the messages.
+- (M7) On an adapter without `reset`, `witness test` gives every test a fresh game process (it ran them in one
+  process on dirty state); `--attach` with several tests, `ab` with param/seed/scene/input variants, `heatmap` over
+  several runs and `measure figure --of` refuse with a clear message instead of giving wrong results. PROTOCOL.md
+  lists which commands need `reset`.
+- (M8) PROTOCOL.md: `--attach` / `"launch": {"attach": true}` (there is no `witness attach`), TCP and WebSocket are
+  the only transports (the stdio section is gone), and `meta` is a key name (`super`, `command`, `cmd`, `win`,
+  `windows` are accepted for it).
+- (M9) `witness init` copies no skills when Witness runs as an installed plugin; copies it does make are stamped with
+  the version and CLI path, and `witness doctor` warns about an unstamped, other-version or broken copy.
+- (M14) A replay whose last line was cut off (a crash) loads without it, with a warning; a bad line before the end is
+  an error naming `file:line`; `witness replays` marks cut-short recordings.
+- Also: `test --json` notes go to stderr; `--repeat` references are released after the last pass; `trace --xy --hist`
+  draws x/y histograms; media errors in `measure` print as messages; `listen --loop` past the capture's end is a clear
+  error; replay input goes in requests of at most 2000 events and about 1 MiB (Godot web's inbound buffer is 4 MiB).
+
+**Adapters**
+- (M13) Unity records one replay line per fixed step (`Time.fixedDeltaTime`), written at frame end; a frame's input
+  goes on its first step (Input Manager) or last step (Input System), so FixedUpdate logic replays exactly (GUIDE §9
+  lists the remaining limits). Godot C# records in `_PhysicsProcess`.
+- End-state writers (`<file>.jsonl.state.json`, which `witness replay` checks): C# `Witness.WriteEndState`, Java
+  `writeEndState`, Python `write_end_state`, Lua `write_end_state` (LÖVE: on quit), Rust `Recorder::end_state`, Go
+  `(*Recorder).EndState`, Godot `Witness.stop_recording()` (also on window close), Godot C# `EndRecording()`, and the
+  JS Node recorder on a clean exit. C++ has none yet. Godot writes it at the precision its snapshots use (at full
+  precision every desktop Godot replay would end with a false "end state differs"). A close request the game cancels
+  (`auto_accept_quit = false`) holds the frames after it, and a stale end state is deleted when more frames are
+  recorded.
+- (M14) C#, Java, Lua and Godot flush every recorded line (a crash used to lose up to 60 frames).
+- (M15) Godot web: WebSocket buffers of 4 MiB in / 64 MiB out (64 KiB before), and a failed send is reported.
+- (M16) Godot's template launches `--write-movie witness/movies/witness.avi` (it was `user://`), and `witness init`
+  installs `witness/movies/.gdignore`; the GUIDE describes the file (an MJPEG AVI, tens of MB per minute).
+- (M8) The Unity and Lua GUIDEs no longer mention `witness attach` or a stdio transport.
+- Key names: C++, Rust, Go and C# report the OS key as `meta` (0.7.2: `super` in C++/Rust/Go); every adapter accepts
+  `super`, `command`, `cmd`, `win` and `windows` as aliases (JS and Godot rejected `super`). Godot C# records mouse
+  motion and the wheel like GDScript, and replays fractional scrolls.
+
+**Tests:** `tests/core/run.mjs` (core regressions, with a tiny game), `tests/play/safety.mjs` (play process safety),
+`tests/js-adapter/utf8-split.mjs` and `key-aliases.mjs`, all run by `node tests/run.mjs`;
+`WITNESS_TEST_SKIP=play,web,python` leaves the heavy sub-suites out. The examples' copies of the Godot, Godot C# and
+C# adapters are re-synced, and the Godot example writes and checks its replay's end state in CI.
+
+**Adoption steps**
+1. **Baselines move to `witness/refs`.** If you keep reference pictures in `witness/shots` for `shot --diff`, move
+   them to `witness/refs/<name>.png` (or re-save with `witness shot … --save-ref <name>`), commit them, and use
+   `--diff <name>`. Pictures you put in witness/shots yourself are no longer pruned, but that folder is scratch output
+   (ignored by git).
+2. **Parallel runs share a budget now.** By default one machine runs at most 3 Witness games/browsers, 1 of them a
+   headless browser; more launches wait up to 90 s, then fail with `no free slot`. A CI box or script that runs more
+   in parallel on purpose: set `WITNESS_MAX_PROCS` / `WITNESS_MAX_BROWSERS` (0 = no limit), or
+   `WITNESS_BUDGET_WAIT=<seconds>` to queue longer (with a Bash timeout to match). Playtests: a second web-game
+   session needs `WITNESS_PLAY_MAX_WEB=2`.
+3. **Skill copies:** if `witness init` copied skills into `.claude/skills/witness*` and you use the installed plugin,
+   delete the copies (the plugin provides current ones). Without the plugin, delete them and re-run `witness init`
+   (it keeps your other files) to get 0.7.3's skills. `witness doctor` warns about stale copies.
+4. **Re-copy the adapter your game uses** if it changed: JS (`witness.js`), C++ (`witness.h`), C# (`Witness.cs`),
+   Unity (`Runtime/Witness.cs`, `Runtime/WitnessBridge.cs`), Godot (`addons/witness/Witness.gd`), Godot C#
+   (`WitnessNode.cs` and `Witness.cs`), Go, Java, Lua (`witness.lua`, `witness_love.lua`), Python (`witness.py`), Rust.
+   Nothing breaks without it; you miss the fixes above (UTF-8, flushing, end states, key aliases).
+5. **Game code that checks for the key name `super`** (C++/Rust/Go adapters) must check `meta`.
+6. **Godot:** change `--write-movie user://witness.avi` in witness.json to `witness/movies/witness.avi`, create an
+   empty `witness/movies/.gdignore`, and add `movies/*` and `!movies/.gdignore` to `witness/.gitignore` (new projects
+   get all three from `witness init`). A game that quits by itself (`get_tree().quit()`) while recording replays: call
+   `Witness.stop_recording()` (C#: `EndRecording()`) first so the end state is written.
+7. **Unity:** re-record replays made with 0.7.2 (they were per rendered frame; they are now per fixed step). Pin
+   `Application.targetFrameRate` when recording replays you assert on.
+8. **Adapters without `reset`:** `witness test` is now correct but slower (a fresh process per test), and `ab` with
+   params, multi-run `heatmap` and `measure figure --of` refuse. *Optional:* implement `reset` to get the speed back.
+9. **Playtest scripts:** `play list --clean` / `stop` no longer kill an unanswering PID (check the named PID
+   yourself); `next` separates orders only as `next,`, `. Next` or a leading `next`; batch testers can't use
+   `--force`, `--all`, `clean`, `batch` or another session. Run `play batch` in the background.
+10. *Optional:* add `"movies": {"days": N}` to witness.json `"retention"` (Godot), and use `witness clean --movies`.
+
 ## 0.7.2 (2026-10-19)
 
 **play: goto a target inside a wall** (reported by Embervale: `goto 172,-100`, a cell in the Inn's front wall beside

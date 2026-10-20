@@ -12,7 +12,9 @@ import { makeBrief } from "../../src/play/brief.js";
 import { compass, editDistance, singular } from "../../src/play/util.js";
 import { runFixTests } from "./fixes.mjs";
 import { checkSnapshot, checkLines } from "../../src/play/check.js";
-import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, budgetText, batchLine, wallCapFor } from "../../src/play/batch.js";
+import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, budgetText, batchLine, wallCapFor, claudeCommand } from "../../src/play/batch.js";
+import { shArg, launchArgs, cmdRoot } from "../../src/play/brief.js";
+import { spawnSync } from "node:child_process";
 import { shimCommand } from "../../src/play/registry.js";
 import { stuckSpots, reportMarkdown as reportMd } from "../../src/play/report.js";
 import { UntilWatch, fmtHours } from "../../src/play/until.js";
@@ -462,7 +464,7 @@ function platWorld() {
   const args = testerArgs({ model: "sonnet", effort: "low", cliJs: "C:/w/bin/witness.js", name: "b1-1" });
   const after = (f) => args[args.indexOf(f) + 1];
   ok("batch: claude -p with sonnet, low effort, Bash+Read only, dontAsk, no user settings or MCP", args[0] === "-p" && after("--model") === "sonnet" && after("--effort") === "low" && after("--tools") === "Bash,Read" && after("--permission-mode") === "dontAsk" && after("--setting-sources") === "project,local" && args.includes("--strict-mcp-config") && after("--output-format") === "json", args.join(" "));
-  ok("batch: Bash is limited to the witness commands and the session's short command", args.includes('Bash(node "C:/w/bin/witness.js" play:*)') && args.includes("Bash(./b1-1:*)") && !args.some((a) => a === "Bash" || a === "Bash(*)" || /^Bash\(node:/.test(a)), args.join(" "));
+  ok("batch: Bash is limited to the witness commands and the session's short command", args.includes('Bash(node "C:/w/bin/witness.js" play do:*)') && args.includes("Bash(./b1-1:*)") && !args.some((a) => a === "Bash" || a === "Bash(*)" || /^Bash\(node:/.test(a)), args.join(" "));
   const md = batchMarkdown([{ i: 1, goal: "win | fast", persona: "newbie", dir: nodePath.join(tmpB, "b1-1"), report: { outcome: "won", gameSeconds: 41.2, stats: { orders: 5, kills: 4, deaths: 0, stuck: 0 }, notes: [{ kind: "bug", t: 3, text: "door" }], feedback: { fun: 3, text: "easy" } }, reply: "won" },
     { i: 2, goal: "lose", persona: "fighter", report: null, timedOut: true, code: null, stderr: "" }], { base: tmpB, model: "sonnet", effort: "low", minutes: 1 });
   ok("batch: the summary file has a row per tester, links next to it, feedback and notes", /\| 1 \| win \/ fast \| newbie \| won \| 41\.2 \| 5 \| 4 \| 0 \| 0 \| 1 \| 3 \| \[report\]\(b1-1\/report\.md\) \|/.test(md) && /no report \(timed out\)/.test(md) && /- bug at 3s: door/.test(md), md);
@@ -473,6 +475,9 @@ function platWorld() {
   const shown = bb.split("COMMANDS")[1].split("ORDERS")[0].split("\n").map((l) => /^\s+(start|order|look|next|screen|note|end):\s+(.+?)(\s{2,}\(.*)?$/.exec(l)).filter(Boolean).map((m) => m[2].replace("<orders>", "goto Inn").replace("<what you noticed>", "x"));
   ok("batch: every command in the brief is allowed (start, order, look, next, screen, note, end)", shown.length === 7 && shown.every(allowed), JSON.stringify(shown.filter((c) => !allowed(c))) + "\n" + rules.join("\n"));
   ok("batch: the quoted and ./ variants are allowed too; other commands aren't", allowed(`"${shimCommand("b1-1").replace(/"/g, "")}" look`) && allowed("./b1-1 look") && !allowed("ls /") && !allowed("node -e 1") && after("--add-dir").length > 3, rules.join("\n"));
+  // 0.7.3: a tester can't run the main agent's commands (a batch of its own, clean, stop --all, list --clean)
+  const W = 'node "C:/w/bin/witness.js" play';
+  ok("batch: testers may not run play batch / clean / list / stop / suggest", ["batch --goals g.txt", "clean --all", "clean ..", "list --clean", "stop --all", "suggest --write", "brief"].every((c) => !allowed(`${W} ${c}`)) && ["status -s b1-1", "orders", "shot -s b1-1"].every((c) => allowed(`${W} ${c}`)), rules.join("\n"));
   // a permission-blocked tester: from claude's JSON permission_denials, or its reply; not when it played
   const den = [{ tool_name: "Bash", tool_input: { command: 'cd "C:/T/witness-play" && ./long-explorer "goto Inn"' } }];
   ok("batch: blockedBy reads permission_denials", (blockedBy({ denials: den, report: { stats: { orders: 0 } } }) || {}).command === 'cd "C:/T/witness-play" && ./long-explorer "goto Inn"');
@@ -583,6 +588,43 @@ ok("help: units named", /brief .*--minutes 4 \(GAME minutes\)/.test(PLAY_HELP) &
     const msys = shimCommand("b1-1").replace(/"/g, "").replace(/^([A-Za-z]):/, (m, d) => `/${d.toLowerCase()}`);
     ok("batch: the MSYS /c/... form of the shim is allowed (bare and quoted)", al(`${msys} look`) && al(`"${msys}" look`), `${msys}\n${rl.join("\n")}`);
   }
+}
+
+// ---- 0.7.3 audit (pure)
+{
+  // M11: "next" splits a chain only where it can't be part of the order
+  ok("splitChain: 'talk to the next guard' is one order", JSON.stringify(splitChain("talk to the next guard")) === '["talk to the next guard"]', JSON.stringify(splitChain("talk to the next guard")));
+  ok("splitChain: 'fight next wolf' is one order", splitChain("fight next wolf").length === 1);
+  ok("splitChain: a bare trailing 'next' is dropped (the chain isn't rejected)", JSON.stringify(splitChain("explore; next")) === '["explore"]' && parseOrders("explore; next").length === 1 && splitChain("next").length === 0, JSON.stringify(splitChain("explore; next")));
+  ok("splitChain: 'goto Inn, next, talk guard' leaves no trailing comma", JSON.stringify(splitChain("goto Inn, next, talk guard")) === '["goto Inn","talk guard"]', JSON.stringify(splitChain("goto Inn, next, talk guard")));
+  ok("splitChain: 'next,' / '. Next' / a leading next still chain", JSON.stringify(splitChain("goto Inn next, talk guard")) === '["goto Inn","talk guard"]' && JSON.stringify(splitChain("goto Inn. Next talk guard")) === '["goto Inn","talk guard"]' && JSON.stringify(splitChain("next talk guard")) === '["talk guard"]', JSON.stringify([splitChain("goto Inn next, talk guard"), splitChain("goto Inn. Next talk guard"), splitChain("next talk guard")]));
+  ok("parseOrders: 'talk to the next guard' targets the guard", (() => { const o2 = P("talk to the next guard"); return o2.length === 1 && o2[0].verb === "talk"; })(), JSON.stringify(P("talk to the next guard")));
+  // low: brief arguments survive sh ($ and backticks used to expand inside the double quotes)
+  const shOk = (x) => { const r = spawnSync("sh", ["-c", `printf %s ${shArg(x)}`], { encoding: "utf8", windowsHide: true }); return r.error ? null : r.stdout === x; };
+  const words = ["find the $HOME chest", "a `whoami` b", 'say "hi"', "don't $x", "C:/my games/x", "back\\slash"];
+  const shRes = words.map(shOk);
+  ok("brief: shArg round-trips $, backticks, quotes, apostrophes and backslashes through sh", shRes.every((x) => x === true || x === null) && shRes.some((x) => x === true), JSON.stringify(words.map((w, i) => [shArg(w), shRes[i]])));
+  const bd = makeBrief({ cli: 'node "C:/w/bin/witness.js"', configDir: "C:/game", name: "b1-1", goal: "open the $ chest" });
+  ok("brief: a goal with $ is single-quoted in the start line", /--goal 'open the \$ chest'/.test(bd), bd.split("\n").find((l) => /start:/.test(l)));
+  // M12: --cmd is carried into the brief's start line (it fell back to --config <folder> with no witness.json there)
+  ok("launchArgs: --cmd is repeated (quoted), launch flags kept", launchArgs({ cmd: 'node "game.js"', device: "iphone-15" }) === ' --device iphone-15 --cmd "node \\"game.js\\""', launchArgs({ cmd: 'node "game.js"', device: "iphone-15" }));
+  const bc = makeBrief({ cli: 'node "C:/w/bin/witness.js"', configDir: "C:/game", name: "b1-1", goal: "win", launch: launchArgs({ cmd: "python game.py" }) });
+  ok("brief: --cmd in the start line, after --config <the game folder>", /start:\s+node "C:\/w\/bin\/witness\.js" play start --name b1-1 --config "C:\/game" --cmd "python game\.py"/.test(bc), bc.split("\n").find((l) => /start:/.test(l)));
+  const tdir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "witness-cmdroot-"));
+  ok("cmdRoot: with --cmd, a --config folder is the root; without --cmd, untouched", cmdRoot({ cmd: "x", config: tdir }, "C:/cwd") === nodePath.resolve(tdir) && cmdRoot({ config: tdir }, "C:/cwd") === "C:/cwd" && cmdRoot({ cmd: "x" }, "C:/cwd") === "C:/cwd" && cmdRoot({ cmd: "x", config: nodePath.join(tdir, "nope") }, "C:/cwd") === "C:/cwd");
+  // low: claude on Windows: claude.exe on PATH, else the script inside npm's claude.cmd (spawn can't run a .cmd)
+  const d1 = nodePath.join(tdir, "npm"), d2 = nodePath.join(tdir, "native"), js = nodePath.join(d1, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+  fs.mkdirSync(nodePath.dirname(js), { recursive: true }); fs.writeFileSync(js, ""); fs.mkdirSync(d2);
+  // npm's real cmd-shim template: the IF EXIST "%dp0%\node.exe" block comes before the target line
+  fs.writeFileSync(nodePath.join(d1, "claude.cmd"), '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+  const cc = claudeCommand({ PATH: `${d2};${d1}` }, "win32");
+  ok("claudeCommand: npm's claude.cmd (no node.exe beside it) → node + its cli.js", cc.length === 2 && cc[0] === process.execPath && nodePath.resolve(cc[1]) === nodePath.resolve(js), JSON.stringify(cc));
+  fs.writeFileSync(nodePath.join(d1, "node.exe"), "");   // nvm-windows / prefix = the nodejs folder
+  const cn = claudeCommand({ PATH: `${d2};${d1}` }, "win32");
+  ok("claudeCommand: node.exe beside the shim isn't taken for claude", cn.length === 2 && cn[0] === process.execPath && nodePath.resolve(cn[1]) === nodePath.resolve(js), JSON.stringify(cn));
+  fs.writeFileSync(nodePath.join(d2, "claude.exe"), "");
+  ok("claudeCommand: claude.exe wins; WITNESS_CLAUDE overrides; elsewhere plain claude", claudeCommand({ PATH: `${d1};${d2}` }, "win32")[0] === nodePath.join(d2, "claude.exe") && claudeCommand({ WITNESS_CLAUDE: "x/fake.mjs" }, "win32")[1] === "x/fake.mjs" && claudeCommand({ PATH: d1 }, "linux")[0] === "claude");
+  fs.rmSync(tdir, { recursive: true, force: true });
 }
 
 // ---- regressions from a real game's reports (Embervale)

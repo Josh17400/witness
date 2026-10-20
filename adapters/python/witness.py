@@ -39,7 +39,7 @@ from array import array
 __all__ = [
     "PROTOCOL", "DEFAULT_ADDR", "active", "recording", "address", "run", "seed", "frame", "time",
     "log", "info", "warn", "error", "sound", "input_events", "is_down", "record_frame", "record_event",
-    "record_touch", "mark", "start_recording", "AudioCapture", "json_safe", "WitnessError",
+    "record_touch", "mark", "start_recording", "write_end_state", "AudioCapture", "json_safe", "WitnessError",
     "watching",
 ]
 
@@ -769,8 +769,10 @@ class _Recorder:
     def __init__(self, path, name, fps, seed_value):
         directory = os.path.dirname(os.path.abspath(path))
         os.makedirs(directory, exist_ok=True)
-        self.file = open(path, "w", encoding="utf-8", newline="\n", buffering=1)
+        self.path = path
+        self.file = open(path, "w", encoding="utf-8", newline="\n", buffering=1)  # line-buffered: a crash loses nothing
         self.f = 0
+        self.t = 0.0
         self.mark = None
         self.seed = seed_value
         started = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
@@ -788,6 +790,7 @@ class _Recorder:
             line["mark"], self.mark = self.mark, None
         self.file.write(_dumps(line) + "\n")
         self.f += 1
+        self.t += float(dt)
 
     def close(self):
         try:
@@ -851,6 +854,23 @@ def record_touch(id, x, y, phase, pressure=None):  # noqa: A002 - "id" is the pr
     if pressure is not None:
         e["pressure"] = pressure
     _A.rec_pending.append(e)
+
+
+def write_end_state(state):
+    """Write <recording>.state.json: the state the recording ended in ({"frame", "time", "state"}),
+    which `witness replay` compares field by field to the replay's final state. Call it once at the
+    end of play (after the last record_frame) with what your snapshot handler returns. Returns False
+    (and does nothing) unless this run is recording."""
+    r = _A.recorder
+    if r is None:
+        return False
+    try:
+        with open(r.path + ".state.json", "w", encoding="utf-8", newline="\n") as f:
+            f.write(_dumps({"frame": r.f, "time": r.t, "state": json_safe(state)}))
+        return True
+    except OSError as e:
+        sys.stderr.write("[witness] can't write %s.state.json: %s\n" % (r.path, e))
+        return False
 
 
 def mark(label="F8"):

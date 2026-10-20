@@ -19,6 +19,7 @@ pub struct Recorder {
     path: PathBuf,
     seed: i64,
     frame: u64,
+    time: f64,
     pending: Vec<Value>,
     mark: Option<String>,
 }
@@ -50,6 +51,7 @@ impl Recorder {
             path,
             seed: seed(),
             frame: 0,
+            time: 0.0,
             pending: Vec::new(),
             mark: None,
         };
@@ -143,6 +145,17 @@ impl Recorder {
             eprintln!("[witness] replay write failed: {e}");
         }
         self.frame += 1;
+        self.time += dt;
+    }
+
+    /// Write `<file.jsonl>.state.json`: the state the recording ended in (`{"frame", "time",
+    /// "state"}`), which `witness replay` compares field by field to the replay's final state.
+    /// Call it once at the end of play, after the last [`frame`](Self::frame), with the snapshot.
+    pub fn end_state(&self, state: Value) -> io::Result<()> {
+        let mut p = self.path.clone().into_os_string();
+        p.push(".state.json");
+        let o = obj! { "frame" => self.frame, "time" => self.time, "state" => state };
+        fs::write(PathBuf::from(p), o.to_string())
     }
 }
 

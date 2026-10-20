@@ -2,9 +2,9 @@ name: adapter-js
 
 on:
   push:
-    paths: ["adapters/js/**", "examples/js-node/**", "examples/js-browser/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-js.yml"]
+    paths: ["adapters/js/**", "tests/js-adapter/**", "examples/js-node/**", "examples/js-browser/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-js.yml"]
   pull_request:
-    paths: ["adapters/js/**", "examples/js-node/**", "examples/js-browser/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-js.yml"]
+    paths: ["adapters/js/**", "tests/js-adapter/**", "examples/js-node/**", "examples/js-browser/**", "examples/coins.witness.json", "bin/**", "src/**", ".github/workflows/adapter-js.yml"]
   workflow_dispatch:
 
 jobs:
@@ -29,6 +29,8 @@ jobs:
         run: cmp ../coins.witness.json witness/coins.witness.json
       - name: syntax
         run: node --check ../../adapters/js/witness.js && node --check game.mjs
+      - name: adapter regressions (UTF-8 split across TCP chunks, OS-key aliases)
+        run: node ../../tests/js-adapter/utf8-split.mjs && node ../../tests/js-adapter/key-aliases.mjs
       - name: witness doctor
         run: node ../../bin/witness.js doctor
       - name: witness test

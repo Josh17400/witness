@@ -6,7 +6,7 @@ import { WitnessError } from "../core/session.js";
 import { measureState, STATE_MEASURES } from "./measure.js";
 import { computeEffect, reportEffect } from "./effect.js";
 import { computeWindow, reportWindow } from "./window.js";
-import { checkExpect } from "./common.js";
+import { checkExpect, DieError, forgetDie } from "./common.js";
 
 export const MEASURE_KINDS = [...STATE_MEASURES, "effect", "window"];
 
@@ -18,10 +18,17 @@ export async function runMeasureStep(session, spec, base = {}, shotDir = ".") {
   const kind = kinds[0], opts = { ...(spec[kind] || {}) };
   for (const k of Object.keys(opts)) if (typeof opts[k] === "number") opts[k] = String(opts[k]);   // CLI-style values
   const ro = { seed: opts.seed != null ? +opts.seed : base.seed ?? 1, scene: opts.scene ?? base.scene, params: opts.params ?? base.params, input: opts.input != null ? String(opts.input) : undefined };
+  if (!session.has("reset")) throw new WitnessError(`measure ${kind} runs its own scenario from 'reset', which this adapter doesn't have`);
   let out;
-  if (STATE_MEASURES.includes(kind)) out = await measureState(session, kind, opts, ro);
-  else if (kind === "effect") out = reportEffect(await computeEffect(session, opts, ro, shotDir), { json: true });
-  else out = reportWindow(await computeWindow(session, opts, ro), { json: true });
+  try {
+    if (STATE_MEASURES.includes(kind)) out = await measureState(session, kind, opts, ro);
+    else if (kind === "effect") out = reportEffect(await computeEffect(session, opts, ro, shotDir), { json: true });
+    else out = reportWindow(await computeWindow(session, opts, ro), { json: true });
+  } catch (e) {
+    // a bad option is this step's failure, not the end of the whole test run
+    if (e instanceof DieError) { forgetDie(e); throw new WitnessError(e.message); }
+    throw e;
+  }
   const checks = [].concat(spec.expect ?? []).map((e) => checkExpect(String(e), out.env));
   return { kind, env: out.env, checks };
 }

@@ -1,3 +1,5 @@
 .godot/
 witness/shots/
 witness/replays/
+witness/movies/*
+!witness/movies/.gdignore

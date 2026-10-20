@@ -183,7 +183,13 @@ public final class SelfTest {
                 if (f == 20) Witness.mark("F8");
                 Witness.recordFrame(1.0 / 60, evs);
             }
+            eq(46, Files.readAllLines(Paths.get(record), StandardCharsets.UTF_8).size(), "frames flushed as they are recorded");
+            eq(true, Witness.writeEndState(Collections.singletonMap("x", 7)), "writeEndState while recording");
             Witness.stopRecording();
+            Map<String, Object> end = (Map<String, Object>) Witness.Json.parse(new String(Files.readAllBytes(Paths.get(record + ".state.json")), StandardCharsets.UTF_8));
+            eq(45L, end.get("frame"), "end state: frames recorded");
+            eq(7L, ((Map<String, Object>) end.get("state")).get("x"), "end state: the game state");
+            Files.delete(Paths.get(record + ".state.json"));
             List<String> lines = Files.readAllLines(Paths.get(record), StandardCharsets.UTF_8);
             eq(46, lines.size(), "replay has a header + 45 frames");
             Map<String, Object> head = (Map<String, Object>) Witness.Json.parse(lines.get(0));
@@ -194,6 +200,7 @@ public final class SelfTest {
             eq("{\"f\":40,\"dt\":0.016666666666666666,\"in\":[{\"type\":\"touch\",\"id\":1,\"x\":5,\"y\":6,\"phase\":\"down\"},{\"type\":\"touch\",\"id\":1,\"x\":5,\"y\":6,\"phase\":\"up\"}]}", lines.get(41), "touch recorded, synthesized mouse skipped");
         } else {
             eq(false, Witness.recording(), "not recording without WITNESS_RECORD");
+            eq(false, Witness.writeEndState(Collections.emptyMap()), "no end state without a recording");
         }
 
         // Sound events: no-op while disconnected, one unsolicited line once connected

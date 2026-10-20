@@ -52,6 +52,9 @@ export async function runDaemon(dir) {
     setStatus({ state: "failed", error: e.message });
     process.exit(1);
   }
+  // `play stop` / `end` (or a batch's cleanup) while this was launching the game: don't start playing
+  const stopAsked = () => fs.existsSync(path.join(dir, "stop.request"));
+  if (stopAsked()) { log("stop requested while starting"); try { await g.stop(); } catch { /* gone */ } setStatus({ state: "ended", endedAt: new Date().toISOString(), reason: "stopped while starting", outcome: "stopped", summary: "stopped while starting" }); process.exit(0); }
   const S = g.session, fps = S.fps;
   const rawPlay = { ...(spec.cfg.play || {}) };
   if (opts.noMap) rawPlay.map = false;
@@ -532,8 +535,8 @@ export async function runDaemon(dir) {
 
   // ---- lifetime guards
   const idleMs = Math.max(30, +(opts.idle || 300)) * 1000, maxMs = wallMin * 60000;
-  let idleTimer = null;
-  const touch = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => shutdown("idle timeout", "idle"), idleMs); };
+  let idleTimer = null, inflight = 0;   // commands being handled: a long order (wait 600) isn't idleness
+  const touch = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => (inflight || doRunning ? touch() : shutdown("idle timeout", "idle")), idleMs); };
   const maxTimer = setTimeout(() => shutdown(`session time limit reached (max ${wallMin} min)`, "timeout"), maxMs);
   touch();
   // the game went away by itself: a running order reports it (with the exit code); otherwise the session ends here
@@ -567,7 +570,6 @@ export async function runDaemon(dir) {
     }
     const shoot = (why, scale) => (live.on ? lock.run(() => screenshot(why, scale)) : screenshot(why, scale));
     switch (cmd) {
-      case "ping": return { ok: true, text: "pong" };
       case "look": {
         let shot = null, res = null;
         if (a.wait && live.on) res = (await liveDo(null, a.for, true)).result;   // keep the plan; answer at the next event or the horizon
@@ -607,20 +609,29 @@ export async function runDaemon(dir) {
   }
 
   server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (d) => { body += d; if (body.length > 1e6) req.destroy(); });
+    // bytes first, decoded once: a multibyte character split across chunks must not turn into U+FFFD
+    const parts = []; let n = 0;
+    req.on("data", (d) => { parts.push(d); n += d.length; if (n > 1e6) req.destroy(); });
     req.on("end", () => {
       let msg;
-      try { msg = JSON.parse(body || "{}"); } catch { res.writeHead(400); res.end("{}"); return; }
+      try { msg = JSON.parse(Buffer.concat(parts).toString("utf8") || "{}"); } catch { res.writeHead(400); res.end("{}"); return; }
       if (msg.token !== spec.token) { res.writeHead(403); res.end(JSON.stringify({ ok: false, code: 1, text: "bad token" })); return; }
+      // ping is answered here, outside the command queue: a liveness check must not wait behind a running order (it
+      // used to time out there and get a healthy session killed). It proves this PID is this session's daemon.
+      if (msg.cmd === "ping") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true, text: "pong", data: { name: spec.name, pid: process.pid, gamePid: g.proc ? g.proc.pid : null, finalizing } })); return; }
+      inflight++;
       chain = chain.then(() => handle(msg)).then((out) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(out)); },
-        (e) => { log(`command failed: ${e.stack || e.message}`); res.writeHead(200); res.end(JSON.stringify({ ok: false, code: 1, text: `✖ ${e.message}` })); });
+        (e) => { log(`command failed: ${e.stack || e.message}`); res.writeHead(200); res.end(JSON.stringify({ ok: false, code: 1, text: `✖ ${e.message}` })); })
+        .finally(() => { inflight--; if (!finalizing) touch(); });
     });
   });
   server.listen(0, "127.0.0.1", () => {
     const port = server.address().port;
     setStatus({ state: "ready", port, pid: process.pid, gamePid: g.proc ? g.proc.pid : null, fps, profile: cfg.profile, cell: world.cell });
     log(`ready on port ${port} (game pid ${g.proc ? g.proc.pid : "-"}, ${fps} fps, profile ${cfg.profile}, cell ${world.cell}${live.on ? ", LIVE" : ""})`);
+    // stopped while it was starting (stop/end found no port yet and left stop.request): checked after "ready" is written,
+    // so either that stop saw the port or this sees the file
+    if (stopAsked()) { log("stop requested while starting"); shutdown("stopped while starting", "stopped"); return; }
     if (live.on) { ap.standingMode = true; live.lastCmd = Date.now(); live.loopP = liveLoop(); }
   });
 }

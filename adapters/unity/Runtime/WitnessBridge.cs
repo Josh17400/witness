@@ -82,6 +82,8 @@ namespace WitnessKit
         private bool _audioRendering;
         private int _audioChannels;
         private readonly List<WitnessEvent> _recordEvents = new List<WitnessEvent>();
+        private readonly List<float> _recDts = new List<float>();   // this rendered frame's fixed steps, written at FrameEnd
+        private readonly List<WitnessEvent> _recCarry = new List<WitnessEvent>();   // input of frames without a fixed step
 
         /// <summary>Registers a custom command for `witness call name args`. Safe to call again after a scene reload.</summary>
         public static void RegisterCall(string name, string args, string help, Func<List<object>, object> fn)
@@ -125,7 +127,7 @@ namespace WitnessKit
         {
             bool attach = false;
 #if UNITY_EDITOR && WITNESS_ATTACH
-            attach = true;   // Editor: with the WITNESS_ATTACH scripting define, Play mode connects to `witness attach`
+            attach = true;   // Editor: with the WITNESS_ATTACH scripting define, Play mode connects to `witness <command> --attach`
 #endif
             if (Witness.Active || attach) _mode = Mode.Witness;
             else if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WITNESS_RECORD"))) _mode = Mode.Recording;
@@ -205,6 +207,13 @@ namespace WitnessKit
         private void OnApplicationQuit()
         {
             if (_audioRendering) AudioRenderer.Stop();
+            if (_mode == Mode.Recording && Witness.Recording)
+            {
+                WriteRecordedSteps();   // fixed steps of a frame that didn't reach FrameEnd
+                // <file>.state.json: the state the recording ended in, so `witness replay` can prove it replays exactly
+                try { Witness.WriteEndState(TakeSnapshot()); }
+                catch (Exception e) { Debug.LogWarning("[witness] no end state for the replay: " + e.Message); }
+            }
             Witness.StopRecording();
         }
 
@@ -213,6 +222,7 @@ namespace WitnessKit
         private struct WitnessFrameStartHook { }
         private struct WitnessPhysicsHook { }
         private struct WitnessFrameEndHook { }
+        private struct WitnessRecordStepHook { }
 
         private static void InstallPlayerLoop()
         {
@@ -220,6 +230,7 @@ namespace WitnessKit
             Insert(ref loop, typeof(UnityEngine.PlayerLoop.EarlyUpdate), typeof(WitnessFrameStartHook), FrameStart, true);
             Insert(ref loop, typeof(UnityEngine.PlayerLoop.PreUpdate), typeof(WitnessPhysicsHook), PhysicsStep, true);
             Insert(ref loop, typeof(UnityEngine.PlayerLoop.PostLateUpdate), typeof(WitnessFrameEndHook), FrameEnd, false);
+            Insert(ref loop, typeof(UnityEngine.PlayerLoop.FixedUpdate), typeof(WitnessRecordStepHook), RecordStep, true);
             PlayerLoop.SetPlayerLoop(loop);
         }
 
@@ -264,11 +275,19 @@ namespace WitnessKit
             Physics2D.Simulate(dt);
         }
 
+        // Recording: one replay frame per fixed step (0..n per rendered frame), the unit witness mode steps (one
+        // FixedUpdate + one Update per frame). Recording rendered frames instead replays physics at the wrong rate.
+        // The steps are buffered and written at FrameEnd, once the frame's input is known (WriteRecordedSteps).
+        private static void RecordStep()
+        {
+            if (_instance != null && _mode == Mode.Recording) _instance._recDts.Add(Time.fixedDeltaTime);
+        }
+
         private static void FrameEnd()
         {
             var b = _instance;
             if (b == null) return;
-            if (_mode == Mode.Recording) { b.RecordFrame(); return; }
+            if (_mode == Mode.Recording) { b.CollectRecordedInput(); b.WriteRecordedSteps(); return; }
             if (_mode == Mode.Witness) b.WitnessFrameEnd();
         }
 
@@ -610,7 +629,8 @@ namespace WitnessKit
 
         // ------------------------------------------------------------------ recording (normal play)
 
-        private void RecordFrame()
+        // This rendered frame's input (into _recordEvents; WriteRecordedSteps puts it on one of the frame's steps).
+        private void CollectRecordedInput()
         {
             _recordEvents.Clear();
 #if WITNESS_INPUT_SYSTEM && ENABLE_INPUT_SYSTEM
@@ -678,7 +698,33 @@ namespace WitnessKit
                 RecordLifts();
             }
 #endif
-            Witness.RecordFrame(Time.unscaledDeltaTime, _recordEvents);
+        }
+
+        // Writes the frame's buffered fixed steps. A replay line applies its input before its FixedUpdate and its
+        // Update, so the frame's input goes where live play first saw it: the old Input Manager updates in
+        // EarlyUpdate (before FixedUpdate) -> the frame's first step; the Input System (dynamic update, PreUpdate:
+        // after FixedUpdate, before Update) -> its last step. With one fixed step per frame both are exact. Input
+        // of a frame without a fixed step rides on the next frame's first step.
+        private void WriteRecordedSteps()
+        {
+            int n = _recDts.Count;
+            if (n == 0) { _recCarry.AddRange(_recordEvents); _recordEvents.Clear(); return; }
+#if WITNESS_INPUT_SYSTEM && ENABLE_INPUT_SYSTEM
+            int at = n - 1;
+#else
+            int at = 0;
+#endif
+            var line = new List<WitnessEvent>();
+            for (int i = 0; i < n; i++)
+            {
+                line.Clear();
+                if (i == 0) line.AddRange(_recCarry);
+                if (i == at) line.AddRange(_recordEvents);
+                Witness.RecordFrame(_recDts[i], line);
+            }
+            _recDts.Clear();
+            _recCarry.Clear();
+            _recordEvents.Clear();
         }
 
         // Touch recording (normal play). Platform touch ids become Witness finger ids (0 = the first finger

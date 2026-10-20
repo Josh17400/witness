@@ -297,6 +297,9 @@ while running:
     witness.record_frame(dt, events)        # one line per frame, full-precision dt
 ```
 
+Lines reach the disk as they are written, so a crash keeps the whole recording. At the end of play,
+`witness.write_end_state(game.state())` writes `<file.jsonl>.state.json` (the state the recording
+ended in), and `witness replay` then checks the replay ends in exactly that state.
 All of these are no-ops unless `witness.recording()` is true. The replay applies each frame's
 events **before** that frame's update, so record them in the same frame you applied them.
 From an event pump you can also queue events as they arrive with `witness.record_event(e)` /

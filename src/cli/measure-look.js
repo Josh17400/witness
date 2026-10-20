@@ -722,6 +722,8 @@ async function figureMeasure(m, c, files, opt) {
     await withGame({ ...opt, params: undefined, scene: undefined }, async (s, cfg) => {
       if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
       gamePixels(s, "measure figure", opt);
+      // a second run (without the figure) in the same process: it must start from the same state
+      if (!s.has("reset")) die("measure figure --of runs the scene twice in one game process (with and without the figure), which needs the adapter's 'reset': add 'reset', or save two pictures yourself and run witness measure figure <with.png> --mask diff:<without.png>");
       const base = runOpts({ ...opt, params: undefined, scene: undefined }, cfg);
       for (const scene of scenes) for (const params of sets) {
         const frames = [...new Set(ats.map((t) => framesOf(t, s.fps)))].sort((a, b) => a - b);

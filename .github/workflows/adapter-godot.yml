@@ -50,3 +50,5 @@ jobs:
           grep -q '"mark":"F8"' witness/replays/ci.jsonl
           node ../../bin/witness.js replay witness/replays/ci.jsonl --cmd "godot --path . --headless --fixed-fps 60" --watch "state.player.pos[0].toFixed(4)" | tee replay.txt
           grep -F "\"$x\"" replay.txt
+          test -f witness/replays/ci.jsonl.state.json
+          grep -F "ended in exactly the recorded end state" replay.txt

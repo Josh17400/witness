@@ -235,7 +235,9 @@ while acc >= FIXED_DT { world.update(FIXED_DT, &input); if let Some(r) = &mut re
 
 One `frame(dt)` per **simulation step**, with the dt that step used. Queued events go into the
 next frame line. Lines are flushed per frame, so crashes keep the replay. Play it back with
-`witness replay last`.
+`witness replay last`. At the end of play, `rec.end_state(snapshot)` writes
+`<file.jsonl>.state.json` (the state the recording ended in) and the replay then checks it ends in
+exactly that state.
 
 Touch (phones, tablets, touchscreens): record each finger with
 `r.touch(id, x, y, witness::TouchPhase::Down | Move | Up | Cancel)` in logical pixels, with small ids
@@ -358,5 +360,5 @@ witness shot --at 1       # look at the PNG
 | `Value`, `obj!`, `arr!` | JSON |
 | `witness::info/warn/error/log` | logs (errors fail tests) |
 | `witness::sound(name)`, `witness::sound_with(name, volume, pos)` | announce a sound (optional) |
-| `Recorder::from_env(name, fps)`, `.seed()`, `.key()`, `.mouse()`, `.touch()`, `.input()`, `.mark()`, `.frame(dt)` | replays |
+| `Recorder::from_env(name, fps)`, `.seed()`, `.key()`, `.mouse()`, `.touch()`, `.input()`, `.mark()`, `.frame(dt)`, `.end_state(state)` | replays |
 | `witness::seed()`, `witness::normalize_key()`, `witness::base64()` | helpers |

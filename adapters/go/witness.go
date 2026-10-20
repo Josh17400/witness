@@ -336,8 +336,12 @@ var keyAliases = map[string]string{
 	"rightcontrol": "ctrl", "controlleft": "ctrl", "controlright": "ctrl",
 	"lalt": "alt", "ralt": "alt", "leftalt": "alt", "rightalt": "alt", "altleft": "alt", "altright": "alt", "option": "alt", "altgr": "alt",
 	"del": "delete", "ins": "insert", "pgup": "pageup", "pgdn": "pagedown", "back": "backspace",
-	"meta": "super", "metaleft": "super", "metaright": "super", "lsuper": "super", "rsuper": "super", "leftsuper": "super",
-	"rightsuper": "super", "superleft": "super", "superright": "super", "command": "super", "windows": "super",
+	// the OS key is "meta" (as in the JS and Godot adapters); super/gui/command/windows spellings map to it
+	"super": "meta", "metaleft": "meta", "metaright": "meta", "leftmeta": "meta", "rightmeta": "meta", "lmeta": "meta",
+	"rmeta": "meta", "lsuper": "meta", "rsuper": "meta", "leftsuper": "meta", "rightsuper": "meta", "superleft": "meta",
+	"superright": "meta", "gui": "meta", "lgui": "meta", "rgui": "meta", "leftgui": "meta", "rightgui": "meta", "cmd": "meta",
+	"command": "meta", "leftcommand": "meta", "rightcommand": "meta", "windows": "meta", "leftwindows": "meta",
+	"rightwindows": "meta", "lwin": "meta", "rwin": "meta",
 }
 
 // NormalizeKey maps common key spellings to the Witness name: "Return" -> "enter",

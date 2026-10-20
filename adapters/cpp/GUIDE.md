@@ -190,7 +190,7 @@ const char* witness_from_sdl(SDL_Keycode k, char* buf, size_t n) { return witnes
 // witness -> engine (injection). SDL_GetScancodeFromName is case-insensitive ("right" == "Right").
 SDL_Scancode sdl_from_witness(const char* name) {
     static const struct { const char *w, *sdl; } alias[] = {
-        {"enter", "Return"}, {"shift", "Left Shift"}, {"ctrl", "Left Ctrl"}, {"alt", "Left Alt"}, {"super", "Left GUI"}};
+        {"enter", "Return"}, {"shift", "Left Shift"}, {"ctrl", "Left Ctrl"}, {"alt", "Left Alt"}, {"meta", "Left GUI"}};
     for (auto& a : alias) if (strcmp(name, a.w) == 0) return SDL_GetScancodeFromName(a.sdl);
     return SDL_GetScancodeFromName(name);   // a-z, 0-9, space, escape, tab, backspace, left/right/up/down, f1-f12
 }

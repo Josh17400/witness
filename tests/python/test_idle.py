@@ -165,6 +165,31 @@ def main():
     check_replies("sounds", out)
     check("sounds: one sound line, frame 1, volume and pos", out["events"] == [{"event": "sound", "name": "tick", "frame": 1, "volume": 0.5, "pos": [1.0, 2.0]}], out["events"])
 
+    # 6. recording: every line reaches the disk at once (a crash keeps it), and the end state lands in <file>.state.json
+    import tempfile
+    saved = {k: os.environ.pop(k, None) for k in ("WITNESS_ADDR", "WITNESS_RECORD")}
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = os.path.join(tmp, "run.jsonl")
+        check("record: no end state while not recording", witness.write_end_state({"x": 1}) is False)
+        os.environ["WITNESS_RECORD"] = rec
+        try:
+            witness.start_recording("t", fps=60, seed=3)
+            for f in range(5):
+                witness.record_frame(0.25, [{"type": "key", "key": "d", "down": True}] if f == 0 else None)
+            with open(rec, encoding="utf-8") as fh:
+                check("record: header + 5 frames on disk before close", len(fh.read().splitlines()) == 6)
+            check("record: write_end_state", witness.write_end_state({"x": 7, "nan": float("nan")}) is True)
+            with open(rec + ".state.json", encoding="utf-8") as fh:
+                end = json.load(fh)
+            check("record: end state shape", end == {"frame": 5, "time": 1.25, "state": {"x": 7, "nan": "NaN"}}, end)
+        finally:
+            witness._A.recorder.close()
+            witness._A.recorder = None
+            os.environ.pop("WITNESS_RECORD", None)
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+
     print("%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
 

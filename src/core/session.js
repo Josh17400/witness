@@ -3,6 +3,7 @@
 import { hint } from "./expr.js";
 import net from "node:net";
 import crypto from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
 export class WitnessError extends Error {}
 
@@ -11,9 +12,12 @@ export function listen({ host = "127.0.0.1", port = 0 } = {}) {
   return new Promise((resolve, reject) => {
     const waiting = [];
     const ready = [];
+    const timers = new Set();
     const server = net.createServer((sock) => {
       sniff(sock).then((conn) => {
         const s = new Session(conn);
+        // a connection that goes away before its hello (a probe, a dying old game) is dropped, not an unhandled rejection
+        s.helloP.catch(() => { const i = ready.indexOf(s); if (i >= 0) ready.splice(i, 1); });
         const w = waiting.shift();
         if (w) w(s); else ready.push(s);
       }).catch(() => sock.destroy());
@@ -26,36 +30,52 @@ export function listen({ host = "127.0.0.1", port = 0 } = {}) {
         /** Wait for the next adapter connection (and its hello). */
         nextSession(timeoutMs = 30000) {
           return new Promise((res, rej) => {
-            const timer = setTimeout(() => rej(new WitnessError(`no game connected within ${timeoutMs / 1000}s — is the Witness adapter wired in, and does the game read WITNESS_ADDR? (see 'witness doctor${hint.flags}')`)), timeoutMs);
-            const take = (s) => s.helloP.then((h) => { clearTimeout(timer); res(s); }, (e) => { clearTimeout(timer); rej(e); });
+            const timer = setTimeout(() => { timers.delete(timer); rej(new WitnessError(`no game connected within ${timeoutMs / 1000}s — is the Witness adapter wired in, and does the game read WITNESS_ADDR? (see 'witness doctor${hint.flags}')`)); }, timeoutMs);
+            timers.add(timer);
+            const done = () => { clearTimeout(timer); timers.delete(timer); };
+            const take = (s) => s.helloP.then(() => { done(); res(s); }, (e) => { done(); rej(e); });
             const s = ready.shift();
             if (s) take(s); else waiting.push(take);
           });
         },
-        close() { server.close(); },
+        close() { server.close(); for (const t of timers) clearTimeout(t); timers.clear(); },   // a pending wait never fires after close
       });
     });
   });
 }
 
-// Decide between raw NDJSON and WebSocket by peeking at the first bytes.
+// Decide between raw NDJSON and WebSocket by peeking at the first bytes. A WebSocket handshake may arrive in several
+// chunks: it is read up to its blank line first. A bad handshake closes that socket only (never an uncaught throw).
 function sniff(sock) {
   return new Promise((resolve, reject) => {
-    sock.once("data", (first) => {
-      sock.pause();
-      if (first.slice(0, 4).toString() === "GET ") resolve(wsUpgrade(sock, first));
-      else resolve(ndjsonConn(sock, first));
-    });
+    let head = Buffer.alloc(0);
+    const stop = () => { sock.pause(); sock.removeListener("data", onData); };
+    const onData = (d) => {
+      head = Buffer.concat([head, d]);
+      const start = head.slice(0, 4).toString("latin1");
+      if (start.length < 4 && "GET ".startsWith(start)) return;   // too short to tell yet
+      if (start !== "GET ") { stop(); resolve(ndjsonConn(sock, head)); return; }
+      if (head.indexOf("\r\n\r\n") < 0) {
+        if (head.length > 65536) { stop(); sock.destroy(); reject(new Error("websocket handshake too long")); }
+        return;
+      }
+      stop();
+      try { resolve(wsUpgrade(sock, head)); } catch (e) { reject(e); }
+    };
+    sock.on("data", onData);
     sock.once("error", reject);
+    sock.once("close", () => reject(new Error("closed before saying anything")));
   });
 }
 
 /** A line-based connection: {send(obj), onMessage(fn), onClose(fn), close()}. */
 function ndjsonConn(sock, first) {
   const handlers = { msg: [], close: [] };
+  // a character's UTF-8 bytes can be split across two chunks: the decoder holds the partial bytes until the rest
+  const dec = new StringDecoder("utf8");
   let buf = "";
   const feed = (d) => {
-    buf += d.toString("utf8");
+    buf += dec.write(d);
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, nl).replace(/\r$/, "");
@@ -90,7 +110,7 @@ function wsUpgrade(sock, first) {
   let head = first.toString("latin1");
   const end = head.indexOf("\r\n\r\n");
   const key = /sec-websocket-key:\s*(.+)\r\n/i.exec(head)?.[1]?.trim();
-  if (!key || end < 0) { sock.destroy(); throw new Error("bad websocket handshake"); }
+  if (!key || end < 0) { try { sock.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); } catch { /* gone */ } throw new Error("bad websocket handshake (no Sec-WebSocket-Key)"); }
   const accept = crypto.createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
   sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
   let buf = first.slice(Buffer.byteLength(head.slice(0, end + 4), "latin1"));
@@ -208,17 +228,31 @@ export class Session {
 
   // convenience wrappers
   reset(seed, scene, params) { return this.request("reset", { seed, ...(scene ? { scene } : {}), ...(params ? { params } : {}) }); }
-  input(events) { return events.length ? this.request("input", { events }) : Promise.resolve(); }
+  /** Queue input; a long replay's events go in several requests (one huge line can stall or overflow an adapter). */
+  /** In requests of at most `chunk` events and about `maxBytes` (a web adapter's inbound buffer: Godot's is 4 MiB). */
+  async input(events, chunk = 2000, maxBytes = 1 << 20) {
+    let part = [], bytes = 0;
+    for (const e of events) {
+      const n = JSON.stringify(e).length + 1;
+      if (part.length && (part.length >= chunk || bytes + n > maxBytes)) { await this.request("input", { events: part }); part = []; bytes = 0; }
+      part.push(e); bytes += n;
+    }
+    if (part.length) await this.request("input", { events: part });
+  }
   step(frames, dt, dts) { return this.request("step", { frames, ...(dt ? { dt } : {}), ...(dts ? { dts } : {}) }, Math.max(60000, frames * 50)); }
   snapshot(paths) { return this.request("snapshot", paths ? { paths } : {}); }
   screenshot(scale) { return this.request("screenshot", scale ? { scale } : {}, 120000); }
   audio() { return this.request("audio", {}, 120000); }
   call(name, args = []) { return this.request("call", { name, args }); }
   eval(expr) { return this.request("eval", { expr }); }
-  async drainLogs() {
-    if (this.has("logs")) {
+  /** Fetch the adapter's logs into this.logs (kept until drainLogs): before a reset, which may clear the adapter's. */
+  async pullLogs() {
+    if (this.has("logs") && !this.closed) {
       try { const r = await this.request("logs"); for (const l of r.logs || []) this.logs.push(l); } catch { /* optional */ }
     }
+  }
+  async drainLogs() {
+    await this.pullLogs();
     const out = this.logs;
     this.logs = [];
     return out;

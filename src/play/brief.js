@@ -2,6 +2,9 @@
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
 import { shimCommand } from "./registry.js";
 import { fmtHours } from "./until.js";
+import fs from "node:fs";
+import path from "node:path";
+import { launchFlags } from "../cli/common.js";
 
 export const PERSONAS = {
   newbie: { reaction: 0.35, text: "a new player: follows the game's hints, reads dialogue, notices what's confusing" },
@@ -11,7 +14,23 @@ export const PERSONAS = {
   fighter: { reaction: 0.22, text: "a fighter: seeks out combat and judges difficulty, telegraphs and balance" },
 };
 
-const q = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
+/**
+ * One shell word for the brief's commands (a tester's Bash tool runs them through sh): double quotes, or single quotes
+ * when $, a backtick or a backslash would still expand inside double ones (a goal "find the $ chest" lost its "$ chest").
+ */
+export const shArg = (s) => { s = String(s); return /[$`\\]/.test(s) ? `'${s.replace(/'/g, "'\\''")}'` : `"${s.replace(/"/g, '\\"')}"`; };
+const q = shArg;
+
+/**
+ * --cmd has no witness.json, so its root is the working folder; a --config folder given with it is the root instead:
+ * a brief's start line names the game folder (a batch tester runs from an empty temp folder).
+ */
+export function cmdRoot(opt, root) {
+  if (!opt.cmd || opt.cmd === true || !opt.config || opt.config === true) return root;
+  try { const d = path.resolve(String(opt.config)); return fs.statSync(d).isDirectory() ? d : root; } catch { return root; }
+}
+/** The launch as a start line repeats it: launch flags, plus --cmd "<launch>" for an ad-hoc launch. */
+export const launchArgs = (opt) => launchFlags(opt) + (opt.cmd && opt.cmd !== true ? ` --cmd ${shArg(opt.cmd)}` : "");
 
 /** A brief's start line --config: the folder, or the file itself when it isn't named witness.json. */
 export const configArg = (root, file) => (file && !/[\\/]witness\.json$/i.test(file) ? file : root).replace(/\\/g, "/");

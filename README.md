@@ -23,7 +23,8 @@ witness trace --watch "state.player.pos[1]" --input "space@1" --compare "GRAVITY
 witness trace --xy "state.player.pos" --input "right@0-3"   # the path over the level, start/end/death markers
 witness heatmap playtests                        # where playtesters spent time and died
 witness shot --from 1 --to 1.5 --sheet --follow "state.player.pos" --zoom 3   # a whole motion in one picture
-witness shot --at 1,4 --diff witness/shots/before.png
+witness shot --at 3 --save-ref before              # a named baseline (witness/refs/before.png: never pruned)
+witness shot --at 3 --diff before                  # what changed since: moved / appeared / gone, SSIM
 witness listen --time 8 --input "space@1"        # every sound tied to its cause, audio report + PNGs
 witness replay last --shot                       # what the human saw when they pressed F8
 witness measure scale witness/shots/shot.png     # exact pixel checks: scale/blur, box, contrast, motion
@@ -34,7 +35,7 @@ witness measure anim --of "state.player.anim"    # frames per pose, loop length,
 witness measure perf --time 5                    # frame cost p50/p95/max, spikes and what caused them, memory growth
 witness shot --clip --from 1 --to 3              # an animated PNG to watch in a browser
 witness play start --goal "Escape the arena"     # agent playtests: a cheap model PLAYS the game, Witness reports
-witness clean                                    # prune old playtests, recordings, screenshots (also automatic)
+witness clean                                    # prune old playtests, recordings, generated screenshots (also automatic)
 ```
 
 ## Install
@@ -98,6 +99,12 @@ Times are seconds or frames (`90f`), and expressions can look one frame back (`p
 Games may announce their sounds (`witness.sound("coin")`) so `listen` names them; everything else needs nothing more
 than the adapter.
 
+Witness keeps the machine responsive when several agents use it at once: every game or headless-browser launch takes
+a slot of a machine-wide budget (`WITNESS_MAX_PROCS`, default 3; `WITNESS_MAX_BROWSERS`, default 1) and waits up to
+`WITNESS_BUDGET_WAIT` seconds (default 90) for one, and a launched game is killed with its whole process tree when the
+command ends, fails or is interrupted. Generated output (witness/shots, replays, playtests, Godot movies) is pruned
+automatically; named baselines go in witness/refs (`shot --save-ref`), which is never pruned.
+
 * Spec: [docs/PROTOCOL.md](docs/PROTOCOL.md)
 * What changed and how to adopt each release: [CHANGELOG.md](CHANGELOG.md)
 * Agent playtests: [docs/PLAYTEST.md](docs/PLAYTEST.md)
@@ -118,6 +125,7 @@ witness play start --name t1 --goal "Escape the arena"                    # (wha
 witness play do "talk guard; choose 1; fight wolves block" -s t1
 witness play end -s t1 --fun 4 --difficulty 2 --feedback "…"              # → witness/playtests/t1/report.md
 witness replay witness/playtests/t1/replay.jsonl --at 12.4 --shot         # see a marked moment again
+witness play batch --goals goals.txt --minutes 3                          # agents without subagents: headless testers (run it in the background)
 ```
 
 [examples/arena](examples/arena) is a small top-down game built for it (a maze, wolves that telegraph their bites,

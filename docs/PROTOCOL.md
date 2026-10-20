@@ -8,9 +8,10 @@ lines in any language.
 ## 1. Transport
 
 * The CLI opens a **TCP server** on `127.0.0.1:<port>` and launches the game with the
-  environment variable `WITNESS_ADDR=127.0.0.1:<port>`. Other values (games already
-  running in an editor, or started by hand) use the default `127.0.0.1:7357` with
-  `witness attach`.
+  environment variable `WITNESS_ADDR=127.0.0.1:<port>`. Games Witness doesn't start (already
+  running in an editor, or started by hand) connect to the default `127.0.0.1:7357` while a
+  command waits with `--attach` (`witness doctor --attach`, `"launch": {"attach": true}` in
+  `witness.json`; `--port` picks another port).
 * The adapter **connects as a client**: on startup, if `WITNESS_ADDR` is set, or if the game
   was started with `--witness`. Browsers connect with a **WebSocket** to
   `ws://<addr>/` on the same port; the CLI auto-detects WebSocket upgrades. Browser games
@@ -34,8 +35,8 @@ lines in any language.
     screenshot is requested, or every step if that's simpler.
   * Audio goes into a buffer instead of to a device (see `audio`).
   * Saves and settings go to a scratch location so tests never touch the player's real save.
-* Logs: the game must keep stdout free of non-protocol text only when using the optional
-  `stdio` transport (section 7). TCP adapters can print freely.
+* Logs: the game may print freely to stdout/stderr: protocol messages travel over the socket only.
+  The CLI keeps the last lines of output and shows them when the game fails to start or connect.
 
 ## 2. Handshake
 
@@ -63,7 +64,7 @@ order, with `{"id": <n>, "ok": true, ...result}` or
 
 | cmd | args | result | notes |
 |---|---|---|---|
-| `reset` | `seed` (int), `scene?` (string), `params?` (object) | `{}` | Return the game to a deterministic initial state: the same seed and the same inputs must always give the same snapshots, screenshots and audio, **whatever ran before in the same process** (see §6). Without `reset`, the CLI restarts the process for each run. Reserved `params` (honour them if the game can vary them per run): `window: [w, h]` (window/backbuffer size in device pixels) and `dpi` (device pixel ratio); the CLI sends them for `--window 1920x1080` / `--dpi 2`. `camera: "hold"` (sent for `--hold-camera`) asks the game to keep its camera where the reset put it for the whole run (no following, no shake), so pixel measurements of a moving character (foot slide, registration, sprite size) aren't mixed with camera motion; games that ignore it still work, and `measure motion` then removes the camera's motion itself. `hide: [ids or type names]` (sent by `measure figure`) asks the game not to draw those entities this run (drawing only: everything else, the simulation included, stays the same), so the picture minus this run's is the entity's exact silhouette; games that ignore it still work (the silhouette is then estimated). |
+| `reset` | `seed` (int), `scene?` (string), `params?` (object) | `{}` | Return the game to a deterministic initial state: the same seed and the same inputs must always give the same snapshots, screenshots and audio, **whatever ran before in the same process** (see §6). Without `reset`, `witness test` starts a fresh game process for each test (slower; not possible with `--attach`, where only one test can run); commands that compare several runs in one process (`doctor`'s determinism check, `window`, `effect`, `ab` with params/seed/scene/input variants, `heatmap` over several replays or seeds, `measure motion`, `measure registration`, `measure figure --of`, measure steps in tests) need `reset`. Reserved `params` (honour them if the game can vary them per run): `window: [w, h]` (window/backbuffer size in device pixels) and `dpi` (device pixel ratio); the CLI sends them for `--window 1920x1080` / `--dpi 2`. `camera: "hold"` (sent for `--hold-camera`) asks the game to keep its camera where the reset put it for the whole run (no following, no shake), so pixel measurements of a moving character (foot slide, registration, sprite size) aren't mixed with camera motion; games that ignore it still work, and `measure motion` then removes the camera's motion itself. `hide: [ids or type names]` (sent by `measure figure`) asks the game not to draw those entities this run (drawing only: everything else, the simulation included, stays the same), so the picture minus this run's is the entity's exact silhouette; games that ignore it still work (the silhouette is then estimated). |
 | `input` | `events: [Event]` | `{}` | Queue input events. Each has `frame` (absolute frame number at which to apply it; apply at the start of that frame). Events for a past or current frame apply at the next step. |
 | `step` | `frames` (int ≥ 1), `dt?` (seconds, default `1/fps`), `dts?` (an array of per-frame dt, used by replays; overrides `dt`) | `{"frame": f, "time": t}` | Advance exactly that many fixed frames, applying queued inputs at their frames. |
 | `snapshot` | `paths?` (array of strings, optional filter) | `{"frame", "time", "state": {...}}` | Game-defined JSON describing its state. With `paths`, return only those top-level state keys (the CLI sends the keys its expressions read when it samples every frame, e.g. `["player", "entities"]`; it checks the filter against one full snapshot and turns it off if a key comes back different, and `WITNESS_PATHS=0` disables it). Ignoring `paths` is always allowed. Conventions (optional but unlocking helpers): `state.entities = [{"id", "type", "pos": [x, y(, z)], ...}]`, `state.scene`, `state.player`. Values must be JSON-safe (no NaN; use `"NaN"`). Optional `digest` (in the reply or in `state`): a string hash of the game's full internal state (every actor, RNG states, timers), so comparisons also catch hidden state the snapshot doesn't show. Agent playtests (`witness play`) read more optional conventions: entity `hostile`/`item`/`talk`, `state: "windup"` or `telegraph: <seconds>`, `state.dialogue`, `state.goal`, `state.notice`, `state.map`, `state.won`/`state.dead` (see [PLAYTEST.md](PLAYTEST.md#snapshot-conventions)). `witness measure ui` reads `state.ui = [{"id", "kind": "text"\|"button"\|"panel"\|"icon", "rect": [x, y, w, h], "text"?, "fontPx"?, "layer"?}]` in screen pixels (list only what is drawn this frame: a toast while it shows). Games that draw layers at different pixel scales (a world at ×5, a UI layer stretched at ×4.11) may name them: `state.layers = [{"name": "world", "rect": [x, y, w, h]}, {"name": "ui", "rect": [...]}]` in the same screen pixels, each rect where that layer draws (a UI layer over the whole screen: the rect of its panels, one entry per panel with the same name is fine); `witness doctor` names the scale regions it finds by the smallest layer holding most of each (without it, a region holding `state.ui` elements is called UI). |
@@ -118,8 +119,9 @@ input specs like `space@1.5`), it means seconds, or frames with an `f` suffix: `
 ```
 
 * **Key names** are lowercase: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`,
-  `backspace`, `shift`, `ctrl`, `alt`, `left`, `right`, `up`, `down`, `f1`–`f12`, plus any
-  other name the game understands.
+  `backspace`, `shift`, `ctrl`, `alt`, `meta` (the OS key: Cmd / Windows / Super), `left`,
+  `right`, `up`, `down`, `f1`–`f12`, plus any other name the game understands. Adapters also
+  accept `super`, `command`, `cmd`, `win` and `windows` for `meta` and report it as `meta`.
 * Mouse coordinates are in the game's logical pixels, with the top-left origin.
 * `button`: 0 = left, 1 = middle, 2 = right.
 * `action` events are for games with an input-mapping layer: the adapter passes the action
@@ -224,11 +226,11 @@ adapter writes a replay:
    journey, a fight) use `"match"` steps in tests or `witness test --repeat 2`, which compares every
    step of every test against the first pass.
 
-## 7. Optional stdio transport
+## 7. Transports
 
-If TCP is impossible, set `"transport": "stdio"` in `witness.json`. The CLI then talks over
-the child's stdin and stdout. Protocol lines must start with the two characters `@w`
-(e.g. `@w{"id":1,...}`); other stdout lines are treated as game logs.
+TCP (NDJSON) and WebSocket, on the port in `WITNESS_ADDR`, are the only transports. There is no stdio transport:
+a game that can't open a socket (some consoles, sandboxed builds) needs a small relay process of its own. Lines
+that start with `@w` are accepted on TCP as plain protocol lines (the prefix is dropped).
 
 ## 8. Versioning
 

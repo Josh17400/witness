@@ -102,7 +102,10 @@ export async function abCommand(pos, opt) {
     await withVariant(A, async (s, cfg, root) => { plan(s); shotsDir = path.join(root, cfg.shots); capA = await capture(s, cfg, A); });
     await withVariant(B, async (s, cfg) => { if (s.fps !== fps) die(`A runs at ${fps} fps and B at ${s.fps}: they can't be compared frame by frame`); capB = await capture(s, cfg, B); });
   } else {
-    await withGame(opt, async (s, cfg, root) => { plan(s); shotsDir = path.join(root, cfg.shots); capA = await capture(s, cfg, A); capB = await capture(s, cfg, B); });
+    await withGame(opt, async (s, cfg, root) => {
+      // both variants in one process: without reset B would start from A's end state, its seed/scene/params never applied
+      if (!s.has("reset")) die("ab runs A and B in one game process, which needs the adapter's 'reset' (else B starts where A ended and its params are never applied): add 'reset' to the adapter, or make the difference an environment variable (--a FOO=0 --b FOO=1: a fresh process per variant)");
+      plan(s); shotsDir = path.join(root, cfg.shots); capA = await capture(s, cfg, A); capB = await capture(s, cfg, B); });
   }
   const outDir = path.resolve(opt.out && opt.out !== true ? String(opt.out) : path.join(shotsDir, "ab"));
   fs.mkdirSync(outDir, { recursive: true });

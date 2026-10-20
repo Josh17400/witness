@@ -46,8 +46,10 @@ end:    W end -s t1 --fun <1-5> --difficulty <1-5> --feedback '<3-6 sentences>'
 ```
 Note and feedback text: single quotes, plain words, no backticks, `$` or apostrophes inside (a backtick gets the command denied).
 
-The main agent usually gives you the exact `start` command: run it as given. It prints the first observation with
-your goal, the game's controls and the order card. `W orders` prints the order card again.
+The main agent usually gives you the exact `start` command: run it as given (keep its `--cmd "…"` if it has one). It
+prints the first observation with your goal, the game's controls and the order card. `W orders` prints the order card
+again. Only these commands are yours: never `W batch`, `W clean`, `W list`, `--all` or `--force` (in a headless batch
+they are refused; they belong to the main agent).
 
 ## Orders (chain several with ";")
 

@@ -7,6 +7,7 @@ import { sampleExprs, frameGrid } from "../core/sample.js";
 import { alignSoundEvents, matchSounds, soundFrame } from "../core/soundmatch.js";
 import { parseNamedEvents, eventFrames, inputPresses, errorLines } from "./ask.js";
 import { die, withGame, runOpts, media, printLogs, framesOf, fmtT, envelope, emit } from "./common.js";
+import { splitRange } from "./window.js";
 
 export async function listenCommand(pos, opt) {
   const named = parseNamedEvents(opt.events);
@@ -57,9 +58,12 @@ export async function listenCommand(pos, opt) {
     // --loop a..b: how the end of a music loop meets its start
     let seam = null;
     if (opt.loop && opt.loop !== true) {
-      const mm = /^\s*([^.]+?)\s*\.\.\s*(.+?)\s*$/.exec(String(opt.loop));
-      if (!mm) die("--loop wants a..b (seconds or frames), e.g. --loop 0..4");
-      const la = framesOf(mm[1], fps) / fps, lb = framesOf(mm[2], fps) / fps;
+      const mm = splitRange(opt.loop);
+      if (!mm) die("--loop wants a..b (seconds or frames), e.g. --loop 0..4 or --loop 0.5..4.25");
+      const la = framesOf(mm[0], fps) / fps, lb = framesOf(mm[1], fps) / fps;
+      const len = dec.channels[0].length / dec.sampleRate;
+      if (!(la >= 0 && lb > la)) die(`--loop ${opt.loop}: the end must come after the start`);
+      if (lb > len + 1e-6) die(`--loop ${opt.loop}: the capture is only ${+len.toFixed(3)} s long (raise --time to at least ${+(lb + 0.1).toFixed(2)})`);
       const { loopSeam } = await import("../media/hygiene.js");
       try { seam = { a: la, b: lb, ...loopSeam(m.mono(dec.channels), dec.sampleRate, la, lb) }; } catch (e) { die(`--loop: ${e.message}`); }
     }

@@ -5,10 +5,20 @@ import { findConfig, openGame, runBuild, CONFIG_NAME } from "../core/launch.js";
 import { frameAt, secondsOf } from "../core/runner.js";
 import { ExprError, fmt } from "../core/expr.js";
 import { WitnessError } from "../core/session.js";
+import { markGenerated } from "../core/clean.js";
 
 export const CLI = { json: false };   // with --json, human-readable extras go to stderr so stdout stays valid JSON
 
-export const die = (msg, code = 1) => { console.error(`✖ ${msg}`); process.exit(code); };
+/** A die() inside withGame: thrown up to withGame, which stops the game (graceful quit, process tree) before exiting. */
+export class DieError extends Error { constructor(msg, code = 1) { super(msg); this.code = code; } }
+let gameDepth = 0, pendingDie = null;
+export const die = (msg, code = 1) => {
+  if (gameDepth > 0) { const e = new DieError(msg, code); pendingDie = pendingDie || e; throw e; }
+  console.error(`✖ ${msg}`);
+  process.exit(code);
+};
+/** A caller that turns a die() into something else (a test's failure) takes it off the pending list. */
+export const forgetDie = (e) => { if (e === pendingDie) pendingDie = null; };
 export const say = (...a) => (CLI.json ? console.error : console.log)(...a);
 
 /** "1,2.5,90f" -> ["1", "2.5", "90f"] (times stay strings so "90f" keeps meaning frames). */
@@ -86,17 +96,28 @@ export async function withGame(opt, fn) {
   } catch (e) {
     die(e.message);
   }
+  // die() inside fn throws a DieError up to here (process.exit would skip the stop and leak the game); one that
+  // something caught and swallowed still ends the command once fn returns
+  gameDepth++;
+  let result, failure = null;
   try {
-    return await fn(g.session, cfg, root, g);
+    result = await fn(g.session, cfg, root, g);
   } catch (e) {
     if (e instanceof WitnessError || e instanceof ExprError) {
       const tail = g.output().trim().split("\n").slice(-15).join("\n");
-      die(`${e.message}${tail ? `\n--- last game output ---\n${tail}` : ""}`);
-    }
-    throw e;
+      failure = new DieError(`${e.message}${tail ? `\n--- last game output ---\n${tail}` : ""}`);
+    } else failure = e;
   } finally {
-    await g.stop();
+    gameDepth--;
   }
+  if (!failure && pendingDie) failure = pendingDie;
+  try { await g.stop(); } catch { /* best effort: the exit hook kills what's left */ }
+  if (failure) {
+    if (!(failure instanceof DieError) || gameDepth > 0) throw failure;
+    pendingDie = null;
+    die(failure.message, failure.code);
+  }
+  return result;
 }
 
 /**
@@ -192,6 +213,25 @@ export function splitTop(s) {
 }
 
 /**
+ * Record files a command wrote in their project's shots-folder manifest (src/core/clean.js), so the files it names
+ * itself (trace --out jump.png, <shot>-protan.png beside a test shot, lvl1/a.png) are pruned like shot.png; a file
+ * outside a shots folder is left alone. shotsDir: the folder when known, else found from each file's witness.json.
+ */
+export function markOutputs(files, shotsDir = null) {
+  const dirs = new Map();
+  for (const f0 of [].concat(files || [])) {
+    const f = typeof f0 === "string" ? f0 : f0 && (f0.file || f0.path);
+    if (!f) continue;
+    let d = shotsDir;
+    if (!d) {
+      const at = path.dirname(path.resolve(f));
+      if (!dirs.has(at)) { let s = null; try { const c = findConfig(at); if (c) s = path.resolve(c.root, c.config.shots); } catch { /* no project */ } dirs.set(at, s); }
+      d = dirs.get(at);
+    }
+    if (d) markGenerated(d, f);
+  }
+}
+/**
  * The one JSON shape new commands print with --json:
  * { ok, command, verdict, summary: {the few numbers that matter}, data: {details}, files: [] }
  */
@@ -271,6 +311,7 @@ const fmtV = (v) => fmt(v, 60);
  * env.ok === false also sets exit code 1.
  */
 export function emit(env, text, opt, { expectable = true, json = null } = {}) {
+  markOutputs(env.files);
   let exp = null;
   if (expectable && opt.expect && opt.expect !== true) {
     exp = checkExpect(String(opt.expect), env);

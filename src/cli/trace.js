@@ -347,7 +347,13 @@ export async function traceCommand(pos, opt) {
   let hists = null;
   if (opt.hist) {
     const mm = m || await media();
-    const fa = flatSeries(exprs, RA.main), fb = two ? flatSeries(exprs, RB.main) : null;
+    // the --watch series, plus the --xy position per axis (alone: --xy "state.player.pos" --hist)
+    const xyAxes = (r) => {
+      if (!xyExpr || exprs.includes(xyExpr)) return [];
+      const at = new Map(((r.xy && r.xy.points) || []).map((p) => [p[2], p]));
+      return ["x", "y"].map((ax, k) => ({ label: `${xyExpr}.${ax}`, expr: xyExpr, vals: frames.map((f) => (at.has(f) ? at.get(f)[k] : null)) }));
+    };
+    const fa = [...flatSeries(exprs, RA.main), ...xyAxes(RA)], fb = two ? [...flatSeries(exprs, RB.main), ...xyAxes(RB)] : null;
     const bins = opt.bins && opt.bins !== true ? Math.max(2, Math.min(200, +opt.bins)) : 20;
     hists = fa.map((s, i) => {
       const sets = [s.vals, ...(fb ? [(fb.find((x) => x.label === s.label) || fb[i]).vals] : [])];

@@ -482,8 +482,11 @@ pub fn normalize_key(name: &str) -> String {
         "pgup" => "pageup",
         "pgdn" => "pagedown",
         "back" => "backspace",
-        "meta" | "metaleft" | "metaright" | "lsuper" | "rsuper" | "leftsuper" | "rightsuper"
-        | "superleft" | "superright" | "command" | "windows" => "super",
+        // the OS key is "meta" (as in the JS and Godot adapters); super/gui/command/windows spellings map to it
+        "super" | "metaleft" | "metaright" | "leftmeta" | "rightmeta" | "lmeta" | "rmeta"
+        | "lsuper" | "rsuper" | "leftsuper" | "rightsuper" | "superleft" | "superright" | "gui"
+        | "lgui" | "rgui" | "leftgui" | "rightgui" | "cmd" | "command" | "leftcommand"
+        | "rightcommand" | "windows" | "leftwindows" | "rightwindows" | "lwin" | "rwin" => "meta",
         _ => return k,
     };
     alias.to_string()
@@ -1131,6 +1134,10 @@ mod tests {
             (" ", "space"),
             ("F5", "f5"),
             ("Escape", "escape"),
+            ("Super", "meta"),
+            ("SuperLeft", "meta"),
+            ("Meta", "meta"),
+            ("Left GUI", "meta"),
         ] {
             assert_eq!(normalize_key(i), o);
         }
@@ -1251,5 +1258,21 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let w = r#"{"f":0,"dt":0.5,"in":[{"type":"touch","id":0,"x":10,"y":20,"phase":"down"}]}"#;
         assert_eq!(text.lines().nth(1), Some(w));
+    }
+
+    #[test]
+    fn recorder_end_state() {
+        let name = format!("witness-end-{}.jsonl", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        let mut r = Recorder::create(path.clone(), "end", 60).unwrap();
+        r.frame(0.25);
+        r.frame(0.5);
+        r.end_state(obj! { "x" => 7 }).unwrap();
+        drop(r);
+        let end = path.with_extension("jsonl.state.json");
+        let text = std::fs::read_to_string(&end).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&end);
+        assert_eq!(text, r#"{"frame":2,"time":0.75,"state":{"x":7}}"#);
     }
 }
