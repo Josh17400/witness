@@ -137,7 +137,9 @@ async function verifiedLive(entries) {
   for (const e of entries) { if (starting(e) || !(await ping(e, 2000)).dead) out.push(e); else updateEntry(e.name, { state: "ended", summary: `the session daemon wasn't answering (${NOT_KILLED(e)})` }); }
   return out;
 }
-const sameDir = (a, b) => { const x = path.resolve(a), y = path.resolve(b); return process.platform === "win32" ? x.toLowerCase() === y.toLowerCase() : x === y; };
+// symlinks resolved (macOS /var is /private/var), so one folder under two spellings still counts as the same
+const realish = (p) => { p = path.resolve(p); const tail = []; while (!fs.existsSync(p)) { const d = path.dirname(p); if (d === p) break; tail.unshift(path.basename(p)); p = d; } try { p = fs.realpathSync.native(p); } catch { /* as is */ } return path.join(p, ...tail); };
+const sameDir = (a, b) => { const x = realish(a), y = realish(b); return process.platform === "win32" ? x.toLowerCase() === y.toLowerCase() : x === y; };
 
 /** `witness play <sub> …` */
 export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {

@@ -16,7 +16,9 @@ export function parseRect(s, what = "a region") {
   if (v.length !== 4 || v.some((x) => !Number.isFinite(x)) || v[2] <= 0 || v[3] <= 0) die(`${what} is x,y,w,h (got ${s})`);
   return { x: v[0], y: v[1], w: v[2], h: v[3] };
 }
-const samePath = (a, b) => (process.platform === "win32" ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+// symlinks resolved (macOS /var is /private/var), so one file under two spellings still counts as the same
+const realish = (p) => { p = path.resolve(p); const tail = []; while (!fs.existsSync(p)) { const d = path.dirname(p); if (d === p) break; tail.unshift(path.basename(p)); p = d; } try { p = fs.realpathSync.native(p); } catch { /* as is */ } return path.join(p, ...tail); };
+const samePath = (a, b) => { const x = realish(a), y = realish(b); return process.platform === "win32" ? x.toLowerCase() === y.toLowerCase() : x === y; };
 /** --save-ref <name>: a baseline name (letters, digits, . _ -), ".png" optional. */
 export function refName(v) {
   const n = v === true ? "" : String(v).replace(/\.png$/i, "");
