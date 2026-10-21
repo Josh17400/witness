@@ -4,7 +4,7 @@ import { r1, clip, oneLine, fmtT, compass, len } from "./util.js";
 import { thingLabel } from "./perceive.js";
 import { lookOf } from "./profiles.js";
 import { describeControls } from "./config.js";
-import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS } from "./orders.js";
+import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS, ORDER_CARD_TURN } from "./orders.js";
 import { cellOf } from "./events.js";
 
 const IDLE = /^(idle|none|normal|walk|walking|stand|standing|wander|patrol|default)$/i;
@@ -51,6 +51,7 @@ function letterTable(things) {
 /** Build the observation data (also what --json prints). */
 export function observeData(w, ctx) {
   const { cfg, grid, ap } = ctx;
+  if (cfg.profile === "turn") return turnData(w, ctx);
   const P = w.player;
   const data = { t: +w.t.toFixed(2), frame: w.frame, player: null, stats: {}, near: [], farther: {}, remembered: [], dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, dead: w.dead, won: w.won, result: ctx.result || null, events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })), map: null };
   if (P && P.p2) {
@@ -105,6 +106,7 @@ function platformWindow(w, marks) {
 
 /** The text a tester reads. */
 export function observeText(w, ctx) {
+  if (ctx.cfg.profile === "turn") return turnText(w, ctx);
   const d = observeData(w, ctx), cfg = ctx.cfg, L = [];
   const head = [`[t ${fmtT(w.t)}${ctx.live ? ` · ${ctx.live}` : ""}]`];
   if (d.player) {
@@ -154,6 +156,83 @@ export function observeText(w, ctx) {
   if (ctx.first) {
     L.push(`controls: ${describeControls(cfg)}`);
     L.push(`orders: ${ORDER_CARD.split("\n").join("\n        ")}${cfg.profile === "platformer" ? `\n        ${ORDER_CARD_PLATFORMER}` : cfg.profile === "fps" ? `\n        ${ORDER_CARD_FPS}` : ""}`);
+  }
+  return L.join("\n");
+}
+
+// ------------------------------------------------------------------ turn-based / card / menu games
+/** One field value as text: numbers, short strings, lists of cards/labels, {us: 3, them: 5} scores. */
+export function fmtField(v, n = 160) {
+  if (v == null) return "–";
+  if (typeof v === "number") return String(r1(v));
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (typeof v === "string") return clip(oneLine(v), n);
+  const lab = (x) => (x && typeof x === "object" ? x.label ?? x.text ?? x.name ?? x.title ?? x.card ?? x.id ?? null : x);
+  if (Array.isArray(v)) {
+    if (!v.length) return "(none)";
+    const parts = v.map((x) => { const l = lab(x); return l != null && typeof l !== "object" ? String(l) : JSON.stringify(x); });
+    return clip(parts.join(", "), n);
+  }
+  const ent = Object.entries(v);
+  if (ent.length && ent.every(([, x]) => x == null || typeof x !== "object")) return clip(ent.map(([k, x]) => `${k} ${typeof x === "number" ? r1(x) : x}`).join(" · "), n);
+  const l = lab(v);
+  return clip(l != null && typeof l !== "object" ? String(l) : JSON.stringify(v), n);
+}
+
+function turnData(w, ctx) {
+  const fields = {};
+  for (const s of w.stats) fields[s.label] = s.value;
+  return { t: +w.t.toFixed(2), frame: w.frame, profile: "turn", scene: w.scene, yourTurn: w.yourTurn, fields,
+    choices: (w.choices || []).map((c) => ({ n: c.n, label: c.label, id: c.id, legal: c.legal, selected: c.selected || undefined })),
+    dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, dead: w.dead, over: w.over || false, won: w.won, result: ctx.result || null,
+    events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })) };
+}
+
+/** The turn profile's observation: the game's own fields, whose turn, the choices; no map, no distances, no cell. */
+function turnText(w, ctx) {
+  const d = turnData(w, ctx), cfg = ctx.cfg, L = [];
+  const head = [`[t ${fmtT(w.t)}${ctx.live ? ` · ${ctx.live}` : ""}]`];
+  if (w.scene) head.push(`scene ${clip(w.scene, 30)}`);
+  const long = [];
+  for (const [k, v] of Object.entries(d.fields)) {
+    const txt = fmtField(v);
+    if (Array.isArray(v) || txt.length > 32) long.push([k, txt]); else head.push(`${k} ${txt}`);
+  }
+  if (w.yourTurn === true) head.push("YOUR TURN"); else if (w.yourTurn === false) head.push("not your turn");
+  L.push(head.join(" · "));
+  if (ctx.clock) L.push(ctx.clock);
+  if (ctx.first && ctx.session && ctx.session.goal) L.push(`your goal: ${ctx.session.goal}`);
+  if (d.goal) L.push(`goal: ${clip(oneLine(d.goal), 140)}`);
+  if (d.result) L.push(d.result.line);
+  if (w.won) L.push("★ GAME WON (the game reports a win) — play on or end the session");
+  else if (w.dead || w.over) L.push(`GAME OVER${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}`);
+  for (const [k, txt] of long) L.push(`${k}: ${txt}`);
+  if (w.dialogue) {
+    const dl = w.dialogue;
+    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}"${clip(oneLine(dl.text), 220)}"`);
+    if (dl.options.length) L.push(`  ${dl.options.map((o, i) => `${i + 1}) ${clip(oneLine(o), 60)}`).join("   ")}    (choose ${dl.options.map((_, i) => i + 1).join(" / ")})`);
+  }
+  const ch = w.choices || [];
+  if (ch.length && !(w.dialogue && w.dialogue.options.length)) {
+    const shown = ch.slice(0, 24);
+    const one = (c) => `${c.n}) ${clip(c.label, 56)}${c.selected ? " (selected)" : ""}${c.legal ? "" : " (not allowed)"}`;
+    const lines = []; let line = "";
+    for (const c of shown) { const x = one(c); if (line && line.length + x.length > 110) { lines.push(line); line = ""; } line += (line ? "   " : "") + x; }
+    if (line) lines.push(line);
+    L.push(`choices (pick <n> or pick <words>)${ch.length > shown.length ? ` — ${ch.length} in all, the rest by words` : ""}:`);
+    for (const l of lines) L.push(`  ${l}`);
+  } else if (!ch.length && !w.dialogue) L.push(w.yourTurn === false ? "no choices: the others are playing (wait)" : "no choices listed right now");
+  if (w.menu) L.push(`menu open: ${clip(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), 140)}`);
+  if (d.notice && !w.dead) L.push(`game says: "${clip(oneLine(d.notice), 140)}"`);
+  const evs = (ctx.events || []).filter((e) => !e.dup);
+  if (evs.length) {
+    const shown = evs.slice(-9);
+    L.push(`events: ${shown.map((e) => `${r1(e.t)} ${e.text}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`);
+  }
+  if (ctx.first) {
+    const ctl = describeControls(cfg);
+    if (ctl) L.push(`controls: ${ctl}`);
+    L.push(`orders: ${ORDER_CARD_TURN.split("\n").join("\n        ")}`);
   }
   return L.join("\n");
 }

@@ -52,6 +52,11 @@ export const ORDER_CARD = [
   "modifiers: for 8s · careful (wake on anything) · kite 4 (keep distance)",
 ].join("\n");
 export const ORDER_CARD_PLATFORMER = "run <left|right> [to x] · jump [left|right] [short|long|high] · stomp <thing> · wait for <thing>";
+export const ORDER_CARD_TURN = [
+  "pick <n|words> (one of the choices: a card, a menu button, a move; by number or by words from its label)",
+  "choose <n|words> (a dialogue option; pick works there too) · wait [s] (until your turn, new choices or a dialogue; cap s)",
+  "press <key|control> [xN] · hold <key|control> <s> · stop",
+].join("\n");
 export const ORDER_CARD_FPS = "fight [thing] [hold] · look <dir|thing> · reload · weapon <n|name> · go forward|back|left|right [cells]";
 
 function tokenize(s) {
@@ -245,7 +250,7 @@ function parseOne(text, ctx) {
       if (verb === "hold") o.seconds = secs ?? mods.forS ?? 1;
       break;
     }
-    case "wait": { const n = rest.find((x) => parseSeconds(x.w) != null); o.seconds = n ? parseSeconds(n.w) : mods.forS ?? 1; break; }
+    case "wait": { const n = rest.find((x) => parseSeconds(x.w) != null); o.seconds = n ? parseSeconds(n.w) : mods.forS ?? 1; if (!n && mods.forS == null) o.untimed = true; break; }
     case "waitfor": o.target = parseTarget(rest); if (!o.target) throw new OrderError(`"${text}": wait for what? e.g. "wait for Koopa"`); break;
     case "follow": o.target = parseTarget(rest); if (!o.target) throw new OrderError(`"${text}": follow whom?`); break;
     case "stop": break;

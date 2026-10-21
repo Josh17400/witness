@@ -4,9 +4,9 @@
 import fs from "node:fs";
 
 export class ReplayRecorder {
-  constructor({ name = "game", seed = 1, fps = 60, scene = null, params = null, session = null, launch = null } = {}) {
+  constructor({ name = "game", seed = 1, fps = 60, scene = null, params = null, session = null, launch = null, epoch = null } = {}) {
     // launch: the browser it ran in ({engine, device}), so `witness replay` can say when it replays on another one
-    this.head = { replay: 1, name, seed, fps, started: new Date().toISOString(), scene, params, source: "witness play", session, ...(launch ? { launch } : {}) };
+    this.head = { replay: 1, name, seed, fps, started: new Date().toISOString(), scene, params, source: "witness play", session, ...(epoch != null ? { epoch } : {}), ...(launch ? { launch } : {}) };
     this.fps = fps;
     this.frames = new Map();   // f → {in: [], marks: [], calls: []}
   }

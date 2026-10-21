@@ -48,6 +48,34 @@ function normFacing(f) {
 
 const STAT_SKIP = /^(id|type|kind|name|pos|position|x|y|z|vx|vy|vz|vel|velocity|size|w|h|width|height|hp|health|maxhp|hpmax|max_hp|maxhealth|healthmax|facing|dir|direction|yaw|pitch|look|forward|state|ongroud|onground|grounded|on_ground|frame|time|t|digest|seed|team|hostile|item|talk|npc|dead|won|attacking|blocking|dodging|invulnerable|star|cooldown|telegraph|lean|magsize|mag_size|maxammo|ads|reloading|sprinting|crouching|god|paused)$/i;
 
+// turn profile: snapshot fields that aren't game facts for the header (shown elsewhere, or engine plumbing)
+const FIELD_SKIP = /^(choices|tappables|moves|legalMoves|actions|yourTurn|your_turn|myTurn|isYourTurn|playerTurn|dialogue|dialog|conversation|notice|message|toast|hint|ui|layers|entities|map|digest|frame|frames|time|t|seed|player|scene|won|dead|gameOver|game_over|victory|menu|goal|objective|quest|camera|pointer|touches|debug|fps|dt)$/i;
+const FIELD_FIRST = [/^scores?$/i, /^(phase|stage|state|step)$/i, /^(turn|whoseTurn|current|currentPlayer|active)$/i, /^round$/i, /^trump/i, /^hand$/i, /^trick$/i, /^(bid|contract)/i, /^(dealer|leader)$/i, /^(lives|money|coins|gold|chips)$/i];
+
+/**
+ * The game's choices as [{n, label, id, key, rect, legal, selected, raw}]: {label, id} objects or plain strings
+ * (state.choices; also {text|name|title}, {value}, legal/enabled/disabled, selected). Duplicate labels get " #2".
+ */
+export function normChoices(v) {
+  if (!Array.isArray(v) || !v.length) return null;
+  const out = [], seen = new Map();
+  v.forEach((c, i) => {
+    if (c == null) return;
+    const o = typeof c === "object" ? c : null;
+    let label = o ? o.label ?? o.text ?? o.name ?? o.title ?? o.id ?? o.value : c;
+    label = String(label ?? `#${i + 1}`).replace(/\s+/g, " ").trim().slice(0, 80) || `#${i + 1}`;
+    const k = label.toLowerCase(), dup = (seen.get(k) || 0) + 1; seen.set(k, dup);
+    if (dup > 1) label = `${label} #${dup}`;
+    const rect = o && Array.isArray(o.rect) && o.rect.length >= 2 ? o.rect.map(Number) : o && Array.isArray(o.pos) ? o.pos.map(Number) : o && Array.isArray(o.click) ? o.click.map(Number) : null;
+    out.push({
+      n: out.length + 1, label, id: o ? o.id ?? o.value ?? o.label ?? o.text ?? i : c, key: o && o.key != null ? String(o.key) : null, rect,
+      legal: !(o && (o.legal === false || o.enabled === false || o.disabled === true || o.allowed === false)),
+      selected: !!(o && (o.selected === true || o.active === true || o.checked === true)), raw: c,
+    });
+  });
+  return out.length ? out : null;
+}
+
 export class Perceiver {
   constructor(cfg, { fps = 60 } = {}) {
     this.cfg = cfg;
@@ -57,7 +85,7 @@ export class Perceiver {
       player: c(cfg.player), entities: c(cfg.entities), pos: c(cfg.pos), hostile: c(cfg.hostile), item: c(cfg.item), npc: c(cfg.npc),
       friend: c(cfg.friend), telegraph: c(cfg.telegraph), ignore: c(cfg.ignore), dialogue: c(cfg.dialogue), menu: c(cfg.menu),
       goal: c(cfg.goal), notice: c(cfg.notice), scene: c(cfg.scene), won: c(cfg.won), dead: c(cfg.dead), map: cfg.map ? c(cfg.map) : null,
-      ammo: c(cfg.ammo), avoid: c(cfg.avoid),
+      ammo: c(cfg.ammo), avoid: c(cfg.avoid), choices: c(cfg.choices), yourTurn: c(cfg.yourTurn),
     };
     this.statFns = null;          // decided on the first snapshot (stable observation lines)
     this.memory = new Map();      // id → {thing, lastSeen, gone}
@@ -205,10 +233,17 @@ export class Perceiver {
     const sc = pick(this.fx.scene, state.scene, state.level, state.location);
     const scene = sc == null ? null : typeof sc === "object" ? String(sc.name ?? sc.region ?? sc.site ?? JSON.stringify(sc).slice(0, 40)) : String(sc);
     const won = !!pick(this.fx.won, state.won, state.victory, state.win, state.complete, state.completed);
-    const dead = !!(this.fx.dead ? this.fx.dead(S) : state.dead ?? state.gameOver ?? state.game_over ?? (player && player.hp != null && player.hp <= 0) ?? (pl && pl.dead));
+    // (turn/menu games: a finished match isn't a death to respawn from; it's `over`)
+    const over = cfg.profile === "turn" && !this.fx.dead ? !!(state.gameOver ?? state.game_over ?? state.over) : false;
+    const dead = !!(this.fx.dead ? this.fx.dead(S) : cfg.profile === "turn" ? state.dead : state.dead ?? state.gameOver ?? state.game_over ?? (player && player.hp != null && player.hp <= 0) ?? (pl && pl.dead));
+
+    // ---- choices / whose turn (turn-based, card and menu games; any profile may list choices)
+    const choices = normChoices(this.fx.choices ? this.fx.choices(S) : state.choices ?? (dialogue ? null : state.tappables) ?? state.moves ?? state.legalMoves ?? state.actions);
+    const yt = this.fx.yourTurn ? this.fx.yourTurn(S) : state.yourTurn ?? state.your_turn ?? state.myTurn ?? state.isYourTurn ?? state.playerTurn;
+    const yourTurn = yt === undefined ? null : !!yt;
 
     // ---- stats (decided once so observation lines stay stable)
-    if (!this.statFns) this.statFns = this.pickStats(state, pl);
+    if (!this.statFns) this.statFns = cfg.profile === "turn" ? this.pickFields(state) : this.pickStats(state, pl);
     const stats = [];
     for (const s of this.statFns) { const v = s.fn(S); if (v !== undefined && v !== null && v !== false) stats.push({ label: s.label, value: v }); }
 
@@ -245,13 +280,36 @@ export class Perceiver {
       remembered.length = 0;
     }
     this.sceneKey = sceneKey;
-    const world = { snap, frame, t, player, things, remembered, sceneKey, newScene, maxListed, map, dialogue, menu, goal, notice: notice ? String(notice) : null, scene, won, dead, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
+    const world = { snap, frame, t, player, things, remembered, sceneKey, newScene, maxListed, map, dialogue, menu, goal, choices, yourTurn, notice: notice ? String(notice) : null, scene, won, dead, over, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
     this.prev = world;
     return world;
   }
 
   /** Mark a remembered thing gone; `why` (killed / picked up / removed) lets orders explain what happened to it. */
   forget(id, why = null) { const m = this.memory.get(id); if (m) { m.gone = true; m.why = why; } }
+
+  /**
+   * Turn profile: the game's own fields for the observation (play.show: ["score", "hand", "state.trick", {label, expr}]),
+   * else the snapshot's top-level fields that read like game state (score, phase, hand, trick, …), at most 10.
+   */
+  pickFields(state) {
+    const out = [];
+    const add = (label, src) => { const fn = compileExpr(src); if (fn) out.push({ label, fn }); };
+    const expr = (s) => (/^(state|snap)\b/.test(s) || !/^[\w$.[\]"']+$/.test(s) ? s : `state.${s}`);
+    if (Array.isArray(this.cfg.show)) {
+      for (const s of this.cfg.show) {
+        if (typeof s === "string") add(s.replace(/^state\./, "").split(/[[\]]/)[0], expr(s));
+        else if (s && s.expr) add(s.label || s.expr, s.expr);
+      }
+      return out;
+    }
+    if (Array.isArray(this.cfg.stats)) return this.pickStats(state, null);
+    const keys = Object.keys(state || {}).filter((k) => !FIELD_SKIP.test(k));
+    const rank = (k) => { const i = FIELD_FIRST.findIndex((re) => re.test(k)); return i < 0 ? FIELD_FIRST.length : i; };
+    keys.sort((a, b) => rank(a) - rank(b));
+    for (const k of keys.slice(0, 10)) add(k, `state[${JSON.stringify(k)}]`);
+    return out;
+  }
 
   pickStats(state, pl) {
     const out = [];

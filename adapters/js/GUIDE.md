@@ -36,11 +36,8 @@ Work in this order and check each step with `witness doctor`:
    import witness from "./witness/witness.js";   // first: installs the takeover in witness mode
    import Phaser from "phaser";
    ```
-   For classic `<script>` games, add `<script type="module" src="witness/witness.js"></script>`
-   and call `start()` from game code once `witness` is available (e.g. `import()` it from a
-   module, or put the game's boot code in a module). A loop that started before the import is
-   picked up at its next `requestAnimationFrame` call, so nothing breaks. The first frame just
-   runs on real time.
+   For classic `<script>` games (inline scripts, no modules) see **§1b**: their scripts run
+   before any module, so boot timers and loops would start on real time.
 3. **Call `witness.start({...})` exactly once, after assets are loaded and the game can run.**
    In witness mode that is the hello. Until then frames run on the display clock (so engines can
    boot and preload); afterwards they run only on `step`. Typical places: the end of `main()`
@@ -62,7 +59,54 @@ await witness.start({
 ```
 
 Every option is optional, but without `snapshot` the CLI has nothing to test, and without
-`reset` it can't rerun deterministically. The full type is `StartOptions` in `witness.d.ts`.
+`reset` it can't rerun deterministically (browser games: the CLI then reloads the page for each
+reset, §6). The full type is `StartOptions` in `witness.d.ts`.
+
+In the browser `start()` first waits until the page's pictures and fonts are ready (every `<img>`
+and CSS `background-image` decoded, `document.fonts.ready`, two display frames; at most 10 s),
+because a big background still decoding on real time makes the first screenshots differ between
+runs (worst at DPR 3). `start({ ready: { ms: 300 } })` waits longer, `start({ ready: false })`
+skips it; `witness.ready()` is the same wait on its own.
+
+## 1b. Classic-script and DOM pages
+
+Inline classic `<script>`s run **before** any module, so before `import witness`: their
+`setTimeout` boot timers, `requestAnimationFrame` loops and first `Date` reads run on real time,
+and runs differ. Two supported ways, best first:
+
+1. **Let the CLI inject the adapter (no page changes for the timing).** In `witness.json`:
+   ```json
+   "launch": { "url": "http://localhost:8080/index.html", "inject": true }
+   ```
+   Witness then runs its own `adapters/js/witness.js` in the page before any page script
+   (Playwright init script), and serves it for the page's own `.../witness.js` request, so the
+   page's `import witness from "./witness/witness.js"` gets that same instance
+   (`globalThis.__witnessApi`, also usable from classic scripts). Everything the page's scripts
+   do runs on the virtual clock from the first line. `WITNESS_CONFIG` set by the page is read too
+   late here: use the URL parameters (`?witness_animations=0` …) or `witness.json` (`clock.epoch`).
+2. **`witness.boot()`** (pages opened some other way, `--attach`, or no CLI page control): make the
+   inline scripts inert with `type="text/witness"` (any `data-type="…"` becomes their real type),
+   import the adapter, then run them:
+   ```html
+   <script type="text/witness"> /* the game's code, unchanged */ </script>
+   <script type="text/witness" src="game.js"></script>
+   <script type="module">
+     import witness from "./witness/witness.js";
+     await witness.boot();              // runs them in order as classic scripts (global scope)
+     await witness.start({ name: "Euchre", fps: 60, snapshot: () => window.game.state() });
+   </script>
+   ```
+   Module scripts run before `DOMContentLoaded`, so the game's own `DOMContentLoaded` handlers
+   still run. It works the same without Witness (off mode runs them too), so it can ship.
+
+DOM games (no `<canvas>`) need nothing else: `hello` says `browser (DOM)`, the CLI captures the
+whole viewport (`launch.capture` unset = `screen` for a page without a visible canvas), and
+**CSS transitions and animations run on the virtual clock** (§2). `witness.dom.tap(el)` taps an
+element (selector or Element) the way a finger does and says `"ok"` or `"blocked by #overlay"`;
+`witness.dom.tappables()` lists what can be tapped as `[{label, id}]` (in view first; labels from
+text, `aria-label`, `title`, `#id`; `(selected)` for `.sel` / `aria-pressed`): handy as
+`calls: { tap: (sel) => witness.dom.tap(sel) }` and `snapshot: () => ({ choices: witness.dom.tappables(), … })`,
+so a replay repeats the taps as calls.
 
 ## 2. The rAF takeover (browser), and how determinism works
 
@@ -71,10 +115,27 @@ In witness mode:
 * `requestAnimationFrame(cb)` queues `cb`. Each `step` frame runs every queued callback once
   with the frame's timestamp, just as a browser frame would. Callbacks queued during a frame run
   next frame. `cancelAnimationFrame` works, even within a frame.
-* `performance.now()` returns a **virtual clock** that advances by exactly `dt` per frame and
-  stays frozen within a frame. `Date.now()` / `new Date()` follow the same clock, starting at a
-  fixed epoch (2026-01-01T00:00:00Z, override with `WITNESS_CONFIG.epoch`), so even games that seed
-  from `Date.now()` become reproducible.
+* `performance.now()` returns a **virtual clock** that starts at 0 when the adapter loads,
+  advances by exactly `dt` per frame and stays frozen within a frame. `Date.now()` / `new Date()`
+  follow the same clock, starting at a fixed epoch, so even games that seed from `Date.now()`
+  become reproducible. The default epoch is 2026-01-01T00:00:00Z: a weekly reset or season
+  countdown then reads from that date ("Resets in 256d"), and date-gated features look wrong. Set
+  it in `witness.json`: `"clock": { "epoch": "today" }` (this run's date, 00:00 UTC, pinned for the
+  whole run) or an ISO date / time (`"2026-06-15"`, `"2026-06-15T09:00:00Z"`). The CLI sends it
+  in the page URL (`?witness_epoch=`), as `WITNESS_EPOCH` (Node) and with **every reset**: the Date
+  restarts exactly at the epoch on each reset. Recordings keep it in their header (`epoch`), and
+  replaying restarts the Date there. Without it, older behaviour: the Date goes on across resets.
+  (`WITNESS_CONFIG.epoch` sets it for a page on its own.) `witness doctor` prints the epoch.
+* **CSS transitions, CSS animations and `element.animate()`** run on the virtual clock too: every
+  frame each animation of the document is held (playbackRate 0) and its `currentTime` set from the
+  virtual time since the frame it was first seen; past its end it is finished, so
+  `transitionend` / `animationend` still fire. A frame that starts, finishes or wraps one waits for
+  one real display frame so those events are dispatched in the same frame every run. Infinite
+  animations move along too; animations still running at a reset restart there; `<video>`
+  elements are paused (they play on real time). `globalThis.__witnessAnimating()` (or
+  `witness.animating()`) is the number of **finite** animations still running: 0 once the screen
+  has settled, e.g. `eval "globalThis.__witnessAnimating?.() ?? 0"` after a scene change. Off:
+  `WITNESS_CONFIG.animations = false` / `?witness_animations=0` (`videos: false` leaves videos alone).
 * `setTimeout`/`setInterval`/`requestIdleCallback` are virtual timers. A timer due inside a frame
   fires during that frame, before the rAF callbacks, with the clock set to its own due time.
   Intervals keep their phase. The HTML 4 ms nesting clamp is applied, so `setTimeout(f, 0)`
@@ -178,7 +239,18 @@ both places. Things that commonly leak across a reset:
 * the camera.
 
 The virtual clock is **not** rewound on reset (games compute `dt = now - last`, so going backwards
-would break them). Keep absolute times out of the state.
+would break them). Keep absolute times out of the state. (`Date` does restart at the epoch on each
+reset when `witness.json` sets `clock.epoch`, §2.)
+
+**Browser games without a reset handler, or whose progress lives in memory you can't clear:**
+the CLI can reload the page for each reset. `launch.reset` in `witness.json`: `"auto"` (default:
+reload when `start()` got no `reset`), `"reload"` (always, also with a handler: the handler then
+runs on the fresh page), `"handler"` (never; a game without a handler has no `reset`). A reload
+clears `localStorage` / `sessionStorage` first (`"keepStorage": true` keeps them), loads the page
+again with `?witness_seed=<seed>` and the epoch, waits for the new hello and goes on over the new
+connection: fresh memory, the seed from the first line, the Date back at the epoch. A reset with
+nothing run since the page loaded doesn't reload again. The boot itself must be deterministic:
+call `start()` once it has settled (§1b).
 
 ## 7. Audio
 
@@ -197,7 +269,10 @@ and hand-written graphs. Limits:
 * `<audio>`/`HTMLAudioElement` playback and `createMediaElementSource` are **not** captured (a
   silent node is returned and a warning logged). Prefer decoded `AudioBuffer`s, or Howler with
   `html5: false`.
-* Capacity: `WITNESS_CONFIG.audioSeconds` (default 300) of simulated time per context.
+* Capacity: `WITNESS_CONFIG.audioSeconds` (default 300) of simulated time per context (an offline
+  context's length is fixed when it is made). Past it the context goes on silently: its
+  `currentTime` keeps following simulated time, so the game runs unchanged; only an `audio` read
+  of the time after it warns (a long `witness play` session never reads audio: no warning).
   `WITNESS_CONFIG.webaudio = false` keeps the real AudioContext (and turns capture off).
 
 **Audio unlock (iPhone "no sound until a tap").** Browsers start an `AudioContext` suspended until the player
@@ -247,7 +322,10 @@ scene with a 2D UI canvas on top) at its backing resolution × `scale`, as exact
   correctly at any time. If your code creates the context before the import (rare), pass
   `preserveDrawingBuffer: true` yourself.
 * DOM/CSS UI (HTML health bars, menus) is not on the canvas, so it isn't captured. Draw it in
-  `screenshot()` yourself if it matters, or test it through state.
+  `screenshot()` yourself if it matters, test it through state, or capture the screen
+  (`launch.capture: "screen"`, browser launches). A page with no visible canvas (a DOM game) is
+  captured as the screen by default. CSS animations are held on the virtual clock, so a capture
+  mid-transition is the same in every run (Witness doesn't let Playwright fast-forward them).
 * `screenshotFormat: "png"` sends a PNG (smaller, for 4K canvases). `screenshot()` may return a
   canvas or `{width, height, data: Uint8Array RGBA}` (Node games render their own; see the Node
   example).
@@ -507,6 +585,13 @@ witness.saveRecording()      // browser record mode: download / flush
 witness.input, witness.inputEvents(), witness.frame, witness.time
 witness.createMixer({ sampleRate, channels }).play(samples, { delay, volume })
 witness.real                 // the real setTimeout/requestAnimationFrame/now/Date
+await witness.ready({ frames, ms, timeout })  // pictures decoded + fonts ready (start() does it)
+await witness.boot()         // run <script type="text/witness"> deferred classic scripts (§1b)
+witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(root?) -> [{label, id}]
+witness.animating()          // finite CSS / Web Animations still running; also globalThis.__witnessAnimating()
 ```
 Page config, read at import: `globalThis.WITNESS_CONFIG = { addr, record, seed, takeover, raf,
-timers, webaudio, console, audioSeconds, audioRate, epoch }`.
+timers, webaudio, console, animations, videos, audioSeconds, audioRate, epoch }` (also
+`?witness_<name>=0` in the URL for the on/off ones, `?witness_epoch=`, and `WITNESS_EPOCH` in Node).
+`witness.json` for browser games also takes `launch.inject`, `launch.reset`, `launch.keepStorage`
+and `"clock": { "epoch": … }`.

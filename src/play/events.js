@@ -43,6 +43,7 @@ export class EventTracker {
     this.recentLogs = [];       // game log lines of the last 1.5 s (death causes)
     this.drift = null;          // hp changes too small to show (regen ticks of 0.02): added up until they're worth a line
     this.goneAt = new Map();
+    this.said = [];             // {t, k} notices and log lines of the last 2 s (one event when a game shows and logs a line)
     this.dot = new DotClassifier();    // id -> t of its last "is gone" (a thing flickering at the edge of the list is gone once)
   }
 
@@ -56,12 +57,15 @@ export class EventTracker {
     const pushInf = (kind, text, data, key) => ev.push({ t, frame, kind, text, data, dup: said(key) || undefined });
     const reach = cfg.reach.attack;
 
-    // game logs as events (the game's own words), errors always
+    // game logs as events (the game's own words), errors always. A game that both shows a line (state.notice) and
+    // logs it gets one event, not two (they can land a few frames apart: logs are read 4 times a second)
+    this.said = this.said.filter((x) => t - x.t < 2);
+    const sameSaid = (m) => { const k = sayKey(m); return !!k && this.said.some((x) => x.k === k); };
     for (const l of ctx.logs || []) {
       const msg = clip(oneLine(l.message), 160);
       if (l.level === "error") push("error", `game error: ${msg}`);
       else if (l.level === "warn") push("warn", `game warning: ${msg}`);
-      else if (cfg.logs && (!this.logRe || this.logRe.test(msg))) push("log", `game: "${msg}"`);
+      else if (cfg.logs && (!this.logRe || this.logRe.test(msg))) { if (!sameSaid(l.message)) push("log", `game: "${msg}"`); this.said.push({ t, k: sayKey(l.message) }); }
     }
     if (!prev) {
       for (const th of cur.things) if (th.rel === "hostile" && th.dist <= cfg.alert) this.alerted.add(th.id);
@@ -201,13 +205,15 @@ export class EventTracker {
         push("dialogue", `${prev.dialogue ? "dialogue" : "dialogue opened"} — ${d.speaker ? `${d.speaker}: ` : ""}"${clip(d.text, 120)}"${d.options.length ? ` [${d.options.map((o, i) => `${i + 1}) ${clip(o, 40)}`).join(" ")}]` : ""}`);
       } else push("dialogue-close", "dialogue closed");
     }
-    if (cur.notice && cur.notice !== prev.notice) push("notice", `game says: "${clip(oneLine(cur.notice), 140)}"`);
+    if (cur.notice && cur.notice !== prev.notice) { if (!sameSaid(cur.notice)) push("notice", `game says: "${clip(oneLine(cur.notice), 140)}"`); this.said.push({ t, k: sayKey(cur.notice) }); }
     const gt = (g) => (g ? g.text : null);
     if (gt(cur.goal) !== gt(prev.goal) && cur.goal && cur.goal.text) push("goalchange", `goal: ${clip(cur.goal.text, 120)}`);
     if (!!cur.menu !== !!prev.menu) push("menu", cur.menu ? "a menu opened" : "the menu closed");
     // stats (gold 2→3); skip pure counters like time
     const ps = new Map(prev.stats.map((s) => [s.label, s.value]));
-    const changes = cur.stats.filter((s) => ps.has(s.label) && JSON.stringify(ps.get(s.label)) !== JSON.stringify(s.value) && !/^(time|timer|clock|frame|t)$/i.test(s.label));
+    // (turn profile: the shown fields include hands and tricks; only the short ones make "score 3→4" lines)
+    const changes = cur.stats.filter((s) => ps.has(s.label) && JSON.stringify(ps.get(s.label)) !== JSON.stringify(s.value) && !/^(time|timer|clock|frame|t)$/i.test(s.label)
+      && (cfg.profile !== "turn" || ((s.value == null || typeof s.value !== "object") && String(s.value).length <= 40)));
     if (changes.length && changes.length <= 3) push("stat", changes.map((s) => `${s.label} ${fmtV(ps.get(s.label))}→${fmtV(s.value)}`).join(", "));
 
     this.trackFight(prev, cur, ev, dealtNow, attackedRecently, killedNow);
@@ -252,6 +258,8 @@ export class EventTracker {
   finish(t) { if (this.active) this.closeFight("unresolved", t); }
 }
 
+/** A notice or log line as a comparison key: lowercase words only ("You won the trick!" = "you won the trick"). */
+const sayKey = (m) => String(m ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 const fmtV = (v) => (typeof v === "number" ? r1(v) : JSON.stringify(v));
 export function cellOf(w, p2) { return [Math.floor((p2[0] - (w.origin?.[0] || 0)) / w.cell), Math.floor((p2[1] - (w.origin?.[1] || 0)) / w.cell)]; }
 export { dist2 };

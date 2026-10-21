@@ -42,7 +42,9 @@ function parseMove(spec, keys, profile) {
   return wasd || !arrows ? mk("w", "s", "a", "d") : mk("up", "down", "left", "right");
 }
 
-const PROFILES = ["topdown", "platformer", "fps"];
+const PROFILES = ["topdown", "platformer", "fps", "turn"];
+// turn-based / card / board / menu games: no body to walk, the game offers choices (cards, buttons, moves)
+const TURN_ALIASES = /^(turn|turns|turn-based|turnbased|card|cards|board|menu|menus)$/i;
 
 /**
  * Resolve the play config. `raw` = witness.json "play" (may be undefined), `hello` = the adapter hello.
@@ -51,7 +53,7 @@ const PROFILES = ["topdown", "platformer", "fps"];
 export function resolvePlayConfig(raw = {}, hello = {}) {
   raw = raw || {};
   const keys = (hello.keys || []).map((k) => String(k).toLowerCase());
-  const profile = PROFILES.includes(raw.profile) ? raw.profile : "topdown";
+  const profile = PROFILES.includes(raw.profile) ? raw.profile : TURN_ALIASES.test(String(raw.profile || "")) ? "turn" : "topdown";
   const c = raw.controls || {};
   const pick = (name, cands) => (name in c ? parseControl(c[name]) : cands ? parseControl(firstIn(keys, cands)) : null);
   const controls = {
@@ -88,6 +90,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     profile,
     controls,
     named,
+    rawControls: c,
     // where things live (expressions over the snapshot; `state`, `snap` and the expr.js helpers are in scope)
     player: raw.player || null,             // null: state.player, else the first entity typed Player/Hero
     entities: raw.entities || "state.entities",
@@ -128,14 +131,47 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     platformer: { jumpFrames: 18, runJumpFrames: 22, stomp: true, ...(raw.platformer || {}) },
     fps: { sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2, ...(raw.fps || {}) },
     module: raw.module || null,
+    resultChars: Math.max(40, +(raw.resultChars ?? 400) || 400),   // how much of a call's result an observation shows
+    // turn profile (also read by any profile when the game lists choices): the game's choices, whose turn it is, the
+    // fields the observation shows, how a pick reaches the game, how long a bare `wait` may wait for your turn
+    choices: raw.choices || null, yourTurn: raw.yourTurn || null,
+    show: Array.isArray(raw.show) ? raw.show : null,
+    pick: parsePick(raw.pick),
+    turnWait: Math.max(1, +(raw.turnWait ?? 30) || 30),
   };
   cfg.northSign = /^\+/.test(String(cfg.north)) ? 1 : -1;
   return cfg;
 }
 
+/**
+ * How `pick` sends a choice: {call: "fn"} calls the game's function with the choice's id (args: ["id"] / ["index"] /
+ * ["label"] / ["id", "index"]...), {mode: "click"} clicks the choice's rect/pos, {mode: "keys"} presses its number
+ * (or play.controls.choose). Default "auto": the choice's own key, else a configured call, else a click when the
+ * choice has a rect/pos, else its number key.
+ */
+export function parsePick(p) {
+  if (p == null || p === "auto") return { mode: "auto", call: null, args: ["id"] };
+  if (typeof p === "string") {
+    if (/^(click|tap|keys?|numbers?)$/i.test(p)) return { mode: /^(click|tap)$/i.test(p) ? "click" : "keys", call: null, args: ["id"] };
+    const m = /^call:(.+)$/i.exec(p);
+    return { mode: "call", call: (m ? m[1] : p).trim(), args: ["id"] };
+  }
+  if (typeof p === "object") {
+    const call = p.call ? String(p.call) : null;
+    const mode = call ? "call" : /^(click|tap)$/i.test(String(p.mode || "")) ? "click" : /^(keys?|numbers?)$/i.test(String(p.mode || "")) ? "keys" : "auto";
+    const args = Array.isArray(p.args) && p.args.length ? p.args.map(String) : ["id"];
+    return { mode, call, args };
+  }
+  return { mode: "auto", call: null, args: ["id"] };
+}
+
 /** Short description of the controls for the brief / first observation. */
 export function describeControls(cfg) {
   const c = cfg.controls, out = [];
+  if (cfg.profile === "turn") {   // no movement: only the controls the game named itself
+    for (const [k, v] of Object.entries(cfg.named)) if (!["confirm", "cancel"].includes(k) && v && !(k in c && !(cfg.rawControls || {})[k])) out.push(`${k} ${controlLabel(v)}`);
+    return out.join(" · ");
+  }
   const parts = c.move.axis ? null : ["up", "left", "down", "right"].map((d) => c.move[d] ? c.move[d].key || controlLabel(c.move[d]) : null).filter(Boolean);
   const mv = c.move.axis ? `stick ${c.move.axis.join("/")}` : parts.every((k) => k.length === 1) ? parts.join("") : parts.join("/");
   if (mv) out.push(`move ${mv}`);

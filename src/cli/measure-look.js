@@ -14,6 +14,7 @@ import { die, withGame, gamePixels, runOpts, media, printLogs, framesOf, fmtT, s
 import { sampleExprs, frameGrid } from "../core/sample.js";
 import { entitiesOf, cameraHint } from "./measure.js";
 import { backgroundPalette } from "../media/align.js";
+import { resolveDevice, safePresetFor } from "../core/devices.js";
 
 const r2 = (v) => (v == null ? v : Math.round(v * 100) / 100);
 const val = (v) => (v !== undefined && v !== true ? String(v) : null);
@@ -30,7 +31,7 @@ export async function lookMeasure(what, files, opt) {
 }
 
 /** The frame(s) to look at: a PNG file, or the game's screenshot (+ snapshot) at --at, once per --window size. */
-async function getFrames(m, files, opt, gameCoords = null, { second = null } = {}) {
+async function getFrames(m, files, opt, gameCoords = null, { second = null, web = false } = {}) {
   if (files[0]) return { frames: [{ img: readImage(m, files[0]), snap: null, label: path.basename(String(files[0])) }], file: path.resolve(String(files[0])) };
   const wins = val(opt.window) ? val(opt.window).split(",").map((w) => w.trim()).filter(Boolean) : [null];
   const frames = [];
@@ -40,16 +41,27 @@ async function getFrames(m, files, opt, gameCoords = null, { second = null } = {
     if (!s.has("screenshot")) die("this game's adapter doesn't support 'screenshot'");
     if (gameCoords) gamePixels(s, gameCoords, opt);
     const f = framesOf(val(opt.at) || "1", s.fps);
+    // web (measure ui): any capture mode works, the page's layout says how its coordinates land on the picture; a page
+    // with no canvas (a DOM game) is captured from the screen in the same session
+    let mode = s.web ? s.web.captureMode : null, fellBack = false;
+    const grab = async () => {
+      if (web && s.web && mode !== "screen") {
+        const info = await s.web.info().catch(() => null);
+        if (info && !(info.canvases || []).some((c) => c.rect[2] * c.rect[3] > 0)) { mode = "screen"; fellBack = true; }
+      }
+      if (web && s.web && mode !== s.web.captureMode) { const c = await s.web.capture(mode); return shotImage({ width: c.width, height: c.height, format: "png", data: c.png.toString("base64") }); }
+      return shotImage(await s.screenshot());
+    };
     for (const w of wins) {
       const st = await begin(s, runOpts(w ? { ...opt, window: w } : { ...opt, window: undefined }, cfg));
       await stepTo(s, st, f);
-      const shot = await s.screenshot();
-      const img = await shotImage(shot);
+      const img = await grab();
       const snap = await s.snapshot();
       const fr = { img: { width: img.width, height: img.height, data: Uint8Array.from(img.data) }, snap, f, window: w, label: `f${f}${w ? ` at ${w}` : ""}` };
+      if (web && s.web) fr.web = { mode, fellBack, device: s.web.device || null, safeInsets: s.web.safeInsets || null, info: await s.web.info().catch(() => null), size: Array.isArray(s.hello.size) ? s.hello.size : null };
       // a second frame a little later (second(snap) frames on): what moves with the camera is the world, not HUD
       const k = second ? second(snap) : 0;
-      if (k) { await stepTo(s, st, f + k); const im2 = await shotImage(await s.screenshot()); fr.next = { f: f + k, img: { width: im2.width, height: im2.height, data: Uint8Array.from(im2.data) } }; }
+      if (k) { await stepTo(s, st, f + k); const im2 = await grab(); fr.next = { f: f + k, img: { width: im2.width, height: im2.height, data: Uint8Array.from(im2.data) } }; }
       frames.push(fr);
       printLogs(await s.drainLogs());
     }
@@ -74,6 +86,80 @@ function pctOrPx(s, size, def) {
 }
 
 // ------------------------------------------------------------------ measure ui
+
+/**
+ * How state.ui coordinates land on the picture, and the picture's px per CSS px (= pt on iOS, dp on Android).
+ * Browser games: from the page's layout (viewport, DPR, the main canvas's CSS box and hello.size); the ui list is in
+ * game px when the page has a canvas (hello.size), else in CSS px (a DOM game's getBoundingClientRect). A PNG file:
+ * px per pt from --device (picture width / the profile's CSS width), coordinates as given unless --ui-scale.
+ * --ui-scale css|game forces the units; a number (3) or auto (= px per pt) scales the list by hand.
+ */
+export function uiGeometry(fr, opt) {
+  const W = fr.img.width, H = fr.img.height, us = val(opt["ui-scale"]);
+  let device = null;
+  if (fr.web) device = fr.web.device;
+  else if (val(opt.device)) { try { device = resolveDevice(val(opt.device)); } catch (e) { die(e.message); } }
+  let pxPerPt = null, map = null, units = null, note = null;
+  if (fr.web) {
+    const info = fr.web.info || {}, size = fr.web.size;
+    const vw = (info.viewport && info.viewport[0]) || (device ? device.width : W), vh = (info.viewport && info.viewport[1]) || (device ? device.height : H);
+    let cv = null;
+    for (const c of info.canvases || []) if (c.rect[2] * c.rect[3] > 0 && (!cv || c.rect[2] * c.rect[3] > cv.rect[2] * cv.rect[3])) cv = c;
+    units = us === "css" || us === "game" ? us : cv && size ? "game" : "css";
+    if (units === "game" && !(cv && size)) die("--ui-scale game: the page has no canvas (or hello has no size): its state.ui is in CSS px (--ui-scale css)");
+    const mode = fr.web.mode;
+    if (mode === "screen") {
+      const kx = W / vw, ky = H / vh;
+      pxPerPt = kx;
+      map = units === "game" ? { kx: (cv.rect[2] / size[0]) * kx, ky: (cv.rect[3] / size[1]) * ky, ox: cv.rect[0] * kx, oy: cv.rect[1] * ky } : { kx, ky, ox: 0, oy: 0 };
+      note = `the screen at ${r2(kx)} px per CSS px${fr.web.fellBack ? " (the page has no canvas: captured from the screen)" : ""}; state.ui in ${units === "game" ? `game px (the ${size.join("×")} canvas at ${cv.rect.map(r2).join(",")} CSS)` : "CSS px"}`;
+    } else if (cv) {
+      // element: the canvas as shown, at device px; canvas: the game's own pixels
+      const kx = W / cv.rect[2], ky = H / cv.rect[3];
+      pxPerPt = kx;
+      map = units === "game" ? (size ? { kx: W / size[0], ky: H / size[1], ox: 0, oy: 0 } : null) : { kx, ky, ox: -cv.rect[0] * kx, oy: -cv.rect[1] * ky };
+      note = `the ${mode === "element" ? "canvas as shown" : "game's canvas"} (${W}×${H}) at ${r2(kx)} px per CSS px; state.ui in ${units === "game" ? "game px" : "CSS px"}`;
+    }
+  } else if (device) { pxPerPt = W / device.width; note = `${device.name}: ${W} px wide = ${r2(pxPerPt)} px per pt (a full-screen screenshot assumed)`; }
+  if (us && us !== "css" && us !== "game") {
+    let k;
+    if (us === "auto" || us === "dpr") { if (!pxPerPt) die("--ui-scale auto needs --device (the screenshot's px per CSS px), or give the factor: --ui-scale 3"); k = pxPerPt; }
+    else { k = +us; if (!(k > 0 && k <= 16)) die(`--ui-scale wants a factor (3), auto, css or game (got ${us})`); }
+    map = { kx: k, ky: k, ox: 0, oy: 0 };
+    note = `${note ? `${note}; ` : ""}state.ui scaled ×${r2(k)}`;
+  }
+  if (map && Math.abs(map.kx - 1) < 1e-9 && Math.abs(map.ky - 1) < 1e-9 && !map.ox && !map.oy) map = null;
+  return { device, pxPerPt, map, units, note };
+}
+
+/** --min-text: "2%" / "12" (px) / "11pt" (needs px per pt); default 11 pt on a device, else 2% of the height. */
+function minTextOf(opt, H, geo) {
+  const v = val(opt["min-text"]);
+  if (v && /pt$/i.test(v)) {
+    const n = parseFloat(v);
+    if (!(n >= 0)) die(`--min-text wants 2%, 12 (px) or 11pt, got ${v}`);
+    if (!geo.pxPerPt) die("--min-text in pt needs to know the screenshot's px per pt: a browser game, or --device iphone-15 with a PNG");
+    return { px: n * geo.pxPerPt, pct: null, pt: n };
+  }
+  if (v == null && geo.device && geo.pxPerPt) return { px: 11 * geo.pxPerPt, pct: null, pt: 11 };
+  return pctOrPx(opt["min-text"], H, "2%");
+}
+
+/** Tap targets: --min-tap N (pt with a device, else px; "Npx" px; 0 off); default 44 pt (iOS) / 48 dp (Android) on a touch device. */
+function tapMinOf(opt, geo) {
+  const v = val(opt["min-tap"]);
+  if (v != null) {
+    const n = parseFloat(v);
+    if (!(n >= 0)) die(`--min-tap wants a size (44, 48, 44pt, 30px; 0 = off), got ${v}`);
+    if (n === 0) return null;
+    const pt = /px$/i.test(v) || !geo.pxPerPt ? null : n;
+    return { px: pt != null ? n * geo.pxPerPt : n, pt, why: "--min-tap" };
+  }
+  const d = geo.device;
+  if (!d || !d.touch || !geo.pxPerPt) return null;
+  const android = /android/i.test(`${d.userAgent || ""} ${d.platform || ""} ${d.name || ""}`);
+  return { px: (android ? 48 : 44) * geo.pxPerPt, pt: android ? 48 : 44, why: android ? "Android: 48 dp" : "Apple HIG: 44 pt" };
+}
 
 /**
  * measure ui --from/--to: state.ui sampled over a span: texts shown again within --within seconds of their last
@@ -132,7 +218,7 @@ async function uiMeasure(m, files, opt) {
   const ui = await import("../media/ui.js");
   if (opt.from !== undefined || opt.to !== undefined) return uiSweep(ui, opt);
   // without state.ui the rows come from pixels: a frame 6 frames later tells world things (they scroll) from HUD
-  const got = await getFrames(m, files, opt, "measure ui (state.ui rects)", { second: (snap) => (!val(opt.ui) && (opt.pixels || !Array.isArray(snap?.state?.ui)) ? 6 : 0) });
+  const got = await getFrames(m, files, opt, null, { web: true, second: (snap) => (!val(opt.ui) && (opt.pixels || !Array.isArray(snap?.state?.ui)) ? 6 : 0) });
   let uiFile = null;
   if (val(opt.ui)) {
     const p = path.resolve(val(opt.ui));
@@ -146,21 +232,30 @@ async function uiMeasure(m, files, opt) {
   const safeName = val(opt.safe) && /^[a-z]/i.test(val(opt.safe)) ? val(opt.safe).toLowerCase() : null;
   for (const fr of got.frames) {
     const { img } = fr, W = img.width, H = img.height;
+    const geo = uiGeometry(fr, opt);
     let safe, safeM, preset = null;
     if (safeName) {
       // a frame from the game is its canvas (logical px), not a device screenshot: any size is fine
-      try { preset = ui.safePreset(safeName, W, H, { fit: val(opt.fit) || "contain", canvas: !!fr.snap }); } catch (e) { die(`--safe: ${e.message}`); }
+      try { preset = ui.safePreset(safeName, W, H, { fit: val(opt.fit) || "contain", canvas: !!fr.snap && !(fr.web && fr.web.mode !== "canvas") }); } catch (e) { die(`--safe: ${e.message}`); }
       safe = { px: null, pct: null }; safeM = preset.px;
+    } else if (val(opt.safe) == null && geo.device && geo.pxPerPt) {
+      // a phone or tablet: no generic 5% margin (every full-width bar would be "outside"); the emulated insets when the
+      // page was given them (--safe-insets, a screen capture), else no safe-area check, and the preset to ask for
+      const ins = fr.web && fr.web.safeInsets && fr.web.mode === "screen" ? fr.web.safeInsets : null, k = geo.pxPerPt;
+      const sp = safePresetFor(geo.device);
+      if (ins) { safeM = { left: ins.left * k, right: ins.right * k, top: ins.top * k, bottom: ins.bottom * k }; safe = { px: null, pct: null, note: `safe area: the emulated insets (--safe-insets ${ins.preset}: top ${ins.top}, right ${ins.right}, bottom ${ins.bottom}, left ${ins.left} pt)` }; }
+      else { safeM = { x: 0, y: 0 }; safe = { px: 0, pct: null, note: `safe area not checked on ${geo.device.name} (no generic margin on a phone${sp ? `: --safe ${sp} checks the notch and home indicator zones` : ""})` }; }
     } else {
       safe = pctOrPx(opt.safe, 1, "5%");
       safeM = safe.pct != null ? safe.pct / 100 : { x: safe.px, y: safe.px };
     }
-    const minT = pctOrPx(opt["min-text"], H, "2%");
+    const minT = minTextOf(opt, H, geo);
     const list = uiFile || (opt.pixels ? null : fr.snap?.state?.ui);
     let els, source;
     const panels = [], moved = [];
     if (Array.isArray(list)) {
       try { els = ui.normalizeUI(list); } catch (e) { die(e.message); }
+      if (geo.map) els = ui.scaleUI(els, geo.map);
       source = uiFile ? path.basename(val(opt.ui)) : "state.ui";
     } else {
       const found = ui.findTextRows(img, { threshold: +(opt.threshold || 24) });
@@ -179,14 +274,21 @@ async function uiMeasure(m, files, opt) {
     const contrasts = [];
     const offIds = new Set(chk.offscreen.map((o) => o.id));
     const zero = els.filter((e) => !(e.w > 0 && e.h > 0) && (e.kind === "text" || e.text));
+    // scrolled out of their container's window: not on screen, nothing to measure; partly: measure what shows
+    const scrolledOut = new Set(chk.scrolled.filter((q) => !q.visible).map((q) => q.id));
+    const scrolledPart = new Map(chk.scrolled.filter((q) => q.visible).map((q) => [q.id, { x: q.visible[0], y: q.visible[1], w: q.visible[2], h: q.visible[3] }]));
     // text not held by a panel or button sits straight on the world: its background may be busy (no plate)
     const held = (e) => els.some((p) => p !== e && (p.kind === "panel" || p.kind === "button") && p.x <= e.x && p.y <= e.y && p.x + p.w >= e.x + e.w && p.y + p.h >= e.y + e.h);
     for (const e of els) {
-      if (offIds.has(e.id) || !(e.kind === "text" || e.text) || zero.includes(e)) continue;
-      const tc = ui.textContrast(img, e);
-      const need = minC ?? ((e.fontPx ?? e.h) >= 24 ? 3 : 4.5);
+      if (offIds.has(e.id) || scrolledOut.has(e.id) || !(e.kind === "text" || e.text) || zero.includes(e)) continue;
+      // 24 px+ text is "large" (WCAG: 18 pt ≈ 24 CSS px): in picture px that is 24 × px per pt on a device
+      const need = minC ?? ((e.fontPx ?? e.h) >= 24 * (geo.device && geo.pxPerPt ? geo.pxPerPt : 1) ? 3 : 4.5);
+      // gradient text (background-clip: text, marked fill: "gradient" or found from pixels): no one text colour
+      if (e.fill === "gradient") { contrasts.push({ id: e.id, need, ratio: null, unmeasurable: "gradient text (marked in state.ui)" }); continue; }
+      const tc = ui.textContrast(img, scrolledPart.get(e.id) || e);
+      if (tc && tc.unreliable) { contrasts.push({ id: e.id, need, ratio: null, unmeasurable: `gradient text (its colour changes along ${tc.unreliable.axis}: ${tc.unreliable.channel} by ${tc.unreliable.range} levels)`, estimate: tc.ratio }); continue; }
       const outlined = tc && tc.outline && tc.outline.textVsOutline >= need;
-      const plate = e.kind === "text" && !held(e) && !outlined ? ui.plateCheck(img, e, { need }) : null;
+      const plate = e.kind === "text" && !held(e) && !outlined && !scrolledPart.has(e.id) ? ui.plateCheck(img, e, { need }) : null;
       contrasts.push({ id: e.id, need, ...(tc ? tc : { ratio: null }), ...(plate ? { plate } : {}) });
     }
     const dups = source === "pixels"
@@ -204,8 +306,13 @@ async function uiMeasure(m, files, opt) {
     for (const o of chk.overlaps) add("fail", "overlap", [o.a, o.b], `${name(o.a)} and ${name(o.b)} overlap by ${o.rect[2]}×${o.rect[3]} px at ${o.rect[0]},${o.rect[1]}`);
     for (const e of zero) add("warn", "zero-size", [e.id], `${name(e.id)}: zero-size rect (${e.w}×${e.h}): nothing to measure`);
     for (const s of chk.small) { const e = byId.get(s.id); if (zero.includes(e)) continue; add("fail", "small", [s.id], source === "pixels" ? `${name(s.id)} glyphs ${e.glyphPx} px tall (≈ ${s.fontPx} px font) < ${r2(chk.minText)} px` : `${name(s.id)} ${s.estimated ? "rect height" : "font"} ${s.fontPx} px < ${r2(chk.minText)} px`); }
+    // tap targets: tappable elements on screen under the platform minimum (their hit box when listed)
+    const tapMin = source === "pixels" ? null : tapMinOf(opt, geo);
+    const taps = tapMin ? ui.tapTargets(els, { minX: tapMin.px, minY: tapMin.px, skip: new Set([...offIds, ...scrolledOut]) }) : [];
+    const inPt = (v) => (tapMin && tapMin.pt != null ? `${r2(v / geo.pxPerPt)}` : `${r2(v)}`);
+    for (const t of taps) add("fail", "tap", [t.id], `${name(t.id)} tap target ${t.hit ? "(hit box) " : ""}${inPt(t.w)}×${inPt(t.h)} ${tapMin.pt != null ? "pt" : "px"} < ${tapMin.pt ?? r2(tapMin.px)}×${tapMin.pt ?? r2(tapMin.px)} ${tapMin.pt != null ? "pt" : "px"} (${tapMin.why})`);
     for (const c of contrasts) {
-      if (c.ratio == null) { const e = byId.get(c.id); if (e.text) add("warn", "invisible", [c.id], `${name(c.id)}: its rect is one flat colour (text not drawn?)`); continue; }
+      if (c.ratio == null) { if (c.unmeasurable) continue; const e = byId.get(c.id); if (e.text) add("warn", "invisible", [c.id], `${name(c.id)}: its rect is one flat colour (text not drawn?)`); continue; }
       if (c.plate && c.plate.busy) {
         // over a busy background the averaged ratio hides the weak spots: judge the worst glyph edge instead
         const p = c.plate, g = p.edge;
@@ -247,7 +354,7 @@ async function uiMeasure(m, files, opt) {
       written.push(file);
     }
     if (source === "pixels") for (const f of F) f.confidence = "low";
-    results.push({ fr, W, H, source, els, chk, contrasts, F, fails, warns, readable, minT, safe, preset, dups, moved });
+    results.push({ fr, W, H, source, els, chk, contrasts, F, fails, warns, readable, minT, safe, preset, dups, moved, geo, tapMin });
   }
   // text
   const lines = [];
@@ -264,7 +371,13 @@ async function uiMeasure(m, files, opt) {
       if (p.sizeNote) lines.push(`  ⚠ ${p.sizeNote}`);
       if (p.canvasNote) lines.push(`  · ${p.canvasNote}`);
     }
-    lines.push(`  ${r.preset ? "" : `safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · `}min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? "4.5 (3 for 24 px+)"} · edges within ${alignTol} px`);
+    if (r.geo.note) lines.push(`  · ${r.geo.note}`);
+    lines.push(`  ${r.preset ? "" : r.safe.note ? `${r.safe.note} · ` : `safe area ${r.safe.pct != null ? `${r.safe.pct}% = ` : ""}${r.chk.margins.x}×${r.chk.margins.y} px margins · `}min text ${r2(r.chk.minText)} px${r.minT.pct != null ? ` (${r.minT.pct}% of ${r.H})` : r.minT.pt != null ? ` (${r.minT.pt} pt)` : ""}${heur ? " (glyph height ≈ 0.7 × font px)" : ""} · text contrast ≥ ${val(opt["min-contrast"]) ?? `4.5 (3 for ${r.geo.device && r.geo.pxPerPt ? "24 pt" : "24 px"}+)`}${r.tapMin ? ` · tap targets ≥ ${r.tapMin.pt != null ? `${r.tapMin.pt} pt` : `${r2(r.tapMin.px)} px`} (${r.tapMin.why})` : ""} · edges within ${alignTol} px`);
+    if (r.chk.scrolled.length) {
+      const out = r.chk.scrolled.filter((q) => !q.visible).length, part = r.chk.scrolled.length - out, guessed = r.chk.scrolled.filter((q) => q.guessed).length;
+      lines.push(`  · ${r.chk.scrolled.length} element${r.chk.scrolled.length > 1 ? "s" : ""} cut by a scroll container (${out} scrolled out of view, ${part} partly visible): not clipped or off screen, left out of the layout checks${guessed ? ` (${guessed} matched to a scroll: true container by position; give them "parent": "<container id>" to be exact)` : ""}`);
+    }
+    for (const c of r.contrasts.filter((q) => q.unmeasurable)) lines.push(`  · ${c.id}: contrast not measurable, ${c.unmeasurable}${c.estimate != null ? ` (a single-colour estimate would say ${c.estimate.toFixed(2)}:1)` : ""}`);
     lines.push(r.F.length ? `  ${r.fails ? "✖" : "⚠"} ${r.fails} problem${r.fails === 1 ? "" : "s"}, ${r.warns} warning${r.warns === 1 ? "" : "s"}${heur ? " (low confidence)" : ""}` : r.els.length ? `  ✔ no layout problems` : "  nothing to check: no UI elements found");
     for (const f of r.F) lines.push(`  ${f.level === "fail" ? "✖" : "⚠"} ${f.text}`);
     if (r.readable.length) lines.push(`  ✔ readable: ${r.readable.slice(0, 8).map((c) => { const e = r.els.find((x) => x.id === c.id); return `${c.id} ${e.glyphPx != null ? `glyphs ${e.glyphPx}` : e.fontPx ?? e.h} px ${c.ratio.toFixed(1)}:1${c.outline ? ` (outline; ${c.outline.plainRatio.toFixed(1)}:1 without)` : ""}`; }).join(" · ")}${r.readable.length > 8 ? ` (+${r.readable.length - 8})` : ""}`);
@@ -280,11 +393,12 @@ async function uiMeasure(m, files, opt) {
   if (written.length) lines.push(`picture: ${written.join(", ")} (open it: boxes by status, the safe area in blue)`);
   const first = results[0];
   const count = (r, k) => r.F.filter((f) => f.kind === k).length;
-  const sumOf = (r) => ({ elements: r.els.length, source: r.source, problems: r.fails, warnings: r.warns, clipped: count(r, "clipped"), offscreen: count(r, "offscreen"), overlaps: count(r, "overlap"), smallText: count(r, "small"), lowContrast: count(r, "contrast"), noPlate: count(r, "no-plate"), duplicates: count(r, "duplicate"), unsafe: count(r, "safe"), misaligned: count(r, "align"), touchingEdge: count(r, "edge"), confidence: r.source === "pixels" ? "low" : "exact", ...(r.source === "pixels" ? { movedWithWorld: r.moved.length } : {}), ...(r.preset ? { safePreset: r.preset.name } : {}) });
+  const sumOf = (r) => ({ elements: r.els.length, source: r.source, problems: r.fails, warnings: r.warns, clipped: count(r, "clipped"), offscreen: count(r, "offscreen"), overlaps: count(r, "overlap"), smallText: count(r, "small"), lowContrast: count(r, "contrast"), noPlate: count(r, "no-plate"), duplicates: count(r, "duplicate"), unsafe: count(r, "safe"), misaligned: count(r, "align"), touchingEdge: count(r, "edge"), smallTapTargets: count(r, "tap"), scrolled: r.chk.scrolled.length, contrastUnmeasurable: r.contrasts.filter((c) => c.unmeasurable).length, ...(r.geo.pxPerPt ? { pxPerPt: r2(r.geo.pxPerPt) } : {}), confidence: r.source === "pixels" ? "low" : "exact", ...(r.source === "pixels" ? { movedWithWorld: r.moved.length } : {}), ...(r.preset ? { safePreset: r.preset.name } : {}) });
   const dataOf = (r) => ({
     frame: r.fr.f ?? null, window: r.fr.window ?? null, width: r.W, height: r.H, source: r.source, margins: r.chk.margins, minText: r.chk.minText,
-    elements: r.els.map((e) => ({ id: e.id, kind: e.kind, rect: [e.x, e.y, e.w, e.h], text: e.text, fontPx: e.fontPx, ...(e.glyphPx != null ? { glyphPx: e.glyphPx, glyphs: e.glyphs } : {}) })),
-    findings: r.F, contrast: r.contrasts, duplicates: r.dups, ...(r.source === "pixels" ? { movedWithWorld: r.moved } : {}), ...(r.preset ? { safe: r.preset } : {}), checks: { clipped: r.chk.clipped, offscreen: r.chk.offscreen, unsafe: r.chk.unsafe, overlaps: r.chk.overlaps, small: r.chk.small, aligned: r.chk.aligned },
+    ...(r.geo.pxPerPt ? { pxPerPt: r2(r.geo.pxPerPt) } : {}), ...(r.geo.map ? { uiMap: r.geo.map, uiUnits: r.geo.units } : {}), ...(r.tapMin ? { minTap: { px: r2(r.tapMin.px), pt: r.tapMin.pt, why: r.tapMin.why } } : {}), ...(r.fr.web ? { capture: r.fr.web.mode } : {}),
+    elements: r.els.map((e) => ({ id: e.id, kind: e.kind, rect: [e.x, e.y, e.w, e.h], text: e.text, fontPx: e.fontPx, ...(e.tap ? { tap: true } : {}), ...(e.hit ? { hit: [e.hit.x, e.hit.y, e.hit.w, e.hit.h] } : {}), ...(e.scroll ? { scroll: e.scroll } : {}), ...(e.fill ? { fill: e.fill } : {}), ...(e.glyphPx != null ? { glyphPx: e.glyphPx, glyphs: e.glyphs } : {}) })),
+    findings: r.F, contrast: r.contrasts, duplicates: r.dups, ...(r.source === "pixels" ? { movedWithWorld: r.moved } : {}), ...(r.preset ? { safe: r.preset } : {}), checks: { clipped: r.chk.clipped, offscreen: r.chk.offscreen, unsafe: r.chk.unsafe, overlaps: r.chk.overlaps, small: r.chk.small, aligned: r.chk.aligned, scrolled: r.chk.scrolled },
   });
   const totalFails = results.reduce((s, r) => s + r.fails, 0);
   const env = envelope("measure ui", {

@@ -1,11 +1,16 @@
 // Witness media: UI layout checks (witness measure ui).
 //
-//   normalizeUI(list)                          -> [{ id, kind, x, y, w, h, text, fontPx, layer }] from the state.ui
-//                                                 convention ({id, kind, rect: [x, y, w, h], text?, fontPx?, layer?});
-//                                                 throws on a malformed entry
+//   normalizeUI(list)                          -> [{ id, kind, x, y, w, h, text, fontPx, layer, tap, hit, scroll,
+//                                                 parent, clip, fill }] from the state.ui convention ({id, kind,
+//                                                 rect: [x, y, w, h], text?, fontPx?, layer?, tap?, role?, hit?,
+//                                                 scroll?, parent?, clip?, fill?}); throws on a malformed entry
+//   scaleUI(els, { kx, ky, ox, oy })           -> the same elements mapped to screenshot px (x' = ox + x * kx)
+//   tapTargets(els, { minX, minY })            -> tappable elements (kind button, tap: true, role button) whose hit
+//                                                 box (hit, else rect) is under the minimum: [{ id, w, h }]
 //   layoutChecks(els, { width, height, safe, minText, alignTol })
-//        -> { margins, minText, clipped, offscreen, unsafe, overlaps, small, aligned }   (geometry only)
-//   textContrast(img, rect)                    -> { ratio, deltaE, fg, bg, fgCount, bgCount, outline? } | null (one
+//        -> { margins, minText, clipped, offscreen, unsafe, overlaps, small, aligned, scrolled }   (geometry only;
+//           scrolled: elements cut by their scroll container, not reported as clipped / off screen)
+//   textContrast(img, rect)                    -> { ratio, deltaE, fg, bg, fgCount, bgCount, outline?, unreliable? } | null (one
 //                                                 flat colour): the rect's pixels split in two colour groups (2-means
 //                                                 in Lab), the smaller one is the text; only each group's core pixels
 //                                                 (closer to their own centre than a third of the gap) are compared, so
@@ -42,12 +47,78 @@ export function normalizeUI(list) {
     const r = Array.isArray(e?.rect) ? e.rect : e && "x" in e ? [e.x, e.y, e.w, e.h] : null;
     if (!r || r.length !== 4 || r.some((v) => !Number.isFinite(+v))) throw new TypeError(`state.ui[${i}]${e?.id != null ? ` (${e.id})` : ""}: rect must be [x, y, w, h] numbers`);
     const kind = KINDS.has(e.kind) ? e.kind : e.text != null ? "text" : "panel";
+    const rectOf = (v, what) => {
+      if (v == null) return null;
+      const q = Array.isArray(v) ? v : typeof v === "object" && "x" in v ? [v.x, v.y, v.w ?? v.width, v.h ?? v.height] : null;
+      if (!q || q.length !== 4 || q.some((n) => !Number.isFinite(+n))) throw new TypeError(`state.ui[${i}]${e?.id != null ? ` (${e.id})` : ""}: ${what} must be [x, y, w, h] numbers`);
+      return { x: +q[0], y: +q[1], w: Math.max(0, +q[2]), h: Math.max(0, +q[3]) };
+    };
+    const role = e.role != null ? String(e.role).toLowerCase() : null;
+    const fill = e.fill != null ? String(e.fill).toLowerCase() : e.gradient ? "gradient" : e.textFill != null && /transparent/i.test(String(e.textFill)) ? "gradient" : null;
+    const scroll = e.scroll === true ? "both" : ["x", "y", "both"].includes(e.scroll) ? e.scroll : null;
     return {
       id: String(e.id ?? `ui${i}`), autoId: e.id == null, kind, x: +r[0], y: +r[1], w: Math.max(0, +r[2]), h: Math.max(0, +r[3]),
       text: e.text != null ? String(e.text) : null, fontPx: Number.isFinite(+e.fontPx) && e.fontPx != null ? +e.fontPx : null,
       layer: e.layer ?? 0, hidden: !!e.hidden,
+      // tappable: a button, or anything marked tap: true / role "button" | "link" | "tab" | "checkbox" ...
+      tap: e.tap === false ? false : e.tap === true || kind === "button" || (role != null && /^(button|link|tab|checkbox|radio|switch|menuitem|option)$/.test(role)),
+      hit: rectOf(e.hit, "hit"), scroll, parent: e.parent != null ? String(e.parent) : e.in != null ? String(e.in) : null, clip: rectOf(e.clip, "clip"),
+      fill: fill && /gradient|transparent|clip|image/.test(fill) ? "gradient" : null,
     };
   }).filter((e) => !e.hidden);
+}
+
+/** Elements mapped into screenshot px: x' = ox + x * kx, y' = oy + y * ky (rects, hit boxes, clips; fontPx × ky). */
+export function scaleUI(els, { kx = 1, ky = kx, ox = 0, oy = 0 } = {}) {
+  if (kx === 1 && ky === 1 && !ox && !oy) return els;
+  const R = (q) => (q ? { x: r4(ox + q.x * kx), y: r4(oy + q.y * ky), w: r4(q.w * kx), h: r4(q.h * ky) } : q);
+  return els.map((e) => ({ ...e, ...R(e), fontPx: e.fontPx != null ? r4(e.fontPx * ky) : null, hit: R(e.hit), clip: R(e.clip) }));
+}
+
+/**
+ * Where each element is cut by a scroll container: Map id -> { rect (the visible window), container (id | null) }.
+ * An element's own clip rect wins; else its parent chain up to a scroll: true element; else (only for elements that
+ * leave such a container's rect along its scroll axis while staying inside it across) the nearest such container.
+ */
+export function scrollClips(els) {
+  const byId = new Map(els.map((e) => [e.id, e])), out = new Map();
+  const scrollers = els.filter((e) => e.scroll && e.w > 0 && e.h > 0);
+  for (const e of els) {
+    if (e.clip) { out.set(e.id, { rect: e.clip, container: e.parent }); continue; }
+    let p = e.parent ? byId.get(e.parent) : null, guard = 0, clip = null, container = null;
+    while (p && guard++ < 64) {
+      if (p.scroll || p.clip) { const r = p.clip ? (inter(p, p.clip) || { ...p.clip, w: 0, h: 0 }) : p; clip = clip ? (inter(clip, r) || { x: r.x, y: r.y, w: 0, h: 0 }) : r; container = container || p.id; }
+      p = p.parent ? byId.get(p.parent) : null;
+    }
+    if (clip) { out.set(e.id, { rect: clip, container }); continue; }
+    if (e.scroll || e.parent) continue;   // a container itself, or an element placed under a non-scrolling parent
+    let best = null;
+    for (const s of scrollers) {
+      if (s === e || contains(e, s)) continue;
+      const ax = s.scroll === "x" || s.scroll === "both", ay = s.scroll === "y" || s.scroll === "both";
+      const inX = e.x >= s.x - 1 && e.x + e.w <= s.x + s.w + 1, inY = e.y >= s.y - 1 && e.y + e.h <= s.y + s.h + 1;
+      if (inX && inY) { if (!best || s.w * s.h < best.w * best.h) best = s; continue; }   // inside it: clipped by it if it scrolls
+      const outY = !inY && ay && inX, outX = !inX && ax && inY;
+      if ((outY || outX) && (!best || s.w * s.h < best.w * best.h)) best = s;
+    }
+    if (best) out.set(e.id, { rect: best, container: best.id, guessed: true });
+  }
+  return out;
+}
+
+/**
+ * Tappable elements (e.tap) whose hit box (e.hit, else the rect) is smaller than minX × minY px. A tappable inside
+ * another tappable is skipped (a button in a clickable tile: one target, counted once). Skips: hidden (ids in skip).
+ */
+export function tapTargets(els, { minX = 44, minY = minX, skip = null } = {}) {
+  const taps = els.filter((e) => e.tap && !(skip && skip.has(e.id))).map((e) => ({ e, b: e.hit || e }));
+  const out = [];
+  for (const t of taps) {
+    if (!(t.b.w > 0 && t.b.h > 0)) continue;
+    if (taps.some((o) => o !== t && contains(o.b, t.b) && !(contains(t.b, o.b) && taps.indexOf(o) > taps.indexOf(t)))) continue;
+    if (t.b.w + 1e-6 < minX || t.b.h + 1e-6 < minY) out.push({ id: t.e.id, w: r2(t.b.w), h: r2(t.b.h), hit: !!t.e.hit });
+  }
+  return out;
 }
 
 const inter = (a, b) => {
@@ -72,11 +143,19 @@ export function layoutChecks(els, { width, height, safe = 0.05, minText = 8, ali
   const sides = typeof safe === "object" && "left" in safe;
   const mx = sides ? safe.left : typeof safe === "object" ? safe.x : safe * width, my = sides ? safe.top : typeof safe === "object" ? safe.y : safe * height;
   const S = sides ? { left: safe.left, right: safe.right, top: safe.top, bottom: safe.bottom } : { left: mx, right: mx, top: my, bottom: my };
-  const out = { margins: { x: r2(mx), y: r2(my), ...(sides ? { left: r2(S.left), right: r2(S.right), top: r2(S.top), bottom: r2(S.bottom) } : {}) }, minText: r2(minText), clipped: [], offscreen: [], unsafe: [], overlaps: [], small: [], aligned: [] };
+  const out = { margins: { x: r2(mx), y: r2(my), ...(sides ? { left: r2(S.left), right: r2(S.right), top: r2(S.top), bottom: r2(S.bottom) } : {}) }, minText: r2(minText), clipped: [], offscreen: [], unsafe: [], overlaps: [], small: [], aligned: [], scrolled: [] };
   const screen = { x: 0, y: 0, w: width, h: height };
   const onScreen = new Set();
+  const clips = scrollClips(els);
   for (const e of els) {
     if (!(e.w > 0 && e.h > 0)) continue;
+    // inside a scroll container: what lies outside its window is scrolled away, not clipped or off screen
+    const c = clips.get(e.id);
+    if (c && !contains(c.rect, e) && !(c.guessed && contains(screen, e))) {
+      const v = inter(inter(e, c.rect) || { x: 0, y: 0, w: 0, h: 0 }, screen);
+      out.scrolled.push({ id: e.id, container: c.container, visible: v ? [r2(v.x), r2(v.y), r2(v.w), r2(v.h)] : null, visiblePercent: v ? r2((100 * v.w * v.h) / (e.w * e.h)) : 0, ...(c.guessed ? { guessed: true } : {}) });
+      continue;
+    }
     const vis = inter(e, screen);
     if (!vis) { out.offscreen.push({ id: e.id }); continue; }
     onScreen.add(e);
@@ -161,6 +240,11 @@ export function textContrast(img, rect) {
   if (!fgCount || !bgCount) return null;
   const r = contrast(img, fg, bg);
   const res = { ratio: r.ratio, deltaE: r.deltaE, fg: r.meanA.slice(0, 3).map(Math.round), bg: r.meanB.slice(0, 3).map(Math.round), fgCount, bgCount };
+  // gradient text (background-clip: text, a fill that changes across the glyphs): the "text colour" is a mean of
+  // many colours, so the ratio means little. The ink (everything not background core) changes colour steadily with
+  // position: one channel follows x or y closely (R² ≥ 0.5) over 40+ levels. Anti-aliasing and outlines don't.
+  const grad = inkGradient(img, labs, idx, lab, fgGroup, bg, W);
+  if (grad) res.unreliable = { why: "gradient text", axis: grad.axis, channel: grad.channel, r2: grad.r2, range: grad.range };
   // an outline (a third colour hugging the text: black around yellow letters): pixels in neither core that are far
   // from the text-background line in Lab (so not anti-aliased edges between the two). The glyph edge the eye reads
   // is then text vs outline or outline vs background, whichever is stronger.
@@ -188,6 +272,31 @@ export function textContrast(img, rect) {
     }
   }
   return res;
+}
+
+/** The strongest linear trend of an ink colour channel over x or y: { axis, channel, r2, range } when R² ≥ 0.5 and the
+ *  fitted colour changes 40+ levels across the ink, else null. */
+function inkGradient(img, labs, idx, lab, fgGroup, bgCore, W) {
+  const d = img.data, pts = [];
+  for (let i = 0; i < idx.length; i++) if (lab[i] === fgGroup && !bgCore[idx[i]]) pts.push(idx[i]);
+  if (pts.length < 24) return null;
+  let best = null;
+  for (const axis of ["x", "y"]) {
+    const pos = pts.map((p) => (axis === "x" ? p % W : (p - (p % W)) / W));
+    const n = pts.length, mp = pos.reduce((s, v) => s + v, 0) / n;
+    const vp = pos.reduce((s, v) => s + (v - mp) ** 2, 0);
+    if (vp <= 0) continue;
+    const lo = Math.min(...pos), hi = Math.max(...pos);
+    for (let ch = 0; ch < 3; ch++) {
+      const cv = pts.map((p) => d[p * 4 + ch]), mc = cv.reduce((s, v) => s + v, 0) / n;
+      let sxy = 0, vc = 0;
+      for (let k = 0; k < n; k++) { sxy += (pos[k] - mp) * (cv[k] - mc); vc += (cv[k] - mc) ** 2; }
+      if (vc <= 0) continue;
+      const rr = (sxy * sxy) / (vp * vc), range = Math.abs((sxy / vp) * (hi - lo));
+      if (rr >= 0.5 && range >= 40 && (!best || rr > best.r2)) best = { axis, channel: "rgb"[ch], r2: r2(rr), range: Math.round(range) };
+    }
+  }
+  return best;
 }
 
 /**

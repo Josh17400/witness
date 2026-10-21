@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>DOM boot</title><style>body { margin: 0; background: #123; }</style></head>
+<body>
+  <div id="out"></div>
+  <!-- deferred: run by witness.boot() after the takeover is in place (GUIDE.md §1b) -->
+  <script type="text/witness">
+    var game = { bootAt: null, ready: false, order: [] };
+    setTimeout(function () { game.bootAt = performance.now(); }, 200);
+    document.addEventListener("DOMContentLoaded", function () { game.ready = true; });
+    game.order.push("a");
+  </script>
+  <script type="text/witness">game.order.push("b");</script>
+  <script type="module">
+    import witness from "/witness/witness.js";
+    await witness.boot();
+    await witness.start({ name: "dom-boot", fps: 60, snapshot: () => game });
+  </script>
+</body>
+</html>

@@ -6,7 +6,7 @@ import { norm, len, sub, add, scale, dist2, dot, perp, compass, dirVector, r1, f
 import { controlLabel, parseControl } from "./config.js";
 import { makeProfile, moveControls, lookOf } from "./profiles.js";
 import { PlatformRunner, SAFE_STATES } from "./platformer.js";
-import { OrderError, resolveTarget } from "./orders.js";
+import { OrderError, resolveTarget, ORDER_CARD_TURN } from "./orders.js";
 import { thingLabel } from "./perceive.js";
 import { DotClassifier } from "./events.js";
 import { parseWitnessInput } from "../core/input-spec.js";
@@ -746,6 +746,7 @@ class Choose extends Behaviour {
     }
     if (n && (idx < 1 || idx > n)) throw new OrderError(`there ${n === 1 ? "is only 1 option" : `are only ${n} options`}: ${d.options.map((x, i) => `${i + 1}) ${x}`).join("  ")}`);
     this.idx = idx; this.text0 = JSON.stringify(d); this.chosen = d.options[idx - 1] ?? `#${idx}`; this.phase = "press";
+    this.watch = new StateWatch(w);
   }
   tick(w, want) {
     const ap = this.ap, c = ap.cfg.controls, ch = c.choose;
@@ -771,16 +772,174 @@ class Choose extends Behaviour {
     }
     const now = w.dialogue ? JSON.stringify(w.dialogue) : null;
     if (now !== this.text0) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}"${w.dialogue ? ` → ${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 100)}"` : " → dialogue closed"}`);
+    // a choice that only toggles something (a difficulty button gets a CSS class): the snapshot changed and stayed so
+    // (after the dialogue has had half a second to answer, so a slow dialogue still reports its new line)
+    const changed = this.watch.check(w);
+    if (changed && ap.t - this.waitT > 0.5 + (this.waitFrames || 0) / ap.fps) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}": state changed (${changed}), dialogue unchanged`);
     // many games swallow the first confirm while the text is still typing out: press it once more
     if (ch.mode === "arrows" && !this.again && ap.t - this.waitT > 0.35 + (this.waitFrames || 0) / ap.fps) {
       this.again = true;
       want.taps.push({ label: "confirm", c: c.confirm || parseControl("enter"), frames: c.tapFrames });
       return this.run();
     }
-    if (ap.t - this.waitT > 1.0 + (this.waitFrames || 0) / ap.fps) return this.fail(`chose ${this.idx} but the dialogue didn't change (is play.controls.choose right?)`);
+    if (ap.t - this.waitT > 1.0 + (this.waitFrames || 0) / ap.fps) return this.fail(`chose ${this.idx} but nothing changed: not the dialogue, not the game state (is play.controls.choose right?)`);
     return this.run();
   }
 }
+
+// ------------------------------------------------------------------ turn-based / card / menu games
+const VOLATILE = /(^|\.)(t|time|times|frame|frames|clock|tick|ticks|elapsed|timer|timers|now|seed|fps|dt|delta|anim\w*|animating|particles|camera|pointer|touches|perf)(\.|$|\[)/i;
+/** The snapshot as flat path → short JSON (3 levels; arrays as one value), without time-like fields. */
+export function flatState(state, pre = "", out = {}, depth = 0) {
+  if (!state || typeof state !== "object") return out;
+  for (const [k, v] of Object.entries(state)) {
+    const p = pre ? `${pre}.${k}` : k;
+    if (VOLATILE.test(p)) continue;
+    if (v && typeof v === "object" && !Array.isArray(v) && depth < 2) flatState(v, p, out, depth + 1);
+    else { const j = JSON.stringify(v); out[p] = j && j.length > 2000 ? `${j.length}:${j.slice(0, 2000)}` : j; }
+  }
+  return out;
+}
+/**
+ * Did the game's state change because of what we just sent? A field counts when it differs from before the input and
+ * held the same value over two looks in a row (counters and moving things keep changing, a toggled setting doesn't).
+ * `check(w)` returns the changed fields ("difficulty, ui.selected") or null.
+ */
+class StateWatch {
+  constructor(w) { this.base = flatState(w.snap && w.snap.state); this.last = null; }
+  check(w) {
+    const now = flatState(w.snap && w.snap.state), last = this.last;
+    this.last = now;
+    if (!last) return null;
+    const keys = new Set([...Object.keys(now), ...Object.keys(this.base)]);
+    const changed = [...keys].filter((k) => now[k] !== this.base[k] && now[k] === last[k]);
+    if (!changed.length) return null;
+    const named = changed.filter((k) => !/(^|\.)digest$/.test(k));
+    const top = [...new Set(named.map((k) => k.split(".").slice(0, 2).join(".")))];
+    return top.length ? `${top.slice(0, 4).join(", ")}${top.length > 4 ? ` +${top.length - 4}` : ""}` : "hidden state (digest)";
+  }
+}
+
+/** Find a choice by number or by words of its label. Throws OrderError listing the choices. */
+export function matchChoice(choices, o) {
+  const list = () => choices.slice(0, 12).map((c) => `${c.n}) ${clip(c.label, 40)}`).join("  ") + (choices.length > 12 ? `  … (${choices.length} in all)` : "");
+  if (!o.optionText) {
+    const idx = o.option === -1 ? choices.length : o.option;
+    const c = choices.find((x) => x.n === idx);
+    if (!c) throw new OrderError(`there ${choices.length === 1 ? "is only 1 choice" : `are ${choices.length} choices`}: ${list()}`);
+    return c;
+  }
+  const q = o.optionText.toLowerCase().trim(), norm = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}♠♣♥♦]+/gu, " ").trim();
+  const words = norm(q).split(" ").filter(Boolean);
+  let best = null, bs = 0;
+  for (const c of choices) {
+    const l = c.label.toLowerCase(), nl = norm(l), lw = new Set(nl.split(" "));
+    let s = l === q || nl === norm(q) ? 1000 : l.includes(q) ? 500 : 0;
+    if (!s) {
+      const whole = words.filter((x) => lw.has(x)).length, part = words.filter((x) => !lw.has(x) && x.length > 2 && nl.includes(x)).length;
+      s = whole + part >= Math.ceil(words.length / 2) ? whole * 10 + part * 4 + (whole + part === words.length ? 5 : 0) : 0;
+    }
+    if (s && c.legal) s += 1;   // ties go to a legal move
+    if (s > bs) { bs = s; best = c; }
+  }
+  if (!best) throw new OrderError(`no choice matches "${o.optionText}" — choices: ${list()}`, "pick by number, or by words from the label");
+  return best;
+}
+
+/**
+ * pick: send one of the game's choices (state.choices) the way play.pick says (a game call, a click on its rect, its
+ * key or number key), then wait until the game reacts: a dialogue, new choices, the turn passing, any lasting state
+ * change, or the call's acknowledgement.
+ */
+class Pick extends Behaviour {
+  constructor(o, ap, w) {
+    super(o, ap, w);
+    this.choice = matchChoice(w.choices, o);
+    this.watch = new StateWatch(w);
+    this.sig0 = choiceSig(w); this.dlg0 = w.dialogue ? JSON.stringify(w.dialogue) : null; this.turn0 = w.yourTurn; this.scene0 = w.scene;
+    this.phase = "send";
+  }
+  get desc() { return `picked ${this.choice.n}) "${clip(this.choice.label, 50)}"`; }
+  route() {
+    const cfg = this.ap.cfg, p = cfg.pick, c = this.choice;
+    if (p.mode === "call" || (p.mode === "auto" && p.call)) return "call";
+    if (p.mode === "click") return "click";
+    if (p.mode === "keys") return "keys";
+    return c.key ? "key" : c.rect ? "click" : "keys";
+  }
+  tick(w, want) {
+    const ap = this.ap, cfg = ap.cfg, c = this.choice;
+    if (this.phase === "send") {
+      const how = this.route();
+      this.phase = "wait"; this.waitT = ap.t;
+      if (how === "call") {
+        const args = cfg.pick.args.map((a) => (a === "index" || a === "n" ? c.n - 1 : a === "number" ? c.n : a === "label" ? c.label : a === "choice" ? c.raw : c.id));
+        return { status: "call", name: cfg.pick.call, args };
+      }
+      if (how === "click") {
+        const r = c.rect;
+        if (!r) return this.fail(`choice ${c.n} has no rect or pos to click (give choices a rect, or set play.pick)`);
+        const x = Math.round(r.length >= 4 ? r[0] + r[2] / 2 : r[0]), y = Math.round(r.length >= 4 ? r[1] + r[3] / 2 : r[1]);
+        want.raw.push({ at: 0, type: "mouse", x, y }, { at: 0, type: "mouse", x, y, button: 0, down: true }, { at: 2, type: "mouse", x, y, button: 0, down: false });
+        return this.run();
+      }
+      if (how === "key") { want.taps.push({ label: "pick", c: parseControl(c.key), frames: cfg.controls.tapFrames }); return this.run(); }
+      const ch = cfg.controls.choose;
+      if (ch.mode === "list") { const k = ch.keys[c.n - 1]; if (!k) return this.fail(`no control configured for choice ${c.n} (play.controls.choose has ${ch.keys.length})`); want.taps.push({ label: "pick", c: k, frames: cfg.controls.tapFrames }); return this.run(); }
+      if (c.n > 9) return this.fail(`choice ${c.n} has no number key: set play.pick (a call or click) to pick past 9`);
+      want.taps.push({ label: "pick", c: parseControl(String(c.n)), frames: cfg.controls.tapFrames });
+      return this.run();
+    }
+    // the game's answer to a call: false / {ok: false} / {error} is a refusal
+    if (this.result !== undefined && !this.judged) {
+      this.judged = true;
+      const r = this.callValue;
+      if (this.callFailed) return this.fail(this.result);
+      if (r === false || (r && typeof r === "object" && (r.ok === false || r.legal === false || r.error))) return this.fail(`${this.desc}: the game refused it${r && typeof r === "object" && (r.error || r.reason || r.message) ? ` ("${clip(String(r.error || r.reason || r.message), 120)}")` : ""}`);
+    }
+    const what = [];
+    if (w.dialogue && JSON.stringify(w.dialogue) !== this.dlg0) what.push(`${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 100)}"`);
+    else if (!w.dialogue && this.dlg0) what.push("dialogue closed");
+    if (w.scene !== this.scene0 && w.scene != null) what.push(`scene ${w.scene}`);
+    if (this.turn0 !== w.yourTurn && w.yourTurn != null) what.push(w.yourTurn ? "your turn" : "the turn passed");
+    if (choiceSig(w) !== this.sig0) what.push(w.choices ? `${w.choices.length} choice${w.choices.length === 1 ? "" : "s"} now` : "no choices now");
+    if (what.length) return this.done(`${this.desc} → ${what.join(", ")}`);
+    const changed = this.watch.check(w);
+    if (changed) return this.done(`${this.desc}: state changed (${changed})`);
+    if (this.result !== undefined && !this.callFailed && ap.t - this.waitT > 0.5) return this.done(`${this.desc}: the game accepted it (${this.result}), nothing visible changed yet`);
+    if (ap.t - this.waitT > 1.0) return this.fail(`${this.desc} but nothing changed (is play.pick right? choices: ${this.route()})`);
+    return this.run();
+  }
+}
+const choiceSig = (w) => (w.choices ? w.choices.map((c) => `${c.label}|${c.legal}|${c.selected}`).join("\n") : "");
+
+/**
+ * Turn profile `wait`: until it becomes your turn, the choices change, a dialogue opens or changes, the scene changes
+ * or the game ends; `wait 10` caps it at 10 s (a bare `wait` at play.turnWait, 30 s).
+ */
+class WaitTurn extends Behaviour {
+  constructor(o, ap, w) {
+    super(o, ap, w);
+    this.cap = o.untimed ? (o.forS ?? ap.cfg.turnWait) : o.seconds;
+    this.sig0 = choiceSig(w); this.dlg0 = w.dialogue ? JSON.stringify(w.dialogue) : null; this.turn0 = w.yourTurn; this.scene0 = w.scene;
+    this.already = o.untimed && w.yourTurn === true;
+    this.over0 = !!(w.won || w.dead || w.over);
+  }
+  tick(w) {
+    if (this.already) return this.done("it's already your turn");
+    if ((w.won || w.dead || w.over) && !this.over0) return this.done(w.won ? "the game reports a win" : "the game is over");
+    if (w.yourTurn === true && this.turn0 !== true) return this.done(`your turn${w.choices ? ` (${w.choices.length} choice${w.choices.length === 1 ? "" : "s"})` : ""}`);
+    if (w.dialogue && JSON.stringify(w.dialogue) !== this.dlg0) return this.done(`a dialogue: ${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 80)}"`);
+    if (w.scene !== this.scene0 && w.scene != null) return this.done(`scene ${w.scene}`);
+    if (choiceSig(w) !== this.sig0 && this.age > 0.05) {
+      if (w.yourTurn === false) { this.sig0 = choiceSig(w); }   // the others' moves show up while it isn't your turn: keep waiting
+      else return this.done(`the choices changed (${w.choices ? w.choices.length : 0} now)`);
+    }
+    if (this.age >= this.cap - 1e-9) return this.done(`waited ${r1(this.age)}s${w.yourTurn === false ? " (still not your turn)" : ""}`);
+    return this.run();
+  }
+}
+const TURN_NO = /^(goto|go|run|explore|follow|fight|flee|talk|pickup|interact|stomp|jump|look|reload|weapon|block|dodge)$/;
 function controlEventRaw(c, down) { return controlEvent(c, down, { x: 0, y: 0 }); }
 
 class Pickup extends Behaviour {
@@ -985,7 +1144,8 @@ export class Autopilot {
       this.visitedBefore = (this.visitedBefore || 0) + this.grid.visited.size;   // coverage adds up across levels
       this.grid.reset(); this.windupSeen.clear(); this.prevP = null;
       if (this.platform) this.platform.reset();
-      this.emit("scene", `${this.sceneArrival ? `entered ${this.sceneArrival}: ` : ""}new scene/level (${w.sceneKey}): map knowledge reset`);
+      // (a turn/menu game has no map: its scene changes are just the tracker's "scene: home → table")
+      if (this.cfg.profile !== "turn") this.emit("scene", `${this.sceneArrival ? `entered ${this.sceneArrival}: ` : ""}new scene/level (${w.sceneKey}): map knowledge reset`);
     }
     this.prevW = w;
     if (this.cfg.mapWindow) this.grid.windowed = true;
@@ -1196,7 +1356,9 @@ export class Autopilot {
 
   /** Build the behaviour for an order (may throw OrderError when its target doesn't exist). */
   make(o, w) {
-    if ((!w.player || !w.player.p2) && !/^(press|hold|wait|stop|set|call|choose|use|respawn|combo)$/.test(o.verb))
+    if (this.cfg.profile === "turn" && TURN_NO.test(o.verb))
+      throw new OrderError(`"${o.text}": this is a turn-based / menu game, there's nothing to ${o.verb === "goto" || o.verb === "go" ? "walk to" : o.verb}`, ORDER_CARD_TURN);
+    if ((!w.player || !w.player.p2) && this.cfg.profile !== "turn" && !/^(press|hold|wait|stop|set|call|choose|use|respawn|combo)$/.test(o.verb))
       throw new OrderError("there's no player in the game right now (an intro, a cutscene or a menu?)", "wait, or press the key the screen asks for (press enter)");
     try { return this.make1(o, w); }
     catch (e) {
@@ -1256,7 +1418,11 @@ export class Autopilot {
       case "flee": return new Flee(o, this, w);
       case "talk": return new Talk(o, this, w, resolveTarget(o.target, w, { prefer: "npc" }).things[0]);
       case "interact": return new Interact(o, this, w, o.target ? resolveTarget(o.target, w).things[0] : null);
-      case "choose": return new Choose(o, this, w);
+      case "choose":
+        // the game's choices (cards, menu buttons, moves) when no dialogue with options is open
+        if (w.choices && !(w.dialogue && w.dialogue.options.length)) return new Pick(o, this, w);
+        if (!w.dialogue && cfg.profile === "turn") throw new OrderError("there are no choices right now (no state.choices, no dialogue): wait for your turn, or look at a screenshot", ORDER_CARD_TURN);
+        return new Choose(o, this, w);
       case "pickup": {
         let r;
         try { r = resolveTarget(o.target, w, { prefer: "item" }); }
@@ -1277,8 +1443,9 @@ export class Autopilot {
         const dir = o.dir ? dirVector(o.dir, w.northSign) : foe ? norm(sub(w.player.p2, foe.p2)) : this.lastMoveDir;
         return new Tap(o, this, w, { control: c.dodge, dir, label: "dodged" });
       }
-      case "wait": return new Wait(o, this, w, o.seconds);
-      case "waitfor": return new WaitFor(o, this, w, resolveTarget(o.target, w, { allowRemembered: false }).things[0]);
+      case "wait": return cfg.profile === "turn" ? new WaitTurn(o, this, w) : new Wait(o, this, w, o.seconds);
+      case "waitfor": if (cfg.profile === "turn") return new WaitTurn({ ...o, untimed: true }, this, w);
+        return new WaitFor(o, this, w, resolveTarget(o.target, w, { allowRemembered: false }).things[0]);
       case "stop": return new Instant(o, this, w, () => ({ status: "done", msg: "stopped" }));
       case "set": return new Instant(o, this, w, () => {
         const k = o.key, v = o.value;
@@ -1363,7 +1530,7 @@ export class Autopilot {
       // ---- reflexes that come before the order
       if (w.dead && b.standing) return { want, k: this.cfg.tick, status: "run" };
       if (w.dead && b.auto) { this.cur = this.suspended || b; this.suspended = null; b = this.cur; }
-      const stillOk = b instanceof Tap || b instanceof Wait || b instanceof Instant || b instanceof Choose || b instanceof Hold || b instanceof CallOrder;
+      const stillOk = b instanceof Tap || b instanceof Wait || b instanceof Instant || b instanceof Choose || b instanceof Pick || b instanceof WaitTurn || b instanceof Hold || b instanceof CallOrder;
       // live mode: an order given (or running) while dead waits for the respawn (up to 12 s) instead of failing
       if (w.dead && !stillOk && this.standingMode) {
         b.deadSince ??= this.t;
@@ -1375,7 +1542,7 @@ export class Autopilot {
         return this.finish(b, { status: "fail", msg: `a dialogue is open (${w.dialogue.speaker || "someone"}: "${clip(w.dialogue.text, 60)}") — choose an option or press cancel first` }, want);
       // no player in the snapshot (a cutscene, an intro, a title screen): only orders that don't move can run
       if (!w.player || !w.player.p2) {
-        if (!(b instanceof Tap || b instanceof Wait || b instanceof Hold || b instanceof Instant || b instanceof Choose || b instanceof CallOrder))
+        if (!(b instanceof Tap || b instanceof Wait || b instanceof Hold || b instanceof Instant || b instanceof Choose || b instanceof Pick || b instanceof WaitTurn || b instanceof CallOrder))
           return this.finish(b, { status: "fail", msg: "there's no player in the game right now (an intro, a cutscene or a menu?) — wait, or press the key the screen asks for" }, want);
         const res0 = b.tick(w, want);
         if (res0.status === "call") { this.wantedMove = false; return { want, k: 1, status: "call", name: res0.name, args: res0.args }; }
@@ -1442,4 +1609,4 @@ export class Autopilot {
   }
 }
 
-export { GoTo, Fight, Flee, Talk, Choose, Pickup, Explore, Tap, Hold, Wait, Behaviour, Look, hpPct, reachW, fmtCell };
+export { GoTo, Fight, Flee, Talk, Choose, Pick, WaitTurn, StateWatch, Pickup, Explore, Tap, Hold, Wait, Behaviour, Look, hpPct, reachW, fmtCell };

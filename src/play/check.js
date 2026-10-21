@@ -3,7 +3,7 @@
 // one would unlock. Pure: `checkSnapshot(state, profile)` works on any snapshot state.
 import { openGame } from "../core/launch.js";
 import { begin, stepTo } from "../core/runner.js";
-import { rawPos } from "./perceive.js";
+import { rawPos, normChoices } from "./perceive.js";
 import { resolvePlayConfig } from "./config.js";
 
 const DOORS = /^(door|doorway|entrance|entry|stairs?|staircase|stairway|ladder|portal|exit|trapdoor|hatch|gate)$/i;
@@ -21,6 +21,7 @@ function playerOf(state) {
  */
 export function checkSnapshot(state, profile = "topdown") {
   state = state || {};
+  if (profile === "turn") return checkTurn(state);
   const P = playerOf(state), pos = P ? rawPos(P) : null;
   const ents = (Array.isArray(state.entities) ? state.entities : []).filter((e) => e && typeof e === "object" && e !== P);
   const has = (f) => ents.some((e) => f in e);
@@ -69,6 +70,37 @@ export function checkSnapshot(state, profile = "topdown") {
   return out;
 }
 
+/** Does this snapshot look like a turn-based / card / menu game (choices or whose turn, no player position)? */
+export function looksTurnBased(state) {
+  if (!state || typeof state !== "object") return false;
+  const P = playerOf(state);
+  if (P && rawPos(P)) return false;
+  return !!(normChoices(state.choices ?? state.tappables) || ["yourTurn", "your_turn", "myTurn", "isYourTurn"].some((k) => k in state));
+}
+
+/** The turn profile's checklist: choices with labels and legality, whose turn, score, phase, hand, outcome. */
+function checkTurn(state) {
+  const out = [];
+  const add = (key, label, ok, unlocks, hint, seen) => out.push({ key, label, ok, unlocks, hint, ...(seen ? { seen } : {}) });
+  const raw = state.choices ?? state.tappables ?? state.moves ?? state.legalMoves ?? state.actions;
+  const ch = normChoices(raw);
+  const objs = Array.isArray(raw) && raw.some((c) => c && typeof c === "object");
+  add("choices", "choices (cards, buttons, moves) with label and id", ch ? (objs ? raw.every((c) => !c || typeof c !== "object" || ((c.label ?? c.text ?? c.name) != null && (c.id ?? c.value) != null)) : true) : false,
+    "pick <n|words>, and the choices list in every observation", ch ? "every choice needs a label and a stable id: [{label: \"Play J♠\", id: \"JS\"}] (plain strings work too)" : "state.choices = [{label, id}] (or plain strings): what the player can click or play right now",
+    ch ? `${ch.length}: ${ch.slice(0, 5).map((c) => c.label).join(", ")}${ch.length > 5 ? ", …" : ""}` : null);
+  add("legal", "legal moves marked", ch ? (objs && raw.some((c) => c && typeof c === "object" && ("legal" in c || "enabled" in c || "disabled" in c)) ? true : null) : null,
+    "the tester sees which moves the game allows (and a bug hunter can try the others)", "list only legal moves, or mark them: legal: false / disabled: true (can't tell from this snapshot)");
+  const turnKey = ["yourTurn", "your_turn", "myTurn", "isYourTurn", "playerTurn"].find((k) => k in state);
+  add("turn", "whose turn (state.yourTurn)", turnKey ? true : false, "wait wakes the moment it's your turn; the header says YOUR TURN", "state.yourTurn = true while the player has to act");
+  const score = ["score", "scores", "points"].find((k) => state[k] != null);
+  add("score", "score", score ? true : null, "the header shows it, and score changes are events", "state.score (a number, or {us: 3, them: 5}) (not seen: no score on this screen?)", score ? JSON.stringify(state[score]).slice(0, 40) : null);
+  add("phase", "scene or phase", state.scene != null || state.phase != null ? true : false, "scene changes and phases in the observation and the report", "state.scene = \"home\" / \"table\", state.phase = \"bidding\"");
+  add("hand", "the player's hand or resources", Array.isArray(state.hand) || state.hand != null ? true : null, "the tester knows what it holds (card games)", "state.hand = [\"J♠\", \"A♥\"] (not seen: not a card game, or not dealt yet)");
+  add("dialogue", "a dialogue with speaker and options", "dialogue" in state || "dialog" in state ? true : null, "choose, and wait wakes when one opens", "state.dialogue = {speaker, text, options[]} while one is open (null when closed)");
+  add("outcome", "won / game over", "won" in state || "dead" in state || "gameOver" in state || "victory" in state || "winner" in state ? true : false, "the outcome in the report, and a win wakes the tester", "state.won / state.gameOver (or state.winner)");
+  return out;
+}
+
 /** The checklist as text lines. */
 export function checkLines(items) {
   const L = [];
@@ -100,8 +132,11 @@ export async function playCheck(opt, { loadConfig }) {
       if (atF != null && f < atF) continue;
       state = (await S.snapshot()).state || {};
       if (atF == null && playerOf(state) && Array.isArray(state.entities) && state.entities.length > 1) break;
+      if (atF == null && profile === "turn" && normChoices(state.choices ?? state.tappables)) break;
     }
     const items = checkSnapshot(state, profile);
+    // an unconfigured game that reads as turn-based: say so (its action checklist would be all misses)
+    if (!opt.json && profile !== "turn" && !(cfg.play && cfg.play.profile) && looksTurnBased(state)) console.log('this looks like a turn-based / card / menu game: set "play": {"profile": "turn"} in witness.json (or run witness play suggest)');
     if (opt.json) { console.log(JSON.stringify({ command: "play check", profile, items }, null, 1)); return; }
     console.log(`Playtest-ready check for ${S.hello.name || cfg.name} (${profile}, seed ${seed}${scene ? `, scene ${scene}` : ""}):`);
     for (const l of checkLines(items)) console.log(l);

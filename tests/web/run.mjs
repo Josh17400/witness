@@ -330,6 +330,13 @@ else {
     r = witness(P("bridge"), ["test", "--engine", "webkit", "--device", "iphone-15", "--no-auto-unlock"], env);
     ok("shim page in webkit: test passes", r.status === 0 && /2 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
   }
+  // a pure-DOM page: CSS animations on the virtual clock, launch.inject, witness.boot(), reset by reload, clock.epoch
+  {
+    const d = spawnSync(process.execPath, [path.join(here, "dom.mjs")], { encoding: "utf8", timeout: 900000, env: { ...process.env, ...env } });
+    const m = /(\d+) passed, (\d+) failed/.exec(d.stdout || "");
+    if (m) pass += +m[1];
+    ok("dom page suite (tests/web/dom.mjs)", d.status === 0 && m && +m[2] === 0, d.stdout + d.stderr);
+  }
   for (const d of shots) fs.rmSync(d, { recursive: true, force: true });
   for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "safe-nocover", "mixed"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
 }

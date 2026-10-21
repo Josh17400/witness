@@ -1,6 +1,6 @@
 // UI layout tests: `node tests/media/ui.mjs` — geometry checks on a planted layout, text contrast with anti-aliased
 // edges, and text-like rows found from pixels alone (drawn with the embedded 8×16 font, so the glyph boxes are known).
-import { normalizeUI, layoutChecks, textContrast, findTextRows, safePreset, duplicateTexts, pixelDuplicates, textTimeline, repeatedTexts, plateCheck } from "../../src/media/ui.js";
+import { normalizeUI, layoutChecks, textContrast, findTextRows, safePreset, duplicateTexts, pixelDuplicates, textTimeline, repeatedTexts, plateCheck, scaleUI, tapTargets, scrollClips } from "../../src/media/ui.js";
 import { contrastRatio } from "../../src/media/color.js";
 import { glyph } from "../../src/media/font.js";
 import { ok, show, done } from "./harness.mjs";
@@ -261,6 +261,59 @@ function village() {
   const { rows } = findTextRows(im);
   show("village rows", rows.map((r) => `${r.x},${r.y} ${r.w}×${r.h} ${r.glyphs}g`).join(" · "));
   ok("village: exactly the 3 text rows (HP, GOLD, OAKVALE), no world sprites", rows.length === 3 && want.every((b) => rows.some((r) => r.x === b.x && r.y === b.y && r.w === b.w && r.h === b.h)), rows.map((r) => [r.x, r.y, r.w, r.h, r.glyphs]));
+}
+
+// ---- 0.7.5: phone UIs — tappables, scaled lists, scroll containers, gradient text
+{
+  const els = normalizeUI([
+    { id: "deal", kind: "button", rect: [10, 10, 40, 30], text: "Deal" },
+    { id: "tile", kind: "panel", tap: true, rect: [100, 10, 60, 60] },
+    { id: "inner", kind: "button", rect: [110, 20, 20, 20] },                 // a button inside a tappable tile: counted once (the tile)
+    { id: "pad", kind: "icon", role: "button", rect: [200, 10, 20, 20], hit: [190, 0, 44, 44] },   // small icon, 44×44 hit box
+    { id: "label", kind: "text", rect: [10, 60, 40, 12], text: "Score" },
+    { id: "grad", kind: "text", rect: [10, 80, 60, 20], text: "EUCHRE", fill: "linear-gradient(...)" },
+    { id: "off", kind: "button", tap: false, rect: [0, 0, 10, 10] },
+  ]);
+  const byId = (id) => els.find((e) => e.id === id);
+  ok("normalizeUI: tap from kind button / tap / role, hit box, gradient fill", byId("deal").tap && byId("tile").tap && byId("pad").tap && !byId("label").tap && !byId("off").tap && byId("pad").hit.w === 44 && byId("grad").fill === "gradient" && byId("label").fill === null);
+  const t = tapTargets(els, { minX: 44 });
+  ok("tapTargets: 40×30 Deal is small; the tile counts once (its inner button skipped); the icon's 44×44 hit box passes", t.map((x) => x.id).join() === "deal" && t[0].w === 40 && t[0].h === 30, JSON.stringify(t));
+  const t2 = tapTargets(els, { minX: 66 });
+  ok("tapTargets: at 66 px the tile (60×60) and the icon's hit box are small too, the inner button still not counted", t2.map((x) => x.id).join() === "deal,tile,pad" && t2.find((x) => x.id === "pad").hit, JSON.stringify(t2));
+  const sc = scaleUI(els, { kx: 3, ky: 3, ox: 0, oy: 6 });
+  ok("scaleUI: rects, hit boxes and fontPx ×3 (offset +6 y)", sc[0].x === 30 && sc[0].y === 36 && sc[0].w === 120 && sc[3].hit.x === 570 && sc[3].hit.w === 132 && scaleUI(normalizeUI([{ id: "a", rect: [1, 1, 2, 2], text: "x", fontPx: 11 }]), { kx: 3 })[0].fontPx === 33);
+}
+{
+  // a 100×200 screen; a vertical list (scroll: true) from y 40 to 160 with 10 rows of 30 px: rows 0-3 show, row 4 is cut, the rest are scrolled out
+  const list = [{ id: "list", kind: "panel", rect: [0, 40, 100, 120], scroll: "y" }, { id: "tabbar", kind: "panel", rect: [0, 170, 100, 30] }];
+  for (let i = 0; i < 10; i++) list.push({ id: `row${i}`, kind: "text", rect: [10, 40 + i * 30, 80, 20], text: `Row ${i}`, ...(i % 2 || i === 4 ? { parent: "list" } : {}) });   // row4 (on screen under the list) needs its parent: by position alone it could be anything
+  const els = normalizeUI(list);
+  const chk = layoutChecks(els, { width: 100, height: 200, safe: 0, minText: 4 });
+  const sc = new Map(chk.scrolled.map((q) => [q.id, q]));
+  show("scrolled", chk.scrolled.map((q) => `${q.id}${q.guessed ? "?" : ""}:${q.visiblePercent}%`).join(" "));
+  ok("scroll: rows past the list window are scrolled, not off screen / clipped (explicit parent or matched by position)", !chk.offscreen.length && !chk.clipped.length && sc.has("row4") && sc.get("row4").visible === null && ["row4", "row5", "row6", "row7", "row8", "row9"].every((id) => sc.has(id)) && !sc.has("row3") && sc.get("row5").guessed === undefined && sc.get("row6").guessed === true, JSON.stringify(chk.scrolled));
+  ok("scroll: the tab bar under the list (on screen, not in it) is not taken for list content", !sc.has("tabbar") && scrollClips(els).get("tabbar")?.guessed === true);
+  ok("scroll: scrolled rows are left out of the overlap check (row4 under the tab bar)", !chk.overlaps.some((o) => [o.a, o.b].includes("row4")), JSON.stringify(chk.overlaps));
+  const clipEl = normalizeUI([{ id: "c", kind: "text", rect: [0, 150, 50, 20], text: "x", clip: [0, 0, 100, 160] }]);
+  const c2 = layoutChecks(clipEl, { width: 100, height: 200, safe: 0, minText: 1 });
+  ok("scroll: an element's own clip rect: partly visible (50%)", c2.scrolled.length === 1 && c2.scrolled[0].visiblePercent === 50 && c2.scrolled[0].visible.join() === "0,150,50,10");
+  // without the scroll marking the old findings stay
+  const plain = layoutChecks(normalizeUI(list.map((e) => ({ ...e, scroll: undefined, parent: undefined }))), { width: 100, height: 200, safe: 0, minText: 4 });
+  ok("scroll: unmarked, the rows past the screen are still off screen / clipped", plain.offscreen.length === 4 && plain.clipped.length === 1 && !plain.scrolled.length, JSON.stringify([plain.offscreen, plain.clipped]));
+}
+{
+  // gradient text: glyph blocks whose colour goes red → yellow across x, on near-black: not a ratio; plain text is
+  const g = img(120, 24, [12, 12, 16]), p = img(120, 24, [12, 12, 16]);
+  for (let k = 0; k < 8; k++) for (let y = 4; y < 20; y++) for (let x = 0; x < 9; x++) {
+    if ((x + y) % 5 === 0) continue;   // some holes, like letters
+    const X = 6 + k * 14 + x;
+    put(g, X, y, [230, Math.round(40 + (200 * X) / 120), 40]);
+    put(p, X, y, [230, 230, 230]);
+  }
+  const tg = textContrast(g, { x: 0, y: 0, w: 120, h: 24 }), tp = textContrast(p, { x: 0, y: 0, w: 120, h: 24 });
+  show("gradient", JSON.stringify(tg.unreliable), "plain", tp.ratio.toFixed(2), JSON.stringify(tp.unreliable || null));
+  ok("textContrast: gradient fill → unreliable (along x, green channel)", tg.unreliable && tg.unreliable.why === "gradient text" && tg.unreliable.axis === "x" && tg.unreliable.channel === "g", JSON.stringify(tg));
+  ok("textContrast: the same glyphs in one colour → a ratio, not unreliable", !tp.unreliable && tp.ratio > 10);
 }
 
 done("ui");

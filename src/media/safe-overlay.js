@@ -11,7 +11,7 @@
  *  viewport of vw×vh CSS px: { corner, island: {x, y, w, h, r} | null, home: {x, y, w, h} | null, insets }. */
 export function overlayShapes(safe, vw, vh) {
   const p = safe.preset;
-  const tab = /safari/.test(p), se = p === "iphone-se", ipad = p === "ipad";
+  const tab = /safari/.test(p) || p === "custom", se = p === "iphone-se", ipad = p === "ipad";   // custom insets: only the zones are tinted
   const land = safe.orientation === "landscape";
   const corner = tab || se ? 0 : ipad ? 18 : 55;
   let island = null;

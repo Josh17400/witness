@@ -6,8 +6,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { openGame } from "../core/launch.js";
 import { begin, stepTo } from "../core/runner.js";
-import { rawPos } from "./perceive.js";
-import { checkSnapshot, checkLines } from "./check.js";
+import { rawPos, Perceiver } from "./perceive.js";
+import { checkSnapshot, checkLines, looksTurnBased } from "./check.js";
+import { resolvePlayConfig } from "./config.js";
 
 const DEFAULT_KEYS = ["w", "a", "s", "d", "up", "down", "left", "right", "space", "j", "k", "l", "e", "f", "q", "x", "z", "c", "shift", "enter", "1"];
 
@@ -26,6 +27,13 @@ export async function suggest(opt, { loadConfig }) {
   const g = await openGame(cfg, root, { quiet: true });
   const S = g.session, fps = S.fps;
   const notes = [], play = { ...(cfg.play || {}) };
+  const writePlay = (pl) => {
+    const f = file || path.join(root, "witness.json");
+    const j = JSON.parse(fs.readFileSync(f, "utf8"));
+    j.play = pl;
+    fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
+    console.log(`✔ wrote "play" into ${f}`);
+  };
   try {
     if (!S.has("reset")) throw new Error("the adapter has no 'reset': suggest needs it to probe each key from the same start");
     const frames = Math.round(0.4 * fps);
@@ -34,6 +42,19 @@ export async function suggest(opt, { loadConfig }) {
     const probe2 = async (input) => { const st = await begin(S, { seed, scene, params, input }); await stepTo(S, st, mid); const a = (await S.snapshot()).state || {}; await stepTo(S, st, frames); return [a, (await S.snapshot()).state || {}]; };
     const [idleMid, idle] = await probe2(undefined);
     const st0 = await begin(S, { seed, scene, params }); const start = (await S.snapshot()).state || {}; void st0;
+    // a turn-based / card / menu game (choices or whose turn, no player position): nothing to probe with movement keys
+    if ((play.profile ? resolvePlayConfig(play, {}).profile === "turn" : looksTurnBased(idle) || looksTurnBased(start))) {
+      const st = looksTurnBased(idle) ? idle : start;
+      play.profile = "turn";
+      if (!play.show) { const fields = new Perceiver(resolvePlayConfig(play, {}), { fps }).pickFields(st).map((f) => f.label); if (fields.length) play.show = fields; }
+      console.log(`Suggested "play" config for ${S.hello.name || cfg.name} (a turn-based / card / menu game: it lists choices or whose turn it is, and has no player position):\n`);
+      console.log(JSON.stringify({ play }, null, 2));
+      console.log("\nPlaytest-ready snapshot (docs/PLAYTEST.md):");
+      for (const l of checkLines(checkSnapshot(st, "turn"))) console.log(l);
+      console.log(`\nHow a pick reaches the game: a choice's own "key", else play.pick ({"call": "<game function>"} gets the choice's id; "click" clicks its rect), else its number key. Reference: docs/PLAYTEST.md`);
+      if (opt.write) writePlay(play);
+      return;
+    }
     const P0 = playerOf(idle);
     if (!P0) notes.push("✖ no player found (state.player or an entity typed Player): set play.player to an expression, e.g. \"state.hero\"");
     const keys = (S.hello.keys && S.hello.keys.length ? S.hello.keys : DEFAULT_KEYS).map((k) => String(k).toLowerCase()).slice(0, 30);
@@ -100,21 +121,14 @@ export async function suggest(opt, { loadConfig }) {
     const out = { play };
     console.log(`Suggested "play" config for ${S.hello.name || cfg.name} (probed ${keys.length} keys from seed ${seed}${scene ? `, scene ${scene}` : ""}):\n`);
     console.log(JSON.stringify(out, null, 2));
-    console.log("
-Playtest-ready snapshot (docs/PLAYTEST.md):");
+    console.log("\nPlaytest-ready snapshot (docs/PLAYTEST.md):");
     for (const l of checkLines(conv)) console.log(l);
     if (moves.length) console.log(`\nKeys that moved the player: ${moves.map((m) => `${m.key} (${dirOf(m)})`).join(", ")}`);
     if (Object.keys(flips).length) console.log(`Fields switched on by a key: ${Object.entries(flips).map(([f, ks]) => `${f} ← ${ks.join("/")}`).slice(0, 10).join(", ")}`);
     for (const n of notes) console.log(n);
     if (!moves.length) console.log("No key moved the player from this start (a title screen? use --scene / --params to start in gameplay).");
     console.log("\nCheck it, then add or adjust anything the probe can't see (heal, dialogue choose mode, reach, cell). Reference: docs/PLAYTEST.md");
-    if (opt.write) {
-      const f = file || path.join(root, "witness.json");
-      const j = JSON.parse(fs.readFileSync(f, "utf8"));
-      j.play = play;
-      fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
-      console.log(`✔ wrote "play" into ${f}`);
-    }
+    if (opt.write) writePlay(play);
   } finally {
     await g.stop();
   }

@@ -68,7 +68,9 @@ export async function begin(session, { seed = 1, scene, params, input, events, r
     // before (a measure step's, a doctor run's) are gone before anyone looks
     await session.pullLogs();
     // a replay restarts exactly as recorded: its seed, and its scene/params when the header has them
-    await session.reset(replay ? replay.seed : seed, replay && replay.scene != null ? replay.scene : scene, replay && replay.params != null ? replay.params : params);
+    // (and the virtual Date from the epoch it was recorded with, when the header has one: JS adapter games)
+    await session.reset(replay ? replay.seed : seed, replay && replay.scene != null ? replay.scene : scene, replay && replay.params != null ? replay.params : params,
+      ...(replay && replay.epoch != null ? [replay.epoch] : []));
   }
   const state = { frame: 0, time: 0, dts: replay ? replay.dts : null, calls: replay && replay.calls && replay.calls.length ? replay.calls : null, callIdx: 0 };
   if (state.calls && !session.has("call")) throw new WitnessError("this replay contains game calls (recorded by witness play --allow-calls) but the adapter has no 'call'");
@@ -111,7 +113,7 @@ export function loadReplay(file, { quiet = false } = {}) {
   const startOf = [0];
   for (let i = 0; i < dts.length; i++) startOf[i + 1] = startOf[i] + dts[i];
   const marks = markFrames.map((m) => ({ ...m, t: startOf[m.frame] }));
-  return { file, seed: head.seed ?? 1, scene: head.scene ?? null, params: head.params ?? null, name: head.name, launch: head.launch || null, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length, warnings };
+  return { file, seed: head.seed ?? 1, epoch: head.epoch ?? null, scene: head.scene ?? null, params: head.params ?? null, name: head.name, launch: head.launch || null, dts, events, marks, calls, duration: startOf[dts.length], frames: dts.length, warnings };
 }
 
 /**

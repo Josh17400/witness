@@ -21,7 +21,7 @@ import { listenCommand } from "../src/cli/listen.js";
 import { windowCommand } from "../src/cli/window.js";
 import { abCommand } from "../src/cli/ab.js";
 import { parseArgs, unknownFlags } from "../src/cli/args.js";
-import { describeWeb, displayReport, unlockProbe, audioReport, webglReport } from "../src/cli/web.js";
+import { describeWeb, displayReport, unlockProbe, audioReport, webglReport, clockLine } from "../src/cli/web.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
@@ -60,7 +60,9 @@ Common options:
   Browser games (launch.url): --device iphone-15|iphone-15-safari|iphone-15-pro-max|iphone-se|ipad[-landscape]
   (viewport, DPR, touch, mobile, user agent, platform, 5 touch points, portrait screen size) · --safe-insets
   (launch.safeInsets): the page's env(safe-area-inset-*) rewritten to the device's insets (iPhone 15 portrait top 59 /
-  bottom 34, landscape left/right 59 / bottom 21 CSS px; a Safari tab 0; 0 without viewport-fit=cover) · --safe-overlay (launch.safeOverlay): the
+  bottom 34, landscape left/right 59 / bottom 21 CSS px; a Safari tab 0; 0 without viewport-fit=cover; --safe-insets
+  59,0,34,0 gives them by hand (top,right,bottom,left CSS px) or a preset name; a custom device of a known size, e.g.
+  393×852, gets that device's preset; launch.device {"safeInsets": [..]} too) · --safe-overlay (launch.safeOverlay): the
   island, home indicator and rounded corners drawn over screenshots after capture · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a
   tap) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
   dom:tap:x,y@t / dom:click / dom:key:space (real browser input) · expressions web.audio.state, web.dpr
@@ -253,8 +255,9 @@ const CMD_HELP = {
   contrast <shot.png> --a <mask> --b <mask>
       WCAG ratio and ΔE between two pixel sets. A mask is x,y,w,h | #rrggbb[~tolerance] | diff:<without.png>,
       and --b may be ring[:radius] (the pixels just outside --a, e.g. outline vs the ground around it).
-  ui [shot.png] [--at 1] [--ui ui.json] [--safe 5%|<preset>] [--fit contain|cover|stretch] [--min-text 2%|12]
+  ui [shot.png] [--at 1] [--ui ui.json] [--safe 5%|<preset>] [--fit contain|cover|stretch] [--min-text 2%|12|11pt]
      [--min-contrast 4.5] [--align 3] [--window 1280x720,1920x1080] [--pixels] [--out ui.png]
+     [--device iphone-15] [--min-tap 44] [--ui-scale css|game|3|auto]
       UI layout from the game's state.ui = [{id, kind: text|button|panel|icon, rect: [x,y,w,h], text?, fontPx?,
       layer?}] (or --ui file): ✖ clipped by / entirely off the screen, ✖ overlapping (same layer; panels and buttons
       may hold others), ✖ text smaller than --min-text (default 2% of the screen height), ✖ text contrast under 4.5
@@ -279,6 +282,18 @@ const CMD_HELP = {
       top 20 (status bar), landscape none. ipad (10th gen/Air 11"): top 24, bottom 20. A full-screen shot whose width
       isn't a whole number of points for the preset is warned about, with the preset that fits; a frame from the game
       is its own canvas (any size): one line says how insets map onto it instead.
+      Phones and DOM games (--device, any --capture): one launch takes the picture and state.ui together; a page with
+      no canvas is captured from the screen, and state.ui is mapped onto the picture from the page's layout (CSS px
+      for a DOM game, game px through the canvas box; --ui-scale css|game forces it, --ui-scale 3|auto scales a --ui
+      file by hand; with a PNG, --device iphone-15 gives the px per pt). On a device: --min-text defaults to 11 pt
+      (Npt / px / % accepted), the 24 px "large text" bar is 24 pt, no generic 5% safe margin (the emulated
+      --safe-insets, or --safe <preset>), and ✖ tap targets under 44 pt (iOS) / 48 dp (Android) (--min-tap N, 0 off):
+      kind button, tap: true or role: "button" | "link" | "tab" ..., measured on hit: [x,y,w,h] when given (padding,
+      ::before), a tappable inside another counted once. Scroll containers: "scroll": true | "x" | "y" on the
+      container, "parent": "<its id>" (or "clip": [x,y,w,h]) on its content: what lies outside the container's window
+      is "scrolled", not clipped or off screen (unmarked content that leaves the screen is matched by position).
+      Gradient text (background-clip:text; "fill": "gradient", or a fill colour that follows x or y): "contrast not
+      measurable", not a failure.
   ui --from 0 --to 30 [--every 1f] [--within 10] [--input ...]
       sweep state.ui: ⚠ an element (by id) that hid and came back with the same text within --within s (a repeated
       toast or prompt: both times, how long it was hidden, its rect; values that change while it stays, like HP 10 →
@@ -340,9 +355,12 @@ const CMD_HELP = {
       --background auto|first|median|<file.png>  (auto: median for 8+ frames; median needs movers to move their own
       size) · --camera auto|static|moving|state (state: the game's state.camera, exact) · --min-size 6 (smallest object, px) · --threshold 16`,
   doctor: `witness doctor [--time 3] [--device iphone-15] [--engine webkit] [--no-auto-unlock] [--safe-insets]
-              [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."]
+              [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."] [--shot-tol 2]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
+  Screenshots (rgba8 or PNG, e.g. --capture screen) match when every channel is within --shot-tol levels (default 2:
+  Chromium anti-aliasing noise; 0 = exact); a mismatch reports the pixel count, box and largest difference and writes
+  doctor-determinism-A.png / -A-again.png / -diff.png to the shots folder (pruned like other generated files).
   For long game-specific scenarios (journeys, fights) use test steps with "match", or witness test --repeat 2.
   Browser games also get: the engine and device; the page (CSS viewport, DPR, screen, touch points, platform; ⚠ a
   touch profile reporting < 2 touch points); safe areas (--safe-insets emulates them; else the measure ui --safe preset to check); how
@@ -382,7 +400,9 @@ const commands = {
       // lasts for the page's life, as in a browser, so it must happen before the determinism runs compare audio)
       if (s.web) {
         report.push(`  ${describeWeb(s.web)}`);
-        webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy };
+        const clock = clockLine(s);
+        if (clock) report.push(`  ${clock}`);
+        webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy, dom: !!s.web.dom, epoch: s.epoch ?? null, reset: s.web.resetMode || "handler" };
         if (s.web.policy === "gesture") { const p = await unlockProbe(s); p.forEach(mark); webSummary.unlock = p[0] ? p[0][1] : null; const none = p.some(([, t]) => /no AudioContext was created/.test(t)); webSummary.audioLocked = none ? null : p.some(([, t]) => /stayed SUSPENDED/.test(t)); if (none) webSummary.noAudioContext = true; }
       }
       // step + snapshot
@@ -400,7 +420,9 @@ const commands = {
         const T = Math.max(0.5, +(opt.time || 3));
         const scriptA = "right@0.1-1.2, space@0.3, up@1.3-1.8, mouse:100,100@0.5, click:120,90@0.8, left@1.9-2.4, down@2.5-2.9, space@2.6";
         const scriptB = "left@0.1-0.9, down@0.4-1.4, click:60,40@0.6, right@1.5-2.6, space@1.1, up@2.7-3";
-        const matcher = new Matcher();
+        const shotTol = opt["shot-tol"] !== undefined && opt["shot-tol"] !== true ? +opt["shot-tol"] : 2;
+        if (!(shotTol >= 0 && shotTol <= 255)) die("--shot-tol wants a per-channel level 0..255 (default 2)");
+        const matcher = new Matcher({ shotTol });
         const exactAudio = caps.includes("audio") && h.audio_exact !== false;
         if (caps.includes("audio") && !exactAudio) report.push("  (hello says audio_exact: false — audio follows real time here, so it isn't compared)");
         const run = async (seed, input) => {
@@ -418,10 +440,27 @@ const commands = {
         await run(11, scriptB);
         const r = await matcher.check("A", await run(7, scriptA), "run A again");
         const covered = ["state", digestOf(first.snap) != null ? "digest" : null, first.shot ? "screenshot" : null, first.audio ? "audio" : null].filter(Boolean).join(", ");
-        if (r.ok) ok(`deterministic over ${T}s: the same seed + input gave identical ${covered}, even after a different run in between`);
+        if (r.ok) ok(`deterministic over ${T}s: the same seed + input gave identical ${covered}, even after a different run in between${r.notes && r.notes.length ? ` (${r.notes.join("; ")})` : ""}`);
         else {
           bad("NOT deterministic: run A repeated after a different run gave a different result (see docs/PROTOCOL.md §6)");
           for (const p of r.problems) report.push(`    ${p}`);
+          // the two screenshots and where they differ, in the shots folder (pruned like other generated files)
+          if (r.shots) {
+            try {
+              const { shotImageOf, pixelDiffImage } = await import("../src/core/compare.js");
+              const { encodePNG } = await import("../src/media/png.js");
+              const A = shotImageOf(r.shots[0]), B = shotImageOf(r.shots[1]);
+              if (A && B) {
+                const dir = path.resolve(root, cfg.shots || "witness/shots"), base = path.join(dir, "doctor-determinism");
+                fs.mkdirSync(dir, { recursive: true });
+                const files = [[`${base}-A.png`, A], [`${base}-A-again.png`, B]];
+                for (const [f, im] of files) fs.writeFileSync(f, encodePNG(im.width, im.height, im.data));
+                if (A.width === B.width && A.height === B.height) { const f = `${base}-diff.png`; fs.writeFileSync(f, encodePNG(A.width, A.height, pixelDiffImage(A, B, shotTol))); files.push([f]); }
+                for (const [f] of files) markGenerated(dir, f);
+                report.push(`    pictures: ${files.map(([f]) => path.relative(process.cwd(), f) || f).join(", ")}${files.length > 2 ? " (diff: red = off by more than the tolerance, yellow = within it, magenta box = the red pixels' extent)" : ""}`);
+              }
+            } catch (e) { report.push(`    (couldn't write the screenshots: ${e.message})`); }
+          }
           report.push("    tip: look for unseeded RNGs, wall-clock reads, threads, and state a reset doesn't clear (timers, id counters, caches, UI)");
         }
         if (digestOf(first.snap) == null) report.push("  tip: add a snapshot \"digest\" (a hash of the full internal state) so hidden state is compared too");

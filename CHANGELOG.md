@@ -3,6 +3,72 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.5 (2026-10-21)
+
+From the first real DOM/card-game test (Euchre Unleashed: a pure-DOM iPhone web game, 3 Sonnet testers, 5 matches).
+
+**Fix**
+- `witness play suggest` crashed on load (a raw newline inside a string since `play check` shipped). A core test now
+  runs `node --check` over every source file, so a lazily imported command can't ship broken again.
+
+**Turn-based / card / menu games: a `turn` play profile** (`"play": {"profile": "turn"}`; `card`, `menu`, `board`)
+- The game lists `state.choices` (`{label, id, legal?, selected?, key?}` or plain strings); testers `pick <n|words>`
+  (ties go to a legal move). `play.pick` says how a pick reaches the game: a recorded call with the choice's id, a
+  click on its rect, its number key or its own key. A pick succeeds when the dialogue, scene, turn, choices or any
+  other field changes and holds; a game answering `false` / `{ok:false}` / `{error}` fails it with the game's reason.
+- `wait` runs until `state.yourTurn`, new choices, a dialogue, a scene change or game over (bare `wait` caps at
+  `play.turnWait`, 30 s). The observation is a header from the game's own fields (`play.show`), YOUR TURN, and the
+  numbered choices: no cell, map, near list or movement card; no "map knowledge reset" on scene changes. Brief,
+  personas, `play check` conventions (choices, legal moves, turn, score) and the report fit turn games;
+  `play suggest` proposes the profile when a snapshot has choices/yourTurn and no player position.
+- `choose` also accepts a choice that only changed the game state (a CSS-class toggle): "chose 3) "Hard": state
+  changed (difficulty), dialogue unchanged". In any profile it picks from `state.choices` when no dialogue is open.
+- Screens settle before the tester sees them: after an order that changed scene/dialogue, and before `play shot`,
+  the session steps (≤ 0.5 s) until the page reports no running animations.
+- A notice and a log line with the same words become one event; call results show 400 characters
+  (`play.resultChars`). Playtest replays record the clock epoch.
+
+**Web / DOM games (JS adapter)**
+- CSS animations and transitions run on the virtual clock (held, then driven frame by frame; `animationend` /
+  `transitionend` still fire; `<video>` paused), so DOM screenshots reproduce. `WITNESS_CONFIG.animations=false`
+  turns it off. `witness.animating()` / `globalThis.__witnessAnimating()` count running animations.
+- `start()` waits for images (CSS backgrounds too) to decode and fonts to load first (`start({ready:false})` skips;
+  `witness.ready()` on its own): the first doctor run no longer differs from later ones.
+- Classic-script pages: `launch.inject: true` puts Witness in the page before any page script; or mark scripts
+  `type="text/witness"` and call `witness.boot()`. New `witness.dom.tap(el)` (taps like a finger, reports what
+  covers it) and `witness.dom.tappables()` (→ `[{label, id}]` for `state.choices`). See adapters/js/GUIDE.md §1b.
+- Reset can reload the page: `launch.reset` `"auto"` (default: reload when the game registered no reset handler),
+  `"reload"` or `"handler"`; storage is cleared unless `launch.keepStorage`.
+- `"clock": {"epoch": "today" | "2026-06-15" | ms}` sets the virtual Date's start (pinned per run, recorded in
+  replays); doctor prints a `clock:` line. Without it the old default (2026-01-01) stays.
+- A page without a canvas says "browser (DOM)", is captured from the screen, and doctor no longer warns about it.
+  The 300 s audio capture no longer warns unless something reads audio past it (play sessions never do).
+
+**measure ui and doctor on phones**
+- `measure ui` works for DOM/screen-capture games in one launch (CSS-px ui lists mapped onto the device picture;
+  `--ui-scale` to force). With a device, min text defaults to 11 pt (`--min-text 14pt` works) and the safe area
+  comes from its insets.
+- New tap-target check: 44 pt iOS / 48 dp Android (`--min-tap N`, 0 = off) for `kind: "button"`, `tap: true` or a
+  `role`; `hit` boxes, nested tappables counted once.
+- Scroll containers (`scroll`, `parent`, `clip`) stop false "off screen / clipped" findings; gradient text
+  (`fill: "gradient"`, or detected) reads "contrast not measurable" instead of failing.
+- Doctor compares PNG screenshots with a per-channel tolerance (±2, `--shot-tol N`), reports count / bbox / max
+  difference, and on failure writes A / A-again / diff PNGs (auto-cleaned).
+- `--safe-insets 59,0,34,0` gives explicit insets; custom devices matching a known size get its preset;
+  witness.json devices may carry `"safeInsets"`.
+
+**Adoption steps**
+1. Browser games with no reset handler now reload the page at each reset (before: the browser was relaunched). Set
+   `"launch": {"reset": "handler"}` for the old behaviour.
+2. DOM/CSS games: screenshots may change once, because transitions are now on the virtual clock. Re-save baselines
+   (`shot --save-ref`) after checking them.
+3. Phone `measure ui` runs: text between 11 pt and 2 % of screen height no longer fails, and a new tap-target
+   section may appear. Add `tap`/`hit`/`scroll`/`parent` to `state.ui` where it helps.
+4. *Optional:* turn/card/menu games: add `state.choices` and `state.yourTurn`, set `"play": {"profile": "turn",
+   "pick": …, "show": [...]}`; run `witness play suggest` and `play check` to confirm.
+5. *Optional:* `"clock": {"epoch": "today"}` for games with real-date countdowns; `launch.inject: true` for pages
+   with inline classic scripts (then drop any hand-made deferral).
+
 ## 0.7.4 (2026-10-20)
 
 Fixes from Embervale adopting 0.7.3.

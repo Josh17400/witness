@@ -3,7 +3,9 @@
 // WebSocket. Optional device emulation (src/core/devices.js), an emulated audio autoplay policy (src/core/web-init.js),
 // and screenshots of what the screen shows at device pixels (capture "element" / "screen").
 // Playwright is an OPTIONAL dependency, resolved from the game project first, then from Witness.
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { WitnessError } from "./session.js";
@@ -48,9 +50,9 @@ export function browserOptions(launch) {
   if (engine === "firefox" && device && device.mobile) throw new WitnessError(`Playwright's Firefox can't emulate a mobile viewport (device ${device.name}): use --engine webkit or chromium`);
   // safe areas: env(safe-area-inset-*) rewritten to the profile's insets (safeInsets), the island / home indicator /
   // corners drawn over screenshots (safeOverlay); both need a phone or tablet profile
-  const safe = launch.safeInsets || launch.safeOverlay ? safeInsetsFor(device) : null;
-  if ((launch.safeInsets || launch.safeOverlay) && !safe) throw new WitnessError(`--safe-insets / --safe-overlay need a phone or tablet profile (--device iphone-15[-landscape], iphone-15-safari, iphone-15-pro-max, iphone-se, ipad); ${device ? `${device.name} has no safe-area preset` : "this launch has no device"}`);
-  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture, safeInsets: launch.safeInsets ? safe : null, safeOverlay: launch.safeOverlay ? safe : null };
+  const safe = launch.safeInsets || launch.safeOverlay ? safeInsetsFor(device, launch.safeInsets || true) : null;
+  if ((launch.safeInsets || launch.safeOverlay) && !safe) throw new WitnessError(`--safe-insets / --safe-overlay need a phone or tablet profile (--device iphone-15[-landscape], iphone-15-safari, iphone-15-pro-max, iphone-se, ipad), a custom device of a known size, or explicit insets (--safe-insets 59,0,34,0: top,right,bottom,left CSS px; or a preset name such as iphone-portrait); ${device ? `${device.name} has no safe-area preset` : "this launch has no device"}`);
+  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture, captureSet: launch.capture != null, safeInsets: launch.safeInsets ? safe : null, safeOverlay: launch.safeOverlay ? safe : null };
 }
 
 /** A clear message when the engine's browser build isn't installed for this Playwright version. */
@@ -67,7 +69,21 @@ function launchError(e, engine, pwInfo, root) {
   return e;
 }
 
-export async function openBrowserGame(launch, root, addr, keep) {
+// launch.inject: Witness's own JS adapter (adapters/js/witness.js), turned into a classic script, runs in the page
+// before any of the page's scripts (Playwright addInitScript), so inline classic <script>s already run on the virtual
+// clock; the page's own import of witness.js gets that same instance (globalThis.__witnessApi). Its exports are cut off.
+const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "adapters", "js", "witness.js");
+export function adapterClassicScript() {
+  const src = fs.readFileSync(ADAPTER, "utf8");
+  const cut = src.indexOf("// ---- module exports");
+  if (cut < 0) throw new WitnessError(`${ADAPTER} has no exports marker: can't inject it`);
+  return `(() => {
+${src.slice(0, cut)}
+})();
+//# sourceURL=witness-injected.js`;
+}
+
+export async function openBrowserGame(launch, root, addr, keep, extra = {}) {
   let server = null, browser = null;
   const opts = browserOptions(launch);
   try {
@@ -89,13 +105,41 @@ export async function openBrowserGame(launch, root, addr, keep) {
     const context = await browser.newContext(contextOptions(opts.device, launch.size || [1280, 720]));
     await context.addInitScript(webInit, { policy: opts.policy, standalone: !!(opts.device && opts.device.standalone), platform: (opts.device && opts.device.platform) || null, maxTouchPoints: opts.device && opts.device.maxTouchPoints != null ? opts.device.maxTouchPoints : null });
     if (opts.safeInsets) await context.addInitScript(safeInsetsInit, opts.safeInsets);
+    if (launch.inject) {
+      const adapterSrc = fs.readFileSync(ADAPTER, "utf8");
+      await context.addInitScript({ content: adapterClassicScript() });
+      // the page's own copy of witness.js (any version) is served as Witness's, so both are one adapter
+      await context.route(/\/witness\.js(\?.*)?$/, async (route) => {
+        try {
+          const res = await route.fetch();
+          const body = await res.text();
+          if (/witness-js|Witness adapter for JavaScript/.test(body)) return route.fulfill({ response: res, body: adapterSrc, headers: { ...res.headers(), "content-type": "text/javascript" } });
+          return route.fulfill({ response: res, body });
+        } catch { return route.continue().catch(() => {}); }
+      });
+    }
     const page = await context.newPage();
     page.on("console", (m) => keep(`[page] ${m.text()}\n`));
     page.on("pageerror", (e) => keep(`[page error] ${e.message}\n`));
     const u = new URL(launch.url);
     u.searchParams.set("witness", addr);
+    for (const [k, v] of Object.entries(extra.query || {})) if (v != null) u.searchParams.set(k, String(v));
     await page.goto(u.toString());
     const web = makeWeb(page, browser, opts, pwInfo);
+    web.url = u.toString();
+    web.inject = !!launch.inject;
+    /** Load the page again (launch.reset "reload"): same URL plus query (witness_seed …); storage cleared unless keepStorage. */
+    web.reload = async (query = {}, { keepStorage = false } = {}) => {
+      if (!keepStorage) {
+        await page.evaluate(() => {
+          try { localStorage.clear(); } catch { /* blocked */ }
+          try { sessionStorage.clear(); } catch { /* blocked */ }
+        }).catch(() => {});
+      }
+      const r = new URL(web.url);
+      for (const [k, v] of Object.entries(query)) if (v != null) r.searchParams.set(k, String(v));
+      await page.goto(r.toString());
+    };
     return { browser, server, web };
   } catch (e) {
     // the caller never sees these on failure, so close them here (no stray browsers or servers)
@@ -114,7 +158,7 @@ function makeWeb(page, browser, opts, pwInfo) {
     return best;
   });
   return {
-    engine: opts.engine, engineVersion: browser.version(), playwright: pwInfo.version, device: opts.device, policy: opts.policy, captureMode: opts.capture, page,
+    engine: opts.engine, engineVersion: browser.version(), playwright: pwInfo.version, device: opts.device, policy: opts.policy, captureMode: opts.capture, captureSet: opts.captureSet, page,
     safeInsets: opts.safeInsets, safeOverlay: opts.safeOverlay,
     /** --safe-insets: what the page's CSS had rewritten so far (null: not emulated). */
     safeInfo: () => (opts.safeInsets ? evalWeb(() => (globalThis.__witnessSafe ? globalThis.__witnessSafe.info() : null)) : Promise.resolve(null)),
@@ -131,12 +175,16 @@ function makeWeb(page, browser, opts, pwInfo) {
     /** PNG of the main canvas as displayed (element) or of the viewport (screen), at device pixels. */
     async capture(kind = "element") {
       let png;
-      if (kind === "screen") png = await page.screenshot({ type: "png", animations: "disabled", caret: "hide" });
+      // Playwright's animations: "disabled" finishes every finite CSS animation / transition for good (firing its
+      // end event): it would change the game. With the JS adapter's takeover animations sit still on the virtual clock.
+      const held = await page.evaluate(() => typeof globalThis.__witnessAnimating === "function").catch(() => false);
+      const animations = held ? "allow" : "disabled";
+      if (kind === "screen") png = await page.screenshot({ type: "png", animations, caret: "hide" });
       else {
         const h = await mainCanvas();
         const el = h.asElement();
         if (!el) throw new WitnessError("no visible <canvas> on the page to capture");
-        png = await el.screenshot({ type: "png", animations: "disabled", caret: "hide" });
+        png = await el.screenshot({ type: "png", animations, caret: "hide" });
       }
       return { png, width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
     },

@@ -952,8 +952,8 @@ for (const t of ["utf8-split", "key-aliases"]) {
 
 // agent playtest harness (separate runners: unit tests without processes, process-safety guards (light processes and
 // one mock game), then end-to-end CLI/daemon runs, then session budgets (--until, --game-hours, --wall-minutes) and
-// play batch with a fake claude)
-for (const suite of skip.has("play") ? [] : ["unit", "safety", "e2e", "budget"]) {
+// play batch with a fake claude, then the turn profile on a tiny card game)
+for (const suite of skip.has("play") ? [] : ["unit", "safety", "e2e", "budget", "turn"]) {
   const f = path.join(here, "play", `${suite}.mjs`);
   if (!fs.existsSync(f)) continue;
   const m = spawnSync(process.execPath, [f], { encoding: "utf8", timeout: 600000 });

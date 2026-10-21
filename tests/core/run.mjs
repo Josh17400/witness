@@ -41,6 +41,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const read = new Set(src.flatMap((t) => [...t.matchAll(/\bopt\.([a-z][a-z0-9]*)\b(?!\()|\bopt\["([a-z][a-z0-9-]*)"\]|\b(?:get|val)\("([a-z][a-z0-9-]*)"\)/g)].map((m) => m[1] || m[2] || m[3])));
   const missing = [...read].filter((k) => !KNOWN_FLAGS.has(k) && !k.startsWith("no-"));
   ok("args: every flag the code reads is in KNOWN_FLAGS", !missing.length, missing.join(" "));
+  // every .js file parses: lazily imported commands (play suggest) would otherwise only fail when someone runs them
+  const files = [];
+  const walkF = (d) => { for (const n of fs.readdirSync(d)) { const p = path.join(d, n); if (fs.statSync(p).isDirectory()) { if (n !== "node_modules") walkF(p); } else if (/\.m?js$/.test(n)) files.push(p); } };
+  for (const d of ["src", "bin", path.join("adapters", "js")]) walkF(path.join(root, d));
+  const bad = files.map((f) => [f, spawnSync(process.execPath, ["--check", f], { encoding: "utf8" })]).filter(([, r]) => r.status !== 0);
+  ok(`syntax: all ${files.length} source files parse`, !bad.length, bad.map(([f, r]) => `${path.relative(root, f)}: ${r.stderr.split("\n").slice(0, 4).join(" | ")}`).join("\n"));
   ok("args: --watch takes a value except for play", parseArgs(["--watch", "state.x"], "trace").opt.watch === "state.x" && parseArgs(["start", "--watch", "--goal", "g"], "play").opt.watch === true);
   const pic = parseArgs(["ui", "--picture", "shot.png"], "measure"), dom = parseArgs(["palette", "--dominant", "a.png"], "measure");
   ok("args: --picture/--dominant/--write/--clean/--no-* never eat the next word", pic.opt.picture === true && pic.pos[1] === "shot.png" && dom.pos[1] === "a.png"
@@ -400,6 +406,92 @@ const tinyCfg = (dir, extraLaunch = {}) => { fs.mkdirSync(dir, { recursive: true
   ok("an unknown flag is warned about, with a suggestion", /unknown flag --sead \(ignored\): did you mean --seed\?/.test(typo.stderr), typo.stderr);
   const none = cli(["shot", "--at", "0.2", "--diff", "nope"], {}, proj);
   ok("shot --diff <unknown name>: says how to save one", none.status === 1 && /--save-ref nope/.test(none.stderr), none.stderr);
+}
+
+// ---- 0.7.5: screenshot tolerance (doctor), custom-device safe insets, measure ui on phone screenshots
+{
+  const { shotPixelDiff, pixelDiffImage, shotImageOf } = await import("../../src/core/compare.js");
+  const { encodePNG } = await import("../../src/media/png.js");
+  const { resolveDevice, safeInsetsFor, parseInsets, inferSafeFamily } = await import("../../src/core/devices.js");
+  const { browserOptions } = await import("../../src/core/browser.js");
+  const W0 = 200, H0 = 150, base = new Uint8Array(W0 * H0 * 4);
+  for (let i = 0; i < W0 * H0; i++) base.set([(i * 7) % 200, (i * 3) % 180, 90, 255], i * 4);
+  const noisy = base.slice();
+  for (let k = 0; k < 123; k++) { const o = ((k * 211) % (W0 * H0)) * 4; noisy[o] += 1; }   // 123 px off by one level
+  const png = (d) => ({ width: W0, height: H0, format: "png", data: Buffer.from(encodePNG(W0, H0, d)).toString("base64") });
+  const A = png(base), B = png(noisy);
+  const exact = shotPixelDiff(A, B), tol = shotPixelDiff(A, B, { tol: 2 });
+  ok("shotPixelDiff: PNG shots decoded; exact: 123 px off by 1 with a box", exact && exact.count === 123 && exact.maxDelta === 1 && exact.bbox && exact.noise === 0, JSON.stringify(exact));
+  ok("shotPixelDiff: ±2 tolerance: 0 px over, 123 noise", tol && tol.count === 0 && tol.noise === 123 && tol.bbox === null, JSON.stringify(tol));
+  const m2 = new Matcher({ shotTol: 2 });
+  await m2.check("A", { snap: { state: { a: 1 } }, shot: A });
+  const r2 = await m2.check("A", { snap: { state: { a: 1 } }, shot: B });
+  ok("Matcher shotTol 2: 1-level noise passes, said in a note", r2.ok && r2.notes.length === 1 && /123 px differ by at most 1 level \(within the ±2 tolerance/.test(r2.notes[0]), JSON.stringify(r2));
+  const big = noisy.slice(); big.set([255, 0, 0, 255], (40 * W0 + 50) * 4); big.set([0, 255, 0, 255], (60 * W0 + 70) * 4);
+  const m0 = new Matcher({ shotTol: 2 });
+  await m0.check("A", { snap: { state: {} }, shot: A });
+  const r0 = await m0.check("A", { snap: { state: {} }, shot: png(big) });
+  ok("Matcher shotTol 2: a real change: count, box, largest difference, the noise counted apart; both shots returned", !r0.ok && /screenshot differs: 2 px \(0\.007%\) off by more than 2 levels in box x=50 y=40 21×21, up to \d+ levels \(\+12\d px within ±2\)/.test(r0.problems[0]) && r0.shots.length === 2 && r0.shotDiff.count === 2, JSON.stringify(r0.problems));
+  const dimg = pixelDiffImage(shotImageOf(A), shotImageOf(png(big)), 2);
+  ok("pixelDiffImage: red where over the tolerance, yellow within", dimg.length === W0 * H0 * 4 && dimg[(40 * W0 + 50) * 4] === 255 && dimg[(40 * W0 + 50) * 4 + 1] === 40 && dimg[211 * 4 + 1] === 210);
+  ok("Matcher default stays exact", (await (async () => { const m = new Matcher(); await m.check("x", { snap: { state: {} }, shot: A }); return m.check("x", { snap: { state: {} }, shot: B }); })()).ok === false);
+
+  // custom devices and explicit insets
+  ok("parseInsets: 4, 2 and 1 numbers, objects, arrays", JSON.stringify(parseInsets("59,0,34,0")) === JSON.stringify({ top: 59, right: 0, bottom: 34, left: 0 }) && parseInsets("20,4").left === 4 && parseInsets("8").bottom === 8 && parseInsets([1, 2, 3, 4]).left === 4 && parseInsets({ top: 5 }).right === 0);
+  let threw = null; try { parseInsets("a,b"); } catch (e) { threw = e.message; }
+  ok("parseInsets: a readable error", /top,right,bottom,left/.test(threw || ""), threw);
+  const c393 = resolveDevice({ width: 393, height: 852, dpr: 1 });
+  const si = safeInsetsFor(c393);
+  ok("custom 393×852@1: the iPhone 15 preset is inferred", inferSafeFamily(393, 852) === "iphone" && inferSafeFamily(852, 393) === "iphone" && c393.safe === "iphone" && si && si.preset === "iphone-portrait" && si.top === 59 && si.bottom === 34 && si.inferred === true, JSON.stringify(si));
+  const odd = resolveDevice({ width: 400, height: 800 });
+  ok("custom 400×800: no preset, explicit insets work, a preset name works", safeInsetsFor(odd) === null && JSON.stringify(safeInsetsFor(odd, "10,0,20,0")) === JSON.stringify({ preset: "custom", orientation: "portrait", top: 10, right: 0, bottom: 20, left: 0 }) && safeInsetsFor(odd, "iphone-landscape").left === 59 && safeInsetsFor(resolveDevice({ width: 400, height: 800, safeInsets: [44, 0, 34, 0] })).top === 44);
+  const bo = browserOptions({ url: "x", device: { width: 400, height: 800 }, safeInsets: "12,0,30,0" });
+  ok("browserOptions: --safe-insets 12,0,30,0 on a custom device", bo.safeInsets && bo.safeInsets.preset === "custom" && bo.safeInsets.bottom === 30);
+  let be = null; try { browserOptions({ url: "x", device: { width: 400, height: 800 }, safeInsets: true }); } catch (e) { be = e.message; }
+  ok("browserOptions: no preset and no insets: the error names explicit insets", /--safe-insets 59,0,34,0/.test(be || ""), be);
+  const pa = parseArgs(["--safe-insets", "59,0,34,0", "--device", "x"], "doctor"), pb = parseArgs(["--safe-insets", "test.witness.json"], "test"), pc = parseArgs(["--safe-insets", "iphone-portrait"], "shot");
+  ok("args: --safe-insets takes insets or a preset name, never a file", pa.opt["safe-insets"] === "59,0,34,0" && pb.opt["safe-insets"] === true && pb.pos[0] === "test.witness.json" && pc.opt["safe-insets"] === "iphone-portrait");
+  const { uiGeometry } = await import("../../src/cli/measure-look.js");
+  const fr = (mode, canvases, size) => ({ img: { width: 1179, height: 2556 }, web: { mode, device: resolveDevice("iphone-15"), info: { viewport: [393, 852], dpr: 3, canvases }, size } });
+  const gDom = uiGeometry(fr("screen", [], [393, 852]), {}), gCv = uiGeometry(fr("screen", [{ w: 320, h: 180, rect: [0, 100, 393, 221.0625] }], [320, 180]), {});
+  ok("uiGeometry: a DOM game on the screen: CSS px ×3; a canvas game: game px through the canvas box", gDom.pxPerPt === 3 && gDom.map.kx === 3 && gDom.units === "css" && gCv.units === "game" && Math.abs(gCv.map.kx - (3 * 393) / 320) < 1e-9 && gCv.map.oy === 300, JSON.stringify([gDom, gCv]));
+}
+
+// ---- measure ui on a phone screenshot (a PNG + ui.json in CSS px, --device): pt defaults, tap targets, scroll, gradient text
+{
+  const { encodePNG } = await import("../../src/media/png.js");
+  const w = 750, h = 1334, d = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) d.set([20, 20, 30, 255], i * 4);
+  const fill = (x, y, ww, hh, c) => { for (let j = y; j < y + hh; j++) for (let i = x; i < x + ww; i++) if (i >= 0 && j >= 0 && i < w && j < h) d.set([...c, 255], (j * w + i) * 4); };
+  for (let x = 40; x < 440; x++) for (let y = 40; y < 120; y++) if ((x >> 3) % 2 && (y >> 3) % 2) d.set([230, Math.round(40 + (200 * (x - 40)) / 400), 40, 255], (y * w + x) * 4);   // gradient letters
+  fill(40, 200, 80, 60, [40, 90, 200]); fill(200, 200, 240, 100, [40, 90, 200]);
+  const dir = path.join(tmp, "phone"); fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "shot.png"), encodePNG(w, h, d));
+  const ui = [
+    { id: "title", kind: "text", rect: [20, 20, 200, 40], text: "EUCHRE", fontPx: 28, fill: "gradient" },
+    { id: "deal", kind: "button", rect: [20, 100, 40, 30], text: "Deal", fontPx: 14 },
+    { id: "big", kind: "button", rect: [100, 100, 120, 50], text: "Play", fontPx: 14 },
+    { id: "tiny", kind: "text", rect: [20, 170, 100, 12], text: "fine print", fontPx: 9 },
+    { id: "list", kind: "panel", rect: [0, 200, 375, 300], scroll: "y" },
+  ];
+  for (let i = 0; i < 20; i++) ui.push({ id: `row${i}`, kind: "panel", rect: [0, 200 + i * 40, 375, 40], parent: "list" });
+  fs.writeFileSync(path.join(dir, "ui.json"), JSON.stringify({ ui }));
+  const run = (...extra) => cli(["measure", "ui", path.join(dir, "shot.png"), "--ui", path.join(dir, "ui.json"), "--json", ...extra], {}, dir);
+  const r = run("--device", "iphone-se", "--ui-scale", "auto");
+  let j = null; try { j = JSON.parse(r.stdout); } catch { /* shown */ }
+  const q = j && j.summary;
+  ok("measure ui --device iphone-se --ui-scale auto: ×2, min text 11 pt = 22 px, Deal under 44 pt, rows scrolled (not off screen), gradient title not measured", q && q.pxPerPt === 2 && j.data.minText === 22 && q.smallText === 1 && q.smallTapTargets === 1 && q.offscreen === 0 && q.clipped === 0 && q.scrolled === 13 && q.contrastUnmeasurable === 1 && q.lowContrast === 0 && j.data.findings.find((f) => f.kind === "tap").ids[0] === "deal" && j.data.minTap.pt === 44, r.stdout.slice(0, 1500) + r.stderr);
+  const t = cli(["measure", "ui", path.join(dir, "shot.png"), "--ui", path.join(dir, "ui.json"), "--device", "iphone-se", "--ui-scale", "auto"], {}, dir);
+  ok("measure ui text output: the tap finding in pt, min text in pt, the scroll line, contrast not measurable", /deal \(button "Deal"\) tap target 40×30 pt < 44×44 pt \(Apple HIG: 44 pt\)/.test(t.stdout) && /min text 22 px \(11 pt\)/.test(t.stdout) && /tap targets ≥ 44 pt \(Apple HIG: 44 pt\)/.test(t.stdout) && /13 elements cut by a scroll container \(12 scrolled out of view, 1 partly visible\)/.test(t.stdout) && /safe area not checked on iphone-se \(no generic margin on a phone: --safe iphone-se checks/.test(t.stdout) && !/outside the safe area/.test(t.stdout) && /title: contrast not measurable, gradient text \(marked in state\.ui\)/.test(t.stdout), t.stdout + t.stderr);
+  const r2 = run();
+  let j2 = null; try { j2 = JSON.parse(r2.stdout); } catch { /* shown */ }
+  ok("measure ui without --device: the old 2% default, no tap check", j2 && j2.data.minText === 26.68 && !j2.data.minTap && j2.summary.smallTapTargets === 0, r2.stdout.slice(0, 600) + r2.stderr);
+  const r3 = run("--min-text", "11pt");
+  ok("measure ui --min-text 11pt without a device: says why", r3.status === 1 && /needs to know the screenshot's px per pt/.test(r3.stderr), r3.stderr);
+  const r4 = run("--device", "iphone-se", "--ui-scale", "auto", "--min-tap", "0", "--min-text", "8pt");
+  let j4 = null; try { j4 = JSON.parse(r4.stdout); } catch { /* shown */ }
+  ok("measure ui --min-tap 0 / --min-text 8pt override the defaults", j4 && j4.summary.smallTapTargets === 0 && j4.data.minText === 16 && j4.summary.smallText === 0, r4.stdout.slice(0, 600) + r4.stderr);
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

@@ -26,6 +26,7 @@ export { PERSONAS };
 
 
 const DEBUG = !!process.env.WITNESS_PLAY_DEBUG;
+const ANIM_EXPR = "globalThis.__witnessAnimating?.() ?? 0";
 const OPEN_ENDED = new Set(["explore", "wait", "follow", "run", "waitfor", "hold", "block"]);
 
 export async function runDaemon(dir) {
@@ -80,7 +81,7 @@ export async function runDaemon(dir) {
   let frame = 0, world = null, finalizing = false, server = null, finalP = null;
   const timeline = [], orders = [], notes = [], shots = [], errors = [], pending = [], trail = [];
   let parseErrors = 0, lastLogFrame = 0, firstLook = true;
-  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null } : null });
+  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, epoch: S.epoch ?? null, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null } : null });
   const dts = (k) => Array(k).fill(1 / fps);
 
   // ---- live mode: one loop owns the game and steps it continuously, paced to real time; commands steer it
@@ -175,6 +176,31 @@ export async function runDaemon(dir) {
     timeline.push({ t: +e.t.toFixed(2), frame: e.frame, kind: e.kind, text: e.text });
   }
 
+  /** An order's game call (call <name>, or a pick through play.pick.call): recorded, its answer handed to the order. */
+  async function callGame(dec) {
+    let msg, value, failed = false;
+    try { const r = await S.call(dec.name, dec.args); value = r.result ?? null; msg = `called ${dec.name}(${dec.args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(", ")}) → ${clip(JSON.stringify(value), cfg.resultChars)}`; recorder.call(frame, dec.name, dec.args); }
+    catch (e) { msg = `call ${dec.name} failed: ${e.message}`; failed = true; }
+    if (ap.cur) { ap.cur.result = msg; ap.cur.callValue = value; ap.cur.callFailed = failed; }
+  }
+
+  // ---- settle: after an order changed the scene or a dialogue (and before a screenshot), step until the game's
+  // animations finish (a CSS crossfade caught half way looks like one screen drawn over another), at most 0.5 s.
+  // Needs an adapter that answers eval of ANIM_EXPR with a number (the JS adapter); others skip it silently.
+  let animOk = true;
+  async function animating() {
+    if (!animOk || !S.has("eval") || S.closed) return 0;
+    try { const r = await S.eval(ANIM_EXPR); const v = r && r.value; if (typeof v === "number" && Number.isFinite(v)) return v; } catch { /* unsupported */ }
+    animOk = false; return 0;
+  }
+  async function settleAnims() {
+    if (live.on || stopWhy || hung) return 0;
+    const cap = Math.round(0.5 * fps); let n = 0;
+    try { while (n < cap && (await animating()) > 0) { const k = Math.min(2, cap - n); await stepWorld(k); n += k; } }
+    catch (e) { log(`settle failed: ${e.message}`); }
+    return n;
+  }
+
   // ---- the reflex loop for one `do`
   const wakeFor = (ev, b) => wakeRule(ev, b, { ap, world, cfg, live: live.on });
   // watched turn-taking (--watch --turns): an order plays at real-time speed, the game waits while the tester thinks
@@ -249,7 +275,10 @@ export async function runDaemon(dir) {
     thaw();
     turnPace.wall = Date.now(); turnPace.frame = frame;
     const t0 = world.t;
-    const cap = forS != null ? +forS : list.every((o) => OPEN_ENDED.has(o.verb) || o.forS) ? Math.max(...list.map((o) => o.forS || 6)) + 0.5 : Math.max(25, ...list.map((o) => (o.forS || 0) + 1));
+    // turn profile: a wait runs as long as it says (a bare wait up to play.turnWait), since it ends early on your turn
+    const turnWait = (o) => (cfg.profile === "turn" && o.verb === "wait" ? (o.untimed ? cfg.turnWait : o.seconds) : null);
+    const cap = forS != null ? +forS : list.every((o) => OPEN_ENDED.has(o.verb) || o.forS) ? Math.max(...list.map((o) => turnWait(o) ?? (o.forS || 6))) + 0.5 : Math.max(25, ...list.map((o) => Math.max(turnWait(o) ?? 0, o.forS || 0) + 1));
+    const scene0 = world.sceneKey, dlg0 = world.dialogue ? JSON.stringify(world.dialogue) : null;
     ap.setOrders(list);
     const rec = { t: +t0.toFixed(2), text, status: null, msg: null, seconds: null };
     orders.push(rec);
@@ -261,10 +290,7 @@ export async function runDaemon(dir) {
       if (dec.status === "call") {
         const ev0 = ap.ctrl.emit(dec.want, frame);
         if (ev0.length) { await S.input(ev0); recorder.add(ev0); sent(ev0); }
-        let msg;
-        try { const r = await S.call(dec.name, dec.args); msg = `called ${dec.name}(${dec.args.join(", ")}) → ${clip(JSON.stringify(r.result ?? null), 120)}`; recorder.call(frame, dec.name, dec.args); }
-        catch (e) { msg = `call ${dec.name} failed: ${e.message}`; }
-        if (ap.cur) ap.cur.result = msg;
+        await callGame(dec);
         await stepWorld(1);   // a call is always followed by a step, so it lands inside the recording
         continue;
       }
@@ -291,6 +317,8 @@ export async function runDaemon(dir) {
       else throw e;
     }
     if (result.status === "ended") result.msg = endedMsg(result.msg);
+    // the order changed the screen (a scene, a dialogue): let its transition finish before the tester looks
+    if (!result.outcome && result.status !== "ended" && !S.closed && (world.sceneKey !== scene0 || (world.dialogue ? JSON.stringify(world.dialogue) : null) !== dlg0)) await settleAnims();
     if (result.outcome) { const why = result.msg; setTimeout(() => shutdown(why, result.outcome), 10); }
     // results of a chain: show each finished order
     const parts = ap.results.map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}${ap.results.length > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
@@ -356,10 +384,7 @@ export async function runDaemon(dir) {
     if (dec.status === "call") {
       const ev0 = ap.ctrl.emit(dec.want, frame);
       if (ev0.length) { await S.input(ev0); recorder.add(ev0); sent(ev0); }
-      let msg;
-      try { const r = await S.call(dec.name, dec.args); msg = `called ${dec.name}(${dec.args.join(", ")}) → ${clip(JSON.stringify(r.result ?? null), 120)}`; recorder.call(frame, dec.name, dec.args); }
-      catch (e) { msg = `call ${dec.name} failed: ${e.message}`; }
-      if (ap.cur) ap.cur.result = msg;
+      await callGame(dec);
       await stepWorld(1);
       return;
     }
@@ -481,7 +506,7 @@ export async function runDaemon(dir) {
       name: spec.name, game: { name: S.hello.name, engine: S.hello.engine || null }, persona, goal: opts.goal || null, model: opts.model || null,
       seed: recorder.head.seed, scene: opts.scene ?? null, params: opts.params ?? null, startedAt: new Date(wall0).toISOString(),
       wallSeconds: Math.round((Date.now() - wall0) / 1000), gameSeconds: world.t, frames: frame, fps, orders, timeline, tracker,
-      until: until ? until.report() : null, incidents: ap.incidents, coverage: coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
+      until: until ? until.report() : null, incidents: ap.incidents, coverage: cfg.profile === "turn" ? null : coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
       replay: { file: path.join(dir, "replay.jsonl"), frames: frame, calls: recorder ? [...recorder.frames.values()].reduce((a, x) => a + x.calls.length, 0) : 0 },
       ...extra,
     };
@@ -521,7 +546,7 @@ export async function runDaemon(dir) {
       recorder.write(rp, frame);
       if (endState) fs.writeFileSync(`${rp}.state.json`, JSON.stringify({ frame, time: world.t, state: endState }));
       const png = await coveragePNG(grid, { path: trail, deaths: tracker.deaths, stuck: ap.incidents });
-      if (png) { fs.writeFileSync(path.join(dir, "coverage.png"), png); st.coverage.png = path.join(dir, "coverage.png"); }
+      if (png && st.coverage) { fs.writeFileSync(path.join(dir, "coverage.png"), png); st.coverage.png = path.join(dir, "coverage.png"); }
       const r = reportData(st);
       writeReports(dir, r);
       const S2 = r.stats;
@@ -573,7 +598,7 @@ export async function runDaemon(dir) {
       case "look": {
         let shot = null, res = null;
         if (a.wait && live.on) res = (await liveDo(null, a.for, true)).result;   // keep the plan; answer at the next event or the horizon
-        if (a.shot) shot = await shoot("look", a.scale ? +a.scale : 0);
+        if (a.shot) { await settleAnims(); shot = await shoot("look", a.scale ? +a.scale : 0); }
         const o = look(res, a.json);
         return { ok: true, ...o, shot };
       }
@@ -585,7 +610,7 @@ export async function runDaemon(dir) {
         const o = look(r.result, a.json);
         return { ok: true, ...o };
       }
-      case "shot": { const f = await shoot(a.why || "shot", a.scale ? +a.scale : 0); return f ? { ok: true, text: f, shot: f } : { ok: false, code: 1, text: "this game can't take screenshots (no 'screenshot' capability)" }; }
+      case "shot": { await settleAnims(); const f = await shoot(a.why || "shot", a.scale ? +a.scale : 0); return f ? { ok: true, text: f, shot: f } : { ok: false, code: 1, text: "this game can't take screenshots (no 'screenshot' capability)" }; }
       case "note": {
         const kind = ["bug", "confusing", "fun", "idea"].includes(a.kind) ? a.kind : "note";
         const n = { t: +world.t.toFixed(2), frame, kind, text: oneLine(a.text || "").slice(0, 1000), cell: world.player && world.player.p2 ? cellOf(world, world.player.p2) : null };

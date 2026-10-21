@@ -41,7 +41,7 @@ export const launchFlags = (opt) => {
   if (!opt) return "";
   let f = "";
   for (const k of ["device", "engine", "capture"]) if (opt[k] !== undefined && opt[k] !== true) f += ` --${k} ${shq(String(opt[k]))}`;
-  for (const k of ["no-auto-unlock", "auto-unlock", "safe-insets", "safe-overlay"]) if (opt[k]) f += ` --${k}`;
+  for (const k of ["no-auto-unlock", "auto-unlock", "safe-insets", "safe-overlay"]) if (opt[k]) f += ` --${k}${opt[k] !== true ? ` ${shq(String(opt[k]))}` : ""}`;
   return f;
 };
 /** " --config <what was passed>" plus the launch flags that were passed, for follow-up commands printed to the user
@@ -82,7 +82,7 @@ export function browserOverrides(cfg, opt) {
   if (want.capture !== undefined) launch.capture = String(want.capture);
   if (opt["no-auto-unlock"]) launch.audioUnlock = false;
   else if (opt["auto-unlock"]) launch.audioUnlock = true;
-  if (opt["safe-insets"]) launch.safeInsets = true;
+  if (opt["safe-insets"]) launch.safeInsets = opt["safe-insets"] === true ? true : String(opt["safe-insets"]);
   if (opt["safe-overlay"]) launch.safeOverlay = true;
   return { ...cfg, launch };
 }

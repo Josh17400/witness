@@ -171,8 +171,15 @@ export class Session {
     this.closed = false;
     this.hello = null;
     this.helloP = new Promise((res, rej) => { this._helloRes = res; this._helloRej = rej; });
-    const helloTimer = setTimeout(() => this._helloRej(new WitnessError("the game connected but never sent its hello (see docs/PROTOCOL.md §2)")), 15000);
+    this._helloTimer = setTimeout(() => this._helloRej(new WitnessError("the game connected but never sent its hello (see docs/PROTOCOL.md §2)")), 15000);
+    this._wire(conn);
+  }
+
+  /** Listen to a connection; messages from any connection but the current one (an adopted page's old one) are dropped. */
+  _wire(conn) {
+    const helloTimer = this._helloTimer;
     conn.onMessage((m) => {
+      if (conn !== this.conn) return;
       if (m.hello) { clearTimeout(helloTimer); this.hello = m.hello; this._helloRes(m.hello); return; }
       if (m.event === "badline") {
         this.lastBadLine = m.line;
@@ -205,12 +212,25 @@ export class Session {
       }
     });
     conn.onClose(() => {
+      if (conn !== this.conn) return;
       this.closed = true;
       clearTimeout(helloTimer);
       this._helloRej(new WitnessError("the game disconnected before saying hello"));
       for (const { rej, cmd, timer } of this.pending.values()) { clearTimeout(timer); rej(new WitnessError(`the game disconnected (or crashed) during '${cmd}'`)); }
       this.pending.clear();
     });
+  }
+
+  /**
+   * Go on over another session's connection (a browser page reloaded for a reset reconnects as a new session): this
+   * session keeps its hello, logs and events; the other one goes quiet.
+   */
+  adopt(other) {
+    const conn = other.conn;
+    other.conn = null;
+    this.conn = conn;
+    this.closed = !!other.closed;
+    this._wire(conn);
   }
 
   has(cap) { return !!(this.hello && (this.hello.capabilities || []).includes(cap)); }
@@ -227,7 +247,8 @@ export class Session {
   }
 
   // convenience wrappers
-  reset(seed, scene, params) { return this.request("reset", { seed, ...(scene ? { scene } : {}), ...(params ? { params } : {}) }); }
+  /** epoch: the virtual Date's start for this run (ms; witness.json clock.epoch or a replay's), sent only when set. */
+  reset(seed, scene, params, epoch = this.epoch) { return this.request("reset", { seed, ...(scene ? { scene } : {}), ...(params ? { params } : {}), ...(epoch != null ? { epoch } : {}) }); }
   /** Queue input; a long replay's events go in several requests (one huge line can stall or overflow an adapter). */
   /** In requests of at most `chunk` events and about `maxBytes` (a web adapter's inbound buffer: Godot's is 4 MiB). */
   async input(events, chunk = 2000, maxBytes = 1 << 20) {

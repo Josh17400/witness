@@ -13,6 +13,8 @@ export function wakeFor(ev, b, { ap, world, cfg, live = false }) {
   for (const e of ev) {
     // a scene change the order caused on purpose (it walked into the inn it was sent to) finishes it instead
     if (e.kind === "scene" && ap.sceneArrival) continue;
+    // turn/menu games: a new screen is what the pick or the wait was for; the order's own result reports it
+    if (e.kind === "scene" && cfg.profile === "turn") continue;
     if (["death", "goal", "error", "scene", "lowhp"].includes(e.kind)) return e.text;
     if (world.dead && (e.kind === "alert" || e.kind === "hurt")) continue;
     // damage over time (poison ticks, no attacker): timeline only; low hp and death still wake

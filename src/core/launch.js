@@ -71,6 +71,38 @@ export function runBuild(cfg, root, { quiet = false } = {}) {
   return true;
 }
 
+// The virtual clock's Date epoch (JS adapter): witness.json "clock": {"epoch": "2026-06-15" | "2026-06-15T09:00:00Z" |
+// "today" | ms}. "today" is this run's date at 00:00 UTC, resolved once per config and pinned for every reset and
+// relaunch of the run; the CLI sends it with each reset (and in the page URL / WITNESS_EPOCH so boot code sees it too),
+// and play recordings keep it in their header so a replay restarts the Date exactly there. null: the adapter's own
+// default (2026-01-01T00:00:00Z for the JS adapter).
+export const DEFAULT_EPOCH = Date.UTC(2026, 0, 1);
+const pinnedEpochs = new WeakMap();
+export function resolveEpoch(cfg) {
+  if (pinnedEpochs.has(cfg)) return pinnedEpochs.get(cfg);
+  const v = cfg && cfg.clock && typeof cfg.clock === "object" ? cfg.clock.epoch : null;
+  let ms = null;
+  if (v != null && v !== "") {
+    if (typeof v === "number" || /^-?\d+$/.test(String(v))) ms = Math.floor(+v);
+    else if (String(v).toLowerCase() === "today") { const d = new Date(); ms = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()); }
+    else {
+      const t = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? `${v}T00:00:00Z` : String(v));
+      if (!Number.isFinite(t)) throw new WitnessError(`${CONFIG_NAME}: clock.epoch ${JSON.stringify(v)} isn't a date: use an ISO date ("2026-06-15" or "2026-06-15T09:00:00Z"), "today" or ms since 1970`);
+      ms = t;
+    }
+  }
+  pinnedEpochs.set(cfg, ms);
+  return ms;
+}
+/** One line about the virtual Date for doctor (JS adapter games). */
+export function epochNote(session) {
+  const ms = session.epoch != null ? session.epoch : DEFAULT_EPOCH;
+  const iso = new Date(ms).toISOString().replace(/T00:00:00\.000Z$/, "").replace(/\.000Z$/, "Z");
+  return session.epoch != null
+    ? `clock: the game's Date starts at ${iso} at every reset (witness.json clock.epoch), then follows simulated time`
+    : `clock: the game's Date is virtual and starts at ${iso} (the default): countdowns to real dates read from there; set "clock": {"epoch": "today"} (or an ISO date) in ${CONFIG_NAME}`;
+}
+
 /**
  * Browser launches: session.web (device, engine, audio policy, page facts), the auto-unlock gesture at connect, and
  * screenshots from the screen (capture "element" / "screen") instead of the adapter's canvas readback.
@@ -78,6 +110,13 @@ export function runBuild(cfg, root, { quiet = false } = {}) {
 async function attachWeb(session, web) {
   session.web = web;
   if (web.policy === "auto") { try { web.autoUnlocked = await web.unlock(); } catch { web.autoUnlocked = 0; } }
+  // a DOM game (no visible <canvas>): screenshots are of the viewport, unless launch.capture says otherwise
+  if (web.captureMode === "canvas" && !web.captureSet) {
+    try {
+      const info = await web.info();
+      if (info && !(info.canvases || []).some((c) => c.rect[2] * c.rect[3] > 0)) { web.captureMode = "screen"; web.dom = true; }
+    } catch { /* attached page */ }
+  }
   if (web.captureMode !== "canvas") {
     const caps = session.hello.capabilities || (session.hello.capabilities = []);
     if (!caps.includes("screenshot")) caps.push("screenshot");
@@ -105,6 +144,41 @@ async function attachWeb(session, web) {
       return { width: img.width, height: img.height, format: "png", data: Buffer.from(encodePNG(img.width, img.height, img.data)).toString("base64") };
     };
   }
+}
+
+/**
+ * launch.reset (browser games): "auto" (default) reloads the page for a reset when the game registered no reset
+ * handler, "reload" always does, "handler" never does. A reload clears localStorage / sessionStorage first (keep them
+ * with launch.keepStorage: true), loads the page again with ?witness_seed=<seed> (and the epoch), waits for the new
+ * hello and goes on over the new connection: the same Session, fresh in-memory state, the Date back at the epoch.
+ * A reset right after the page (re)loaded, before any step, doesn't reload again.
+ */
+function setupReload(session, web, launch, srv, timeoutMs) {
+  const mode = String(launch.reset || "auto").toLowerCase();
+  if (!["auto", "reload", "handler"].includes(mode)) throw new WitnessError(`launch.reset ${JSON.stringify(launch.reset)}: use "auto" (reload the page when the game has no reset handler), "reload" or "handler"`);
+  const handler = session.has("reset");
+  if (mode === "handler" || (mode === "auto" && handler)) return;
+  web.resetMode = "reload";
+  if (!handler) (session.hello.capabilities || (session.hello.capabilities = [])).push("reset");
+  let fresh = true;   // nothing ran since the page loaded
+  for (const m of ["step", "input", "call"]) {
+    const f = session[m].bind(session);
+    session[m] = (...a) => { fresh = false; return f(...a); };
+  }
+  web.reloads = 0;
+  session.reset = async (seed, scene, params, epoch = session.epoch) => {
+    if (!fresh) {
+      const next = srv.nextSession(timeoutMs);
+      next.catch(() => {});
+      await web.reload({ witness_seed: seed ?? 1, witness_epoch: epoch }, { keepStorage: !!launch.keepStorage });
+      const s2 = await next;
+      session.adopt(s2);
+      web.reloads++;
+      if (web.policy === "auto") { try { await web.unlock(); } catch { /* none */ } }
+    }
+    fresh = true;   // until the next step / input / call
+    return session.request("reset", { seed, ...(scene ? { scene } : {}), ...(params ? { params } : {}), ...(epoch != null ? { epoch } : {}), reloaded: true });
+  };
 }
 
 const tail = (out, n = 3000) => out.join("").slice(-n);
@@ -137,6 +211,7 @@ export async function openGame(cfg, root, opts = {}) {
   try { srv = await listen({ port: attach ? (opts.port || launch.port || DEFAULT_ATTACH_PORT) : 0 }); }
   catch (e) { if (slot) slot.release(); throw e.code === "EADDRINUSE" ? new WitnessError(`port ${e.port || opts.port || launch.port || DEFAULT_ATTACH_PORT} is in use: another Witness is waiting there (or pass --port)`) : e; }
   const addr = `127.0.0.1:${srv.port}`;
+  const epoch = resolveEpoch(cfg);
   let proc = null, browser = null, server = null, web = null;
   const out = [];
   const keep = (d) => { out.push(d.toString()); if (out.length > 400) out.splice(0, out.length - 400); };
@@ -160,9 +235,9 @@ export async function openGame(cfg, root, opts = {}) {
     } else if (launch.url) {
       // Browser games: optional dev server + headless browser (see src/core/browser.js).
       const { openBrowserGame } = await import("./browser.js");
-      ({ browser, server, web } = await openBrowserGame(launch, root, addr, keep));
+      ({ browser, server, web } = await openBrowserGame(launch, root, addr, keep, { query: { witness_epoch: epoch } }));
     } else {
-      const env = { ...process.env, ...(launch.env || {}), ...(opts.env || {}), WITNESS_ADDR: addr, WITNESS: "1" };
+      const env = { ...process.env, ...(launch.env || {}), ...(opts.env || {}), WITNESS_ADDR: addr, WITNESS: "1", ...(epoch != null ? { WITNESS_EPOCH: String(epoch) } : {}) };
       movieDirs(launch.args, path.resolve(root, launch.cwd || "."));
       // posix: its own process group, so a stop or Ctrl-C takes the whole tree (a shell's game, a launcher's child)
       proc = track(spawn(launch.command, launch.args || [], {
@@ -185,7 +260,11 @@ export async function openGame(cfg, root, opts = {}) {
       }),
     ]);
     if (cfg.fps) session.hello.fps = cfg.fps;
-    if (web) await attachWeb(session, web);
+    session.epoch = epoch;
+    if (web) {
+      await attachWeb(session, web);
+      setupReload(session, web, launch, srv, (opts.timeout || cfg.timeout || 60) * 1000);
+    }
     const handle = {
       session, proc, output: () => out.join(""),
       stop: async () => { await session.quit(); session.close(); await killAll(); },

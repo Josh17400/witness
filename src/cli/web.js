@@ -6,6 +6,7 @@ export { safePresetFor };
 import { begin, stepTo, queueInput } from "../core/runner.js";
 import { nameRegions, scaleLayers, groupsLine, regionLines, fmtScale, readRect, rectVerdict } from "./scale-regions.js";
 import { parseWitnessInput } from "../core/input-spec.js";
+import { epochNote } from "../core/launch.js";
 
 const fx = (v, d = 2) => +(+v).toFixed(d);
 
@@ -59,7 +60,8 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
   }
   if (info.webAudio === false) lines.push(["⚠", `this ${web.engine} build has no Web Audio (Playwright's WebKit for Windows is built without it): Witness put in a silent AudioContext so the page loads; audio can't be captured or heard here (check the unlock path with --engine chromium --no-auto-unlock)`]);
   const c = mainCanvas(info);
-  if (!c) { lines.push(["⚠", "no visible <canvas> on the page"]); return { lines, display: null, info, safe }; }
+  if (!c && web.captureMode === "screen") { lines.push(["", `DOM page (no visible <canvas>): screenshots are of the whole viewport at device pixels${web.dom ? " (chosen because the page has no canvas; launch.capture sets it)" : ""}`]); return { lines, display: null, info, safe }; }
+  if (!c) { lines.push(["⚠", "no visible <canvas> on the page (a DOM game? --capture screen, or leave launch.capture unset: Witness then captures the viewport)"]); return { lines, display: null, info, safe }; }
   const d = canvasDisplay(c, info.dpr);
   const name = `canvas${c.id ? `#${c.id}` : ""}`;
   lines.push([d.problem ? "⚠" : "✔",
@@ -214,6 +216,12 @@ export async function webglReport(web, info) {
   else if (!r && !uses) lines.push(["⚠", `WebGL: ${what} (${web.engine}): a WebGL build would show a blank canvas here`]);
   else lines.push(["", `WebGL: ${what}${uses ? ` · the game's canvas uses ${uses}` : ""}`]);
   return { lines, summary: { webgl: !!gl("webgl"), webgl2: !!gl("webgl2"), renderer: r ? r.renderer : null, software: !!soft, canvasContext: uses } };
+}
+
+/** The virtual Date's start, for JS adapter games (null for other adapters: their Date is the real one). */
+export function clockLine(session) {
+  if (!/witness-js/.test((session.hello && session.hello.adapter) || "")) return null;
+  return epochNote(session) + (session.web && session.web.resetMode === "reload" ? " · reset reloads the page (launch.reset)" : "");
 }
 
 export function describeWeb(web) {

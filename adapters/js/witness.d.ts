@@ -102,6 +102,17 @@ export interface StartOptions {
   seed?: number;
   /** Yield to the event loop after every frame even without a takeover (default: only with one). */
   yieldEachFrame?: boolean;
+  /** Browser: wait for pictures and fonts before the hello (default true; see witness.ready()). */
+  ready?: boolean | WitnessReadyOptions;
+}
+
+export interface WitnessReadyOptions {
+  /** Real display frames to wait after decoding (default 2). */
+  frames?: number;
+  /** Real milliseconds to wait after that (default 0). */
+  ms?: number;
+  /** Most real milliseconds to spend decoding (default 10000). */
+  timeout?: number;
 }
 
 /** A PCM capture buffer that follows simulated time (games that synthesize their own sound). */
@@ -138,20 +149,40 @@ export interface WitnessConfig {
   webaudio?: boolean;
   /** false stops console.* from being forwarded as game logs. */
   console?: boolean;
-  /** Seconds of audio each captured AudioContext can hold (default 300). */
+  /** false leaves CSS transitions / animations / element.animate() on real time (default: on the virtual clock). */
+  animations?: boolean;
+  /** false leaves <video> elements playing (default: paused in witness mode, they run on real time). */
+  videos?: boolean;
+  /** Seconds of audio each captured AudioContext can hold (default 300; past it silent, its clock goes on). */
   audioSeconds?: number;
   /** Sample rate of captured AudioContexts that don't ask for one (default 24000). */
   audioRate?: number;
   /** false: iPhone-Safari audio policy on pages without the CLI's init script (contexts start suspended; resume()
    *  only during a gesture). Browser launches take it from --no-auto-unlock instead. ?witness_audio_unlock=0 */
   audioUnlock?: boolean;
-  /** What Date.now() says at import in witness/record mode (default 2026-01-01T00:00:00Z). */
+  /** What Date.now() says at import in witness/record mode (default 2026-01-01T00:00:00Z): an ISO date, ms since
+   *  1970, or "today" (00:00 UTC). The CLI sets it from witness.json clock.epoch (?witness_epoch= / WITNESS_EPOCH) and
+   *  sends it with every reset, where the Date restarts at it. */
   epoch?: string | number;
 }
 
 declare global {
   // eslint-disable-next-line no-var
   var WITNESS_CONFIG: WitnessConfig | undefined;
+  /** The page's adapter instance (also when the CLI injected it before the page's scripts: launch.inject). */
+  // eslint-disable-next-line no-var
+  var __witnessApi: WitnessApi | undefined;
+  /** Witness mode, browser: finite CSS / Web Animations still running (0 = settled). */
+  // eslint-disable-next-line no-var
+  var __witnessAnimating: (() => number) | undefined;
+}
+
+export interface WitnessDomHelpers {
+  /** Tap an element (or the first match of a selector) at its centre: touch pointer events, mouse events, click.
+   *  "ok", "blocked by <what covers it>" (warned), or "not found: <selector>". */
+  tap(el: Element | string): string;
+  /** What can be tapped (buttons, links, inputs, [role=button], [onclick]), visible, in view first. */
+  tappables(root?: Element | string): { label: string; id: string | null }[];
 }
 
 export interface WitnessApi {
@@ -187,6 +218,14 @@ export interface WitnessApi {
   inputEvents(): WitnessEvent[];
   readonly input: WitnessInputState;
   createMixer(opts?: { sampleRate?: number; channels?: 1 | 2 }): WitnessMixer;
+  /** Browser: wait until pictures are decoded and fonts are ready (start() does it in witness mode). */
+  ready(opts?: WitnessReadyOptions): Promise<void>;
+  /** Browser: run <script type="text/witness"> / [data-witness-deferred] classic scripts in order; returns how many. */
+  boot(opts?: { selector?: string }): Promise<number>;
+  /** DOM games: tap elements and list what can be tapped. */
+  readonly dom: WitnessDomHelpers;
+  /** Finite CSS / Web Animations still running (0 = settled). */
+  animating(): number;
   /** Frames / simulated seconds since the last reset. */
   readonly frame: number;
   readonly time: number;
@@ -216,6 +255,8 @@ export declare const mark: WitnessApi["mark"];
 export declare const sound: WitnessApi["sound"];
 export declare const recordFrame: WitnessApi["recordFrame"];
 export declare const createMixer: WitnessApi["createMixer"];
+export declare const ready: WitnessApi["ready"];
+export declare const boot: WitnessApi["boot"];
 export declare class Mixer implements WitnessMixer {
   constructor(opts?: { sampleRate?: number; channels?: 1 | 2 });
   readonly sampleRate: number;

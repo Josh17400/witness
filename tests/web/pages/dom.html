@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DOM card</title>
+  <!-- A pure-DOM game (no canvas): an inline classic script with a boot timer and Date, a CSS transition, a keyframe
+       animation, an infinite spinner, progress kept in memory and in localStorage, and no reset handler. -->
+  <style>
+    html, body { margin: 0; background: #123; font: 16px sans-serif; color: #fff; }
+    #card { position: absolute; left: 20px; top: 20px; width: 80px; height: 120px; background: rgb(230, 40, 40); transition: transform 1s linear, background-color 1s linear; }
+    #card.moved { transform: translateX(200px); background: rgb(40, 230, 40); }
+    #bar { position: absolute; left: 20px; top: 160px; height: 10px; width: 0; background: #fc0; }
+    #bar.grow { animation: grow 0.5s linear 1 forwards; }
+    @keyframes grow { from { width: 10px; } to { width: 300px; } }
+    #spin { position: absolute; left: 340px; top: 20px; width: 20px; height: 20px; background: #09f; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #count { position: absolute; left: 20px; top: 190px; }
+  </style>
+</head>
+<body>
+  <div id="card"></div>
+  <div id="bar"></div>
+  <div id="spin"></div>
+  <div id="count"></div>
+  <script>
+    // classic inline script: runs before any module (and so before an imported witness.js)
+    var game = { booted: false, bootAt: null, taps: 0, ends: 0, iters: 0, saved: localStorage.getItem("dom-taps") };
+    setTimeout(function () { game.booted = true; game.bootAt = performance.now(); }, 200);
+    var card = document.getElementById("card"), bar = document.getElementById("bar");
+    card.addEventListener("transitionend", function (e) { if (e.propertyName === "transform") game.ends++; });
+    bar.addEventListener("animationend", function () { game.ends++; });
+    function move() { game.taps++; localStorage.setItem("dom-taps", String(game.taps)); card.classList.add("moved"); bar.classList.add("grow"); }
+    document.addEventListener("keydown", function (e) { if (e.key === " ") move(); });
+    function tick() {
+      // a weekly countdown from the virtual Date: days to next Monday 00:00 UTC
+      var d = new Date(), day = d.getUTCDay();
+      document.getElementById("count").textContent = "Resets in " + ((8 - day) % 7 || 7) + "d";
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  </script>
+  <script type="module">
+    import witness from "/witness/witness.js";
+    await witness.start({
+      name: "dom-card", fps: 60,
+      calls: { move: () => { move(); return game.taps; }, tap: (sel) => witness.dom.tap(sel) },
+      snapshot: () => ({ ...game, now: Date.now(), animating: globalThis.__witnessAnimating(), count: document.getElementById("count").textContent, choices: witness.dom.tappables() }),
+    });
+  </script>
+</body>
+</html>

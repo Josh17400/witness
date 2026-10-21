@@ -171,7 +171,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `fight [thing] [mode]` | attack, kill, engage, hit, slay, defeat, battle, strike, shoot, destroy | Approach, face, attack, react to telegraphs. No target: nearest hostiles. A plural (`wolves`, `all enemies`) fights until none is near. |
 | `flee [from thing]` | retreat, escape, evade, run away, back off, get away | Move to the reachable spot farthest from hostiles; done when none is within 1.6 × alert. |
 | `talk <who>` | talk to/with, speak to/with, chat, greet, ask | Walk up, face, press interact, wait for `dialogue`; retries closer, fails after 3 tries. When the dialogue names a `speaker` that isn't the target (by name or type), it says `X answered instead of Guard#4`, presses cancel, steps closer and tries again; without a cancel control, or after 2 wrong answers, it fails with that message and leaves the dialogue open. No target: nearest NPC. |
-| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). |
+| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; with no change at all it fails. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). |
 | `pickup [thing]` | pick up, get, grab, collect, take, loot, fetch | Walk onto the item; press interact if it's still there. No target: nearest item. Plural: collects them all nearby. |
 | `use <control\|item>` | drink, quaff, eat, heal | Tap a control. `use potion` / `heal` / `drink` → the heal control. An unknown word becomes `interact <it>`. |
 | `interact [thing]` | interact with, activate, open, unlock, inspect, read, examine | Walk up, face, press interact (no target: press it here). Reports a new `notice`, or a dialogue that opened. |
@@ -179,7 +179,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `hold <key\|control> <s>` | | Hold for s seconds (default 1). |
 | `block [s]` | guard | Hold block (default 0.8 s). |
 | `dodge [dir]` | roll | Tap dodge while moving (default: away from the nearest hostile). |
-| `wait [s]` | idle, pause, stay, rest | Let time pass (default 1 s); reflexes stay on. |
+| `wait [s]` | idle, pause, stay, rest | Let time pass (default 1 s); reflexes stay on. Turn profile: until your turn, new choices or a dialogue (at most s, or `play.turnWait`). |
 | `wait for <thing>` | | Until it passes, moves away, or 8 s. |
 | `stop` | halt, freeze | Release everything. |
 | `respawn` | revive, continue | Press confirm while dead, again every 1.5 s (a "press Enter" prompt often shows a second after the death), for up to 8 s. |
@@ -256,7 +256,7 @@ events: 0.6 dialogue — Old Guard: "Take this potion…" [1) Thanks.] · 0.6 go
 | `dialogue` | speaker, text and numbered options with the exact `choose` orders |
 | `game says:` | the game's `notice` |
 | `map` | a 19×9 window around you (fps 17×11; platformer: the map rows ahead): `#` wall (the game's map or learned by bumping), `.` open, `?` unknown, one letter per type (uppercase = hostile; a type on both sides gets two letters, marked enemy/ally in the legend). Shown only when walls are known. |
-| `events` | the last 9 notable events since the previous observation: damage, hits, kills, pickups, dialogue, notices, stat changes, game logs, reflexes, bumps and stuck incidents. Game logs that say the same thing as an inferred event replace it. Regeneration is one line per observation (`regenerated +12 over 5s (hp 40→52)`), and so is damage over time with no attacker near (it never wakes the tester or stops an order); hp changes too small to print (0.02 a tick) are added up first. A thing flickering at the edge of the list is `gone` once, and the same text twice within half a second shows once. |
+| `events` | the last 9 notable events since the previous observation: damage, hits, kills, pickups, dialogue, notices, stat changes, game logs, reflexes, bumps and stuck incidents. Game logs that say the same thing as an inferred event replace it, and a log line with the same words as a `notice` shown within 2 s (either first) is one event, not two. Regeneration is one line per observation (`regenerated +12 over 5s (hp 40→52)`), and so is damage over time with no attacker near (it never wakes the tester or stops an order); hp changes too small to print (0.02 a tick) are added up first. A thing flickering at the edge of the list is `gone` once, and the same text twice within half a second shows once. |
 
 Other lines you'll see: `✔ done: fight wolves block — 3 enemies defeated (7.2s)`, `Wolf#6   3.1 E   hp 3/3  WINDUP
 0.2s`, `★ GOAL REACHED: goto Exit#13 — the game reports a win (1.3s)`, `YOU ARE DEAD — game says: "…"`. The first
@@ -540,13 +540,63 @@ need a push; it costs one field. In the platformer profile a goto just arrives (
 
 ## Profiles
 
-`play.profile`: `topdown` (default), `platformer`, `fps`.
+`play.profile`: `topdown` (default), `platformer`, `fps`, `turn` (also written `card`, `menu`, `board`, `turn-based`).
 
 | profile | movement | needs from the snapshot | needs from the controls |
 |---|---|---|---|
 | `topdown` | 8-way keys (or a stick) toward the next path cell. Facing: taps a move key toward the target when the player's `facing` says it's turned away (unknown facing is assumed right). | `player.pos`; `facing` helps attacks land; `hp` for heal/retreat/low-hp | `move`, plus attack / block / dodge / interact / heal as the game has them |
 | `platformer` | left/right with `run` held for distance. Jumps planned from the tile map: a wall at body height (held longer for taller walls), a gap or hazard (running jump), an enemy ahead (jump onto it if stompable, else over it), using time-to-contact from both speeds so fast things (a kicked shell coming back) are jumped in time. **Packs**: with another enemy just behind the first, it stops, lets the first walk in and stomps it from a standstill (timed by the measured air time), so the bounce doesn't land in the second one. **In the air** a landing planner tries each input (toward, none, away), simulates the fall with the measured gravity and every enemy's measured speed, and picks the safest: landing on a head is good, a side hit, a pit or sliding into an enemy after touchdown is not. While an order stands still (wait, press, look), an enemy about to touch you gets jumped on (or away from). Star power (`star`/`invincible` on the player) ignores all this. An enemy marked `stompable: false` close ahead stops the run and fails the order with a suggestion ("wait for X until it hides"), unless its `state` says it's harmless right now (`hidden`, `retracted`, `sleeping`, `inactive`…); `wait for X` ends when it goes harmless. Stuck: high jump, then back up for a run-up. Speeds, gravity and friction are measured from positions, so the game's units don't matter. | `player.pos`, `onGround` (or `grounded`), `size` (and entity `size`, which makes the landing planner exact); `state.map` rows with `#` solid, `=` one-way, `^`/`~` hazards (rows below the map count as a pit) | `move` (left/right/down), `jump`, `run`; `attack` only for `fight X ranged` / `using` |
 | `fps` | WASD relative to the look direction; turning and aiming with mouse deltas. Mouse sensitivity and sign are auto-calibrated on first use (or `play.fps.sens`). `fight` aims at centre mass, fires while the aim error is under the target's angular size, strafes on a rhythm, reloads at 0 ammo, and chases to `fps.range` cells (`fight X hold` never chases). In team games (`team` on the player) damage and kills are only credited to you while you were firing, since teammates shoot too. `respawn` waits up to 8 s for games that respawn on a timer. | `player.pos` (3D), `look` [x,y,z] or `yaw`/`pitch` (`play.fps.degrees`, `yawSign`), `ammo`, `team`; entity `los` / `visible`, `team`, `dead` | `move` (wasd by default), attack (default `mouse:left`, held), `reload` (`r`), `weapons` (`1`–`4`) |
+
+### The `turn` profile (turn-based, card, board and menu games)
+
+For games with nothing to walk: a card game, a board game, a game that is all menus. There is no map, no distances and
+no movement: the observation is the game's own fields and the choices it offers, and the orders are `pick` and `wait`.
+
+```json
+"play": { "profile": "turn", "pick": {"call": "choose"}, "show": ["score", "phase", "hand", "trick"] }
+```
+
+* **Choices**: `state.choices = [{label, id}]` (plain strings work too; also read: `text`/`name`/`title` for the
+  label, `value` for the id, `legal: false` / `enabled: false` / `disabled: true` for a move the game won't take now,
+  `selected: true`, a `key` that picks it, a `rect: [x, y, w, h]` or `pos: [x, y]` in screen pixels to click). Without
+  `state.choices`: `state.tappables`, `state.moves`, `state.legalMoves`, `state.actions`, or the `play.choices`
+  expression. Duplicate labels get ` #2`. The observation numbers them, marks `(selected)` and `(not allowed)`, and
+  shows up to 24 (the rest can be picked by words).
+* **`pick <n|words>`** (also `choose`, `select`): by number, `last`, `first`…, or by words from the label ("pick jack
+  spades", "pick menu"; a legal move wins a tie). It reaches the game the way `play.pick` says: `{"call": "<game
+  function>"}` calls it with the choice's id (`"args": ["index"]`, `["label"]`, `["number"]` or `["choice"]` send
+  something else; it's a recorded call, allowed without `--allow-calls` since the developer configured it), `"click"`
+  clicks the choice's rect, `"keys"` presses its number key (or `play.controls.choose`). Default (`"auto"`): the
+  choice's own `key`, else a configured call, else a click when it has a rect, else its number key (1–9). The pick is
+  done when the game answers: a dialogue opens or changes, the scene changes, the turn passes, the choices change, or
+  any other field changes and stays changed; a call answered with `false`, `{ok: false}` or `{error}` fails with the
+  game's reason ("the game refused it ("not your turn")"); a call answered otherwise with nothing visible changing is
+  done after 0.5 s ("the game accepted it"); nothing at all after 1 s fails. When a dialogue with options is open,
+  `pick` chooses in it (as `choose` does in any profile); in any profile, `choose` picks from `state.choices` when no
+  dialogue with options is open.
+* **`wait`**: until it's your turn (`state.yourTurn` turns true; also `your_turn`, `myTurn`, `isYourTurn`,
+  `playerTurn`, or the `play.yourTurn` expression), a dialogue opens or changes, the scene changes, the game ends, or
+  the choices change while it is your turn (the others' moves showing up while it isn't don't end it). A bare `wait`
+  waits up to `play.turnWait` (30 s) and answers at once when it's already your turn; `wait 10` waits at most 10 s.
+  `pick 2; wait` is the natural loop.
+* **The observation**: a header from the game's own fields (`play.show`: state fields or `{label, expr}`; without it,
+  up to 10 top-level fields that read like game state, score and phase first), `YOUR TURN` / `not your turn`, longer
+  fields (a hand, a trick) on their own lines, the choices, dialogue, `game says:`, events. No cell, no near list, no
+  map, no movement controls. `--json`: `{t, frame, profile: "turn", scene, yourTurn, fields, choices[{n, label, id,
+  legal, selected}], dialogue, goal, notice, dead, over, won, result, events[]}`. Changes of the short fields are events ("score you 1 → 2").
+* A scene change doesn't wake the tester (the pick or wait that caused it reports it) and doesn't say "map knowledge
+  reset". `state.gameOver` is a finished match (`GAME OVER`), not a death: the stuck-dead watch only reads `state.dead`.
+  Movement and combat orders (goto, fight, talk, explore…) are refused with the turn order card. No coverage map.
+* `witness play check` uses the turn checklist (choices with label and id, legal moves marked, whose turn, score,
+  scene or phase, hand, dialogue, outcome), and `witness play suggest` proposes `"profile": "turn"` (with `show`)
+  when the snapshot has choices or `yourTurn` and no player position.
+
+**Settling animations.** After an order that changed the scene or a dialogue, and before `play shot` / `look --shot`
+(turn-taking sessions), the session steps the game until the adapter reports no running animations, at most 0.5 s of
+game time, so a CSS crossfade isn't screenshotted half way ("Home drawn over Profile"). It evals
+`globalThis.__witnessAnimating?.() ?? 0` (the JS adapter answers the number of running finite CSS / Web Animations);
+adapters without `eval`, or games where it doesn't give a number, skip it. The frames are recorded like any others.
 
 The plane is `[0,1]` (x/y) by default and `[0,2]` (x/z) for fps. North is screen up: `-y` by default, `-z` for fps;
 set `play.north: "+y"` for y-up worlds. The platformer's guard reflex is jumping (above), not blocking.
@@ -618,7 +668,12 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 
 | field | default | meaning |
 |---|---|---|
-| `profile` | `topdown` | `topdown` · `platformer` · `fps` |
+| `profile` | `topdown` | `topdown` · `platformer` · `fps` · `turn` |
+| `choices`, `yourTurn` | `state.choices`…, `state.yourTurn`… | expressions for the game's choices and whose turn it is (turn profile; `choices` works in any profile) |
+| `show` | auto | turn profile: the fields the observation shows (`["score", "hand", "state.trick", {"label": "trump", "expr": "state.round.trump"}]`) |
+| `pick` | `"auto"` | how a pick reaches the game: `{"call": "<fn>", "args": ["id"]}`, `"click"`, `"keys"` |
+| `turnWait` | 30 | seconds a bare `wait` may wait for your turn (turn profile) |
+| `resultChars` | 400 | how much of a call's result the order's answer shows (was 120) |
 | `plane` | `[0,1]`, fps `[0,2]` | which position components form the ground plane |
 | `north` | `-y`, fps `-z` | the world direction that is "up" on screen |
 | `cell` | the map's `cell`, else the player's size × 1.25, else 16 (large coordinates) or 1 | world units per nav cell (all distances in orders and observations) |
@@ -678,7 +733,7 @@ ones.
 | `state.camera = {pos: [x, y], zoom?}` (pos = the world point at the screen's top-left; screen = (world − pos) × zoom) | `shot --annotate` boxes in the right place; `measure align` checks the drawing against it |
 | entity `screen: [x, y, w, h]` (screen pixels) | exact annotation boxes for games with any projection (3D included) |
 | entity `box: [w, h]` or `[x, y, w, h]` (the hitbox, state units) | `measure align` compares hitboxes with the drawn art ("hitbox larger than the art") |
-| `state.ui = [{id, kind: "text"\|"button"\|"panel"\|"icon", rect: [x, y, w, h], text?, fontPx?, layer?, hidden?}]` (screen pixels; what the HUD/menus draw this frame) | `measure ui` checks exactly: clipped or off-screen elements, the safe area, overlaps on a layer, text size and contrast, almost-aligned edges ([examples/arena](../examples/arena) lists its HUD and dialogue box) |
+| `state.ui = [{id, kind: "text"\|"button"\|"panel"\|"icon", rect: [x, y, w, h], text?, fontPx?, layer?, hidden?, tap?, role?, hit?, scroll?, parent?, clip?, fill?}]` (screen pixels; what the HUD/menus draw this frame) | `measure ui` checks exactly: clipped or off-screen elements, the safe area, overlaps on a layer, text size and contrast, almost-aligned edges ([examples/arena](../examples/arena) lists its HUD and dialogue box) |
 
 ### Make your game playtest-friendly (in priority order)
 

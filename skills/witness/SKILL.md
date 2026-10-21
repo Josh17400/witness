@@ -75,6 +75,7 @@ witness measure align --at 2                   # are sprites drawn where the sta
 witness measure scale|box|contrast ...         # pixel facts: integer scale/blur, sprite box, WCAG contrast
 witness measure ui --at 2 --out ui.png         # HUD/menus: clipped, off-screen, overlaps, tiny or low-contrast text, text without a plate, the same text twice (state.ui; else a pixel guess)
 witness measure ui --at 2 --safe iphone-landscape   # what sits under the Dynamic Island / home indicator (Home Screen app; a Safari tab: iphone-safari-portrait; also iphone-max-*, iphone-se, ipad)
+witness measure ui --at 2 --device iphone-15        # phone / DOM game, one launch: 11 pt text, 44 pt tap targets (button / tap:true, hit box), "scroll"/"parent" for lists, gradient text not scored
 witness measure ui --from 0 --to 60 --within 10     # toasts shown again within 10 s, text doubled at any frame
 witness measure figure --of Player --params '[{"hour":12},{"hour":22}]'   # hero edge contrast vs each ground surface, day and night
 witness measure colorblind --at 2              # protan/deutan/tritan pictures + which sprite colours become confusable (ΔE)
@@ -178,7 +179,12 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 `${CLAUDE_PLUGIN_ROOT}/docs/PLAYTEST.md`.
 
 1. **Config.** Add a `"play"` section to `witness.json`: at least `controls` (move, attack, block, dodge,
-   interact, heal, choose…), plus `profile` (`topdown` | `platformer` | `fps`) if it isn't top-down.
+   interact, heal, choose…), plus `profile` (`topdown` | `platformer` | `fps` | `turn`) if it isn't top-down.
+   **Turn-based, card, board or menu games** use `"profile": "turn"`: expose `state.choices = [{label, id}]` (what the
+   player can click or play now; `legal: false` for moves it can't take) and `state.yourTurn`, and say how a pick
+   reaches the game (`"pick": {"call": "<fn>"}` gets the choice's id; or `"click"` on a choice `rect`). Testers then
+   `pick <n|words>` and `wait` (until their turn), and see the game's own fields (`"show": ["score", "hand"]`) instead
+   of a map. `play suggest` detects such games.
    `witness play suggest` probes the game and proposes one (`--write` saves it). The harness works much better when
    the snapshot follows the playtest conventions (entity `hostile`/`item`/`talk`, enemy `state: "windup"` or
    `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`, doors with `leadsTo` and, for an exit you push into,

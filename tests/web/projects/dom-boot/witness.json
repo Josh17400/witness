@@ -1,0 +1,7 @@
+{
+  "name": "dom-boot",
+  "launch": { "url": "http://127.0.0.1:5318/dom-boot.html", "server": { "command": "node ../../serve.mjs 5318" } },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 40
+}

@@ -3,6 +3,7 @@
 // `"match": "label"`, `witness test --repeat N`, and replays checked against <file>.state.json.
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { decodePNG, isPNG } from "../media/png.js";
 
 /** Deep differences between two JSON values: [{path, a, b}], at most `limit`. */
 export function diffValues(a, b, at = "", out = [], limit = 12, skip = null) {
@@ -106,20 +107,63 @@ function shotBytes(shot) {
   return shot.data ? Buffer.from(shot.data, "base64") : null;
 }
 
-/** Pixels that differ between two rgba8 shots of the same size: {count, percent, bbox} (null if not comparable). */
-export function shotPixelDiff(a, b) {
-  if (!a || !b || a.format !== "rgba8" || b.format !== "rgba8" || a.width !== b.width || a.height !== b.height) return null;
-  const pa = shotBytes(a), pb = shotBytes(b), w = a.width, h = a.height;
-  let count = 0, x0 = w, y0 = h, x1 = -1, y1 = -1;
+/** A shot ({format: "rgba8"|"png", data} or {path}) decoded to {width, height, data: rgba} (null: none / not readable). */
+export function shotImageOf(shot) {
+  if (!shot) return null;
+  if (shot.width != null && shot.data && shot.data.length === shot.width * shot.height * 4 && typeof shot.data !== "string") return shot;   // already an image
+  const buf = shotBytes(shot);
+  if (!buf) return null;
+  if (isPNG(buf)) { try { return decodePNG(buf); } catch { return null; } }
+  if (shot.format && shot.format !== "rgba8") return null;
+  if (!(shot.width > 0 && shot.height > 0) || buf.length < shot.width * shot.height * 4) return null;
+  return { width: shot.width, height: shot.height, data: new Uint8Array(buf.buffer, buf.byteOffset, shot.width * shot.height * 4) };
+}
+
+/**
+ * Pixels that differ between two shots of the same size (rgba8 or PNG): {count, percent, bbox, maxDelta, noise,
+ * width, height} (null if not comparable). tol: per-channel difference allowed (0 = exact); count and bbox are the
+ * pixels with some channel off by more than tol, noise the pixels that differ but within it (anti-aliasing / GPU
+ * rounding: Chromium screen captures may differ by 1 level on edge pixels from run to run).
+ */
+export function shotPixelDiff(a, b, { tol = 0 } = {}) {
+  const A = shotImageOf(a), B = shotImageOf(b);
+  if (!A || !B || A.width !== B.width || A.height !== B.height) return null;
+  const pa = A.data, pb = B.data, w = A.width, h = A.height;
+  let count = 0, noise = 0, maxDelta = 0, x0 = w, y0 = h, x1 = -1, y1 = -1;
   for (let i = 0, n = w * h; i < n; i++) {
     const o = i * 4;
-    if (pa[o] !== pb[o] || pa[o + 1] !== pb[o + 1] || pa[o + 2] !== pb[o + 2] || pa[o + 3] !== pb[o + 3]) {
-      count++;
-      const x = i % w, y = (i / w) | 0;
-      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
-    }
+    if (pa[o] === pb[o] && pa[o + 1] === pb[o + 1] && pa[o + 2] === pb[o + 2] && pa[o + 3] === pb[o + 3]) continue;
+    const d = Math.max(Math.abs(pa[o] - pb[o]), Math.abs(pa[o + 1] - pb[o + 1]), Math.abs(pa[o + 2] - pb[o + 2]), Math.abs(pa[o + 3] - pb[o + 3]));
+    if (d > maxDelta) maxDelta = d;
+    if (d <= tol) { noise++; continue; }
+    count++;
+    const x = i % w, y = (i / w) | 0;
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
   }
-  return { count, percent: (100 * count) / (w * h), bbox: count ? { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null };
+  return { count, percent: (100 * count) / (w * h), bbox: count ? { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null, maxDelta, noise, tol, width: w, height: h };
+}
+
+/**
+ * A picture of where two same-size images differ: A faded to grey, pixels off by more than tol in red, pixels that
+ * differ within tol in yellow, the bounding box of the red ones outlined in magenta. Returns rgba (Uint8Array).
+ */
+export function pixelDiffImage(A, B, tol = 0) {
+  const w = A.width, h = A.height, out = new Uint8Array(w * h * 4), pa = A.data, pb = B.data;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    const d = Math.max(Math.abs(pa[o] - pb[o]), Math.abs(pa[o + 1] - pb[o + 1]), Math.abs(pa[o + 2] - pb[o + 2]), Math.abs(pa[o + 3] - pb[o + 3]));
+    if (d > tol) { out[o] = 255; out[o + 1] = 40; out[o + 2] = 60; const x = i % w, y = (i / w) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    else if (d > 0) { out[o] = 255; out[o + 1] = 210; out[o + 2] = 0; }
+    else { const g = 40 + Math.round(0.25 * (0.299 * pa[o] + 0.587 * pa[o + 1] + 0.114 * pa[o + 2])); out[o] = out[o + 1] = out[o + 2] = g; }
+    out[o + 3] = 255;
+  }
+  if (x1 >= 0) {
+    const put = (x, y) => { if (x >= 0 && y >= 0 && x < w && y < h) { const o = (y * w + x) * 4; out[o] = 255; out[o + 1] = 0; out[o + 2] = 255; } };
+    for (let x = x0 - 2; x <= x1 + 2; x++) { put(x, y0 - 2); put(x, y1 + 2); }
+    for (let y = y0 - 2; y <= y1 + 2; y++) { put(x0 - 2, y); put(x1 + 2, y); }
+  }
+  return out;
 }
 
 /** Where two audio captures first differ: {seconds, maxDiff} (decoded through the media module when available). */
@@ -143,7 +187,8 @@ async function audioDiff(a, b) {
  * capture = { snap, shot?, audio? } (audio = {sampleRate, channels, format, data}).
  */
 export class Matcher {
-  constructor() { this.refs = new Map(); }
+  /** shotTol: per-channel screenshot difference allowed (0 = exact; doctor uses 2: GPU / anti-aliasing noise). */
+  constructor({ shotTol = 0 } = {}) { this.refs = new Map(); this.shotTol = Math.max(0, +shotTol || 0); }
   has(label) { return this.refs.has(label); }
 
   /**
@@ -168,10 +213,14 @@ export class Matcher {
         d.slice(0, 6).map((x) => `${x.path} ${short(x.a)} → ${short(x.b)}`).join("; "));
     }
     if (ref.digest != null && cur.digest != null && ref.digest !== cur.digest) problems.push(`digest differs (${short(ref.digest)} → ${short(cur.digest)}): hidden state the snapshot doesn't show changed`);
+    let shotDiff = null;
+    const notes = [];
     if (ref.shotHash && cur.shotHash && ref.shotHash !== cur.shotHash) {
-      const px = shotPixelDiff(ref.shot, cur.shot);
-      problems.push(px ? `screenshot differs: ${px.count} px (${px.percent.toFixed(3)}%)${px.bbox ? ` in box x=${px.bbox.x} y=${px.bbox.y} ${px.bbox.w}×${px.bbox.h}` : ""}`
-        : "screenshot differs");
+      const px = shotDiff = shotPixelDiff(ref.shot, cur.shot, { tol: this.shotTol });
+      const sizes = (() => { const A = shotImageOf(ref.shot), B = shotImageOf(cur.shot); return A && B && (A.width !== B.width || A.height !== B.height) ? ` (sizes ${A.width}×${A.height} vs ${B.width}×${B.height})` : ""; })();
+      if (px && px.count === 0) notes.push(`screenshot: ${px.noise} px differ by at most ${px.maxDelta} level${px.maxDelta === 1 ? "" : "s"} (within the ±${px.tol} tolerance: anti-aliasing / GPU noise)`);
+      else problems.push(px ? `screenshot differs: ${px.count} px (${px.percent.toFixed(3)}%) off by more than ${px.tol} level${px.tol === 1 ? "" : "s"}${px.bbox ? ` in box x=${px.bbox.x} y=${px.bbox.y} ${px.bbox.w}×${px.bbox.h}` : ""}, up to ${px.maxDelta} levels${px.noise ? ` (+${px.noise} px within ±${px.tol})` : ""}`
+        : `screenshot differs${sizes}`);
     }
     if (ref.audioHash && cur.audioHash && ref.audioHash !== cur.audioHash) {
       const ad = await audioDiff(ref.audio, cur.audio);
@@ -180,6 +229,6 @@ export class Matcher {
     }
     const shots = problems.some((p) => p.startsWith("screenshot")) ? [ref.shot, cur.shot] : undefined;
     if (release) this.refs.delete(label);
-    return { first: false, ok: !problems.length, problems, shots };
+    return { first: false, ok: !problems.length, problems, shots, notes, ...(shotDiff ? { shotDiff } : {}) };
   }
 }
