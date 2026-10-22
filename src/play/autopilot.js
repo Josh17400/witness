@@ -2,7 +2,7 @@
 // them into held controls every few frames, from the world model: path finding around walls, stuck recovery,
 // facing and attacking, reacting to telegraphed attacks after a human-like reaction delay, dialogue choices.
 // Deterministic: no wall clock, no unseeded randomness.
-import { norm, len, sub, add, scale, dist2, dot, perp, compass, dirVector, r1, fmtT, clip, compileExpr, scopeFor, withVars } from "./util.js";
+import { norm, len, sub, add, scale, dist2, dot, perp, compass, dirVector, r1, fmtT, clip, oneLine, compileExpr, scopeFor, withVars } from "./util.js";
 import { controlLabel, parseControl, canMove } from "./config.js";
 import { makeProfile, moveControls, lookOf } from "./profiles.js";
 import { PlatformRunner, SAFE_STATES } from "./platformer.js";
@@ -850,7 +850,7 @@ class Choose extends Behaviour {
       }
       if (!this.press(w, want)) return this.fail(`no control configured for option ${this.idx}`);
       this.phase = "wait"; this.waitT = this.lastPress = ap.t; this.presses = 1;
-      this.watch = new StateWatch(w);   // what changes from here on is the pick's doing
+      this.watch = new StateWatch(w); this.notice0 = w.notice; this.noticeSeen = null;   // what changes from here on is the pick's doing
       return this.run();
     }
     const now = w.dialogue ? JSON.stringify(w.dialogue) : null;
@@ -858,6 +858,11 @@ class Choose extends Behaviour {
     // a choice that only toggles something (a difficulty button gets a CSS class): the snapshot changed and stayed so
     // (after the dialogue has had half a second to answer, so a slow dialogue still reports its new line)
     const changed = this.watch.check(w);
+    // a hint button that opens a bubble: the game's notice changed (even when it comes from play.notice, not a state
+    // field, or fades again within the half second): that is the pick's answer. A notice that only ticks its numbers
+    // ('Your turn: 9s' → '8s') is not: it neither answers the pick nor stops the anti-misclick re-press
+    if (this.noticeSeen == null && noticeMoved(this.notice0, w.notice)) this.noticeSeen = w.notice;
+    if (this.noticeSeen != null && ap.t - this.waitT > 0.5 + fw) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}": notice changed → "${clip(oneLine(this.noticeSeen), 100)}", dialogue unchanged${said()}`);
     if (changed && ap.t - this.waitT > 0.5 + fw) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}": state changed (${changed}), dialogue unchanged${said()}`);
     // many games swallow the first confirm while the text is still typing out: press it once more
     if (ch.mode === "arrows" && !this.again && ap.t - this.waitT > 0.35 + fw) {
@@ -868,7 +873,7 @@ class Choose extends Behaviour {
     // no ready field (or still not ready after 2 s): a game that ignores picks for a moment after the dialogue opens
     // (anti-misclick) gets the same key again every 0.25 s for up to 1 s, while the same dialogue stays open and nothing
     // changed. Game time decides it, and the presses are ordinary recorded input
-    if (ch.mode !== "arrows" && (w.dialogueReady == null || this.forced) && !changed && ap.t - this.waitT < 1.0 - 1e-9 && ap.t - this.lastPress >= 0.25 - 1e-9) {
+    if (ch.mode !== "arrows" && (w.dialogueReady == null || this.forced) && !changed && this.noticeSeen == null && ap.t - this.waitT < 1.0 - 1e-9 && ap.t - this.lastPress >= 0.25 - 1e-9) {
       this.press(w, want); this.lastPress = ap.t; this.presses++;
       return this.run();
     }
@@ -921,8 +926,10 @@ class StateWatch {
     this.last = now;
     if (!last) return null;
     const keys = new Set([...Object.keys(now), ...Object.keys(this.base)]);
-    // (a dialogue becoming ready for picks is not something a pick changed)
-    const changed = [...keys].filter((k) => now[k] !== this.base[k] && now[k] === last[k] && !/^(dialogue|dialog|conversation)\.ready$/.test(k));
+    // (a dialogue becoming ready for picks is not something a pick changed, nor text whose numbers alone tick on: a
+    // turn timer 'Your turn: 9s' → '8s')
+    const ticks = (a, b) => typeof a === "string" && typeof b === "string" && a[0] === '"' && b[0] === '"' && /[0-9]/.test(a) && a.replace(/[0-9]+/g, "#") === b.replace(/[0-9]+/g, "#");
+    const changed = [...keys].filter((k) => now[k] !== this.base[k] && now[k] === last[k] && !/^(dialogue|dialog|conversation)\.ready$/.test(k) && !ticks(now[k], this.base[k]));
     if (!changed.length) return null;
     const named = changed.filter((k) => !/(^|\.)digest$/.test(k));
     const top = [...new Set(named.map((k) => k.split(".").slice(0, 2).join(".")))];
@@ -966,7 +973,7 @@ class Pick extends Behaviour {
     super(o, ap, w);
     this.choice = matchChoice(w.choices, o);
     this.watch = new StateWatch(w);
-    this.sig0 = choiceSig(w); this.dlg0 = w.dialogue ? JSON.stringify(w.dialogue) : null; this.turn0 = w.yourTurn; this.scene0 = w.scene;
+    this.sig0 = choiceSig(w); this.dlg0 = w.dialogue ? JSON.stringify(w.dialogue) : null; this.turn0 = w.yourTurn; this.scene0 = w.scene; this.notice0 = w.notice;
     this.phase = "send";
   }
   get desc() { return `picked ${this.choice.n}) "${clip(this.choice.label, 50)}"`; }
@@ -985,7 +992,7 @@ class Pick extends Behaviour {
       if (this.readyT != null) {
         // the dialogue that held the lockout closed or became another one: don't send the pick into whatever is there now
         if (!w.dialogue || dlgKey(w.dialogue) !== this.lockDlg) return this.fail(`the dialogue ${w.dialogue ? "changed" : "closed"} before it accepted picks (waited ${r1(ap.t - this.readyT)}s); nothing sent`);
-        this.watch = new StateWatch(w); this.dlg0 = JSON.stringify(w.dialogue); this.sig0 = choiceSig(w); this.turn0 = w.yourTurn; this.scene0 = w.scene;
+        this.watch = new StateWatch(w); this.dlg0 = JSON.stringify(w.dialogue); this.sig0 = choiceSig(w); this.turn0 = w.yourTurn; this.scene0 = w.scene; this.notice0 = w.notice;
       }
       const how = this.route();
       this.phase = "wait"; this.waitT = ap.t;
@@ -1020,6 +1027,7 @@ class Pick extends Behaviour {
     if (w.scene !== this.scene0 && w.scene != null) what.push(`scene ${w.scene}`);
     if (this.turn0 !== w.yourTurn && w.yourTurn != null) what.push(w.yourTurn ? "your turn" : "the turn passed");
     if (choiceSig(w) !== this.sig0) what.push(w.choices ? `${w.choices.length} choice${w.choices.length === 1 ? "" : "s"} now` : "no choices now");
+    if (noticeMoved(this.notice0, w.notice)) what.push(`notice changed → "${clip(oneLine(w.notice), 100)}"`);
     if (what.length) return this.done(`${this.desc} → ${what.join(", ")}`);
     const changed = this.watch.check(w);
     if (changed) return this.done(`${this.desc}: state changed (${changed})`);
@@ -1028,6 +1036,8 @@ class Pick extends Behaviour {
     return this.run();
   }
 }
+/** The game's notice says something new: not gone, and more than its numbers changed (a countdown ticking isn't). */
+const noticeMoved = (n0, n) => !!n && n !== n0 && oneLine(n).replace(/[0-9]+/g, "#") !== oneLine(n0 ?? "").replace(/[0-9]+/g, "#");
 const choiceSig = (w) => (w.choices ? w.choices.map((c) => `${c.label}|${c.legal}|${c.selected}`).join("\n") : "");
 
 /**

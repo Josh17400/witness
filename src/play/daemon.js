@@ -15,6 +15,7 @@ import { wakeFor as wakeRule } from "./wake.js";
 import { observeText, observeData, resultLine } from "./observe.js";
 import { parseOrders, OrderError } from "./orders.js";
 import { ReplayRecorder } from "./recorder.js";
+import { writeRunConfig, fingerprint } from "./build.js";
 import { reportData, coveragePNG, writeReports, addLateFeedback } from "./report.js";
 import { DeadWatch } from "./deadwatch.js";
 import { updateEntry, writeJson } from "./registry.js";
@@ -47,7 +48,7 @@ export async function runDaemon(dir) {
   let g;
   try {
     // --watch: the game shows its window, presents frames, drops real input (docs/PROTOCOL.md, watch mode)
-    g = await openGame(spec.cfg, spec.root, { quiet: true, timeout: spec.cfg.timeout, env: opts.watch ? { WITNESS_WATCH: "1" } : undefined });
+    g = await openGame(spec.cfg, spec.root, { quiet: true, timeout: spec.cfg.timeout, env: opts.watch ? { WITNESS_WATCH: "1" } : undefined, audio: !!(spec.cfg.play && spec.cfg.play.audio === true) });   // no audio capture: nothing here reads it (play.audio: true keeps it)
   } catch (e) {
     log(`launch failed: ${e.message}`);
     setStatus({ state: "failed", error: e.message });
@@ -57,6 +58,12 @@ export async function runDaemon(dir) {
   const stopAsked = () => fs.existsSync(path.join(dir, "stop.request"));
   if (stopAsked()) { log("stop requested while starting"); try { await g.stop(); } catch { /* gone */ } setStatus({ state: "ended", endedAt: new Date().toISOString(), reason: "stopped while starting", outcome: "stopped", summary: "stopped while starting" }); process.exit(0); }
   const S = g.session, fps = S.fps;
+  // a replay that stands on its own: the effective config in the playtest folder (absolute paths, launch.server kept),
+  // and a fingerprint of the build played (the page and the scripts it loads, or the launched files)
+  const runConfig = writeRunConfig(dir, spec.cfg, spec.root);
+  let build = null;
+  try { build = await fingerprint(spec.cfg, spec.root); } catch (e) { log(`build fingerprint failed: ${e.message}`); }
+  setStatus({ runConfig, build: build ? { kind: build.kind, url: build.url, hash: build.hash, count: build.count, server: !!(spec.cfg.launch && spec.cfg.launch.server) } : null });
   const rawPlay = { ...(spec.cfg.play || {}) };
   if (opts.noMap) rawPlay.map = false;
   if (opts.allowCalls) rawPlay.allowCalls = true;
@@ -82,7 +89,7 @@ export async function runDaemon(dir) {
   let frame = 0, world = null, finalizing = false, server = null, finalP = null;
   const timeline = [], orders = [], notes = [], shots = [], errors = [], pending = [], trail = [];
   let parseErrors = 0, lastLogFrame = 0, firstLook = true, lastCall = null;
-  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, epoch: S.epoch ?? null, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null } : null });
+  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, epoch: S.epoch ?? null, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null, ...(S.web.media ? { media: S.web.media } : {}) } : null, build });
   const dts = (k) => Array(k).fill(1 / fps);
   // play.lazyDraw / --lazy-draw: multi-frame steps say only their last frame is observed ("draw": "last", PROTOCOL.md
   // §3), so a game that checks witness.drawing skips drawing the others. Not when watched: the viewer sees every frame.
@@ -499,9 +506,10 @@ export async function runDaemon(dir) {
   function look(result, asJson, full = false) {
     const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: coalesceEvents(pending.splice(0)), first: firstLook, session: { goal: opts.goal, name: spec.name },
       live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null, clock: until ? until.line() : null,
-      death: world.dead || world.over ? (tracker.deaths.at(-1)?.cause ?? null) : null };
+      death: world.dead || world.over ? (tracker.deaths.at(-1)?.cause ?? null) : null, full };
     firstLook = false;
-    // look --full: the latest game call's answer, whole (observations cut it at play.resultChars)
+    // look --full: dialogue / notice / menu / screen text uncut (play.textCap), and the latest game call's answer, whole
+    // (observations cut it at play.resultChars)
     const whole = lastCall ? (lastCall.failed ? lastCall.msg : lastCall.value == null ? "(no result)" : typeof lastCall.value === "string" ? lastCall.value : JSON.stringify(lastCall.value, null, 1)) : null;
     if (asJson) return { data: { ...observeData(world, ctx), ...(full ? { lastCall: lastCall ? { t: lastCall.t, call: lastCall.call, failed: lastCall.failed, value: lastCall.value ?? null } : null } : {}) } };
     const text = observeText(world, ctx);
@@ -531,6 +539,7 @@ export async function runDaemon(dir) {
       until: until ? until.report() : null, incidents: ap.incidents, coverage: cfg.profile === "turn" || cfg.profile === "defense" ? null : coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
       replay: { file: path.join(dir, "replay.jsonl"), frames: frame, calls: recorder ? [...recorder.frames.values()].reduce((a, x) => a + x.calls.length, 0) : 0 },
       lazyDraw: lazy ? { on: lazy.on, steps: lazy.steps, framesUndrawn: lazy.undrawn, frames: frame, game: lazy.game } : null,
+      build: build ? { kind: build.kind, url: build.url || null, hash: build.hash, count: build.count } : null, runConfig: runConfig || null,
       ...extra,
     };
   }

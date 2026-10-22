@@ -167,6 +167,51 @@ ok("splitRange: bad", splitRange("0.9") === null && splitRange("1..2..3") === nu
   ok("unsafeDir: a project inside the Witness checkout (an example) may prune its own folders", unsafeDir(path.join(ex, "witness", "shots"), ex) === null && unsafeDir(path.join(ex, "witness", "replays"), ex) === null
     && !!unsafeDir(path.join(root, "src", "core"), root) && !!unsafeDir(path.join(root, "examples"), root), unsafeDir(path.join(ex, "witness", "shots"), ex));
   ok("unsafeDir: the Witness install and witness/refs", !!unsafeDir(root, path.dirname(root)) && !!unsafeDir(path.join(proj, "witness", "refs"), proj) && unsafeDir(shots, proj) === null);
+  // 0.7.8: a config outside any project (the OS temp folder) writing into a game's witness/shots: that folder is
+  // Witness's own layout, so it is pruned (generated files only); a random outside folder, a drive root, home: refused
+  {
+    const cfgDir = path.join(tmp, "tmpcfg"), game = path.join(tmp, "game"), gShots = path.join(game, "witness", "shots");
+    fs.mkdirSync(cfgDir, { recursive: true }); fs.mkdirSync(gShots, { recursive: true });
+    put(path.join(gShots, "shot-1.png"), 9); put(path.join(gShots, "mine.png"), 9);
+    const tr = prune({ shots: gShots, replays: path.join(game, "witness", "replays") }, cfgDir);
+    ok("prune: a temp config's shots in another folder's witness/shots are pruned (generated only), no warning", tr.warnings.length === 0 && tr.removed.map((p) => path.basename(p)).join() === "shot-1.png" && fs.existsSync(path.join(gShots, "mine.png")), tr);
+    ok("unsafeDir: outside folders that aren't witness/shots|replays (or a drive root, home) stay refused", /outside the project/.test(unsafeDir(path.join(game, "pics"), cfgDir) || "") && !!unsafeDir(path.parse(tmp).root, cfgDir) && !!unsafeDir(os.homedir(), cfgDir) && !!unsafeDir(root, cfgDir), [unsafeDir(path.join(game, "pics"), cfgDir), unsafeDir(root, cfgDir)]);
+    // an outside folder holding a manifest (Desktop) is still refused: the user's figure_1.png / palette.png match GENERATED
+    const desk = path.join(tmp, "Desktop"); fs.mkdirSync(desk, { recursive: true });
+    put(path.join(desk, "shot-9.png"), 9); put(path.join(desk, "figure_1.png"), 9); put(path.join(desk, "palette.png"), 9); fs.writeFileSync(path.join(desk, MANIFEST), "shot-9.png\n");
+    const dr = prune({ shots: desk }, cfgDir, { all: true });
+    ok("prune: an outside folder with a manifest (not witness/shots) is refused; the user's figure_1.png / palette.png survive", dr.removed.length === 0 && /outside the project/.test(dr.warnings.join(" ")) && ["figure_1.png", "palette.png", "shot-9.png"].every((n) => fs.existsSync(path.join(desk, n))), dr);
+  }
+  // ---- 0.7.8: call timeout (WITNESS_CALL_TIMEOUT / launch.callTimeout) names what was pending; launch.media checked
+{
+  const { callTimeout } = await import(pathToFileURL(path.join(root, "src", "core", "launch.js")).href);
+  const { mediaOptions } = await import(pathToFileURL(path.join(root, "src", "core", "browser.js")).href);
+  const { browserOverrides } = await import(pathToFileURL(path.join(root, "src", "cli", "common.js")).href);
+  const was = process.env.WITNESS_CALL_TIMEOUT;
+  delete process.env.WITNESS_CALL_TIMEOUT;
+  const bad = (f) => { try { f(); return null; } catch (e) { return e.message; } };
+  ok("callTimeout: unset → null (60 s), launch.callTimeout seconds, WITNESS_CALL_TIMEOUT wins, 0/junk refused", callTimeout({ launch: {} }) === null && callTimeout({ launch: { callTimeout: 120 } }) === 120
+    && (process.env.WITNESS_CALL_TIMEOUT = "90", callTimeout({ launch: { callTimeout: 120 } }) === 90) && /WITNESS_CALL_TIMEOUT "x": use seconds/.test((process.env.WITNESS_CALL_TIMEOUT = "x", bad(() => callTimeout({})))) && (delete process.env.WITNESS_CALL_TIMEOUT, /launch.callTimeout 0/.test(bad(() => callTimeout({ launch: { callTimeout: 0 } })))));
+  if (was != null) process.env.WITNESS_CALL_TIMEOUT = was;
+  ok("launch.media: checked and normalised; unknown features / values refused with the choices", JSON.stringify(mediaOptions({ reducedMotion: "Reduce", colorScheme: "dark" })) === '{"reducedMotion":"reduce","colorScheme":"dark"}' && mediaOptions(null) === null && mediaOptions({}) === null
+    && /use "dark" or "light"/.test(bad(() => mediaOptions({ colorScheme: "blue" }))) && /unknown media feature/.test(bad(() => mediaOptions({ motion: "reduce" }))) && JSON.stringify(mediaOptions({ forcedColors: "active", contrast: "more" })) === '{"forcedColors":"active","contrast":"more"}');
+  const bo = browserOverrides({ launch: { url: "http://x/", media: { contrast: "more" } } }, { "reduced-motion": true, "color-scheme": "dark" });
+  ok("--reduced-motion / --color-scheme dark → launch.media (merged with the config's)", JSON.stringify(bo.launch.media) === '{"contrast":"more","reducedMotion":"reduce","colorScheme":"dark"}', bo.launch);
+  ok("--reduced-motion / --color-scheme are known flags; --reduced-motion takes no value", KNOWN_FLAGS.has("reduced-motion") && KNOWN_FLAGS.has("color-scheme") && parseArgs(["test", "--reduced-motion", "a.witness.json"]).pos.includes("a.witness.json"));
+  // a fake JS-adapter page: 'call' never answered, the out-of-line "busy" query answered at once
+  const srv = await listen({ port: 0 });
+  const c = net.connect(srv.port, "127.0.0.1");
+  await new Promise((r) => c.on("connect", r));
+  c.write(JSON.stringify({ hello: { protocol: 1, name: "slow", capabilities: ["call"], adapter: "witness-js 0.7.8" } }) + "\n");
+  let buf = "";
+  c.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.cmd === "busy") c.write(JSON.stringify({ id: m.id, ok: true, busy: { cmd: "call", name: "dealHand", ms: 400, awaiting: true }, calls: [{ name: "dealHand", ms: 400 }] }) + "\n"); } });
+  const s = await srv.nextSession(5000);
+  s.requestTimeoutMs = 300;
+  const t0 = Date.now();
+  const msg = await s.call("dealHand", [3, "north"]).then(() => "answered", (e) => e.message);
+  ok("call timeout: configurable, names the call and its args, and the game promise still unresolved (busy query)", /didn't answer 'call' dealHand\(3,"north"\) within 0\.3s/.test(msg) && /waiting on a promise the game returned that never resolved/.test(msg) && /unresolved async calls: dealHand/.test(msg) && /WITNESS_CALL_TIMEOUT/.test(msg) && Date.now() - t0 < 3000, msg);
+  c.destroy(); srv.close();
+  }
   // subfolder shots (a test step's "shot": "lvl1/a.png") and outputs named by the user (trace --out jump.png and its
   // jump-xy.png, <shot>-protan.png beside a test shot): in the manifest, pruned when old; a user's picture beside them stays
   const proj2 = path.join(tmp, "proj2"), shots2 = path.join(proj2, "witness", "shots");
@@ -517,6 +562,110 @@ const tinyCfg = (dir, extraLaunch = {}) => { fs.mkdirSync(dir, { recursive: true
   let j4 = null; try { j4 = JSON.parse(r4.stdout); } catch { /* shown */ }
   ok("measure ui --min-tap 0 / --min-text 8pt override the defaults", j4 && j4.summary.smallTapTargets === 0 && j4.data.minText === 16 && j4.summary.smallText === 0, r4.stdout.slice(0, 600) + r4.stderr);
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // a game whose Date start comes from its own config (WITNESS_CONFIG.epoch): an epoch test, then a plain one that must
+  // see the game's date again (not 2026-01-01), the same as when it runs alone with --name
+  const proj = path.join(tmp, "cfg-epoch");
+  fs.mkdirSync(proj);
+  const adapter = pathToFileURL(path.join(root, "adapters", "js", "witness.js")).href;
+  fs.writeFileSync(path.join(proj, "game.mjs"), `globalThis.WITNESS_CONFIG = { epoch: "2030-03-03", takeover: true };
+const { default: witness } = await import(${JSON.stringify(adapter)});
+await witness.start({ name: "cfg-epoch", fps: 60, reset: () => {}, snapshot: () => ({ y: new Date().getUTCFullYear(), m: new Date().getUTCMonth() + 1 }) });`);
+  fs.writeFileSync(path.join(proj, "witness.json"), JSON.stringify({ name: "cfg-epoch", launch: { command: process.execPath, args: [path.join(proj, "game.mjs")] }, tests: "." }));
+  fs.writeFileSync(path.join(proj, "e.witness.json"), JSON.stringify([{ name: "own", epoch: "2026-06-15", steps: [{ at: "2f", expect: "state.y == 2026 && state.m == 6" }] },
+    { name: "plain", steps: [{ at: "2f", expect: "state.y == 2030 && state.m == 3" }] }]));
+  const r = cli(["test", "--json"], {}, proj);
+  let j = null; try { j = JSON.parse(r.stdout); } catch { /* shown */ }
+  const t = j && j.data && j.data.results;
+  ok("JS adapter: after an epoch test, a plain test is back at the game's own WITNESS_CONFIG.epoch (hello.epoch)", r.status === 0 && t && t.length === 2 && t.every((x) => x.ok), r.stdout.slice(0, 1500) + r.stderr);
+}
+
+// ---- test steps (0.7.8): expectPage / evalAs (page checks), until (conditional wait), per-test epoch, step reminders,
+// the audio drain at a test's start: runTest on an in-process fake session (no game process)
+{
+  const { runTest } = await import("../../src/core/runner.js");
+  const { WitnessError } = await import("../../src/core/session.js");
+  const { DEFAULT_EPOCH } = await import("../../src/core/launch.js");
+  const fake = (o = {}) => ({
+    fps: 60, frame: 0, score: 0, epoch: o.epoch ?? null, log: [], closed: false,
+    hello: { ...(o.helloEpoch != null ? { epoch: o.helloEpoch } : {}), capabilities: ["step", "snapshot", "call", "input", ...(o.noReset ? [] : ["reset"]), ...(o.noEval ? [] : ["eval"]), ...(o.audio ? ["audio"] : [])] },
+    has(c) { return this.hello.capabilities.includes(c); },
+    async reset(seed, scene, params, epoch = this.epoch) { this.log.push(["reset", epoch]); this.frame = 0; this.score = 0; return {}; },
+    async step(n) { this.frame += n; return { frame: this.frame, time: this.frame / 60 }; },
+    async snapshot() { return { frame: this.frame, time: this.frame / 60, state: { frame: this.frame, score: this.score } }; },
+    async call(name) { this.log.push(["call", name, this.frame]); this.score++; return {}; },
+    async input(evs) { this.log.push(["input", evs.map((e) => e.frame)]); return {}; },
+    async eval(expr) { if (expr === "boom") throw new WitnessError("game error on 'eval': boom is not defined"); return { value: new Function("frame", "score", `return (${expr});`)(this.frame, this.score) }; },
+    async audio() { this.log.push(["audio", this.frame]); return o.pcm ? o.pcm(this) : { sampleRate: 22050, channels: 1, format: "f32", data: "" }; },
+    async pullLogs() {}, async drainLogs() { return []; },
+  });
+  const T = (steps, extra = {}) => ({ name: "t", file: "x.witness.json", index: 0, steps, ...extra });
+  const msgs = (r) => r.failures.map((f) => `${f.kind}: ${f.message}`).join(" | ");
+  let s = fake(), r = await runTest(s, T([{ at: 0.5, expectPage: ["frame == 30", "frame == 31", "boom"] }]));
+  ok("expectPage: evaluated in the game at the step; failures show the expression and what it returned (or threw)", r.expects.passed === 1 && r.expects.failed === 2 && /page frame == 31 — got false/.test(msgs(r)) && /page boom — threw: boom is not defined/.test(msgs(r)), msgs(r));
+  r = await runTest(fake(), T([{ at: 0.5, evalAs: { f: "frame * 2", sc: "score + 7" }, expect: ["f == 60", "sc == 7"] }, { at: 1, expect: "f == 60 && frame == 60" }]));
+  ok("evalAs: page values by name, readable by the step's and later steps' expects", r.ok && r.expects.passed === 3, msgs(r));
+  r = await runTest(fake(), T([{ at: 0, evalAs: { count: "1" } }]));
+  ok("evalAs: a helper's name is refused", !r.ok && /evalAs: "count" is a helper's name already/.test(msgs(r)), msgs(r));
+  r = await runTest(fake({ noEval: true }), T([{ at: 0, expectPage: "true" }]));
+  ok("expectPage without the adapter's eval: one clear error", !r.ok && r.failures.length === 1 && /has none \(see its hello\.capabilities\)/.test(msgs(r)), msgs(r));
+  r = await runTest(fake(), T([{ until: "state.frame >= 100", timeout: 5, expect: "frame == 100" }, { expect: "frame == 100" }, { after: 0.5, expect: "frame == 130" }, { at: 3, expect: "frame == 180" }]));
+  ok("until: waits until true, then its expects; no at = right after; after = relative; at stays absolute", r.ok && r.expects.passed === 5 && r.untils[0].frame === 100, msgs(r) + JSON.stringify(r.untils));
+  r = await runTest(fake(), T([{ at: 0.5, until: "state.frame >= 101", every: 7 }, { untilPage: "frame >= 121", expect: "frame == 121" }]));
+  ok("until every 7 frames from 0.5 s: met at 107; untilPage (in the game) then met at 121", r.ok && r.untils[0].frame === 107 && r.untils[1].frame === 121, msgs(r) + JSON.stringify(r.untils));
+  s = fake();
+  r = await runTest(s, T([{ input: "touch:1,2@0.1", until: "state.frame > 1000", timeout: 1 }, { expect: "true" }]));
+  ok("until timeout: fails with the expression, the window and the last value; later point steps skipped; its input ran first", !r.ok && r.expects.failed === 1 && r.expects.passed === 0 && /until state\.frame > 1000 — not true within 1s \(frames 0\.\.60, 0\.000–1\.000s\); last state\.frame > 1000 — got 60 > 1000; the point steps after it were skipped/.test(msgs(r)) && s.log.some((l) => l[0] === "input" && l[1][0] === 6), msgs(r));
+  r = await runTest(fake(), T([{ until: "frame >= 120" }, { at: 1, expect: "true" }]));
+  ok("an absolute at an until already waited past: an error that says to use after", !r.ok && /step 2 at 1s: the test is already at 2\.000s .*use "after"/.test(msgs(r)), msgs(r));
+  r = await runTest(fake(), T([{ at: 2, expect: "true" }, { at: 1, expect: "true" }, { until: "frame >= 200" }]));
+  ok("a point step out of time order in a sequence test: blames file order, not a wait", !r.ok && /step 2 at 1s: the test is already at 2\.000s: steps run in file order once a test has an until\/after step: put step 2 after/.test(msgs(r)) && !/waited/.test(msgs(r)), msgs(r));
+  r = await runTest(fake(), T([{ from: 0, to: 1, always: "state.score == 0" }, { until: "frame >= 90", call: ["bump"] }]));
+  ok("until: its call runs before the wait; range steps still see every frame while it waits", !r.ok && /always state\.score == 0 — failed at frame 1 /.test(msgs(r)) && r.untils[0].frame === 90, msgs(r));
+  // per-test epoch
+  s = fake();
+  await runTest(s, T([{ at: 0, expect: "true" }], { epoch: "2026-06-15" }));
+  await runTest(s, T([{ at: 0, expect: "true" }]));
+  s = fake({ helloEpoch: Date.UTC(2030, 2, 3) });
+  await runTest(s, T([{ at: 0, expect: "true" }], { epoch: "2026-06-15" }));
+  await runTest(s, T([{ at: 0, expect: "true" }]));
+  ok("epoch: after a test's own epoch, the next test gets the adapter's configured start (hello.epoch), not the default", s.log[1][1] === Date.UTC(2030, 2, 3) && s.epoch === null, JSON.stringify(s.log));
+  s = fake(); await runTest(s, T([{ at: 0, expect: "true" }], { epoch: "2026-06-15" })); await runTest(s, T([{ at: 0, expect: "true" }]));
+  ok("epoch: the test's epoch goes with its reset; the next test without one starts at the default epoch; the run's is back after", s.log[0][1] === Date.UTC(2026, 5, 15) && s.log[1][1] === DEFAULT_EPOCH && s.epoch === null, JSON.stringify(s.log));
+  s = fake({ epoch: 5 });
+  r = await runTest(s, T([{ at: 0, expect: "true" }], { now: "today" }));
+  const d0 = new Date();
+  ok("now: \"today\" for one test; witness.json's epoch for the rest; res.epoch recorded", s.log[0][1] === Date.UTC(d0.getFullYear(), d0.getMonth(), d0.getDate()) && r.epoch === s.log[0][1] && s.epoch === 5, JSON.stringify(s.log));
+  r = await runTest(fake({ noReset: true }), T([{ at: 0, expect: "true" }], { epoch: "2026-06-15" }));
+  ok("epoch without the adapter's reset: a warning, not a silent no-op", r.ok && /per-test epoch can't be sent/.test(msgs(r)), msgs(r));
+  let ee = null; try { await runTest(fake(), T([], { epoch: "someday" })); } catch (e) { ee = e.message; }
+  ok("epoch: a bad date is refused, naming the test", /test "t": "epoch" "someday" isn't a date/.test(ee || ""), ee);
+  // reminders
+  s = fake();
+  r = await runTest(s, T([{ at: 0.5, call: ["bump"], expect: "state.score == 1" }, { at: 1.3, input: "touch:1,2@1.4" }]));
+  ok("warns: an expect sharing a step with a call sees the post-call state; an input @t ≥ the step's at is relative (lands at 2.7 s)", r.ok && /step 1: "expect" runs after the step's "call"/.test(msgs(r)) && /step 2 \(at 1\.3s\): .*@1\.4s lands at 2\.7s; for 1\.4s from the start write @0\.1/.test(msgs(r)) && s.log.find((l) => l[0] === "input")[1][0] === 162, msgs(r) + JSON.stringify(s.log));
+  r = await runTest(fake(), T([{ at: 0.5, input: "right@0-2" }, { at: 0.05, input: "space@0" }, { at: 0.5, input: "drag:1,1->9,9@0-1, swipe:1,1->9,9@0-0.9, touch:1,1@0-1, click:1,1@0" }, { at: 0.5, input: [{ frame: 0, type: "key", key: "a", down: true }, { frame: 40, type: "key", key: "a", down: false }] }]));
+  ok("no relative-input warning for a hold's release, a tap's key-up, drag/swipe moves, a touch's up (only item starts count)", r.ok && !/relative to it/.test(msgs(r)), msgs(r));
+  r = await runTest(fake(), T([{ at: 0.5, input: "a@0, b@0.6-1" }]));
+  ok("relative-input warning: names the item that starts late", /item @0\.6s lands at 1\.1s; for 0\.6s from the start write @0\.1/.test(msgs(r)), msgs(r));
+  // audio drained at the start of a test even without a reset (a fresh page: its load isn't in the first capture)
+  s = fake({ noReset: true, audio: true });
+  r = await runTest(s, T([{ at: 0.5, expect: "true" }]), { matcher: new Matcher(), matchAll: true });
+  const au = s.log.filter((l) => l[0] === "audio");
+  ok("--repeat without reset: audio drained at the test's start (frame 0), then captured at the step", au.length === 2 && au[0][1] === 0 && au[1][1] === 30, JSON.stringify(s.log));
+  // --repeat through the Matcher: step audio at another rate on pass 2 (0.7.3 Euchre: 22050/24000 vs 44100 Hz)
+  const pcm = (rate, v) => ({ sampleRate: rate, channels: 1, format: "f32", data: Buffer.from(new Float32Array(rate / 10).fill(v).buffer).toString("base64") });
+  for (const [v, name] of [[0, "silent"], [0.25, "loud"]]) {
+    s = fake({ audio: true, pcm: (me) => pcm(me.pass === 1 ? 24000 : 44100, v) });
+    const m = new Matcher(), t = T([{ at: 0.5, expect: "true" }]);
+    s.pass = 1; const p1 = await runTest(s, t, { matcher: m, matchAll: true });
+    s.pass = 2; const p2 = await runTest(s, { ...t, _lastPass: true }, { matcher: m, matchAll: true });
+    const mm = p2.failures.filter((f) => f.kind === "match");
+    if (v === 0) ok("--repeat: silent step audio at 24000 then 44100 Hz is no mismatch (at most a 'both captures silent' note)", p1.ok && p2.ok && !mm.length && !/audio: (?!both captures silent)/.test(msgs(p2)), msgs(p1) + " || " + msgs(p2));
+    else ok(`--repeat: ${name} step audio at 24000 then 44100 Hz fails the match`, p1.ok && !p2.ok && mm.length === 1 && /repeat: .*Hz/.test(mm[0].message), msgs(p2));
+  }
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

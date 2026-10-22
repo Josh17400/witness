@@ -131,7 +131,7 @@ of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` bes
 |---|---|---|
 | `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--wall-minutes 20` `--idle 300` `--until "<expr>"` `--game-hours N` `--clock "<expr>"` `--allow-calls` `--no-map` `--lazy-draw` `--model NAME` `--out DIR` `--force` `--json` `--live` `--watch` `--speed 1` `--horizon 4` `--pause-after 15` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). `--wall-minutes`: a hard stop after that many real minutes (`--minutes` is its old name here). `--until` / `--game-hours`: see [Playing until a game time](#playing-until-a-game-time---until---game-hours). `--live` / `--watch`: see [Live mode](#live-mode-and-watching). `--lazy-draw`: the same as `play.lazyDraw`. |
 | `play do "<orders>"` | `-s t1` `--for S` `--json` | Turn-based: runs an order chain until it's done, failed, interrupted by a wake event, or hits the time cap. Live: replaces the plan at once and answers at the first of done/failed, an important event, or the horizon (`--for S`, default 4 s); the game keeps going. Prints the observation. |
-| `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` `--full` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. `--full`: also the latest game call's answer, uncut (an order's answer shows the first `play.resultChars`, 800, and says when it cut). |
+| `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` `--full` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. `--full`: the game's texts uncut (dialogue, notice, menu and screen text, which observations cut at `play.textCap`) and the latest game call's answer, uncut (an order's answer shows the first `play.resultChars`, 800, and says when it cut). |
 | `play next` | `-s t1` `--for S` | Live mode: the same as `look --wait`. |
 | `play shot` | `-s t1` `--scale K` | Screenshot → PNG path (open it with the Read tool). Frames narrower than 600 px are upscaled 2× (nearest). |
 | `play note "<text>"` | `--bug` `--confusing` `--fun` `--idea` `--shot` `-s t1` | Adds a note to the timeline and a mark to the replay. `--bug` notes always take a screenshot. |
@@ -171,7 +171,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `fight [thing] [mode]` | attack, kill, engage, hit, slay, defeat, battle, strike, shoot, destroy | Approach, face, attack, react to telegraphs. No target: nearest hostiles. A plural (`wolves`, `all enemies`) fights until none is near. With a time given (`fight enemies for 25s`), reaching it is the plan: `✔ done: fought for 25s as ordered: 4 enemies defeated, 2 still on the field` (without one it still fails at 60 s). `fight enemies when they come` (also `as they arrive`, `incoming`; always in the defense profile) waits for the next enemy instead of failing on an empty field: with a time, it fights and waits until the time is up; without, it ends when a kill clears the field or after `play.fightWait` (20 s) with none. With no move control (`"move": false`, or the defense profile) it attacks from where it stands and never presses a move key. |
 | `flee [from thing]` | retreat, escape, evade, run away, back off, get away | Move to the reachable spot farthest from hostiles; done when none is within 1.6 × alert. |
 | `talk <who>` | talk to/with, speak to/with, chat, greet, ask | Walk up, face, press interact, wait for `dialogue`; retries closer, fails after 3 tries. When the dialogue names a `speaker` that isn't the target (by name or type), it says `X answered instead of Guard#4`, presses cancel, steps closer and tries again; without a cancel control, or after 2 wrong answers, it fails with that message and leaves the dialogue open. No target: nearest NPC. |
-| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; with no change at all it fails, only after the retry window below. **Pick lockouts**: a game that ignores picks for a moment after a dialogue opens (an anti-misclick delay) can say so with `dialogue.ready: false`; `choose` (and `pick`) then wait until it's `true`, at most 2 s, and press once (`… (waited 0.6s for the dialogue to accept picks)`). Without a `ready` field (or still not ready after 2 s), `choose` presses the option's key again every 0.25 s for up to 1 s while the same dialogue stays open and nothing changed (`… (pressed 3×: the game ignored the first)`); timed by game frames, the presses are ordinary recorded input. So `choose 2; fight enemies for 25s` works right after a dialogue stopped a fight, no `wait 1` first. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). |
+| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; a hint button that only opens a bubble answers `chose 6) "Hint": notice changed → "…", dialogue unchanged` (the game's `notice` changing counts even when it comes from `play.notice` or fades again within the half second; `pick` adds `notice changed → "…"` the same way); with no change at all it fails, only after the retry window below. **Pick lockouts**: a game that ignores picks for a moment after a dialogue opens (an anti-misclick delay) can say so with `dialogue.ready: false`; `choose` (and `pick`) then wait until it's `true`, at most 2 s, and press once (`… (waited 0.6s for the dialogue to accept picks)`). Without a `ready` field (or still not ready after 2 s), `choose` presses the option's key again every 0.25 s for up to 1 s while the same dialogue stays open and nothing changed (`… (pressed 3×: the game ignored the first)`); timed by game frames, the presses are ordinary recorded input. So `choose 2; fight enemies for 25s` works right after a dialogue stopped a fight, no `wait 1` first. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). |
 | `pickup [thing]` | pick up, get, grab, collect, take, loot, fetch | Walk onto the item; press interact if it's still there. No target: nearest item. Plural: collects them all nearby. |
 | `use <control\|item>` | drink, quaff, eat, heal | Tap a control. `use potion` / `heal` / `drink` → the heal control. An unknown word becomes `interact <it>`. |
 | `interact [thing]` | interact with, activate, open, unlock, inspect, read, examine | Walk up, face, press interact (no target: press it here). Reports a new `notice`, or a dialogue that opened. |
@@ -255,13 +255,16 @@ events: 0.6 dialogue — Old Guard: "Take this potion…" [1) Thanks.] · 0.6 go
 | `farther`, `out of view` | counts by type beyond that range; up to 4 remembered things with last known distance |
 | `dialogue` | speaker, text and numbered options with the exact `choose` orders |
 | `game says:` | the game's `notice` |
+| `screen text:` | the game's own full readable text of the current screen (`state.screenText`, or `play.screenText`: a results panel, a rules page), on one line; not shown when it only repeats the dialogue or notice |
 | `map` | a 19×9 window around you (fps 17×11; platformer: the map rows ahead): `#` wall (the game's map or learned by bumping), `.` open, `?` unknown, one letter per type (uppercase = hostile; a type on both sides gets two letters, marked enemy/ally in the legend). Shown only when walls are known. |
 | `events` | the last 9 notable events since the previous observation: damage, hits, kills, pickups, dialogue, notices, stat changes, game logs, reflexes, bumps and stuck incidents. Game logs that say the same thing as an inferred event replace it, and a log line with the same words as a `notice` shown within 2 s (either first) is one event, not two. Regeneration is one line per observation (`regenerated +12 over 5s (hp 40→52)`), and so is damage over time with no attacker near (it never wakes the tester or stops an order); hp changes too small to print (0.02 a tick) are added up first. A thing flickering at the edge of the list is `gone` once, and the same text twice within half a second shows once. |
 
 Other lines you'll see: `✔ done: fight wolves block — 3 enemies defeated (7.2s)`, `Wolf#6   3.1 E   hp 3/3  WINDUP
 0.2s`, `★ GOAL REACHED: goto Exit#13 — the game reports a win (1.3s)`, `YOU ARE DEAD — game says: "…"`. The first
-observation also prints the controls and the order card. `--json` returns the same content as data (`{t, frame,
-player, stats, near[], farther, remembered[], dialogue, goal, notice, dead, won, result, events[], map}`).
+observation also prints the controls and the order card. Dialogue, notice and menu text show up to 600 characters,
+screen text up to 1200 (`play.textCap`); a longer one ends `…" (cut, 412 more chars; look --full)`, and `look --full`
+shows it whole. `--json` returns the same content as data (`{t, frame,
+player, stats, near[], farther, remembered[], dialogue, goal, notice, screenText, dead, won, result, events[], map}`, always uncut).
 
 ## Batch runs (`witness play batch`)
 
@@ -324,8 +327,8 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   every tester (the whole process tree) and stops its session.
 * **Output:** a line per tester as it finishes, then a summary: outcome, game time, orders, kills, deaths, stuck
   incidents, notes, fun, and each report path. The same goes to `witness/playtests/batch-<MMDDhhmm>.md` (`--out DIR`
-  changes the folder) with the testers' feedback, notes and final replies. `--dry-run` prints the claude commands
-  without running anything. `WITNESS_CLAUDE=<path>` runs another program instead of `claude` (a `.js`/`.mjs` file runs
+  changes the folder) with the testers' feedback, notes and final replies. `--dry-run` prints each tester's claude
+  command and its whole brief (the exact prompt it would get) without running anything. `WITNESS_CLAUDE=<path>` runs another program instead of `claude` (a `.js`/`.mjs` file runs
   with node; the tests use a fake tester that runs the brief's own commands through `sh`).
 
 ## Playing until a game time (`--until`, `--game-hours`)
@@ -718,6 +721,8 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `show` | auto | turn profile: the fields the observation shows (`["score", "hand", "state.trick", {"label": "trump", "expr": "state.round.trump"}]`) |
 | `pick` | `"auto"` | how a pick reaches the game: `{"call": "<fn>", "args": ["id"]}`, `"click"`, `"keys"` |
 | `turnWait` | 30 | seconds a bare `wait` may wait for your turn (turn profile) |
+| `textCap` | `{dialogue: 600, notice: 600, menu: 600, screen: 1200}` | characters of the game's texts an observation shows before it says `(cut, N more chars; look --full)`: a number for all, or per field (`{"dialogue": 800, "notice": 600}`); 220 / 140 / 140 before 0.7.8 |
+| `screenText` | `state.screenText` | an expression for the game's full readable text of the current screen (a string, or a list of lines), shown as `screen text:` |
 | `resultChars` | 800 | how much of a call's result the order's answer shows (400 in 0.7.5; `look --full` shows it all) |
 | `fightWait` | 20 | seconds a waiting fight (`when they come`, the defense profile) waits for an enemy when no time was given |
 | `screen` | none | per-thing screen position expression (`e`) for `tap:target`, or `"world"` (positions are screen pixels) |
@@ -772,6 +777,7 @@ ones.
 | `state.dialogue = {speaker, text, options[], selected?, ready?}` (null when closed) | talk/choose, dialogues in the report; `ready: false` while the game still ignores picks (an anti-misclick lockout after it opens) makes `choose`/`pick` wait for `true` (at most 2 s) instead of pressing into the lockout |
 | `state.lastHit = {by, type?}` or a string (`{by: "Bomber", type: "bomb"}`, `"artillery shell"`); also `player.lastHit` | what hit the player last, for damage no entity dealt (bombs, missiles, artillery, traps): hurt events say `from Bomber bomb`, the death `killed by Bomber bomb` (event, report, observation). Set it **with every hit** (clear it, or give it a counter, `{by, type, n}`, when an enemy hits or the same bomb hits again): Witness trusts it when it changes with the hp drop; a value left standing only names a hit no nearby attacker or damage-over-time tick explains. Without it the cause is the game's log line, else the nearest attacker (`last hit by Wolf#3`), else `cause unknown` |
 | `state.goal` (text or `{text, pos}`), `state.notice` | goal and "game says" lines; `goto goal` with a pos |
+| `state.screenText` (a string, or a list of lines) | the whole readable text of the current screen as the player sees it (a tournament result, a rules page, a results panel): its own `screen text:` observation line, so a tester doesn't call a full panel empty. Cheap for a DOM game: the visible panel's `innerText` |
 | `state.map = {cell, origin, rows[], solid?}` | walls known up front (rows of characters; `#` solid unless `solid` lists others), coverage % of the open map |
 | map `door` (default `"+"`) and `avoid` (default none): characters for cells to keep off; map `window: true` | paths go round doors and the like unless the goal is there; a window that follows the player is merged as it moves, and outside it is unknown ground |
 | entity `avoid: true` (or `door: true`, or type Door / Stairs / Exit / Portal …), `leadsTo: "Inn"` | the same for things: doors are kept off unless they're the goal or lead to it; a door leading to the goto target counts as arriving when the scene changes there |
@@ -862,7 +868,14 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
    fewer, so a long run's 63 incidents read as the 3-4 places that matter) ·
    Deaths · Dialogues · Coverage (link to coverage.png) · Key moments (screenshots) · Orders · Timeline (notable);
 5. **Reproduce**: the exact `witness replay` commands for the whole session, each note (`--at <t> --shot`), the top 3
-   stuck spots and the second before each death.
+   stuck spots and the second before each death. They load the playtest's own config, `witness.run.json` in its
+   folder: the session's config with absolute paths (tests / shots / replays relative to that folder, so any command run
+   with `--config <playtest>/witness.run.json` reaches the project's) and `launch.server` kept (so the replay starts the server again;
+   no build step), so they work after a batch's per-run config or its server is gone. A web game whose `launch.url` is
+   a local server Witness didn't start (no `launch.server`) gets a warning to start it first. Then the build played:
+   a fingerprint of the page at `launch.url` and the same-origin scripts and styles it loads (following JS imports, inline
+   module scripts' too; dev-server runtime like Vite's `/@vite/client` skipped; a command launch: the launched files), also in the replay header (`build`) and report.json. `witness replay` warns
+   `⚠ the build changed since this playtest (/js/cards.js changed)` when today's build differs.
 
 **report.json**: `session, game, persona, goal, seed, scene, params, model, startedAt, endedAt, wallSeconds,
 gameSeconds, frames, fps, status, outcome, endReason, orders[{t, text, status, msg, seconds}], timeline[{t, frame,
@@ -872,7 +885,7 @@ telegraphs{windups, avoided, hits}, stuck[{t, cell, heading, seconds, resolved, 
 cells, count, unresolved, seconds, first, last, headings, replayAt, shot}], until{…} (above), deaths[{t, cell,
 cause}], kills[], pickups[], dialogues[{t, speaker, text, options}], coverage{cells, seen, openCells, percent,
 mapWindow?, bounds, png}, shots[{t, why, file}], errors[{t, text}], notes[{t, frame, kind, text, cell, shot?}],
-feedback{fun, difficulty, text}, replay{file, frames, calls}, profile, pace{mode, speed, wallSeconds, gameSeconds,
+feedback{fun, difficulty, text}, replay{file, frames, calls}, build{kind, url, hash, count}, runConfig, profile, pace{mode, speed, wallSeconds, gameSeconds,
 freezes, frozenWallSeconds, frozenShare, orders, ordersPerGameMinute, ordersStoppedEarly}, lazyDraw{on, steps,
 framesUndrawn, frames, game{reads, skipped}} (null without `play.lazyDraw`; `game` from the adapter's `perf.lazy_draw`), stats{…counts…}`. Live
 orders can also end as `replaced` (a newer `do` replaced them) or `ended` (still running at the end).

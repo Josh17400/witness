@@ -1,7 +1,7 @@
 // Witness play: notable events between two world models (hurt, hit, kill, pickup, alert, dialogue, death, goal ...),
 // plus the report's accumulators: fights (encounters with damage dealt/taken and telegraph stats), deaths, pickups,
 // dialogues. Events carry a `kind` the daemon uses to decide whether to wake the tester.
-import { dist2, r1, clip, oneLine } from "./util.js";
+import { dist2, r1, clip, oneLine, capText } from "./util.js";
 import { thingLabel } from "./perceive.js";
 import { canMove } from "./config.js";
 
@@ -241,15 +241,17 @@ export class EventTracker {
     this.hurtTimes = this.hurtTimes.filter((h) => t - h < 5);
 
     // ---- dialogue / notice / goal / menu
-    const dj = (d) => (d ? JSON.stringify(d) : null);
+    // (text cut at play.textCap with a note, like the observation's own line; data.full keeps it whole for look --full)
+    const dj = (d) => (d ? JSON.stringify(d) : null), cap = { dialogue: 600, notice: 600, ...(cfg.textCap || {}) };
     if (dj(cur.dialogue) !== dj(prev.dialogue)) {
       if (cur.dialogue) {
         const d = cur.dialogue;
         this.dialogues.push({ t, speaker: d.speaker, text: d.text, options: d.options });
-        push("dialogue", `${prev.dialogue ? "dialogue" : "dialogue opened"} — ${d.speaker ? `${d.speaker}: ` : ""}"${clip(d.text, 120)}"${d.options.length ? ` [${d.options.map((o, i) => `${i + 1}) ${clip(o, 40)}`).join(" ")}]` : ""}`, { opened: !prev.dialogue, options: d.options.length });
+        const line = (full) => `${prev.dialogue ? "dialogue" : "dialogue opened"} — ${d.speaker ? `${d.speaker}: ` : ""}${capText(d.text, cap.dialogue, full)}${d.options.length ? ` [${d.options.map((o, i) => `${i + 1}) ${clip(o, 40)}`).join(" ")}]` : ""}`;
+        push("dialogue", line(false), { opened: !prev.dialogue, options: d.options.length, full: line(true) });
       } else push("dialogue-close", "dialogue closed");
     }
-    if (cur.notice && cur.notice !== prev.notice) { if (!sameSaid(cur.notice)) push("notice", `game says: "${clip(oneLine(cur.notice), 140)}"`); this.said.push({ t, k: sayKey(cur.notice) }); }
+    if (cur.notice && cur.notice !== prev.notice) { if (!sameSaid(cur.notice)) push("notice", `game says: ${capText(cur.notice, cap.notice)}`, { full: `game says: ${capText(cur.notice, 0, true)}` }); this.said.push({ t, k: sayKey(cur.notice) }); }
     const gt = (g) => (g ? g.text : null);
     if (gt(cur.goal) !== gt(prev.goal) && cur.goal && cur.goal.text) push("goalchange", `goal: ${clip(cur.goal.text, 120)}`);
     if (!!cur.menu !== !!prev.menu) push("menu", cur.menu ? "a menu opened" : "the menu closed");

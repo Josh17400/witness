@@ -35,7 +35,7 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
   witness play do "<orders>" [-s t1] [--for S]  run orders ("fight wolf block; then talk guard") until done/interrupted
                      (live: replaces the plan now, answers at done / an important event / the horizon; play goes on)
   witness play look [-s t1] [--shot] [--json] [--wait] [--full]   the observation now (live --wait: at the next event or horizon;
-                     --full: plus the latest game call's answer, uncut)
+                     --full: the game's texts uncut (play.textCap) plus the latest game call's answer, uncut)
   witness play shot [-s t1] [--scale 2]          screenshot → PNG path (open it with the Read tool)
   witness play note '<text>' [--bug|--confusing|--fun|--idea] [--shot] [-s t1]
   witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback '…']   → report.md/json + replay, stops everything

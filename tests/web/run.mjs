@@ -443,6 +443,13 @@ else {
     if (m) pass += +m[1];
     ok("dom page suite (tests/web/dom.mjs)", d.status === 0 && m && +m[2] === 0, d.stdout + d.stderr);
   }
+  // launch.media, desktop dom:tap, call timeout, hanging decode(), a temp-folder config, play sessions without audio capture
+  {
+    const d = spawnSync(process.execPath, [path.join(here, "media.mjs")], { encoding: "utf8", timeout: 600000, env: { ...process.env, ...env } });
+    const m = /(\d+) passed, (\d+) failed/.exec(d.stdout || "");
+    if (m) pass += +m[1];
+    ok("media page suite (tests/web/media.mjs)", d.status === 0 && m && +m[2] === 0, d.stdout + d.stderr);
+  }
   for (const d of shots) fs.rmSync(d, { recursive: true, force: true });
   for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "safe-nocover", "mixed", "voices"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
 }

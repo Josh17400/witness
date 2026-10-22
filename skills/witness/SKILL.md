@@ -120,6 +120,11 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
   `touch:x,y@t` (or a real `dom:tap:x,y@t`). A web build needs an AudioContext in witness mode for that check
   (SDL: open the device, fed silence; cpp GUIDE §13). Keep a web config beside the desktop one: `--config
   witness.web.json`.
+  Accessibility: `--reduced-motion` / `--color-scheme dark` (witness.json `launch.media`, also `forcedColors`,
+  `contrast`) are emulated by the browser, so `matchMedia` and `@media` both see them. A slow `call` / `eval`
+  (cold WebKit under load): `WITNESS_CALL_TIMEOUT=120` or `launch.callTimeout`; the error names the call and an
+  unresolved game promise. A config may live outside the game (e.g. the temp folder): Playwright is then found from
+  the current folder, Witness or a global install.
 
 ## 3. Test files: prove gameplay, keep it proven
 
@@ -141,7 +146,22 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
 ]
 ```
 
-* Each step at time `at`: `call` → `input` → `expect` → `probe` → `shot` → `match`.
+* Each step at time `at`: `call` → `input` → `evalAs` → `expect` → `expectPage` → `probe` → `shot` → `match`. So an
+  `expect` beside a `call` sees the state **after** the call (a warning reminds you; check the state before it in an
+  earlier step), and an input's `@t` inside a step is **relative** to the step: `{"at": 1.3, "input":
+  "dom:tap:196,40@1.4"}` taps at 2.7 s (warned when `@t` ≥ the step's `at`); write `@0.1` for 1.4 s.
+* **Page checks** (adapters with `eval`; the game evaluates them, so a browser game can read the DOM):
+  `"expectPage": ["document.querySelectorAll('#actions .abtn').length == 3"]` must each be truthy (a failure shows the
+  value: `page … — got 2`); `"evalAs": {"btns": "document.querySelectorAll('.abtn').length"}` names a page value for
+  this and later steps' `expect` (`"expect": "btns == 3"`). `expect` itself is over the JSON snapshot, not the page.
+* **Wait for something**: `{"until": "state.phase == 'bidding'", "timeout": 5}` steps (every `every` frames, default
+  1) until it holds, failing at `timeout` (default 10 s) with the last value; `untilPage` is a page expression for
+  the same; a `call` / `input` on it runs before the wait, its `expect`s once it holds. With an `until` (or `after`)
+  the test's point steps run in file order: no `at` = right after the step before, `"after": 0.5` = 0.5 s after it,
+  `at` stays absolute (an error if the wait already went past it); file order then applies to every point step, so
+  keep their `at`s in time order.
+* **Per-test clock**: `"epoch": "2026-12-24"` (or `"now"`; ISO date/time, `"today"`, ms) on a test starts the game's
+  virtual `Date` there for that test, instead of witness.json `clock.epoch` (needs `reset`; JS adapter games).
 * **Range steps** check every frame from `from` to `to` (or `from + within`): `always` must hold on every frame,
   `never` on none, `eventually` on one. Failures name the frame: `always state.player.hp >= 0 — failed at frame 212
   (t=3.533s): got -1 >= 0`. Rules of the game ("can't fall through the floor") belong here, not in point checks.
@@ -194,6 +214,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    answer whole). A pick dialogue that ignores input for a moment after opening: give it `dialogue.ready: false`
    meanwhile (`choose` waits; without it, `choose` retries for 1 s). Damage no entity deals (bombs, artillery): set
    `state.lastHit = {by, type}` (set with each hit, cleared when an enemy hits) so deaths read "killed by Bomber bomb". Defense fights report one row per engagement.
+   A screen full of text (a tournament result, rules): give `state.screenText` (the visible panel's text) so the
+   tester reads it whole (`screen text:` line); observations cut dialogue / notice / menu at 600 chars and screen text
+   at 1200 (`play.textCap`, e.g. `{"dialogue": 800}`), saying `(cut, N more chars; look --full)`.
    `witness play suggest` probes the game and proposes one (`--write` saves it). The harness works much better when
    the snapshot follows the playtest conventions (entity `hostile`/`item`/`talk`, enemy `state: "windup"` or
    `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`, doors with `leadsTo` and, for an exit you push into,
@@ -218,7 +241,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    second is refused). Use `--parallel 1` when the machine is busy. A tester stopped by a permission denial shows as
    `blocked: permission denied (<command>)` (it is retried once). Testers can't run `batch`, `clean`, `--force` or
    `--all`, or touch another session (`WITNESS_PLAY_TESTER`). `--cmd "<launch>"` carries into every brief and into
-   report.md's replay commands.
+   report.md's replay commands. `--dry-run` prints each tester's claude command and whole brief. report.md's replay
+   commands load the playtest's own `witness.run.json` (launch and `launch.server` kept, absolute paths), so they work
+   after a per-run config is gone; `witness replay` warns when the build changed since the playtest.
    **Games with a day clock:** `--game-hours 4` (brief, batch, start) plays 4 in-game hours, given `play.clock` in
    witness.json (an expression giving in-game hours that keeps increasing: include the day, `"state.day*24 + state.hour"`); `--until "<expr>"` plays
    until any state condition. Orders stop there and the tester ENDs (outcome `until reached`).

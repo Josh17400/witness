@@ -40,8 +40,8 @@ const shq = (c) => (/[\s"'$&|;<>(){}]/.test(c) ? `"${c.replace(/"/g, '\\"')}"` :
 export const launchFlags = (opt) => {
   if (!opt) return "";
   let f = "";
-  for (const k of ["device", "engine", "capture"]) if (opt[k] !== undefined && opt[k] !== true) f += ` --${k} ${shq(String(opt[k]))}`;
-  for (const k of ["no-auto-unlock", "auto-unlock", "safe-insets", "safe-overlay"]) if (opt[k]) f += ` --${k}${opt[k] !== true ? ` ${shq(String(opt[k]))}` : ""}`;
+  for (const k of ["device", "engine", "capture", "color-scheme"]) if (opt[k] !== undefined && opt[k] !== true) f += ` --${k} ${shq(String(opt[k]))}`;
+  for (const k of ["no-auto-unlock", "auto-unlock", "safe-insets", "safe-overlay", "reduced-motion"]) if (opt[k]) f += ` --${k}${opt[k] !== true ? ` ${shq(String(opt[k]))}` : ""}`;
   return f;
 };
 /** " --config <what was passed>" plus the launch flags that were passed, for follow-up commands printed to the user
@@ -68,10 +68,10 @@ export function loadConfig(opt) {
  *  witness.json launch.device / engine / audioUnlock / capture). */
 export function browserOverrides(cfg, opt) {
   const want = { device: opt.device, engine: opt.engine, capture: opt.capture };
-  const any = Object.values(want).some((v) => v !== undefined) || opt["no-auto-unlock"] || opt["auto-unlock"] || opt["safe-insets"] || opt["safe-overlay"];
+  const any = Object.values(want).some((v) => v !== undefined) || opt["no-auto-unlock"] || opt["auto-unlock"] || opt["safe-insets"] || opt["safe-overlay"] || opt["reduced-motion"] || opt["color-scheme"] !== undefined;
   if (!any) return cfg;
   for (const [k, v] of Object.entries(want)) if (v === true) die(`--${k} needs a value (e.g. --device iphone-15, --engine webkit, --capture element)`);
-  if (!cfg.launch || !cfg.launch.url) die(`--device, --engine, --capture, --no-auto-unlock, --safe-insets and --safe-overlay are for browser games (${CONFIG_NAME} launch.url); this launch is ${cfg.launch && cfg.launch.attach ? "attach" : "a command"}`);
+  if (!cfg.launch || !cfg.launch.url) die(`--device, --engine, --capture, --no-auto-unlock, --safe-insets, --safe-overlay, --reduced-motion and --color-scheme are for browser games (${CONFIG_NAME} launch.url); this launch is ${cfg.launch && cfg.launch.attach ? "attach" : "a command"}`);
   const launch = { ...cfg.launch };
   if (want.device !== undefined) {
     const d = String(want.device);
@@ -84,6 +84,9 @@ export function browserOverrides(cfg, opt) {
   else if (opt["auto-unlock"]) launch.audioUnlock = true;
   if (opt["safe-insets"]) launch.safeInsets = opt["safe-insets"] === true ? true : String(opt["safe-insets"]);
   if (opt["safe-overlay"]) launch.safeOverlay = true;
+  // --reduced-motion / --color-scheme dark|light: launch.media (prefers-reduced-motion, prefers-color-scheme)
+  if (opt["color-scheme"] === true) die("--color-scheme needs a value: dark or light");
+  if (opt["reduced-motion"] || opt["color-scheme"] !== undefined) launch.media = { ...(launch.media || {}), ...(opt["reduced-motion"] ? { reducedMotion: "reduce" } : {}), ...(opt["color-scheme"] !== undefined ? { colorScheme: String(opt["color-scheme"]) } : {}) };
   return { ...cfg, launch };
 }
 

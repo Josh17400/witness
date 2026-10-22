@@ -236,11 +236,26 @@ export class Session {
   has(cap) { return !!(this.hello && (this.hello.capabilities || []).includes(cap)); }
   get fps() { return (this.hello && this.hello.fps) || 60; }
 
-  request(cmd, args = {}, timeoutMs = 60000) {
+  /** The default per-request wait (ms): WITNESS_CALL_TIMEOUT / launch.callTimeout seconds (set by openGame), else 60 s. */
+  get requestMs() { return this.requestTimeoutMs > 0 ? this.requestTimeoutMs : 60000; }
+  request(cmd, args = {}, timeoutMs = this.requestMs) {
     if (this.closed) return Promise.reject(new WitnessError(`the game is not connected (it may have crashed) — can't '${cmd}'`));
     const id = this.nextId++;
     return new Promise((res, rej) => {
-      const timer = setTimeout(() => { this.pending.delete(id); rej(new WitnessError(`the game didn't answer '${cmd}' within ${timeoutMs / 1000}s (is it stuck, or not handling '${cmd}'?)`)); }, timeoutMs);
+      // what was pending: the call (name and args), and from the JS adapter (an out-of-line "busy" query) whether a game
+      // promise was still unresolved
+      const timer = setTimeout(async () => {
+        this.pending.delete(id);
+        const what = cmd === "call" ? `'call' ${args.name}(${JSON.stringify(args.args || []).slice(1, -1).slice(0, 200)})` : cmd === "eval" ? `'eval' ${String(args.expr).slice(0, 200)}` : `'${cmd}'`;
+        let busy = "";
+        if (cmd !== "busy" && /witness-js/.test((this.hello && this.hello.adapter) || "") && !this.closed) {
+          try {
+            const b = await this.request("busy", {}, 2000);
+            if (b && b.busy) busy = `; the page was still in '${b.busy.cmd}'${b.busy.name ? ` ${b.busy.name}` : ""} for ${Math.round(b.busy.ms / 100) / 10}s${b.busy.awaiting ? ", waiting on a promise the game returned that never resolved" : ""}${b.calls && b.calls.length ? ` (unresolved async calls: ${b.calls.map((c) => `${c.name} ${Math.round(c.ms / 1000)}s`).join(", ")})` : ""}`;
+          } catch { /* an older adapter, or the page is frozen */ }
+        }
+        rej(new WitnessError(`the game didn't answer ${what} within ${timeoutMs / 1000}s (is it stuck, or not handling '${cmd}'?${cmd === "call" || cmd === "eval" ? " A slow machine: raise WITNESS_CALL_TIMEOUT / launch.callTimeout (seconds)" : ""})${busy}`));
+      }, timeoutMs);
       this.pending.set(id, { res, rej, cmd, timer });
       this.conn.send({ id, cmd, ...args });
     });
@@ -260,10 +275,10 @@ export class Session {
     }
     if (part.length) await this.request("input", { events: part });
   }
-  step(frames, dt, dts) { return this.request("step", { frames, ...(dt ? { dt } : {}), ...(dts ? { dts } : {}) }, Math.max(60000, frames * 50)); }
+  step(frames, dt, dts) { return this.request("step", { frames, ...(dt ? { dt } : {}), ...(dts ? { dts } : {}) }, Math.max(this.requestMs, frames * 50)); }
   snapshot(paths) { return this.request("snapshot", paths ? { paths } : {}); }
-  screenshot(scale) { return this.request("screenshot", scale ? { scale } : {}, 120000); }
-  audio() { return this.request("audio", {}, 120000); }
+  screenshot(scale) { return this.request("screenshot", scale ? { scale } : {}, Math.max(120000, this.requestMs)); }
+  audio() { return this.request("audio", {}, Math.max(120000, this.requestMs)); }
   call(name, args = []) { return this.request("call", { name, args }); }
   eval(expr) { return this.request("eval", { expr }); }
   /** Fetch the adapter's logs into this.logs (kept until drainLogs): before a reset, which may clear the adapter's. */

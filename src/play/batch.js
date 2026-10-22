@@ -140,7 +140,8 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
   });
   for (const r of runs) if (!validName(r.name)) { console.error(`✖ goal #${r.i}: bad session name "${r.name}" (letters, digits, - _ . only, not all dots)`); process.exit(1); }
   for (const r of runs) { try { new UntilWatch({ until: r.until, gameHours: r.gameHours, clock }); } catch (e) { console.error(`✖ goal #${r.i}: ${e.message}`); process.exit(1); } }
-  if (opt["dry-run"]) { for (const r of runs) console.log(`#${r.i} ${r.name}: claude ${testerArgs({ model: r.model, effort: opt.effort || "low", cliJs, name: r.name }).join(" ")}  (brief: ${r.brief.length} chars; ${budgetText(r)}, tester timeout ${r.timeoutMin} wall min)`); return; }
+  // --dry-run: each tester's claude command line and its whole brief (the exact prompt it would get), nothing launched
+  if (opt["dry-run"]) { for (const r of runs) console.log(`${r.i > 1 ? "\n" : ""}#${r.i} ${r.name}: claude ${testerArgs({ model: r.model, effort: opt.effort || "low", cliJs, name: r.name }).join(" ")}  (brief: ${r.brief.length} chars; ${budgetText(r)}, tester timeout ${r.timeoutMin} wall min)\n----- brief #${r.i} (${r.persona}): ${r.goal} -----\n${r.brief}\n----- end of brief #${r.i} -----`); return; }
 
   // one batch machine-wide (each is up to 2 games plus 2 claude processes); a dead holder's lock doesn't count
   const lock = acquireBatchLock({ root, goals: runs.length });

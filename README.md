@@ -96,6 +96,9 @@ Test files are JSON (or JS modules). Point steps check a moment; range steps che
 ```
 
 Times are seconds or frames (`90f`), and expressions can look one frame back (`prev`, `rose(x)`, `changed(x)`).
+Expressions run in the CLI over the snapshot; `expectPage` / `evalAs` run in the game (the DOM of a web game), a
+`{"until": "…", "timeout": 5}` step waits for a condition, and a test's `"epoch"` sets its virtual date
+([skills/witness/SKILL.md](skills/witness/SKILL.md) §3).
 Games may announce their sounds (`witness.sound("coin")`) so `listen` names them; everything else needs nothing more
 than the adapter.
 

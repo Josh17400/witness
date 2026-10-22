@@ -44,7 +44,7 @@ export function reportData(s) {
     fights, telegraphs: tele,
     stuck: s.incidents, stuckSpots: stuckSpots(s.incidents), until: s.until || null, deaths: tr.deaths, kills: tr.kills, pickups: tr.pickups, dialogues: tr.dialogues,
     coverage: s.coverage, shots: s.shots, errors: s.errors, notes: s.notes, feedback: s.feedback || null, stuckDead: s.stuckDead || null,
-    replay: s.replay, profile: s.profile, pace: s.pace || null, lazyDraw: s.lazyDraw || null,
+    replay: s.replay, profile: s.profile, pace: s.pace || null, lazyDraw: s.lazyDraw || null, build: s.build || null, runConfig: s.runConfig || null,
     stats: {
       orders: s.orders.length, ordersFailed: s.orders.filter((o) => o.status === "fail").length, parseErrors: s.parseErrors || 0,
       fightsWon: fights.filter((f) => f.result === "won").length, fightsLost: fights.filter((f) => f.result === "lost").length, fightsHeld: fights.filter((f) => f.result === "held").length,
@@ -63,7 +63,7 @@ export function lazyLine(z) {
 }
 
 /** report.md: readable, most useful first. `rel` makes paths relative to the project root. */
-export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay", config = null, flags = "" } = {}) {
+export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay", config = null, flags = "", server = null } = {}) {
   // link: paths for markdown links (relative to report.md itself); rel: paths for shell commands (relative to the project);
   // config: the config file the session ran with when it isn't the project's witness.json (witness.web.json): the
   // replay commands must load the same launch (a web build), so they carry --config
@@ -194,6 +194,10 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     for (const sp of spots.slice(0, 3)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${sp.replayAt.toFixed(2)} --shot     # stuck spot ${where(sp)}(${sp.cell}): ${sp.count} incident${sp.count > 1 ? "s" : ""}`);
     for (const d of r.deaths.slice(0, 2)) L.push(`${replayCmd} ${sh(rel(r.replay.file))} --at ${Math.max(0, d.t - 1).toFixed(2)} --shot     # just before death`);
     L.push("```");
+    // the run config in this folder carries the launch (and its server) whole; the fingerprint says what build was played
+    if (r.runConfig) L.push(`The commands load this playtest's own config (${sh(rel(r.runConfig))}: the session's launch with absolute paths${server === true ? ", and launch.server, so the replay starts the server again" : ""}).`);
+    if (server === false && r.build && r.build.url && /^https?:\/\/(localhost|127\.|\[::1\])/i.test(r.build.url)) L.push(`⚠ ${r.build.url} was served by something Witness didn't start (no launch.server): start that server before replaying.`);
+    if (r.build) L.push(`Build played: ${r.build.kind === "web" ? `${r.build.url} and ${r.build.count - 1} file${r.build.count === 2 ? "" : "s"} it loads` : `${r.build.count} launched file${r.build.count === 1 ? "" : "s"}`}, fingerprint \`${r.build.hash}\` (in the replay header: \`witness replay\` warns when the build changed since).`);
   }
   return L.join("\n") + "\n";
 }
@@ -204,7 +208,10 @@ function mdOptions(dir) {
   try { spec = JSON.parse(fs.readFileSync(path.join(dir, "session.json"), "utf8")); } catch { /* defaults */ }
   const root = spec.root || dir;
   const rel = (p) => path.relative(root, p).replace(/\\/g, "/");
-  return { rel, link: (p) => path.relative(dir, p).replace(/\\/g, "/"), replayCmd: "witness replay", config: spec.configFile ? rel(spec.configFile) : null, flags: spec.launchFlags || "" };
+  // a playtest's own witness.run.json (0.7.8) beats the config file it started from (a batch's per-run config can be gone)
+  const own = spec.runConfig && fs.existsSync(spec.runConfig) ? spec.runConfig : null;
+  return { rel, link: (p) => path.relative(dir, p).replace(/\\/g, "/"), replayCmd: "witness replay", config: own ? rel(own) : spec.configFile ? rel(spec.configFile) : null, flags: spec.launchFlags || "",
+    server: spec.cfg && spec.cfg.launch && spec.cfg.launch.url ? !!spec.cfg.launch.server : null };
 }
 /** Write report.json and report.md into a session folder. */
 export function writeReports(dir, r) {

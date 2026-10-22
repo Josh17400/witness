@@ -30,6 +30,12 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
   if (!info) return { lines: [["⚠", "the page has no Witness init script (attached page?): no display facts"]], display: null, info, safe: null };
   const ua = /iPhone|iPad|Macintosh|Android|Windows|Linux/.exec(info.userAgent);
   lines.push(["", `page: ${info.viewport.join("×")} CSS px, DPR ${info.dpr}${info.screen ? `, screen ${info.screen.join("×")}` : ""}, ${info.maxTouchPoints ? `maxTouchPoints ${info.maxTouchPoints}` : "maxTouchPoints 0"}${web.device && web.device.touch && !info.touchEvents ? " (this build has no TouchEvent: Witness touches arrive as pointer events only; real iPhones send both)" : ""}${info.standalone ? ", navigator.standalone" : ""}${info.platform ? `, platform ${info.platform}` : ""}${ua ? `, user agent says ${ua[0]}` : ""}`]);
+  // launch.media: what the page's matchMedia says for each emulated feature
+  if (web.media) {
+    const mi = await (web.mediaInfo ? web.mediaInfo() : null);
+    const all = mi && Object.values(mi).every(Boolean);
+    lines.push([all ? "✔" : "⚠", `media emulated (launch.media): ${Object.entries(web.media).map(([k, v]) => `${k} ${v}${mi && !mi[k] ? " (the page's matchMedia doesn't see it)" : ""}`).join(" · ")}${all ? ": matchMedia and @media rules see it" : ""}`]);
+  }
   // a touch profile whose page says "no touch" or a desktop platform: games would pick their mouse / desktop UI
   const dev = web.device;
   if (dev && dev.touch && (info.maxTouchPoints || 0) < 2) lines.push(["⚠", `${dev.name} is a touch screen but the page reports maxTouchPoints ${info.maxTouchPoints || 0} (a real one reports 5): a touch-UI check (maxTouchPoints > 0) or the iPad check (platform MacIntel && maxTouchPoints > 1) picks the desktop UI here`]);
@@ -60,7 +66,7 @@ export async function displayReport(web, media, { layers = [], scaleRects = null
   }
   if (info.webAudio === false) lines.push(["⚠", `this ${web.engine} build has no Web Audio (Playwright's WebKit for Windows is built without it): Witness put in a silent AudioContext so the page loads; audio can't be captured or heard here (check the unlock path with --engine chromium --no-auto-unlock)`]);
   const c = mainCanvas(info);
-  if (!c && web.captureMode === "screen") { lines.push(["", `DOM page (no visible <canvas>): screenshots are of the whole viewport at device pixels${web.dom ? " (chosen because the page has no canvas; launch.capture sets it)" : ""}`]); return { lines, display: null, info, safe }; }
+  if (!c && web.captureMode === "screen") { lines.push(["", `DOM page (no visible <canvas>): screenshots are of the whole viewport at device pixels${web.domPage ? " (chosen because the page has no canvas; launch.capture sets it)" : ""}`]); return { lines, display: null, info, safe }; }
   if (!c) { lines.push(["⚠", "no visible <canvas> on the page (a DOM game? --capture screen, or leave launch.capture unset: Witness then captures the viewport)"]); return { lines, display: null, info, safe }; }
   const d = canvasDisplay(c, info.dpr);
   const name = `canvas${c.id ? `#${c.id}` : ""}`;
@@ -225,5 +231,5 @@ export function clockLine(session) {
 }
 
 export function describeWeb(web) {
-  return `browser: ${web.engine} ${web.engineVersion}${web.playwright ? ` (Playwright ${web.playwright})` : ""} · ${describeDevice(web.device)}${web.captureMode !== "canvas" ? ` · screenshots: ${web.captureMode} capture (device pixels)` : ""}`;
+  return `browser: ${web.engine} ${web.engineVersion}${web.playwright ? ` (Playwright ${web.playwright})` : ""} · ${describeDevice(web.device)}${web.captureMode !== "canvas" ? ` · screenshots: ${web.captureMode} capture (device pixels)` : ""}${web.media ? ` · media ${Object.entries(web.media).map(([k, v]) => `${k} ${v}`).join(", ")}` : ""}`;
 }

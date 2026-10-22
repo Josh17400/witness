@@ -49,7 +49,7 @@ function normFacing(f) {
 const STAT_SKIP = /^(id|type|kind|name|pos|position|x|y|z|vx|vy|vz|vel|velocity|size|w|h|width|height|hp|health|maxhp|hpmax|max_hp|maxhealth|healthmax|facing|dir|direction|yaw|pitch|look|forward|state|ongroud|onground|grounded|on_ground|frame|time|t|digest|seed|team|hostile|item|talk|npc|dead|won|attacking|blocking|dodging|invulnerable|star|cooldown|telegraph|lean|magsize|mag_size|maxammo|ads|reloading|sprinting|crouching|god|paused)$/i;
 
 // turn profile: snapshot fields that aren't game facts for the header (shown elsewhere, or engine plumbing)
-const FIELD_SKIP = /^(choices|tappables|moves|legalMoves|actions|yourTurn|your_turn|myTurn|isYourTurn|playerTurn|dialogue|dialog|conversation|notice|message|toast|hint|ui|layers|entities|map|digest|frame|frames|time|t|seed|player|scene|won|dead|gameOver|game_over|victory|menu|goal|objective|quest|camera|pointer|touches|debug|fps|dt)$/i;
+const FIELD_SKIP = /^(choices|tappables|moves|legalMoves|actions|yourTurn|your_turn|myTurn|isYourTurn|playerTurn|dialogue|dialog|conversation|notice|message|toast|hint|ui|layers|entities|map|digest|frame|frames|time|t|seed|player|scene|won|dead|gameOver|game_over|victory|menu|screenText|screen_text|goal|objective|quest|camera|pointer|touches|debug|fps|dt)$/i;
 const FIELD_FIRST = [/^scores?$/i, /^(phase|stage|state|step)$/i, /^(turn|whoseTurn|current|currentPlayer|active)$/i, /^round$/i, /^trump/i, /^hand$/i, /^trick$/i, /^(bid|contract)/i, /^(dealer|leader)$/i, /^(lives|money|coins|gold|chips)$/i];
 
 /**
@@ -84,7 +84,7 @@ export class Perceiver {
     this.fx = {
       player: c(cfg.player), entities: c(cfg.entities), pos: c(cfg.pos), hostile: c(cfg.hostile), item: c(cfg.item), npc: c(cfg.npc),
       friend: c(cfg.friend), telegraph: c(cfg.telegraph), ignore: c(cfg.ignore), dialogue: c(cfg.dialogue), menu: c(cfg.menu),
-      goal: c(cfg.goal), notice: c(cfg.notice), scene: c(cfg.scene), won: c(cfg.won), dead: c(cfg.dead), map: cfg.map ? c(cfg.map) : null,
+      goal: c(cfg.goal), notice: c(cfg.notice), screenText: c(cfg.screenText), scene: c(cfg.scene), won: c(cfg.won), dead: c(cfg.dead), map: cfg.map ? c(cfg.map) : null,
       ammo: c(cfg.ammo), avoid: c(cfg.avoid), choices: c(cfg.choices), yourTurn: c(cfg.yourTurn),
     };
     this.statFns = null;          // decided on the first snapshot (stable observation lines)
@@ -233,6 +233,9 @@ export class Perceiver {
     const g = pick(this.fx.goal, state.goal, state.objective, state.quest);
     const goal = g == null ? null : typeof g === "string" ? { text: g, p2: null } : typeof g === "object" ? { text: String(g.text ?? g.title ?? g.name ?? g.description ?? ""), p2: this.planeOf(rawPos(g)) } : { text: String(g), p2: null };
     const notice = pick(this.fx.notice, state.notice, state.message, state.toast, state.hint);
+    // the game's own full readable text of the current screen (a results panel, a rules page): its own observation line
+    const st = pick(this.fx.screenText, state.screenText, state.screen_text);
+    const screenText = st == null || st === "" ? null : Array.isArray(st) ? st.map(String).join(" / ") : typeof st === "object" ? JSON.stringify(st) : String(st);
     const sc = pick(this.fx.scene, state.scene, state.level, state.location);
     const scene = sc == null ? null : typeof sc === "object" ? String(sc.name ?? sc.region ?? sc.site ?? JSON.stringify(sc).slice(0, 40)) : String(sc);
     const won = !!pick(this.fx.won, state.won, state.victory, state.win, state.complete, state.completed);
@@ -283,7 +286,7 @@ export class Perceiver {
       remembered.length = 0;
     }
     this.sceneKey = sceneKey;
-    const world = { snap, frame, t, player, things, remembered, sceneKey, newScene, maxListed, map, dialogue, dialogueReady, menu, goal, choices, yourTurn, notice: notice ? String(notice) : null, scene, won, dead, over, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
+    const world = { snap, frame, t, player, things, remembered, sceneKey, newScene, maxListed, map, dialogue, dialogueReady, menu, goal, choices, yourTurn, notice: notice ? String(notice) : null, screenText, scene, won, dead, over, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
     this.prev = world;
     return world;
   }

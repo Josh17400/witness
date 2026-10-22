@@ -76,8 +76,9 @@ ok("orders to an ended session explain themselves", r.code === 1 && /isn't runni
   ok("daemon: … and the note's text is intact", cnotes.includes(text) && !cnotes.some((t) => t.includes("\uFFFD")), JSON.stringify(cnotes));
   const md = fs.readFileSync(path.join(findDir(cdir, "c"), "report.md"), "utf8");
   const lines = md.split("\n").filter((l) => l.startsWith("witness replay"));
-  ok("report.md: every replay command names --config witness.web.json", lines.length === 3 && lines.every((l) => l.startsWith("witness replay --config witness.web.json witness/playtests/c/replay.jsonl")), md);
-  r = witness(["replay", "--config", "witness.web.json", "witness/playtests/c/replay.jsonl"], { cwd: cdir, env });
+  // (0.7.8: the playtest's own witness.run.json, a copy of witness.web.json's launch with absolute paths)
+  ok("report.md: every replay command names the session's config (its copy in the playtest folder)", lines.length === 3 && lines.every((l) => l.startsWith("witness replay --config witness/playtests/c/witness.run.json witness/playtests/c/replay.jsonl")), md);
+  r = witness(["replay", "--config", "witness/playtests/c/witness.run.json", "witness/playtests/c/replay.jsonl"], { cwd: cdir, env });
   ok("report.md's replay command, run as printed, replays exactly", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out);
 }
 

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media page</title>
+  <!-- A pure-DOM page (0.7.8 tests): prefers-reduced-motion / prefers-color-scheme read by matchMedia and by @media
+       rules, a button counted by click (dom:tap on desktop falls back to a click), a call whose promise never resolves,
+       a picture whose decode() never settles (as WebKit's can), and an AudioContext whose clock goes into the state. -->
+  <style>
+    html, body { margin: 0; font: 16px sans-serif; background: rgb(250, 250, 250); color: #000; }
+    #btn { position: absolute; left: 0; top: 0; width: 200px; height: 100px; background: #c33; }
+    #anim { position: absolute; left: 0; top: 120px; width: 40px; height: 40px; background: #39c; transition: transform 1s linear; }
+    @media (prefers-color-scheme: dark) { body { background: rgb(10, 20, 30); } }
+    @media (prefers-reduced-motion: reduce) { #anim { transition: none; } }
+  </style>
+</head>
+<body>
+  <div id="btn"></div>
+  <div id="anim"></div>
+  <img id="pic" alt="pic" width="8" height="8" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+  <script>
+    // ?hangdecode=1: every picture's decode() stays pending forever (WebKit does this on some pictures)
+    if (new URLSearchParams(location.search).get("hangdecode") === "1") HTMLImageElement.prototype.decode = function () { return new Promise(function () {}); };
+  </script>
+  <script type="module" src="media.js"></script>
+</body>
+</html>

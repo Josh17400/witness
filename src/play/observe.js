@@ -1,6 +1,6 @@
 // Witness play: the compact observation a cheap model reads every turn (and its JSON form). Positions/distances are in
 // map cells, directions are compass (north = up on screen), things are named exactly as orders accept them.
-import { r1, clip, oneLine, fmtT, compass, len } from "./util.js";
+import { r1, clip, oneLine, fmtT, compass, len, capText as capLine } from "./util.js";
 import { thingLabel } from "./perceive.js";
 import { lookOf } from "./profiles.js";
 import { describeControls } from "./config.js";
@@ -55,7 +55,7 @@ export function observeData(w, ctx) {
   if (cfg.profile === "turn") return turnData(w, ctx);
   if (cfg.profile === "defense") return defenseData(w, ctx);
   const P = w.player;
-  const data = { t: +w.t.toFixed(2), frame: w.frame, player: null, stats: {}, near: [], farther: {}, remembered: [], dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, dead: w.dead, won: w.won, result: ctx.result || null, events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })), map: null };
+  const data = { t: +w.t.toFixed(2), frame: w.frame, player: null, stats: {}, near: [], farther: {}, remembered: [], dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, screenText: w.screenText || null, dead: w.dead, won: w.won, result: ctx.result || null, events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })), map: null };
   if (P && P.p2) {
     const c = cellOf(w, P.p2);
     const look = cfg.profile === "fps" ? lookOf(w, cfg) : null;
@@ -106,6 +106,20 @@ function platformWindow(w, marks) {
   return { rows, x0, y0: mr0 };
 }
 
+/**
+ * Text the game wants read (dialogue, notice, menu, state.screenText), on one line, cut at play.textCap[field] with a
+ * plain note of how much is left; look --full (ctx.full) shows it whole.
+ */
+function capText(s, ctx, field, q = '"') { return capLine(s, (ctx.cfg.textCap || {})[field] || 600, !!ctx.full, q); }
+/** An events-line entry: a notice / dialogue event's text is cut at play.textCap (look --full: its whole text). */
+const evText = (e, ctx) => (ctx.full && e.data && e.data.full ? e.data.full : e.text);
+/** The game's own full text of the current screen, its own line (skipped when it only repeats the dialogue / notice). */
+function screenLine(w, ctx, L) {
+  const st = w.screenText && oneLine(w.screenText);
+  if (!st || st === oneLine(w.notice) || (w.dialogue && st === oneLine(w.dialogue.text))) return;
+  L.push(`screen text: ${capText(st, ctx, "screen")}`);
+}
+
 /** The text a tester reads. */
 /** " (killed by Bomber bomb)" when the game names what hit last (state.lastHit), else "". */
 const killedBy = (w, ctx) => {
@@ -136,7 +150,7 @@ export function observeText(w, ctx) {
   if (d.result) L.push(d.result.line);
   if (ctx.live && ctx.order && !(d.result && /^(✔|✖)/.test(d.result.line || ""))) L.push(`your order (still running): ${ctx.order}`);
   else if (ctx.live && !ctx.order) L.push("no order running: standing by (holding, guarding, shooting back) while the game plays on");
-  if (w.dead) L.push(`YOU ARE DEAD${killedBy(w, ctx)}${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}${cfg.controls.confirm ? ` (to continue: "respawn", or press the key the game names)` : ""}`);
+  if (w.dead) L.push(`YOU ARE DEAD${killedBy(w, ctx)}${w.notice ? ` — game says: ${capText(w.notice, ctx, "notice")}` : ""}${cfg.controls.confirm ? ` (to continue: "respawn", or press the key the game names)` : ""}`);
   else if (w.won) L.push("★ GOAL REACHED (the game reports a win) — keep exploring or end the session");
   if (d.near.length) {
     L.push("near (dist in cells, compass dir):");
@@ -148,11 +162,12 @@ export function observeText(w, ctx) {
   if (d.remembered.length) L.push(`out of view (last seen): ${d.remembered.map((r) => `${r.key} ${r1(r.dist)} ${r.dir}`).join(", ")}`);
   if (w.dialogue) {
     const dl = w.dialogue;
-    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}"${clip(oneLine(dl.text), 220)}"`);
+    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}${capText(dl.text, ctx, "dialogue")}`);
     if (dl.options.length) L.push(`  ${dl.options.map((o, i) => `${i + 1}) ${clip(oneLine(o), 60)}`).join("   ")}    (choose ${dl.options.map((_, i) => i + 1).join(" / ")})`);
   }
-  if (w.menu) L.push(`menu open: ${clip(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), 140)}`);
-  if (d.notice && !w.dead) L.push(`game says: "${clip(oneLine(d.notice), 140)}"`);
+  if (w.menu) L.push(`menu open: ${capText(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), ctx, "menu", "")}`);
+  if (d.notice && !w.dead) L.push(`game says: ${capText(d.notice, ctx, "notice")}`);
+  screenLine(w, ctx, L);
   if (d.map) {
     const leg = cfg.profile === "platformer" ? "@ you, # solid" + (w.map?.legend ? `, ${Object.entries(w.map.legend).filter(([k]) => k !== "#" && k !== ".").slice(0, 5).map(([k, v]) => `${k} ${clip(v, 14)}`).join(", ")}` : "")
       : "@ you, # wall, . open, ? unknown";
@@ -162,7 +177,7 @@ export function observeText(w, ctx) {
   const evs = (ctx.events || []).filter((e) => !e.dup && (!["bump", "stat"].includes(e.kind) || (ctx.events || []).length < 6));
   if (evs.length) {
     const shown = evs.slice(-9);
-    L.push(`events: ${shown.map((e) => `${r1(e.t)} ${e.text}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`);
+    L.push(`events: ${shown.map((e) => `${r1(e.t)} ${evText(e, ctx)}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`);
   }
   if (ctx.first) {
     L.push(`controls: ${describeControls(cfg)}`);
@@ -195,7 +210,7 @@ function turnData(w, ctx) {
   for (const s of w.stats) fields[s.label] = s.value;
   return { t: +w.t.toFixed(2), frame: w.frame, profile: "turn", scene: w.scene, yourTurn: w.yourTurn, fields,
     choices: (w.choices || []).map((c) => ({ n: c.n, label: c.label, id: c.id, legal: c.legal, selected: c.selected || undefined })),
-    dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, dead: w.dead, over: w.over || false, won: w.won, result: ctx.result || null,
+    dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, screenText: w.screenText || null, dead: w.dead, over: w.over || false, won: w.won, result: ctx.result || null,
     events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })) };
 }
 
@@ -216,11 +231,11 @@ function turnText(w, ctx) {
   if (d.goal) L.push(`goal: ${clip(oneLine(d.goal), 140)}`);
   if (d.result) L.push(d.result.line);
   if (w.won) L.push("★ GAME WON (the game reports a win) — play on or end the session");
-  else if (w.dead || w.over) L.push(`GAME OVER${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}`);
+  else if (w.dead || w.over) L.push(`GAME OVER${w.notice ? ` — game says: ${capText(w.notice, ctx, "notice")}` : ""}`);
   for (const [k, txt] of long) L.push(`${k}: ${txt}`);
   if (w.dialogue) {
     const dl = w.dialogue;
-    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}"${clip(oneLine(dl.text), 220)}"`);
+    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}${capText(dl.text, ctx, "dialogue")}`);
     if (dl.options.length) L.push(`  ${dl.options.map((o, i) => `${i + 1}) ${clip(oneLine(o), 60)}`).join("   ")}    (choose ${dl.options.map((_, i) => i + 1).join(" / ")})`);
   }
   const ch = w.choices || [];
@@ -233,12 +248,13 @@ function turnText(w, ctx) {
     L.push(`choices (pick <n> or pick <words>)${ch.length > shown.length ? ` — ${ch.length} in all, the rest by words` : ""}:`);
     for (const l of lines) L.push(`  ${l}`);
   } else if (!ch.length && !w.dialogue) L.push(w.yourTurn === false ? "no choices: the others are playing (wait)" : "no choices listed right now");
-  if (w.menu) L.push(`menu open: ${clip(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), 140)}`);
-  if (d.notice && !w.dead) L.push(`game says: "${clip(oneLine(d.notice), 140)}"`);
+  if (w.menu) L.push(`menu open: ${capText(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), ctx, "menu", "")}`);
+  if (d.notice && !w.dead) L.push(`game says: ${capText(d.notice, ctx, "notice")}`);
+  screenLine(w, ctx, L);
   const evs = (ctx.events || []).filter((e) => !e.dup);
   if (evs.length) {
     const shown = evs.slice(-9);
-    L.push(`events: ${shown.map((e) => `${r1(e.t)} ${e.text}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`);
+    L.push(`events: ${shown.map((e) => `${r1(e.t)} ${evText(e, ctx)}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`);
   }
   if (ctx.first) {
     const ctl = describeControls(cfg);
@@ -274,7 +290,7 @@ function defenseData(w, ctx) {
   return { t: +w.t.toFixed(2), frame: w.frame, profile: "defense", base: P ? { hp: P.hp, maxHp: P.maxHp } : null, stats,
     enemies: live.filter((th) => th.rel === "hostile").map(one).sort(byDist), items: live.filter((th) => th.rel === "item").map(one).sort(byDist),
     others: live.filter((th) => th.rel !== "hostile" && th.rel !== "item").length,
-    dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, dead: w.dead, won: w.won, result: ctx.result || null,
+    dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, screenText: w.screenText || null, dead: w.dead, won: w.won, result: ctx.result || null,
     events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })) };
 }
 
@@ -290,7 +306,7 @@ function defenseText(w, ctx) {
   if (d.result) L.push(d.result.line);
   if (ctx.live && ctx.order && !(d.result && /^(✔|✖)/.test(d.result.line || ""))) L.push(`your order (still running): ${ctx.order}`);
   else if (ctx.live && !ctx.order) L.push("no order running: standing by (attacking the nearest enemy) while the game plays on");
-  if (w.dead) L.push(`THE BASE HAS FALLEN${killedBy(w, ctx)}${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}`);
+  if (w.dead) L.push(`THE BASE HAS FALLEN${killedBy(w, ctx)}${w.notice ? ` — game says: ${capText(w.notice, ctx, "notice")}` : ""}`);
   else if (w.won) L.push("★ GOAL REACHED (the game reports a win)");
   const fmt = (e, enemy) => {
     const bits = [];
@@ -313,13 +329,14 @@ function defenseText(w, ctx) {
   if (d.items.length) L.push(`items: ${d.items.slice(0, 6).map((e) => `${e.key} ${e.dist == null ? "" : `${e.dist} `}${e.screen ? `(screen ${e.screen.join(",")})` : ""}`.trim()).join(" · ")}${d.items.length > 6 ? ` +${d.items.length - 6}` : ""}`);
   if (w.dialogue) {
     const dl = w.dialogue;
-    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}"${clip(oneLine(dl.text), 220)}"`);
+    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}${capText(dl.text, ctx, "dialogue")}`);
     if (dl.options.length) L.push(`  ${dl.options.map((o, i) => `${i + 1}) ${clip(oneLine(o), 60)}`).join("   ")}    (choose ${dl.options.map((_, i) => i + 1).join(" / ")})`);
   }
-  if (w.menu) L.push(`menu open: ${clip(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), 140)}`);
-  if (d.notice && !w.dead) L.push(`game says: "${clip(oneLine(d.notice), 140)}"`);
+  if (w.menu) L.push(`menu open: ${capText(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), ctx, "menu", "")}`);
+  if (d.notice && !w.dead) L.push(`game says: ${capText(d.notice, ctx, "notice")}`);
+  screenLine(w, ctx, L);
   const evs = (ctx.events || []).filter((e) => !e.dup && e.kind !== "bump");
-  if (evs.length) { const shown = evs.slice(-9); L.push(`events: ${shown.map((e) => `${r1(e.t)} ${e.text}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`); }
+  if (evs.length) { const shown = evs.slice(-9); L.push(`events: ${shown.map((e) => `${r1(e.t)} ${evText(e, ctx)}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`); }
   if (ctx.first) {
     const ctl = describeControls(cfg);
     if (ctl) L.push(`controls: ${ctl}`);

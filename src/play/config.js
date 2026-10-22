@@ -109,7 +109,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     telegraph: raw.telegraph || null, ignore: raw.ignore || null,
     avoid: raw.avoid || null,               // per-thing: keep paths off it unless it's the goal (null: e.avoid / e.door / Door, Stairs, Exit… types)
     mapWindow: raw.mapWindow != null ? !!raw.mapWindow : null,   // true: state.map is a window that follows the player (else detected when it moves)
-    dialogue: raw.dialogue || null, menu: raw.menu || null, goal: raw.goal || null, notice: raw.notice || null,
+    dialogue: raw.dialogue || null, menu: raw.menu || null, goal: raw.goal || null, notice: raw.notice || null, screenText: raw.screenText || null,
     scene: raw.scene || null, won: raw.won || null, dead: raw.dead || null, map: raw.map === false ? false : raw.map || null,
     stats: Array.isArray(raw.stats) ? raw.stats : null,
     ammo: raw.ammo || null,
@@ -147,6 +147,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     fps: { sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2, ...(raw.fps || {}) },
     module: raw.module || null,
     resultChars: Math.max(40, +(raw.resultChars ?? 800) || 800),   // how much of a call's result an observation shows (look --full: all)
+    textCap: parseTextCap(raw.textCap),     // chars of dialogue/notice/menu/screen text an observation shows (look --full: all)
     screen: raw.screen || null,              // per-thing screen position expression with `e` (tap:target); null: e.screen, state.camera
     fightWait: Math.max(1, +(raw.fightWait ?? 20) || 20),   // s a waiting fight ("when they come", defense) waits without a "for"
     // turn profile (also read by any profile when the game lists choices): the game's choices, whose turn it is, the
@@ -158,6 +159,15 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
   };
   cfg.northSign = /^\+/.test(String(cfg.north)) ? 1 : -1;
   return cfg;
+}
+
+/** play.textCap: a number (every field) or {dialogue, notice, menu, screen}; defaults 600 / 600 / 600 / 1200. */
+export const TEXT_CAP = { dialogue: 600, notice: 600, menu: 600, screen: 1200 };
+export function parseTextCap(t) {
+  const out = { ...TEXT_CAP }, ok = (v) => Number.isFinite(+v) && +v > 0 ? Math.max(40, Math.round(+v)) : null;
+  if (t != null && typeof t !== "object") { const n = ok(t); if (n) for (const k of Object.keys(out)) out[k] = n; }
+  else if (t && typeof t === "object") for (const k of Object.keys(out)) { const n = ok(t[k]); if (n) out[k] = n; }
+  return out;
 }
 
 /**

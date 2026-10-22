@@ -2,11 +2,11 @@
 // iPhone Safari, or Firefox) pointed at launch.url with ?witness=<addr>, so the page's adapter connects back over
 // WebSocket. Optional device emulation (src/core/devices.js), an emulated audio autoplay policy (src/core/web-init.js),
 // and screenshots of what the screen shows at device pixels (capture "element" / "screen").
-// Playwright is an OPTIONAL dependency, resolved from the game project first, then from Witness.
+// Playwright is an OPTIONAL dependency, resolved from the game project first, then the current folder, Witness, global.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { WitnessError } from "./session.js";
 import { track, untrack } from "./procs.js";
@@ -16,18 +16,37 @@ import { webInit, safeInsetsInit } from "./web-init.js";
 export const ENGINES = ["chromium", "webkit", "firefox"];
 export const CAPTURES = ["canvas", "element", "screen"];
 
-async function loadPlaywright(root) {
+// Where Playwright is looked for, in order: the config's folder (a config in the OS temp folder has none), WITNESS_PLAYWRIGHT,
+// the current folder, Witness's own install (and the folders above it), then the global npm folder (and NODE_PATH).
+function npmGlobalRoot() {
+  try { const r = spawnSync("npm root -g", { shell: true, encoding: "utf8", windowsHide: true, timeout: 15000 }); return r.status === 0 ? r.stdout.trim() || null : null; } catch { return null; }
+}
+export async function loadPlaywright(root) {
+  const where = [["the config's folder", path.join(path.resolve(root), "package.json")]];
   // WITNESS_PLAYWRIGHT: a folder with Playwright installed (node_modules/playwright), when the game project has none
-  const extra = process.env.WITNESS_PLAYWRIGHT ? [path.join(path.resolve(process.env.WITNESS_PLAYWRIGHT), "package.json")] : [];
-  for (const base of [path.join(root, "package.json"), ...extra, import.meta.url]) {
+  if (process.env.WITNESS_PLAYWRIGHT) where.push(["WITNESS_PLAYWRIGHT", path.join(path.resolve(process.env.WITNESS_PLAYWRIGHT), "package.json")]);
+  where.push(["the current folder", path.join(process.cwd(), "package.json")], ["the Witness install", fileURLToPath(import.meta.url)]);
+  const tried = new Set(), looked = [];
+  // flat: base's folder holds the packages itself (a NODE_PATH entry of any name), so load <folder>/<name> by path
+  const attempt = (label, base, flat = false) => {
+    const dir = path.dirname(base);
+    if (tried.has(dir)) return null;
+    tried.add(dir);
+    looked.push(`${label} (${dir})`);
     try {
       const req = createRequire(base);
       for (const name of ["playwright", "playwright-core", "@playwright/test"]) {
-        try { const m = req(name); const pw = m.chromium ? m : m.default; let version = null; try { version = req(`${name}/package.json`).version; } catch { /* exports map */ } return { pw, version, from: path.dirname(req.resolve(name)) }; } catch { /* next */ }
+        const id = flat ? path.join(dir, name) : name;
+        try { const m = req(id); const pw = m.chromium ? m : m.default; let version = null; try { version = req(flat ? path.join(id, "package.json") : `${name}/package.json`).version; } catch { /* exports map */ } return { pw, version, from: path.dirname(req.resolve(id)) }; } catch { /* next */ }
       }
     } catch { /* next */ }
-  }
-  throw new WitnessError("browser games need Playwright: run 'npm i -D playwright && npx playwright install chromium' in your project (or in the Witness folder, or point WITNESS_PLAYWRIGHT at a folder that has it)");
+    return null;
+  };
+  for (const [label, base] of where) { const r = attempt(label, base); if (r) return r; }
+  // global installs: npm i -g playwright (the global node_modules folder itself), NODE_PATH folders
+  const globals = [...String(process.env.NODE_PATH || "").split(path.delimiter).filter(Boolean).map((d) => ["NODE_PATH", d]), ...[npmGlobalRoot()].filter(Boolean).map((d) => ["the global npm folder", d])];
+  for (const [label, dir] of globals) { const r = attempt(label, path.join(path.resolve(dir), "package.json"), true); if (r) return r; }
+  throw new WitnessError(`browser games need Playwright: run 'npm i -D playwright && npx playwright install chromium' in your project (or in the Witness folder, or 'npm i -g playwright', or point WITNESS_PLAYWRIGHT at a folder that has it). Looked in: ${looked.join(", ")}`);
 }
 
 async function waitForUrl(url, ms, child = null) {
@@ -40,7 +59,25 @@ async function waitForUrl(url, ms, child = null) {
   throw new WitnessError(`the dev server never answered at ${url}`);
 }
 
-/** launch.{engine, device, audioUnlock, capture} checked and resolved: {engine, device, policy, capture}. */
+// launch.media: CSS media features emulated through Playwright (newContext + emulateMedia), so matchMedia and @media
+// rules both see them: {reducedMotion: "reduce"|"no-preference", colorScheme: "dark"|"light",
+// forcedColors: "active"|"none", contrast: "more"|"no-preference"}.
+export const MEDIA = { reducedMotion: ["reduce", "no-preference"], colorScheme: ["dark", "light"], forcedColors: ["active", "none"], contrast: ["more", "no-preference"] };
+export function mediaOptions(media) {
+  if (media == null || media === false) return null;
+  if (typeof media !== "object" || Array.isArray(media)) throw new WitnessError(`launch.media ${JSON.stringify(media)}: use an object such as {"reducedMotion": "reduce", "colorScheme": "dark"}`);
+  const out = {};
+  for (const [k, v] of Object.entries(media)) {
+    if (v == null) continue;
+    if (!MEDIA[k]) throw new WitnessError(`launch.media.${k}: unknown media feature (use ${Object.keys(MEDIA).join(", ")})`);
+    const val = String(v).toLowerCase();
+    if (!MEDIA[k].includes(val)) throw new WitnessError(`launch.media.${k} ${JSON.stringify(v)}: use ${MEDIA[k].map((x) => `"${x}"`).join(" or ")}`);
+    out[k] = val;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** launch.{engine, device, audioUnlock, capture, media} checked and resolved: {engine, device, policy, capture, media}. */
 export function browserOptions(launch) {
   const engine = String(launch.engine || "chromium").toLowerCase();
   if (!ENGINES.includes(engine)) throw new WitnessError(`unknown browser engine '${launch.engine}': use chromium (default), webkit (iPhone/iPad Safari's engine) or firefox`);
@@ -52,7 +89,7 @@ export function browserOptions(launch) {
   // corners drawn over screenshots (safeOverlay); both need a phone or tablet profile
   const safe = launch.safeInsets || launch.safeOverlay ? safeInsetsFor(device, launch.safeInsets || true) : null;
   if ((launch.safeInsets || launch.safeOverlay) && !safe) throw new WitnessError(`--safe-insets / --safe-overlay need a phone or tablet profile (--device iphone-15[-landscape], iphone-15-safari, iphone-15-pro-max, iphone-se, ipad), a custom device of a known size, or explicit insets (--safe-insets 59,0,34,0: top,right,bottom,left CSS px; or a preset name such as iphone-portrait); ${device ? `${device.name} has no safe-area preset` : "this launch has no device"}`);
-  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture, captureSet: launch.capture != null, safeInsets: launch.safeInsets ? safe : null, safeOverlay: launch.safeOverlay ? safe : null };
+  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture, captureSet: launch.capture != null, safeInsets: launch.safeInsets ? safe : null, safeOverlay: launch.safeOverlay ? safe : null, media: mediaOptions(launch.media) };
 }
 
 /** A clear message when the engine's browser build isn't installed for this Playwright version. */
@@ -102,7 +139,7 @@ export async function openBrowserGame(launch, root, addr, keep, extra = {}) {
     const args = opts.engine === "chromium" ? ["--use-gl=angle", "--use-angle=swiftshader", "--autoplay-policy=no-user-gesture-required"] : [];
     try { browser = await type.launch({ headless: launch.headless !== false, args }); }
     catch (e) { throw launchError(e, opts.engine, pwInfo, root); }
-    const context = await browser.newContext(contextOptions(opts.device, launch.size || [1280, 720]));
+    const context = await browser.newContext({ ...contextOptions(opts.device, launch.size || [1280, 720]), ...(opts.media || {}) });
     await context.addInitScript(webInit, { policy: opts.policy, standalone: !!(opts.device && opts.device.standalone), platform: (opts.device && opts.device.platform) || null, maxTouchPoints: opts.device && opts.device.maxTouchPoints != null ? opts.device.maxTouchPoints : null });
     if (opts.safeInsets) await context.addInitScript(safeInsetsInit, opts.safeInsets);
     if (launch.inject) {
@@ -119,6 +156,8 @@ export async function openBrowserGame(launch, root, addr, keep, extra = {}) {
       });
     }
     const page = await context.newPage();
+    // newContext's media options cover every page and reload; emulateMedia again for builds that ignore one of them
+    if (opts.media) { try { await page.emulateMedia(opts.media); } catch (e) { keep(`[witness] launch.media: this Playwright (${pwInfo.version || "?"}) couldn't emulate ${JSON.stringify(opts.media)}: ${e.message}\n`); } }
     page.on("console", (m) => keep(`[page] ${m.text()}\n`));
     page.on("pageerror", (e) => keep(`[page error] ${e.message}\n`));
     const u = new URL(launch.url);
@@ -159,7 +198,12 @@ function makeWeb(page, browser, opts, pwInfo) {
   });
   return {
     engine: opts.engine, engineVersion: browser.version(), playwright: pwInfo.version, device: opts.device, policy: opts.policy, captureMode: opts.capture, captureSet: opts.captureSet, page,
-    safeInsets: opts.safeInsets, safeOverlay: opts.safeOverlay,
+    safeInsets: opts.safeInsets, safeOverlay: opts.safeOverlay, media: opts.media,
+    /** launch.media: what the page's matchMedia says for each emulated feature (null: none emulated). */
+    mediaInfo: () => (opts.media ? evalWeb((m) => {
+      const q = { reducedMotion: "prefers-reduced-motion", colorScheme: "prefers-color-scheme", forcedColors: "forced-colors", contrast: "prefers-contrast" };
+      return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, matchMedia(`(${q[k]}: ${v})`).matches]));
+    }, opts.media) : Promise.resolve(null)),
     /** --safe-insets: what the page's CSS had rewritten so far (null: not emulated). */
     safeInfo: () => (opts.safeInsets ? evalWeb(() => (globalThis.__witnessSafe ? globalThis.__witnessSafe.info() : null)) : Promise.resolve(null)),
     info: () => evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.info() : null)),
@@ -170,7 +214,7 @@ function makeWeb(page, browser, opts, pwInfo) {
     async state() {
       const i = await evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.info() : null));
       if (!i) return null;
-      return { engine: opts.engine, device: opts.device ? opts.device.name : null, dpr: i.dpr, viewport: i.viewport, standalone: i.standalone, touch: i.maxTouchPoints > 0, audio: i.audio };
+      return { engine: opts.engine, device: opts.device ? opts.device.name : null, dpr: i.dpr, viewport: i.viewport, standalone: i.standalone, touch: i.maxTouchPoints > 0, audio: i.audio, media: opts.media || null };
     },
     /** PNG of the main canvas as displayed (element) or of the viewport (screen), at device pixels. */
     async capture(kind = "element") {
@@ -198,10 +242,12 @@ function makeWeb(page, browser, opts, pwInfo) {
         const r = best.getBoundingClientRect(), w = sz ? sz[0] : best.width, h = sz ? sz[1] : best.height;
         return [r.left + (x * r.width) / w, r.top + (y * r.height) / h];
       }, [ev.x, ev.y, size || null]);
-      if (ev.kind === "tap") {
-        if (!(opts.device && opts.device.touch)) throw new WitnessError("dom:tap needs a touch device (--device iphone-15, or a custom device with \"touch\": true); use dom:click on desktop");
-        await page.touchscreen.tap(p[0], p[1]);
-      } else await page.mouse.click(p[0], p[1]);
+      // dom:tap on a desktop viewport (no touch screen): a mouse click at the same point, said once
+      if (ev.kind === "tap" && !(opts.device && opts.device.touch)) {
+        if (!this.tapWarned) { this.tapWarned = true; process.stderr.write("⚠ dom:tap on a desktop viewport (no touch screen): sent as a mouse click at the same point (--device iphone-15 for real touches, or dom:click)\n"); }
+        await page.mouse.click(p[0], p[1]);
+      } else if (ev.kind === "tap") await page.touchscreen.tap(p[0], p[1]);
+      else await page.mouse.click(p[0], p[1]);
     },
   };
 }

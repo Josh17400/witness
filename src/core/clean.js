@@ -8,9 +8,10 @@
 // shots, in subfolders too, --out files and measure pictures there); in the replays folder *.jsonl recordings and their .state.json. Anything else (a
 // picture you put there) stays, and witness/refs (named baselines: shot --save-ref) is never touched. witness/movies
 // (Godot --write-movie output): its .avi/.png/.wav files go, the folder and its .gdignore stay. A shots or
-// replays folder outside the project, the project folder itself, or the Witness install (its top level and code; a
+// replays folder outside the project (unless it is a witness/shots or witness/replays folder; a manifest alone doesn't count), the project folder itself, or the Witness install (its top level and code; a
 // project inside it, such as an example, is fine) is refused, not pruned.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { REG_DIR, listEntries, removeEntry } from "../play/registry.js";
@@ -55,14 +56,20 @@ function liveDirs() {
 }
 
 const inside = (dir, parent) => { const r = path.relative(parent, dir); return !!r && !r.startsWith("..") && !path.isAbsolute(r); };
+/** A folder Witness itself lays out: <somewhere>/witness/shots or /witness/replays. Not "holds the manifest": an outside
+ *  folder (Desktop) with a manifest also holds the user's own files, and GENERATED names (figure_1.png) would match them. */
+export const witnessOutput = (d) => /^(shots|replays)$/i.test(path.basename(d)) && path.basename(path.dirname(d)).toLowerCase() === "witness";
 /**
- * Why a configured output folder must not be pruned (null when it may): it has to be a folder inside the project, not
- * the project itself, and neither the Witness install nor a folder holding it.
+ * Why a configured output folder must not be pruned (null when it may): it has to be a folder inside the project (or,
+ * for a config outside any project, such as one in the OS temp folder, a Witness output folder: .../witness/shots,
+ * .../witness/replays), not the project itself, and neither the Witness install nor a
+ * folder holding it. Only what Witness generated is removed from it either way (GENERATED names, the manifest).
  */
 export function unsafeDir(dir, root) {
   const d = path.resolve(dir), r = path.resolve(root);
   if (d === r) return "is the project folder itself";
-  if (!inside(d, r)) return "is outside the project";
+  if (!inside(d, r) && !witnessOutput(d)) return "is outside the project (and not a witness/shots or witness/replays folder)";
+  if (path.parse(d).root === d || d === path.resolve(os.homedir())) return "is a drive root or the home folder";
   // the install, a folder holding it, one of its top-level folders (examples/, tests/) or anything in its code; a project
   // of its own inside it (examples/js-node, a test fixture) keeps its witness/shots prunable
   if (d === WITNESS_ROOT || inside(WITNESS_ROOT, d) || path.dirname(d) === WITNESS_ROOT || WITNESS_CODE.some((c) => inside(d, path.join(WITNESS_ROOT, c)))) return "is (or holds) the Witness install";

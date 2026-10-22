@@ -76,6 +76,11 @@ export const r0 = (x) => (x == null || !Number.isFinite(+x) ? "?" : String(Math.
 export const fmtT = (t) => `${(Math.round(t * 10) / 10).toFixed(1)}s`;
 export function clip(s, n) { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 export function oneLine(s) { return String(s ?? "").replace(/\s+/g, " ").trim(); }
+/** Game text on one line, quoted, cut at n with a plain note of how much is left (full: whole). */
+export function capText(s, n = 600, full = false, q = '"') {
+  const t = oneLine(s);
+  return full || t.length <= n ? `${q}${t}${q}` : `${q}${t.slice(0, n - 1)}…${q} (cut, ${t.length - n + 1} more chars; look --full)`;
+}
 
 /** Plural → singular for matching ("wolves" → "wolf", "potions" → "potion", "enemies" → "enemy"). */
 export function singular(w) {

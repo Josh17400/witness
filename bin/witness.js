@@ -64,7 +64,8 @@ Common options:
   59,0,34,0 gives them by hand (top,right,bottom,left CSS px) or a preset name; a custom device of a known size, e.g.
   393×852, gets that device's preset; launch.device {"safeInsets": [..]} too) · --safe-overlay (launch.safeOverlay): the
   island, home indicator and rounded corners drawn over screenshots after capture · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a
-  tap) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
+  tap) · --reduced-motion / --color-scheme dark|light (launch.media {reducedMotion, colorScheme, forcedColors, contrast}:
+  matchMedia and @media both see them) · launch.callTimeout / WITNESS_CALL_TIMEOUT (seconds a call/eval may take, 60) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
   dom:tap:x,y@t / dom:click / dom:key:space (real browser input) · expressions web.audio.state, web.dpr
   --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
   --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
@@ -85,7 +86,8 @@ const CMD_HELP = {
   its .witness-generated manifest (test step shots, --out files there); in replays *.jsonl and their .state.json.
   witness/movies (Godot --write-movie): its .avi/.png/.wav go, the folder and its .gdignore stay.
   Other files stay, and witness/refs (named baselines: shot --save-ref) is never pruned. A "shots"/"replays" folder
-  outside the project, the project folder itself or the Witness install is refused. 'witness play clean t1' deletes
+  outside the project (unless it is some folder's witness/shots or witness/replays, e.g. from a config in the temp
+  folder), the project folder itself or the Witness install is refused. 'witness play clean t1' deletes
   one playtest once you've acted on it. A playtest written in the last "hours" (24) always stays unless --all.
   --dry-run lists what would go and removes nothing.`,
   test: `witness test [files...] [--name <substring>] [--json]
@@ -412,7 +414,7 @@ const commands = {
         report.push(`  ${describeWeb(s.web)}`);
         const clock = clockLine(s);
         if (clock) report.push(`  ${clock}`);
-        webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy, dom: !!s.web.dom, epoch: s.epoch ?? null, reset: s.web.resetMode || "handler" };
+        webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy, dom: !!s.web.domPage, media: s.web.media || null, epoch: s.epoch ?? null, reset: s.web.resetMode || "handler" };
         if (s.web.policy === "gesture") { const p = await unlockProbe(s); p.forEach(mark); webSummary.unlock = p[0] ? p[0][1] : null; const none = p.some(([, t]) => /no AudioContext was created/.test(t)); webSummary.audioLocked = none ? null : p.some(([, t]) => /stayed SUSPENDED/.test(t)); if (none) webSummary.noAudioContext = true; }
       }
       // step + snapshot
@@ -679,7 +681,11 @@ const commands = {
         const now = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null };
         const txt = (l) => `${l.engine} · ${l.device || "desktop"}`;
         if (now.engine !== r.launch.engine || now.device !== r.launch.device) console.log(`⚠ recorded on ${txt(r.launch)}, replaying on ${txt(now)}: the viewport differs (touch coordinates, layout); add${r.launch.device ? ` --device ${r.launch.device}` : " --device none"} --engine ${r.launch.engine}`);
+        // launch.media (reduced motion, colour scheme …): a game that honours it plays differently without it
+        if (JSON.stringify(r.launch.media || null) !== JSON.stringify(s.web.media || null)) console.log(`⚠ recorded with launch.media ${JSON.stringify(r.launch.media || {})}, replaying with ${JSON.stringify(s.web.media || {})}: a game that honours prefers-reduced-motion / color-scheme can play differently; set the same launch.media`);
       }
+      // a playtest records a fingerprint of the build it played (src/play/build.js): say when this one differs
+      if (r.file) { const { buildWarning } = await import("../src/play/build.js"); const bw = await buildWarning(r.file, cfg, root).catch(() => null); if (bw) console.log(bw); }
       const st = await begin(s, { replay: r });
       const frames = opt.at ? timeList(opt.at, []).map((t) => framesOf(t, s.fps, r.dts)) : [...r.marks.map((m) => m.frame), r.frames];
       const watch = opt.watch ? splitTop(String(opt.watch)) : [];

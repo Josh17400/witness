@@ -64,7 +64,8 @@ Every option is optional, but without `snapshot` the CLI has nothing to test, an
 reset, §6). The full type is `StartOptions` in `witness.d.ts`.
 
 In the browser `start()` first waits until the page's pictures and fonts are ready (every `<img>`
-and CSS `background-image` decoded, `document.fonts.ready`, two display frames; at most 10 s),
+and CSS `background-image` decoded, `document.fonts.ready`, two display frames; at most 10 s, and 2.5 s for any one
+picture: WebKit's `decode()` can stay pending forever, logged as a warning),
 because a big background still decoding on real time makes the first screenshots differ between
 runs (worst at DPR 3). `start({ ready: { ms: 300 } })` waits longer, `start({ ready: false })`
 skips it; `witness.ready()` is the same wait on its own.
@@ -630,7 +631,7 @@ witness.saveRecording()      // browser record mode: download / flush
 witness.input, witness.inputEvents(), witness.frame, witness.time
 witness.createMixer({ sampleRate, channels }).play(samples, { delay, volume })
 witness.real                 // the real setTimeout/requestAnimationFrame/now/Date
-await witness.ready({ frames, ms, timeout })  // pictures decoded + fonts ready (start() does it)
+await witness.ready({ frames, ms, timeout, each })  // pictures decoded + fonts ready (start() does it; each picture ≤ 2.5 s)
 await witness.boot()         // run <script type="text/witness"> deferred classic scripts (§1b)
 witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(root?) -> [{label, id}]
 witness.animating()          // finite CSS / Web Animations still running; also globalThis.__witnessAnimating()
@@ -638,7 +639,14 @@ witness.drawing              // false on frames nobody sees (step "draw": "last"
 witness.draw(draw) -> bool   // the same as a call: draws unless skipped; repaints before a screenshot after an undrawn frame
 ```
 Page config, read at import: `globalThis.WITNESS_CONFIG = { addr, record, seed, takeover, raf,
-timers, webaudio, console, animations, videos, audioSeconds, audioRate, virtualEnded, realtimeWatch, epoch }` (also
-`?witness_<name>=0` in the URL for the on/off ones, `?witness_epoch=`, and `WITNESS_EPOCH` in Node).
-`witness.json` for browser games also takes `launch.inject`, `launch.reset`, `launch.keepStorage`
+timers, webaudio, console, animations, videos, audioSeconds, audioRate, virtualEnded, realtimeWatch, epoch, audioCapture }` (also
+`?witness_<name>=0` in the URL for the on/off ones, `?witness_epoch=`, and `WITNESS_EPOCH` in Node). `audioCapture: false`
+(`?witness_audio=0`, `WITNESS_AUDIO=0`; what `witness play` sessions use: nothing there reads audio) renders no audio, while
+every AudioContext's `currentTime` and `ended` events still follow simulated time exactly as with capture; witness.json
+`play.audio: true` keeps the capture in play sessions.
+`witness.json` for browser games also takes `launch.inject`, `launch.reset`, `launch.keepStorage`,
+`launch.media` (`{"reducedMotion": "reduce", "colorScheme": "dark", "forcedColors": "active", "contrast": "more"}`:
+emulated by the browser, so `matchMedia` and `@media` rules both see it; `--reduced-motion`, `--color-scheme dark`;
+recorded in play replays), `launch.callTimeout` (seconds a `call` / `eval` may take before it fails, default 60;
+`WITNESS_CALL_TIMEOUT` wins: the error names the call, its args and whether the game's promise was still unresolved)
 and `"clock": { "epoch": … }`.

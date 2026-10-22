@@ -42,7 +42,7 @@ else {
   process.env.WITNESS_PLAYWRIGHT = pwDir;
   const P = (n) => path.join(here, "projects", n);
   const { findConfig, openGame } = await import(pathToFileURL(path.join(root, "src", "core", "launch.js")).href);
-  const { begin, stepTo, queueInput } = await import(pathToFileURL(path.join(root, "src", "core", "runner.js")).href);
+  const { begin, stepTo, queueInput, runTest } = await import(pathToFileURL(path.join(root, "src", "core", "runner.js")).href);
   const shotOf = async (s) => { const r = await s.screenshot(); return decodePNG(Buffer.from(r.data, "base64")); };
   const px = (im, x, y) => Array.from(im.data.slice((y * im.width + x) * 4, (y * im.width + x) * 4 + 3));
   const same = (a, b) => a && b && a.width === b.width && a.height === b.height && Buffer.compare(Buffer.from(a.data), Buffer.from(b.data)) === 0;
@@ -53,7 +53,7 @@ else {
     const g = await openGame(f.config, f.root, { quiet: true });
     try {
       const s = g.session, epoch = Date.UTC(2026, 5, 15);
-      ok("DOM page: hello says browser (DOM); the CLI captures the viewport; reset by reload (no reset handler)", s.hello.engine === "browser (DOM)" && s.web.captureMode === "screen" && s.web.dom === true && s.web.resetMode === "reload" && s.has("reset"), [s.hello.engine, s.web.captureMode, s.web.resetMode]);
+      ok("DOM page: hello says browser (DOM); the CLI captures the viewport; reset by reload (no reset handler)", s.hello.engine === "browser (DOM)" && s.web.captureMode === "screen" && s.web.domPage === true && typeof s.web.dom === "function" && s.web.resetMode === "reload" && s.has("reset"), [s.hello.engine, s.web.captureMode, s.web.resetMode]);
       let st = await begin(s, { seed: 1 });
       await stepTo(s, st, 18);
       let a = (await s.snapshot()).state;
@@ -90,6 +90,15 @@ else {
       st = await begin(s, { seed: 2 });
       st = await begin(s, { seed: 3 });
       ok("a reset right after a reload doesn't reload again", s.web.reloads === 2, s.web.reloads);
+      // test steps on the page (0.7.8): expectPage / evalAs in the game, until (+ untilPage) after a call, a per-test epoch
+      const july = Date.UTC(2026, 6, 1);
+      const rt = await runTest(s, { name: "page", file: "dom.witness.json", index: 0, epoch: "2026-07-01", steps: [
+        { at: 0.3, expectPage: ["document.querySelectorAll('#card').length == 1", "document.querySelectorAll('#card.moved').length"], evalAs: { divs: "document.querySelectorAll('div').length" }, expect: ["divs == 4", `state.now - ${july} <= 300 && state.now >= ${july}`] },
+        { call: ["move"], until: "state.ends >= 2", untilPage: "document.querySelector('#card').classList.contains('moved')", timeout: 3, expect: "state.taps == 1" },
+        { after: 0.1, expectPage: "game.ends == 2 && game.taps == 1" },
+      ] });
+      const fm = rt.failures.filter((x) => x.kind !== "warn").map((x) => x.message);
+      ok("page test steps: expectPage runs in the page (a failing one says 'got 0'), evalAs feeds expects, until met when both transitions ended (~1 s after the call), a per-test epoch", rt.expects.passed === 6 && rt.expects.failed === 1 && fm.length === 1 && /page document\.querySelectorAll\('#card\.moved'\)\.length — got 0/.test(fm[0]) && rt.untils && rt.untils[0].frame >= 75 && rt.untils[0].frame <= 82 && rt.epoch === july && s.epoch === epoch, JSON.stringify({ e: rt.expects, f: rt.failures, u: rt.untils, ep: s.epoch }));
     } finally { await g.stop(); }
   }
 

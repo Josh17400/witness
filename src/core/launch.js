@@ -80,19 +80,18 @@ export const DEFAULT_EPOCH = Date.UTC(2026, 0, 1);
 const pinnedEpochs = new WeakMap();
 export function resolveEpoch(cfg) {
   if (pinnedEpochs.has(cfg)) return pinnedEpochs.get(cfg);
-  const v = cfg && cfg.clock && typeof cfg.clock === "object" ? cfg.clock.epoch : null;
-  let ms = null;
-  if (v != null && v !== "") {
-    if (typeof v === "number" || /^-?\d+$/.test(String(v))) ms = Math.floor(+v);
-    else if (String(v).toLowerCase() === "today") { const d = new Date(); ms = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()); }
-    else {
-      const t = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? `${v}T00:00:00Z` : String(v));
-      if (!Number.isFinite(t)) throw new WitnessError(`${CONFIG_NAME}: clock.epoch ${JSON.stringify(v)} isn't a date: use an ISO date ("2026-06-15" or "2026-06-15T09:00:00Z"), "today" or ms since 1970`);
-      ms = t;
-    }
-  }
+  const ms = parseEpoch(cfg && cfg.clock && typeof cfg.clock === "object" ? cfg.clock.epoch : null, `${CONFIG_NAME}: clock.epoch`);
   pinnedEpochs.set(cfg, ms);
   return ms;
+}
+/** An epoch as written (ISO date / time, "today", ms) → ms, or null when unset; `what` names it in the error. */
+export function parseEpoch(v, what = "epoch") {
+  if (v == null || v === "") return null;
+  if (typeof v === "number" || /^-?\d+$/.test(String(v))) return Math.floor(+v);
+  if (String(v).toLowerCase() === "today") { const d = new Date(); return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()); }
+  const t = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? `${v}T00:00:00Z` : String(v));
+  if (!Number.isFinite(t)) throw new WitnessError(`${what} ${JSON.stringify(v)} isn't a date: use an ISO date ("2026-06-15" or "2026-06-15T09:00:00Z"), "today" or ms since 1970`);
+  return t;
 }
 /** One line about the virtual Date for doctor (JS adapter games). */
 export function epochNote(session) {
@@ -114,7 +113,7 @@ async function attachWeb(session, web) {
   if (web.captureMode === "canvas" && !web.captureSet) {
     try {
       const info = await web.info();
-      if (info && !(info.canvases || []).some((c) => c.rect[2] * c.rect[3] > 0)) { web.captureMode = "screen"; web.dom = true; }
+      if (info && !(info.canvases || []).some((c) => c.rect[2] * c.rect[3] > 0)) { web.captureMode = "screen"; web.domPage = true; }
     } catch { /* attached page */ }
   }
   if (web.captureMode !== "canvas") {
@@ -183,6 +182,14 @@ function setupReload(session, web, launch, srv, timeoutMs) {
 
 const tail = (out, n = 3000) => out.join("").slice(-n);
 
+/** The per-request wait in seconds: WITNESS_CALL_TIMEOUT (env) or launch.callTimeout, else null (Session's 60 s). */
+export function callTimeout(cfg) {
+  const env = process.env.WITNESS_CALL_TIMEOUT, v = env != null && env !== "" ? env : cfg && cfg.launch ? cfg.launch.callTimeout : null;
+  if (v == null || v === "") return null;
+  if (!(+v > 0)) throw new WitnessError(`${env != null && env !== "" ? "WITNESS_CALL_TIMEOUT" : "launch.callTimeout"} ${JSON.stringify(v)}: use seconds (> 0), e.g. 120`);
+  return +v;
+}
+
 /**
  * Godot's --write-movie creates no folders, and a missing one crashes current Godot at startup: make the folder of a
  * relative movie path (against --path, else the launch folder). user:// and res:// paths are Godot's own business.
@@ -197,7 +204,7 @@ export function movieDirs(args, cwd) {
 
 /**
  * Start (or attach to) the game and return {session, stop(), restart(), proc, output()}.
- * opts: {attach, port, timeout, env, quiet}. A launch (not --attach) first takes a machine-wide heavy-process slot
+ * opts: {attach, port, timeout, env, quiet, audio (false: no audio capture, for play sessions)}. A launch (not --attach) first takes a machine-wide heavy-process slot
  * (src/core/budget.js); the game and its dev server are killed with their process trees on stop, and when the CLI
  * exits for any reason (src/core/procs.js). restart(): stop, then launch again (a fresh process: tests on an adapter
  * without 'reset'); the returned object is updated in place.
@@ -206,12 +213,15 @@ export async function openGame(cfg, root, opts = {}) {
   const launch = cfg.launch || {};
   const attach = opts.attach || launch.attach;
   if (!attach && !launch.url && !launch.command) throw new WitnessError(`${CONFIG_NAME} has no "launch" — add {"launch": {"command": "path/to/game", "args": []}} (or "attach": true, or "url": "..."). Run 'witness init' for a template.`);
+  const callSec = callTimeout(cfg);
   const slot = attach ? null : await acquireSlot({ browser: !!launch.url, label: `${cfg.name || "game"}: witness ${process.argv.slice(2).map((x) => (path.isAbsolute(x) ? path.basename(x) : x)).join(" ")}`.slice(0, 160) });   // a daemon's session folder → its name
   let srv;
   try { srv = await listen({ port: attach ? (opts.port || launch.port || DEFAULT_ATTACH_PORT) : 0 }); }
   catch (e) { if (slot) slot.release(); throw e.code === "EADDRINUSE" ? new WitnessError(`port ${e.port || opts.port || launch.port || DEFAULT_ATTACH_PORT} is in use: another Witness is waiting there (or pass --port)`) : e; }
   const addr = `127.0.0.1:${srv.port}`;
   const epoch = resolveEpoch(cfg);
+  // opts.audio false (play sessions: nothing reads audio): the JS adapter captures none, its AudioContext clock runs on
+  const noAudio = opts.audio === false;
   let proc = null, browser = null, server = null, web = null;
   const out = [];
   const keep = (d) => { out.push(d.toString()); if (out.length > 400) out.splice(0, out.length - 400); };
@@ -235,9 +245,9 @@ export async function openGame(cfg, root, opts = {}) {
     } else if (launch.url) {
       // Browser games: optional dev server + headless browser (see src/core/browser.js).
       const { openBrowserGame } = await import("./browser.js");
-      ({ browser, server, web } = await openBrowserGame(launch, root, addr, keep, { query: { witness_epoch: epoch } }));
+      ({ browser, server, web } = await openBrowserGame(launch, root, addr, keep, { query: { witness_epoch: epoch, ...(noAudio ? { witness_audio: 0 } : {}) } }));
     } else {
-      const env = { ...process.env, ...(launch.env || {}), ...(opts.env || {}), WITNESS_ADDR: addr, WITNESS: "1", ...(epoch != null ? { WITNESS_EPOCH: String(epoch) } : {}) };
+      const env = { ...process.env, ...(launch.env || {}), ...(opts.env || {}), WITNESS_ADDR: addr, WITNESS: "1", ...(epoch != null ? { WITNESS_EPOCH: String(epoch) } : {}), ...(noAudio ? { WITNESS_AUDIO: "0" } : {}) };
       movieDirs(launch.args, path.resolve(root, launch.cwd || "."));
       // posix: its own process group, so a stop or Ctrl-C takes the whole tree (a shell's game, a launcher's child)
       proc = track(spawn(launch.command, launch.args || [], {
@@ -261,6 +271,7 @@ export async function openGame(cfg, root, opts = {}) {
     ]);
     if (cfg.fps) session.hello.fps = cfg.fps;
     session.epoch = epoch;
+    if (callSec) session.requestTimeoutMs = callSec * 1000;
     if (web) {
       await attachWeb(session, web);
       setupReload(session, web, launch, srv, (opts.timeout || cfg.timeout || 60) * 1000);

@@ -70,6 +70,8 @@ function compileExpr(src) {
 }
 
 const ENTITY_HELPERS = new Set(["entities", "all", "count", "first", "byId", "near"]);
+/** Names expressions already mean something by (helpers, time helpers): an "evalAs" name can't be one of them. */
+export const RESERVED_NAMES = new Set(["state", "snap", "prev", "frame", "time", "web", "entities", "all", "count", "first", "byId", "near", "dist", "len", "approx", "abs", "min", "max", "floor", "round", "sqrt", "sum", "Math", "JSON", "__t", ...TEMPORAL]);
 
 /**
  * The top-level state keys a set of expressions reads, for the protocol's snapshot "paths" filter: state.player.pos
@@ -141,6 +143,7 @@ export function helpers(snap, prev = null, ctx = null, targs = []) {
     return Math.sqrt(s);
   };
   return {
+    ...(snap && snap.__vars ? snap.__vars : {}),   // test steps' "evalAs" values (page values by name); the helpers below win
     state, snap, prev: prev ? prev.state : null, frame: snap ? snap.frame : 0, time: snap ? snap.time : 0,
     web: snap && snap.web != null ? snap.web : null,   // browser launches: device, dpr, audio policy/state (filled when an expression reads web.)
     entities,

@@ -113,6 +113,8 @@ export interface WitnessReadyOptions {
   ms?: number;
   /** Most real milliseconds to spend decoding (default 10000). */
   timeout?: number;
+  /** Most real milliseconds for any one picture's decode() (default 2500; WebKit's can stay pending forever). */
+  each?: number;
 }
 
 /** A PCM capture buffer that follows simulated time (games that synthesize their own sound). */
@@ -161,6 +163,9 @@ export interface WitnessConfig {
   virtualEnded?: boolean;
   /** false: don't watch for game code running on real time between Witness's frames (perf.realtime, doctor's warning). */
   realtimeWatch?: boolean;
+  /** false: render and capture no audio (play sessions; ?witness_audio=0, WITNESS_AUDIO=0); AudioContext clocks and
+   *  "ended" events still follow simulated time exactly as with capture. */
+  audioCapture?: boolean;
   /** false: iPhone-Safari audio policy on pages without the CLI's init script (contexts start suspended; resume()
    *  only during a gesture). Browser launches take it from --no-auto-unlock instead. ?witness_audio_unlock=0 */
   audioUnlock?: boolean;

@@ -3,6 +3,82 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.8 (2026-10-22)
+
+From Euchre Unleashed's 1.2.0 release (pure-DOM iPhone web card game: 362 Witness tests and Sonnet play batches on
+0.7.3).
+
+**Tests: page checks, waits and a per-test clock**
+- `expectPage: ["document.querySelectorAll('#actions .abtn').length == 3"]`: each expression runs in the game
+  (protocol `eval`, so a browser game reads its DOM) and must be truthy; a failure shows `page <expr> — got 2` or
+  `— threw: <message>`. `evalAs: {"btns": "<js>"}` names a page value that this and later steps' `expect` / `until` /
+  `probe` / ranges read (`"expect": "btns == 3"`); helper names (`count`, `state` …) are refused. An adapter without
+  `eval` fails the test once, clearly. No more harness `mark` calls to check the page.
+- `{"until": "state.phase == 'bidding'", "timeout": 5}` steps (every `every` frames, default 1) until its
+  expressions hold, failing at `timeout` (default 10 s) with the expression, the frame window and the last value;
+  `untilPage` waits on a page expression. Its `call` / `input` run first, its `expect`s once met; `res.untils` has the
+  frames. With an `until` or `after` step, a test's point steps run in file order: no `at` = right after the step
+  before, `"after": 0.5` = 0.5 s after it (or after the until was met), `at` stays absolute (an error, phrased by
+  cause, when a step's `at` is earlier than the steps before it). Tests without them behave as before.
+- A test's `"epoch"` (or `"now"`: ISO date/time, `"today"`, ms) starts the virtual `Date` there for every reset that
+  test makes (begin, measure steps, reloads); `res.epoch` reports it. The next test without one goes back to
+  witness.json `clock.epoch`, else the adapter's own configured start (new optional `hello.epoch`: the JS adapter's
+  `WITNESS_CONFIG.epoch` / `?witness_epoch=` / `WITNESS_EPOCH`), so results don't depend on test order.
+- Warnings for two easy mistakes: an `expect` beside a `call` sees the state after the call; an input's `@t` inside a
+  step is relative to the step (`{"at": 1.3, "input": "dom:tap:196,40@1.4"}` taps at 2.7 s). Only items that really
+  start at or after the step's `at` warn (a tap's release, a hold's end and drag moves don't).
+- `--repeat` on a game without `reset`: audio captured at different sample rates across passes compares correctly
+  (fixed by 0.7.6's tap rate; the repeat path is now covered by a test).
+
+**Browser**
+- `launch.media` `{"reducedMotion": "reduce", "colorScheme": "dark", "forcedColors": "active", "contrast": "more"}`
+  (`--reduced-motion`, `--color-scheme dark|light`) is emulated by the browser, so `matchMedia` and `@media` rules
+  both see it; expressions read it as `web.media`, doctor checks the page sees it, play replays record it and
+  `witness replay` warns when it differs.
+- `launch.callTimeout` / `WITNESS_CALL_TIMEOUT` (seconds, default 60) for slow `call` / `eval` (cold WebKit under
+  load). The timeout error names the call and its args; the JS adapter answers a new out-of-queue `busy` query, so it
+  also says which command the page is still in and whether a promise the game returned never resolved.
+- `witness.ready()` / `start()` give each picture at most 2.5 s (`each`): WebKit's `decode()` can stay pending
+  forever; logged once as a warning.
+- `dom:tap` on a desktop viewport is sent as a mouse click at the same point (warned once) instead of failing.
+- Playwright is found from the config's folder, `WITNESS_PLAYWRIGHT`, the current folder, the Witness install, then a
+  global install (`npm root -g`, `NODE_PATH`); the error lists where it looked. A config in the temp folder works.
+- `witness clean` may prune some folder's `witness/shots` / `witness/replays` outside the project (a temp-folder
+  config); any other outside folder is still refused, manifest or not.
+- Play sessions capture no audio (`?witness_audio=0` / `WITNESS_AUDIO=0`, `WITNESS_CONFIG.audioCapture: false`); every
+  AudioContext's clock and `ended` events run exactly as with capture. `play.audio: true` keeps it.
+- The DOM-page flag is `web.domPage` (it had overwritten the `web.dom()` input method).
+
+**Play**
+- Texts no longer clipped at 220 / 140: dialogue, notice and menu show up to 600 characters, screen text 1200
+  (`play.textCap`, a number or per field); a longer one ends `…" (cut, N more chars; look --full)`, and `look --full`
+  shows it whole, events and game-over lines included. `--json` is always uncut.
+- `state.screenText` (a string or lines; or a `play.screenText` expression): the whole readable text of the screen (a
+  results panel, a rules page) as its own `screen text:` line, so a tester doesn't call a full panel empty.
+- `choose` / `pick` count a changed notice as the answer (`chose 6) "Hint": notice changed → "…"`), even when the
+  bubble fades within half a second; a notice whose numbers alone tick (`Your turn: 9s` → `8s`) doesn't count.
+- Each playtest writes `witness.run.json` (the session's config: absolute launch paths, `launch.server` kept, no
+  build step, tests / shots / replays relative to the folder) and a build fingerprint (the page at `launch.url` plus
+  the same-origin scripts, styles and imports it loads, inline module scripts' too, dev-server runtime skipped; or the
+  launched files) in the replay header and report.json. report.md's replay commands use it, so they work after a
+  batch's per-run config is gone; `witness replay` warns `⚠ the build changed since this playtest (/js/cards.js
+  changed)`.
+- `play batch --dry-run` prints each tester's claude command and its whole brief.
+
+**Adoption steps**
+1. Nothing required. Playtest observations are longer (600-character texts); set `play.textCap` lower if a profile
+   gets too wordy.
+2. *Optional, Euchre:* replace the harness `mark` workaround with `expectPage` (DOM checks such as button counts and
+   panel text) and `evalAs` for values later `expect`s compare; then drop the `mark` call from the game.
+3. *Optional, Euchre:* replace fixed-time steps that wait for AI turns or animations with `until` / `untilPage` steps
+   plus `after` offsets, and keep the remaining `at`s in time order.
+4. *Optional, Euchre:* tests that depend on the date (daily deals, streaks, holidays) set `"epoch": "2026-12-24"` on
+   the test instead of one witness.json-wide `clock.epoch`.
+5. *Optional, Euchre:* drop its `matchMedia` stubs and CSS rewriting for reduced motion / dark mode; set
+   `launch.media` (or pass `--reduced-motion` / `--color-scheme dark`) and check `web.media` in expressions.
+6. *Optional, Euchre:* expose `state.screenText` (the visible panel's `innerText`: tournament results, rules) so play
+   testers read whole panels; slow WebKit runs can set `launch.callTimeout: 120`.
+
 ## 0.7.7 (2026-10-21)
 
 From The Fort's 0.7.6 adoption and its 139-minute wave-100 playtest.
