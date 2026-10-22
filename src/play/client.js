@@ -32,7 +32,8 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
                      witness.json, or --clock: an expression giving in-game hours) has advanced 4 hours
   witness play do "<orders>" [-s t1] [--for S]  run orders ("fight wolf block; then talk guard") until done/interrupted
                      (live: replaces the plan now, answers at done / an important event / the horizon; play goes on)
-  witness play look [-s t1] [--shot] [--json] [--wait]   the observation now (live --wait: at the next event or horizon)
+  witness play look [-s t1] [--shot] [--json] [--wait] [--full]   the observation now (live --wait: at the next event or horizon;
+                     --full: plus the latest game call's answer, uncut)
   witness play shot [-s t1] [--scale 2]          screenshot → PNG path (open it with the Read tool)
   witness play note '<text>' [--bug|--confusing|--fun|--idea] [--shot] [-s t1]
   witness play end [-s t1|--all] [--fun 1-5] [--difficulty 1-5] [--feedback '…']   → report.md/json + replay, stops everything
@@ -205,10 +206,11 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       updateEntry(name, { pid: child.pid });
       // the daemon may first wait for a machine-wide heavy-process slot (src/core/budget.js): allow for it, and say so
       const deadline = Date.now() + ((cfg.timeout || 60) + 20) * 1000 + budgetLimits().waitMs;
-      let info = null, told = false;
+      let info = null, told = 0;
       while (Date.now() < deadline) {
         await sleep(100);
-        if (!told) { try { const w = /^▸ waiting for a free slot.*$/m.exec(fs.readFileSync(path.join(dir, "daemon.log"), "utf8")); if (w) { told = true; console.error(w[0]); } } catch { /* not yet */ } }
+        // relay the daemon's wait lines (the first, then its ~60 s progress lines) as they appear
+        try { const w = fs.readFileSync(path.join(dir, "daemon.log"), "utf8").match(/^▸ (still )?waiting for a free slot.*$/gm) || []; for (; told < w.length; told++) console.error(w[told]); } catch { /* not yet */ }
         info = sessionInfo({ dir });
         if (info && (info.state === "ready" || info.state === "failed")) break;
         if (!pidAlive(child.pid)) { info = sessionInfo({ dir }); break; }
@@ -231,7 +233,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
     case "look": case "next": {
       const e = findSession(opt);
       const wait = sub === "next" || !!opt.wait;
-      print(await request(e, "look", { shot: !!opt.shot, json: !!opt.json, scale: opt.scale, wait, for: opt.for !== undefined && opt.for !== true ? +opt.for : undefined }).catch((err) => fail(err.message)), opt);
+      print(await request(e, "look", { shot: !!opt.shot, json: !!opt.json, full: !!opt.full, scale: opt.scale, wait, for: opt.for !== undefined && opt.for !== true ? +opt.for : undefined }).catch((err) => fail(err.message)), opt);
       return;
     }
     case "do": {

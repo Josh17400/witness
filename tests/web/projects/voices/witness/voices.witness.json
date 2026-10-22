@@ -1,0 +1,11 @@
+[
+  { "name": "voices: onended-capped sounds through compressors and a convolver",
+    "steps": [ { "at": 0.2, "expect": ["state.audio == 'none'"] },
+               { "at": 0.6, "expect": ["state.started > 0"], "match": "early" },
+               { "at": 1.0 }, { "at": 1.5 },
+               { "at": 2.0, "expect": ["state.dropped > 0", "state.ended > 10", "state.early == 0", "state.late < 0.023",
+                                  "state.lsn > 5", "state.ghost == 0", "state.twice == 0"] } ] },
+  { "name": "voices: a second seed",
+    "seed": 5,
+    "steps": [ { "at": 0.2 }, { "at": 0.7 }, { "at": 1.3 } ] }
+]

@@ -101,7 +101,7 @@ than the adapter.
 
 Witness keeps the machine responsive when several agents use it at once: every game or headless-browser launch takes
 a slot of a machine-wide budget (`WITNESS_MAX_PROCS`, default 3; `WITNESS_MAX_BROWSERS`, default 1) and waits up to
-`WITNESS_BUDGET_WAIT` seconds (default 90) for one, and a launched game is killed with its whole process tree when the
+`WITNESS_BUDGET_WAIT` seconds (default 90; 600 for `test`, `doctor` and `play batch`) for one, and a launched game is killed with its whole process tree when the
 command ends, fails or is interrupted. Generated output (witness/shots, replays, playtests, Godot movies) is pruned
 automatically; named baselines go in witness/refs (`shot --save-ref`), which is never pruned.
 

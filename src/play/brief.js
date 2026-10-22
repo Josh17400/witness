@@ -1,5 +1,5 @@
 // Witness play: the prompt a main agent hands to a playtester subagent (Agent tool, model sonnet at low effort, or haiku).
-import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS, ORDER_CARD_TURN } from "./orders.js";
+import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS, ORDER_CARD_TURN, ORDER_CARD_DEFENSE } from "./orders.js";
 import { shimCommand } from "./registry.js";
 import { fmtHours } from "./until.js";
 import fs from "node:fs";
@@ -55,19 +55,27 @@ export function makeBrief({ cli, configDir, name = "t1", goal, persona = "newbie
   const budget = untilText ? `BUDGET: play until ${untilText}. The ⏲ line under the header shows the game clock and how much is left. When an order answers "★ UNTIL REACHED", the playtest is over: run END.`
     : `BUDGET: about ${minutes} minutes of GAME time (the session shows it as [t …s]): keep playing until the header shows [t ${Math.round(minutes * 60)}s] or more.`;
   const hard = wallMinutes != null ? ` Hard limit: the session stops itself after ${wallMinutes} real (wall-clock) minutes, so END before that (if it stops first, still run END with your feedback).` : "";
-  const turn = profile === "turn";
-  const card = turn ? ORDER_CARD_TURN : profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
+  const turn = profile === "turn", defense = profile === "defense";
+  // the developer's notes go into the prompt as plain text: backticks become quotes (the brief tells testers a
+  // backtick breaks a command, so a note quoting an order in backticks would teach the opposite)
+  if (extra) extra = String(extra).replace(/`([^`\n]*)`/g, "\"$1\"").replace(/`/g, "'");
+  const card = turn ? ORDER_CARD_TURN : defense ? ORDER_CARD_DEFENSE : profile === "platformer" ? `${ORDER_CARD_PLATFORMER}\ngoto <thing|x,y> · pickup [thing] · press <key> [xN] · hold <key> <s> · wait [s] · stop`
     : profile === "fps" ? `goto <thing|x,y> · go forward|back|left|right [cells] · go <n|s|e|w…> [cells] · explore [dir] · follow <thing>
 fight [thing] [retreat 30%] [kite N] [hold] · flee · look <dir|thing> · reload · weapon <n>
 press <key> [xN] · hold <key> <s> · wait [s] · stop · respawn · modifiers: for 8s · careful`
       : ORDER_CARD;
-  const does = turn ? "sending the choice you pick to the game, waiting for your turn" : profile === "platformer" ? "running, jumping gaps and walls, stomping enemies that can be stomped"
+  const does = turn ? "sending the choice you pick to the game, waiting for your turn" : defense ? "attacking (or tapping) the enemies that come at your base, waiting for the next wave" : profile === "platformer" ? "running, jumping gaps and walls, stomping enemies that can be stomped"
     : profile === "fps" ? "moving, turning, aiming and firing, strafing, reloading" : "walking around walls, aiming, attack timing, blocking when an enemy winds up";
   const tips = turn
     ? `- Each observation lists the game's choices (cards you can play, menu buttons, moves): "pick 3" or "pick <words from its label>". Choices marked "(not allowed)" are ones the game says you can't take now.
 - "wait" waits until it's your turn again (or the choices change, or a dialogue opens); "wait 10" waits at most 10 s. A good loop is "pick <n>; wait".
 - Watch the header (score, whose turn, phase) and the events line: they tell you what the others played and how the round went.
 - Visit the menus and settings too, not only the main game, and check that what you picked is what the game did.`
+    : defense
+    ? `- You never move: your base stays put and enemies come to it. Each observation lists the enemies closest first (cells from the base, how fast they close in, when they would arrive).
+- "fight enemies for 25s" attacks the nearest enemy over and over, waits for the next one when the field is empty, and reaching the 25 s is the plan (a success). Use it as your main order in a wave.
+- Between fights use the game's own controls with press (its specials, collecting, upgrades) and "wait 5 quiet" to let time pass without enemy alerts stopping the wait.
+- Watch the base hp and the events line; when a choice or a menu opens, answer it with choose (or the calls the game offers).`
     : profile === "platformer"
     ? `- "run right" / "goto <thing>" moves you through the level; jumps over gaps, walls and stompable enemies are automatic.
 - When the autopilot stops in front of something it can't handle (a plant in a pipe, a big gap), decide: "wait for <it>", "wait 1", "jump right long".
@@ -85,7 +93,7 @@ PERSONA: ${turn ? PERSONAS_TURN[P] : PERSONAS[P].text}.
 ${budget}${hard}
 ${live ? `THE GAME IS LIVE: it keeps running in real time while you think${watch ? " (and a person is watching it)" : ""}. Decide quickly. Your last order keeps running until it's done or you give a new one; with nothing ordered the autopilot stands by (holds position, guards, shoots back). A \`do\` replaces the plan at once and comes back after about 4 s of game time, or sooner if the order finishes or something important happens; the game doesn't stop when it comes back. Prefer longer orders that keep you busy ("explore north", "goto <far thing>", "fight nearest enemy") over many tiny ones, and don't resend an order that's still running (use NEXT). To keep your order running and just hear what happens next, run the NEXT command (it gives no new order). Enemies met on the way are fought automatically and your order then carries on.` : "Game time only passes inside orders; the game is paused while you think, so take your time."}
 
-HOW IT WORKS: you give plain-word orders; an autopilot carries them out frame by frame (${does}). You decide WHAT to do and WHY. After every order you get a short text observation: ${turn ? "the game's own fields (score, whose turn, your hand, the phase...), why the order stopped, the choices you can pick, dialogue, recent events" : "your hp and stats, why the order stopped, what is near (distance in map cells and compass direction, north = up), a small map, dialogue, recent events"}.
+HOW IT WORKS: you give plain-word orders; an autopilot carries them out frame by frame (${does}). You decide WHAT to do and WHY. After every order you get a short text observation: ${turn ? "the game's own fields (score, whose turn, your hand, the phase...), why the order stopped, the choices you can pick, dialogue, recent events" : defense ? "your base's hp and the game's stats, why the order stopped, the enemies on the field (closest first, cells from the base, how soon they arrive), dialogue, recent events" : "your hp and stats, why the order stopped, what is near (distance in map cells and compass direction, north = up), a small map, dialogue, recent events"}.
 
 COMMANDS (run with your Bash tool, one at a time, exactly as written: the full path, no cd, nothing chained with && or ;. Each returns in a few seconds):
   start:  ${start}
@@ -97,11 +105,11 @@ COMMANDS (run with your Bash tool, one at a time, exactly as written: the full p
   end:    ${S} end --fun <1-5> --difficulty <1-5> --feedback '<3-6 sentences>'
   (if ${S} isn't found, the long form works the same: ${W} do "<orders>" -s ${name}, ${W} next -s ${name}, …)
   Note and feedback text goes in single quotes, written plainly: no backticks, no $, no apostrophes inside (say "do not", "the guards sword"). A backtick makes the command fail.
-${live ? "SPEED: every turn, send ONLY the next command. No text before or after it, no plans written out: typing costs you time while the game plays on. Think briefly, act." : `TURNS: send only the next command each turn (no commentary), but think it through first: the game waits for you${watch ? " (a person is watching, and each order plays at real speed)" : ""}, so use that time to pick the best move${turn ? "" : ": weapon for the range, cover, when to back off"}.`}
+${live ? "SPEED: every turn, send ONLY the next command. No text before or after it, no plans written out: typing costs you time while the game plays on. Think briefly, act." : `TURNS: send only the next command each turn (no commentary), but think it through first: the game waits for you${watch ? " (a person is watching, and each order plays at real speed)" : ""}, so use that time to pick the best move${turn ? "" : defense ? ": what to fire at, when to use a special, what to buy" : ": weapon for the range, cover, when to back off"}.`}
 
 ORDERS (chain several with ";"):
 ${card.split("\n").map((l) => `  ${l}`).join("\n")}
-${turn ? "Pick choices by their number or by words from their label, as the observation lists them." : 'Name things exactly as the observation lists them (a type like Wolf, an exact one like Wolf#5, a name, or "nearest enemy", "item").'}${controls ? `\nThe game's controls (for press/hold): ${controls}.` : ""}
+${turn ? "Pick choices by their number or by words from their label, as the observation lists them." : defense ? 'Name enemies as the observation lists them (a type like Grunt, an exact one like Grunt#5), or just "enemies".' : 'Name things exactly as the observation lists them (a type like Wolf, an exact one like Wolf#5, a name, or "nearest enemy", "item").'}${controls ? `\nThe game's controls (for press/hold): ${controls}.` : ""}
 
 PLAY WELL:
 - Read each observation fully: the result line (${live ? "✔ done / ✖ failed / ⚠ something important / ⏩ still running" : "✔ done / ✖ failed / ⚠ interrupted / ⏱ time"}) tells you what happened and why.

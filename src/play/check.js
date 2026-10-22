@@ -22,6 +22,7 @@ function playerOf(state) {
 export function checkSnapshot(state, profile = "topdown") {
   state = state || {};
   if (profile === "turn") return checkTurn(state);
+  if (profile === "defense") return checkDefense(state);
   const P = playerOf(state), pos = P ? rawPos(P) : null;
   const ents = (Array.isArray(state.entities) ? state.entities : []).filter((e) => e && typeof e === "object" && e !== P);
   const has = (f) => ents.some((e) => f in e);
@@ -67,6 +68,24 @@ export function checkSnapshot(state, profile = "topdown") {
     add("look", "player look or yaw/pitch, and ammo", P ? (Array.isArray(P.look) || P.yaw != null) && P.ammo != null : false, "aiming, reloading", "player.look = [x, y, z] (or yaw/pitch), player.ammo");
     add("los", "entity line of sight", ents.length ? has("los") || has("visible") : null, "shooting only what's in sight", "entity los: true/false");
   }
+  return out;
+}
+
+/** The defense profile's checklist: the base (hp, a position to measure from), enemies flagged hostile, screen positions, outcome. */
+function checkDefense(state) {
+  const P = playerOf(state), pos = P ? rawPos(P) : null;
+  const ents = (Array.isArray(state.entities) ? state.entities : []).filter((e) => e && typeof e === "object" && e !== P);
+  const out = [], add = (key, label, ok, unlocks, hint, seen) => out.push({ key, label, ok, unlocks, hint, ...(seen ? { seen } : {}) });
+  add("base", "the base as state.player with pos and hp", !!(P && pos) && (P.hp ?? P.health) != null, "distances from the base, arrival times, low-hp wakes, the base hp in the header",
+    !P ? "state.player = {pos, hp, maxHp} (the base, tower or fort you defend)" : !pos ? "the base has no pos" : "the base has no hp");
+  add("entities", "entities with id, type and pos", ents.length ? ents.every((e) => e.id != null && (e.type ?? e.kind) != null && rawPos(e)) : null, "the enemy list, targets, kills",
+    "state.entities = [{id, type, pos, hp}] (none listed right now: between waves?)", ents.length ? `${ents.length}: ${[...new Set(ents.map((e) => String(e.type ?? e.kind ?? "")))].slice(0, 8).join(", ")}` : null);
+  add("flags", "entity hostile / item flags", ents.length ? ents.some((e) => "hostile" in e || "enemy" in e) : null, "exact classification (else guessed from type names)", "hostile: true on enemies, item: true on pickups");
+  const cam = state.camera && typeof state.camera === "object";
+  add("screen", "screen positions (for attack \"tap:target\")", ents.some((e) => e.screen || e.screenPos) || cam ? true : null, "tapping or clicking an enemy where it is drawn",
+    "entity screen: [x, y] in the game's pixels, or state.camera = {pos: [x, y], zoom} (only needed with attack \"tap:target\" / \"click:target\")");
+  add("outcome", "won / dead (the base fell)", "won" in state || "dead" in state || "gameOver" in state || "victory" in state, "the outcome and the end-of-run wake", "state.dead when the base falls, state.won");
+  add("dialogue", "choices as a dialogue (upgrades between waves, perks)", "dialogue" in state || "dialog" in state ? true : null, "choose <n> for the game's own picks", "state.dialogue = {speaker, text, options[]} while one is open");
   return out;
 }
 

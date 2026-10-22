@@ -5,8 +5,10 @@
 //   slot-<i>.json      any launch, i < WITNESS_MAX_PROCS (default 3; 0 = no limit)
 //   browser-<i>.json   headless browsers also take one of these, i < WITNESS_MAX_BROWSERS (default 1)
 // A slot file names its owner by pid AND the OS's start time for that pid, so a crashed owner's slot is taken back
-// and a pid the OS gave to another process doesn't keep holding it. A launch waits for a free slot (saying so once),
-// then fails after WITNESS_BUDGET_WAIT seconds (default 90: under the 120 s an agent's Bash tool waits for a command).
+// and a pid the OS gave to another process doesn't keep holding it; `at` (when the slot was taken, not when it began waiting; an older file without it: its
+// mtime) shows how long each holder has run. A launch waits for a free slot (saying so, then every ~60 s), then fails
+// after WITNESS_BUDGET_WAIT seconds: default 600 for the long batch commands (test, doctor, play batch), else 90
+// (under the 120 s an agent's Bash tool waits for a quick command: play start/do, shot, eval ...).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,7 +20,11 @@ import { atExit } from "./procs.js";
 const envInt = (k, d) => { const v = process.env[k]; return v !== undefined && v !== "" && Number.isFinite(+v) ? Math.max(0, Math.floor(+v)) : d; };
 export const budgetDir = () => process.env.WITNESS_BUDGET_DIR
   || path.join(process.env.WITNESS_PLAY_REGISTRY ? path.dirname(path.resolve(process.env.WITNESS_PLAY_REGISTRY)) : os.tmpdir(), "witness-budget");
-export const budgetLimits = () => ({ max: envInt("WITNESS_MAX_PROCS", 3), maxBrowsers: envInt("WITNESS_MAX_BROWSERS", 1), waitMs: envInt("WITNESS_BUDGET_WAIT", 90) * 1000 });
+export const budgetLimits = () => ({ max: envInt("WITNESS_MAX_PROCS", 3), maxBrowsers: envInt("WITNESS_MAX_BROWSERS", 1), waitMs: envInt("WITNESS_BUDGET_WAIT", defaultWaitSec()) * 1000 });
+/** The default wait (s) of a command line: 600 for the long batch commands (run in the background anyway), else 90. */
+export const defaultWaitSec = (argv = process.argv.slice(2)) => (/^(test|doctor)$/.test(argv[0]) || (argv[0] === "play" && argv[1] === "batch") ? 600 : 90);
+/** 40 s, 4 min, 1 h 5 min */
+export const fmtAge = (ms) => { const s = Math.max(0, Math.round(ms / 1000)), m = Math.floor(s / 60); return s < 60 ? `${s} s` : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
 
 export function pidAlive(pid) {
   if (!pid) return false;
@@ -90,26 +96,34 @@ function reclaim(row, token) {
 function take(dir, kind, n, me) {
   for (let i = 0; i < n; i++) {
     const file = path.join(dir, `${kind}-${i}.json`);
-    try { fs.writeFileSync(file, JSON.stringify({ ...me, kind }), { flag: "wx" }); return file; } catch (e) { if (e.code !== "EEXIST") throw e; }
+    try { fs.writeFileSync(file, JSON.stringify({ ...me, kind, at: new Date().toISOString() }), { flag: "wx" }); return file; } catch (e) { if (e.code !== "EEXIST") throw e; }
   }
   return null;
 }
 function drop(file, token) { const o = readSlot(file); if (o && o.token === token) { try { fs.unlinkSync(file); } catch { /* gone */ } } }
 
-const who = (o) => (o ? `pid ${o.pid}${o.label ? ` (${o.label})` : ""}` : "a launch starting");
+/** A holder row as "the-fort: witness play _daemon b1 (pid 123, running 4 min)"; `at`, else the file's mtime (older files). */
+export function who(r, now = Date.now()) {
+  const o = r.owner;
+  if (!o) return "a launch starting";
+  let since = Date.parse(o.at || "");
+  if (!Number.isFinite(since)) { try { since = fs.statSync(r.file).mtimeMs; } catch { since = NaN; } }
+  const run = Number.isFinite(since) ? `, running ${fmtAge(now - since)}` : "";
+  return o.label ? `${o.label} (pid ${o.pid}${run})` : `pid ${o.pid}${run ? ` (${run.slice(2)})` : ""}`;
+}
 
 /**
  * Take a heavy-process slot (and a browser slot when `browser`). Waits while the machine is at its limit, then throws.
  * Returns { release() } (also released when the process exits). opts override the environment (tests).
  */
-export async function acquireSlot({ browser = false, label = "", log = (m) => console.error(m), dir = budgetDir(), max, maxBrowsers, waitMs, pollMs = 1000 } = {}) {
+export async function acquireSlot({ browser = false, label = "", log = (m) => console.error(m), dir = budgetDir(), max, maxBrowsers, waitMs, pollMs = 1000, progressMs = 60000 } = {}) {
   const L = budgetLimits();
   max = max ?? L.max; maxBrowsers = maxBrowsers ?? L.maxBrowsers; waitMs = waitMs ?? L.waitMs;
   if (!max) return { release() {}, files: [] };
   fs.mkdirSync(dir, { recursive: true });
-  const me = { pid: process.pid, key: myKey(), token: crypto.randomBytes(8).toString("hex"), at: new Date().toISOString(), browser, label: String(label).slice(0, 160) };
+  const me = { pid: process.pid, key: myKey(), token: crypto.randomBytes(8).toString("hex"), browser, label: String(label).slice(0, 160) };
   const known = new Map(), t0 = Date.now();
-  let told = false;
+  let told = 0;
   for (;;) {
     const rows = scanSlots(dir, known);
     for (const r of rows) if (r.stale) reclaim(r, me.token);
@@ -125,10 +139,15 @@ export async function acquireSlot({ browser = false, label = "", log = (m) => co
     if (a) drop(a, me.token);   // a browser launch waits holding nothing
     const busy = scanSlots(dir, known).filter((r) => !r.stale && (r.kind === "slot" || browser));
     const what = a ? `${maxBrowsers} headless browser${maxBrowsers === 1 ? "" : "s"} (WITNESS_MAX_BROWSERS)` : `${max} game/browser process${max === 1 ? "" : "es"} (WITNESS_MAX_PROCS)`;
-    const holders = [...new Map(busy.filter((r) => (a ? r.kind === "browser" : r.kind === "slot")).map((r) => [r.owner ? r.owner.pid : r.file, r.owner])).values()];
-    if (holders.length && holders.every((o) => o && o.pid === process.pid)) throw new WitnessError(`this command already holds every slot for ${what}: it can't start another until it stops one`);
-    if (Date.now() - t0 >= waitMs) throw new WitnessError(`no free slot after ${Math.round((Date.now() - t0) / 1000)} s: this machine is already running ${what}, held by ${holders.map(who).join(", ") || "other launches"}. Wait for them to finish (or stop them: 'witness play stop --all' for playtests), or raise the limit with the environment variable (budget folder: ${dir})`);
-    if (!told) { told = true; log(`▸ waiting for a free slot: the machine-wide limit is ${what}, in use by ${holders.map(who).join(", ") || "other launches"} (gives up after ${Math.round(waitMs / 1000)} s)`); }
+    const holders = [...new Map(busy.filter((r) => (a ? r.kind === "browser" : r.kind === "slot")).map((r) => [r.owner ? r.owner.pid : r.file, r])).values()];
+    if (holders.length && holders.every((r) => r.owner && r.owner.pid === process.pid)) throw new WitnessError(`this command already holds every slot for ${what}: it can't start another until it stops one`);
+    const by = holders.map((r) => who(r)).join(", ") || "other launches", el = Date.now() - t0, cap = Math.round(waitMs / 1000);
+    if (el >= waitMs) throw new WitnessError(`no free slot after ${Math.round(el / 1000)} s: this machine is already running ${what}, held by ${by}. Wait for them to finish (or stop them: 'witness play stop --all' for playtests), or raise the limit with the environment variable (budget folder: ${dir})`);
+    if (!told) {
+      told = Date.now();
+      // over 110 s an agent's Bash call (120 s by default) would be cut off first: say how to wait that long
+      log(`▸ waiting for a free slot: the machine-wide limit is ${what}, in use by ${by} (gives up after ${cap} s${waitMs > 110000 ? `: more than an agent's Bash call waits (120 s by default), so run this command in the background (or set WITNESS_BUDGET_WAIT=<seconds> and a Bash timeout to match)` : ""})`);
+    } else if (Date.now() - told >= progressMs) { told = Date.now(); log(`▸ still waiting for a free slot (${fmtAge(el)} of ${fmtAge(waitMs)}): in use by ${by}`); }
     await new Promise((r) => setTimeout(r, pollMs));
   }
 }

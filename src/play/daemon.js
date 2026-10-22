@@ -80,7 +80,7 @@ export async function runDaemon(dir) {
   const size = S.hello.size || [640, 360];
   let frame = 0, world = null, finalizing = false, server = null, finalP = null;
   const timeline = [], orders = [], notes = [], shots = [], errors = [], pending = [], trail = [];
-  let parseErrors = 0, lastLogFrame = 0, firstLook = true;
+  let parseErrors = 0, lastLogFrame = 0, firstLook = true, lastCall = null;
   const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, epoch: S.epoch ?? null, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null } : null });
   const dts = (k) => Array(k).fill(1 / fps);
 
@@ -179,8 +179,16 @@ export async function runDaemon(dir) {
   /** An order's game call (call <name>, or a pick through play.pick.call): recorded, its answer handed to the order. */
   async function callGame(dec) {
     let msg, value, failed = false;
-    try { const r = await S.call(dec.name, dec.args); value = r.result ?? null; msg = `called ${dec.name}(${dec.args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(", ")}) → ${clip(JSON.stringify(value), cfg.resultChars)}`; recorder.call(frame, dec.name, dec.args); }
+    const head = `${dec.name}(${dec.args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(", ")})`;
+    try {
+      const r = await S.call(dec.name, dec.args); value = r.result ?? null;
+      // null/undefined: done, said plainly; a long answer is cut here and shown whole by look --full
+      const full = value == null ? "(no result)" : JSON.stringify(value);
+      msg = `called ${head} → ${full.length > cfg.resultChars ? `${clip(full, cfg.resultChars)} (cut at ${cfg.resultChars} of ${full.length} chars: look --full shows all)` : full}`;
+      recorder.call(frame, dec.name, dec.args);
+    }
     catch (e) { msg = `call ${dec.name} failed: ${e.message}`; failed = true; }
+    lastCall = { t: +world.t.toFixed(2), call: head, value, failed, msg };
     if (ap.cur) { ap.cur.result = msg; ap.cur.callValue = value; ap.cur.callFailed = failed; }
   }
 
@@ -276,7 +284,8 @@ export async function runDaemon(dir) {
     turnPace.wall = Date.now(); turnPace.frame = frame;
     const t0 = world.t;
     // turn profile: a wait runs as long as it says (a bare wait up to play.turnWait), since it ends early on your turn
-    const turnWait = (o) => (cfg.profile === "turn" && o.verb === "wait" ? (o.untimed ? cfg.turnWait : o.seconds) : null);
+    // (a defense game's timed wait, and any "wait N quiet", runs its N seconds too: nothing small cuts it short)
+    const turnWait = (o) => (cfg.profile === "turn" && o.verb === "wait" ? (o.untimed ? cfg.turnWait : o.seconds) : o.verb === "wait" && !o.untimed && (cfg.profile === "defense" || o.quiet) ? o.seconds : null);
     const cap = forS != null ? +forS : list.every((o) => OPEN_ENDED.has(o.verb) || o.forS) ? Math.max(...list.map((o) => turnWait(o) ?? (o.forS || 6))) + 0.5 : Math.max(25, ...list.map((o) => Math.max(turnWait(o) ?? 0, o.forS || 0) + 1));
     const scene0 = world.sceneKey, dlg0 = world.dialogue ? JSON.stringify(world.dialogue) : null;
     ap.setOrders(list);
@@ -302,7 +311,7 @@ export async function runDaemon(dir) {
       }
       if (dec.status === "done" || dec.status === "fail" || dec.status === "idle") { result = { status: dec.status === "idle" ? "done" : dec.status, msg: dec.message, hint: dec.hint }; break; }
       if (S.closed) { result = stopWhy ? { status: "ended", msg: stopWhy } : await gameTrouble(); break; }
-      const b = ap.cur ? { verb: ap.cur.o?.verb, careful: !!ap.cur.o?.careful, target: ap.cur.thingId ?? ap.cur.target ?? (ap.cur.thing ? ap.cur.thing.id : null) } : null;
+      const b = ap.cur ? { verb: ap.cur.o?.verb, careful: !!ap.cur.o?.careful, quiet: !!ap.cur.o?.quiet, target: ap.cur.thingId ?? ap.cur.target ?? (ap.cur.thing ? ap.cur.thing.id : null) } : null;
       const evs = await stepWorld(Math.max(1, dec.k));
       if (deadWatch.hit) { result = { status: "ended", msg: stopWhy }; break; }
       if (until && until.hit) { result = untilResult(false); break; }
@@ -393,7 +402,7 @@ export async function runDaemon(dir) {
     if ((dec.status === "done" || dec.status === "fail" || dec.status === "idle") && live.order) chainFinished(dec);
     if (S.closed) return;
     const b = ap.activeOrder();
-    const bi = b ? { verb: b.o?.verb, careful: !!b.o?.careful, target: b.thingId ?? b.target ?? (b.thing ? b.thing.id : null) } : null;
+    const bi = b ? { verb: b.o?.verb, careful: !!b.o?.careful, quiet: !!b.o?.quiet, target: b.thingId ?? b.target ?? (b.thing ? b.thing.id : null) } : null;
     // small steps keep a watched window responsive (the game presents frames as it steps)
     const k = Math.max(1, Math.min(opts.watch ? 2 : 4, dec.k || cfg.tick));
     const evs = await stepWorld(k);
@@ -478,12 +487,15 @@ export async function runDaemon(dir) {
     return answer;
   }
 
-  function look(result, asJson) {
+  function look(result, asJson, full = false) {
     const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: coalesceEvents(pending.splice(0)), first: firstLook, session: { goal: opts.goal, name: spec.name },
       live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null, clock: until ? until.line() : null };
     firstLook = false;
-    if (asJson) return { data: observeData(world, ctx) };
-    return { text: observeText(world, ctx) };
+    // look --full: the latest game call's answer, whole (observations cut it at play.resultChars)
+    const whole = lastCall ? (lastCall.failed ? lastCall.msg : lastCall.value == null ? "(no result)" : typeof lastCall.value === "string" ? lastCall.value : JSON.stringify(lastCall.value, null, 1)) : null;
+    if (asJson) return { data: { ...observeData(world, ctx), ...(full ? { lastCall: lastCall ? { t: lastCall.t, call: lastCall.call, failed: lastCall.failed, value: lastCall.value ?? null } : null } : {}) } };
+    const text = observeText(world, ctx);
+    return { text: full ? `${text}\n${lastCall ? `latest call (t ${r1(lastCall.t)}s) ${lastCall.call}, in full:\n${whole}` : "no game call yet this session"}` : text };
   }
 
   function coverage() {
@@ -506,7 +518,7 @@ export async function runDaemon(dir) {
       name: spec.name, game: { name: S.hello.name, engine: S.hello.engine || null }, persona, goal: opts.goal || null, model: opts.model || null,
       seed: recorder.head.seed, scene: opts.scene ?? null, params: opts.params ?? null, startedAt: new Date(wall0).toISOString(),
       wallSeconds: Math.round((Date.now() - wall0) / 1000), gameSeconds: world.t, frames: frame, fps, orders, timeline, tracker,
-      until: until ? until.report() : null, incidents: ap.incidents, coverage: cfg.profile === "turn" ? null : coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
+      until: until ? until.report() : null, incidents: ap.incidents, coverage: cfg.profile === "turn" || cfg.profile === "defense" ? null : coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
       replay: { file: path.join(dir, "replay.jsonl"), frames: frame, calls: recorder ? [...recorder.frames.values()].reduce((a, x) => a + x.calls.length, 0) : 0 },
       ...extra,
     };
@@ -599,7 +611,7 @@ export async function runDaemon(dir) {
         let shot = null, res = null;
         if (a.wait && live.on) res = (await liveDo(null, a.for, true)).result;   // keep the plan; answer at the next event or the horizon
         if (a.shot) { await settleAnims(); shot = await shoot("look", a.scale ? +a.scale : 0); }
-        const o = look(res, a.json);
+        const o = look(res, a.json, !!a.full);
         return { ok: true, ...o, shot };
       }
       case "do": {

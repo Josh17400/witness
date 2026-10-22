@@ -179,8 +179,9 @@ export class EventTracker {
         if (!th.telegraph && wasT) { const ps = this.pendingStrikes.find((s) => s.id === id && s.strikeT == null); if (ps) ps.strikeT = t; }
       }
       // alerts: a hostile comes within range
-      if (th.rel === "hostile" && !th.dead) {
-        if (th.dist <= cfg.alert && !this.alerted.has(id)) { this.alerted.add(id); push("alert", `${th.key} ${was ? "is closing in" : "appeared"}: ${r1(th.dist)} cells ${th.dir}`, { id }); }
+      // (play.alerts false / alert 0: none; a defense game says how far from the base, not which way)
+      if (th.rel === "hostile" && !th.dead && cfg.alerts !== false) {
+        if (th.dist <= cfg.alert && !this.alerted.has(id)) { this.alerted.add(id); push("alert", cfg.profile === "defense" ? `${th.key} ${was ? "is closing in" : "appeared"}: ${r1(th.dist)} cells from the base` : `${th.key} ${was ? "is closing in" : "appeared"}: ${r1(th.dist)} cells ${th.dir}`, { id }); }
         else if (th.dist > cfg.alert * 1.6) this.alerted.delete(id);
       }
     }

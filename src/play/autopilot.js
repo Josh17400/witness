@@ -2,11 +2,11 @@
 // them into held controls every few frames, from the world model: path finding around walls, stuck recovery,
 // facing and attacking, reacting to telegraphed attacks after a human-like reaction delay, dialogue choices.
 // Deterministic: no wall clock, no unseeded randomness.
-import { norm, len, sub, add, scale, dist2, dot, perp, compass, dirVector, r1, fmtT, clip } from "./util.js";
-import { controlLabel, parseControl } from "./config.js";
+import { norm, len, sub, add, scale, dist2, dot, perp, compass, dirVector, r1, fmtT, clip, compileExpr, scopeFor, withVars } from "./util.js";
+import { controlLabel, parseControl, canMove } from "./config.js";
 import { makeProfile, moveControls, lookOf } from "./profiles.js";
 import { PlatformRunner, SAFE_STATES } from "./platformer.js";
-import { OrderError, resolveTarget, ORDER_CARD_TURN } from "./orders.js";
+import { OrderError, resolveTarget, ORDER_CARD_TURN, ORDER_CARD_DEFENSE } from "./orders.js";
 import { thingLabel } from "./perceive.js";
 import { DotClassifier } from "./events.js";
 import { parseWitnessInput } from "../core/input-spec.js";
@@ -20,6 +20,45 @@ function controlEvent(c, down, mouse) {
   if (c.type === "pad") return { type: "pad", button: c.button, down };
   if (c.type === "mouse") return { type: "mouse", x: mouse.x, y: mouse.y, button: c.button, down };
   if (c.type === "axis") return { type: "axis", axis: c.axis, value: down ? 1 : 0 };
+  return null;
+}
+
+/**
+ * Where a thing is on the screen (the game's logical pixels, as mouse/touch events use them): the entity's own
+ * screen: [x, y] (or {x, y}), else play.screen (an expression with `e`), else state.camera {pos: [x, y] | x, y,
+ * zoom | scale, center?} (screen = (world - camera) × zoom, + half the screen with center: true); play.screen "world"
+ * says positions already are screen pixels. Returns {xy, how} or {xy: null, why}.
+ */
+const screenFns = new Map();
+export function screenOf(th, w, cfg, size = [640, 360]) {
+  const e = (th && th.raw) || {}, fin = (v) => Array.isArray(v) && Number.isFinite(+v[0]) && Number.isFinite(+v[1]);
+  const xyOf = (v) => (Array.isArray(v) ? v.map(Number) : v && typeof v === "object" ? [+v.x, +v.y] : null);
+  const on = (xy) => xy[0] >= 0 && xy[1] >= 0 && xy[0] <= size[0] && xy[1] <= size[1];
+  let v = xyOf(e.screen ?? e.screenPos ?? e.screen_pos), how = "its screen field";
+  if (!fin(v) && cfg.screen && cfg.screen !== "world" && w && w.snap) {
+    if (!screenFns.has(cfg.screen)) screenFns.set(cfg.screen, compileExpr(cfg.screen));
+    try { v = xyOf(screenFns.get(cfg.screen)(withVars(scopeFor(w.snap), { e }))); } catch { v = null; }
+    how = "play.screen";
+  }
+  const pos = th && th.pos;
+  if (!fin(v) && fin(pos)) {
+    const cam = w && w.snap && w.snap.state && w.snap.state.camera;
+    const cp = cam && typeof cam === "object" ? xyOf(cam.pos ?? cam.position ?? cam) : null;
+    if (fin(cp)) {
+      const z = +(cam.zoom ?? cam.scale ?? 1) || 1, mid = cam.center === true || cam.anchor === "center";
+      v = [(pos[0] - cp[0]) * z + (mid ? size[0] / 2 : 0), (pos[1] - cp[1]) * z + (mid ? size[1] / 2 : 0)]; how = "state.camera";
+    } else if (cfg.screen === "world") { v = [pos[0], pos[1]]; how = "play.screen world"; }
+    else return { xy: null, why: `${th.key} has no screen position: give entities screen: [x, y], or state.camera {pos: [x, y], zoom}, or play.screen (an expression with e, or "world" when positions are screen pixels)` };
+  }
+  if (!fin(v)) return { xy: null, why: `${th ? th.key : "it"} has no position to tap` };
+  if (!on(v)) return { xy: null, off: true, why: `${th.key} is off the screen (${v.map(Math.round).join(",")} by ${how})` };
+  return { xy: v.map(Math.round), how };
+}
+
+/** A game call's answer that means no: false, {ok: false}, {legal: false}, {error}. Returns the reason ("" if none) or null. */
+export function refusalOf(r) {
+  if (r === false) return "";
+  if (r && typeof r === "object" && !Array.isArray(r) && (r.ok === false || r.legal === false || r.error)) return r.error || r.reason || r.message ? String(r.error || r.reason || r.message) : "";
   return null;
 }
 
@@ -506,6 +545,11 @@ class Fight extends Behaviour {
     this.plural = !!(o.target && o.target.plural) || !o.target;
     this.nav = new Navigator(ap);
     this.kills = 0; this.blockUntil = -1; this.maxT = o.forS ?? 60;
+    this.capped = o.forS != null;   // a time the tester gave ("for 25s"): reaching it is the plan, not a failure
+    // no walking: a defense game, or no move control at all. Attack from where you stand, never press move keys
+    this.still = ap.cfg.profile === "defense" || (ap.cfg.profile !== "fps" && !ap.platform && !canMove(ap.cfg.controls.move));
+    // "fight enemies when they come" (a defense game always): an empty field means wait for the next one
+    this.await = !!o.await || ap.cfg.profile === "defense";
     this.start = w.player && w.player.p2 ? w.player.p2.slice() : null;   // the leash: a fight doesn't chase across the map
     // asked for a defence the game has no control for: use the best one it has, and say so
     const cc = ap.cfg.controls;
@@ -523,14 +567,16 @@ class Fight extends Behaviour {
     if (!this.ap.policy.guard) return "aggressive";
     return this.ap.cfg.guardMode || (c.block ? "block" : c.dodge ? "dodge" : "backoff");
   }
-  pick(w, first = false) {
+  pick(w, first = false, ok = null) {
     let cands;
     if (this.spec && !(this.spec.category === "any" && !this.spec.words.length)) {
       try { cands = resolveTarget(this.spec, w, { prefer: "hostile", allowRemembered: first }).things; }
-      catch (e) { if (first) throw e; cands = []; }
+      catch (e) { if (first && !this.await) throw e; cands = []; }
       cands = cands.filter((th) => !th.dead);
-    } else cands = w.things.filter((th) => th.rel === "hostile" && !th.dead && th.dist <= this.ap.cfg.alert * 2.5);
-    if (!first) cands = cands.filter((th) => th.dist <= this.ap.cfg.alert * 2);
+    } else cands = w.things.filter((th) => th.rel === "hostile" && !th.dead && (this.still || th.dist <= this.ap.cfg.alert * 2.5));
+    if (ok) cands = cands.filter(ok);
+    if (!first && !this.still) cands = cands.filter((th) => th.dist <= this.ap.cfg.alert * 2);
+    if (first && !cands.length && this.await) return null;   // nothing on the field yet: tick waits for it
     if (first && !cands.length) throw new OrderError(this.spec ? `no "${this.spec.raw}" to fight here` : "no enemies around to fight", "explore to find some, or name one from the observation");
     const th = cands[0] || null;
     this.target = th ? th.id : null; this.targetKey = th ? th.key : this.targetKey;
@@ -541,16 +587,47 @@ class Fight extends Behaviour {
     const ap = this.ap, cfg = ap.cfg, t = ap.t, c = cfg.controls;
     if (w.dead) return this.fail("you died");
     const pct = hpPct(w), retreat = this.retreat ?? ap.policy.retreat;
-    if (retreat && pct != null && pct < retreat) { ap.replaceWith(new Flee({ verb: "flee", text: `flee (hp ${Math.round(pct)}% < ${retreat}%)` }, ap, w), `retreating at ${Math.round(pct)}% hp`); return this.run(); }
+    const left = () => w.things.filter((x) => x.rel === "hostile" && !x.dead).length;
+    const tally = () => `${this.kills ? `${this.kills} ${this.kills === 1 ? "enemy" : "enemies"} defeated` : "none defeated"}${left() ? `, ${left()} still on the field` : ", the field is clear"}`;
+    if (this.capped && this.age > this.maxT) return this.done(`fought for ${r1(this.age)}s as ordered: ${tally()}`);
+    if (retreat && pct != null && pct < retreat && !this.still) { ap.replaceWith(new Flee({ verb: "flee", text: `flee (hp ${Math.round(pct)}% < ${retreat}%)` }, ap, w), `retreating at ${Math.round(pct)}% hp`); return this.run(); }
     let th = w.things.find((x) => x.id === this.target && !x.dead);
+    if (th) this.seenAlive = true;
     if (!th) {
-      if (this.target != null) this.kills++;
+      // only a target seen alive in this fight counts as defeated (not one remembered from an earlier look)
+      if (this.target != null && this.seenAlive) this.kills++;
+      this.seenAlive = false;
       const prevKey = this.targetKey;
-      th = this.plural || (this.spec && this.spec.category) ? this.pick(w) : null;
+      th = this.plural || (this.spec && this.spec.category) || (this.await && this.target == null) ? this.pick(w) : null;
+      if (!th && this.await && (this.plural || this.target == null || this.waiting)) {
+        // a wave game between enemies: wait for the next (up to the time given; without one, until a kill clears the
+        // field or play.fightWait passes)
+        this.target = null;
+        this.waiting ??= ap.t;
+        if (!this.capped && this.kills) return this.done(`${tally()}`);
+        if (!this.capped && ap.t - this.waiting > ap.cfg.fightWait) return this.done(`no enemies came in ${r1(ap.t - this.waiting)}s`);
+        if (!this.waitNoted) { this.waitNoted = true; ap.emit("note", `no enemies on the field: waiting for the next${this.capped ? ` (up to ${r1(this.maxT)}s)` : ""}`); }
+        return this.run();
+      }
       if (!th) return this.done(this.kills ? `${this.kills > 1 ? `${this.kills} enemies` : prevKey} defeated` : `${prevKey || "target"} is gone`);
+      if (this.waiting != null) { ap.emit("note", `${th.key} came after ${r1(ap.t - this.waiting)}s: fighting it`); this.waiting = null; this.waitNoted = false; }
     }
     if (this.age > this.maxT) return this.fail(`fight still going after ${r1(this.age)}s`);
     if (ap.platform) return ap.platform.fight(w, want, th, this) || this.run();
+    if (this.still) {
+      // stand and attack: block a windup if there's a block control, never step or turn
+      if (c.block && this.mode === "block" && w.player && w.player.p2 && ap.reactingThreat(w, Infinity)) { want.held.set("block", c.block); return this.run(); }
+      if (c.attack && c.attack.type === "target" && screenOf(th, w, cfg, ap.size).off) {
+        // off the edge of the screen (a portrait phone over a wide field): tap another hostile in view, else wait for
+        // it to come in (an enemy named on its own is waited for)
+        const inView = (x) => !!screenOf(x, w, cfg, ap.size).xy;
+        const alt = this.plural || !this.spec || this.spec.category ? this.pick(w, false, inView) : null;
+        if (alt) th = alt;
+        else { if (!this.offNoted) { this.offNoted = true; ap.emit("note", `${th.key} is off the screen: waiting for an enemy to come into view`); } return this.run(); }
+      }
+      if (ap.attack(want, th, w) === "noscreen") return this.fail(ap.screenWhy);
+      return this.run();
+    }
     const mode = this.defaultMode();
     const p = w.player.p2;
     const reach = reachW(w, cfg.reach.attack);
@@ -568,7 +645,7 @@ class Fight extends Behaviour {
       const k = this.kite * w.cell;
       if (d < k * 0.75) { ap.moveTo(w, sub(p, th.p2), want); }
       else if (d > k * 1.3) { const r = this.nav.tick(w, th.p2, k, { stuckLimit: 5 }); if (r.dir) ap.moveTo(w, r.dir, want); }
-      if (ap.profile.face(w, th.p2, want)) ap.attack(want);
+      if (ap.profile.face(w, th.p2, want) && ap.attack(want, th, w) === "noscreen") return this.fail(ap.screenWhy);
       return this.run();
     }
     if (d > reach * 0.85) {
@@ -579,11 +656,11 @@ class Fight extends Behaviour {
       if (r.fail) return this.fail(`can't reach ${th.key}: ${r.fail}`);
       if (r.dir) ap.moveTo(w, r.dir, want);
       // swing as soon as it's in reach while closing in
-      if (d <= reach && ap.profile.face(w, th.p2, want)) ap.attack(want);
+      if (d <= reach && ap.profile.face(w, th.p2, want) && ap.attack(want, th, w) === "noscreen") return this.fail(ap.screenWhy);
       return this.run();
     }
     this.nav.bestT = t; this.nav.best = Infinity;
-    if (ap.profile.face(w, th.p2, want)) ap.attack(want);
+    if (ap.profile.face(w, th.p2, want) && ap.attack(want, th, w) === "noscreen") return this.fail(ap.screenWhy);
     return this.run();
   }
   /** fps: aim at the target and fire when the aim is on it; strafe on a rhythm; close in or hold range. */
@@ -593,7 +670,11 @@ class Fight extends Behaviour {
     const aim = ap.profile.aim(w, th, want);
     const size = Math.atan2(0.45, Math.max(0.5, d));
     const onTarget = Math.abs(aim.yawErr) < size * cfg.fps.aimTolerance + 0.01 && Math.abs(aim.pitchErr) < size * 1.6 + 0.02;
-    if (onTarget && th.los !== false) { want.held.set("attack", c.attack); ap.lastAttackT = ap.t; }
+    if (onTarget && th.los !== false) {
+      // tap:target has no key to hold: tap the enemy itself (ap.attack paces it)
+      if (c.attack.type === "target") { if (ap.attack(want, th, w) === "noscreen") return this.fail(ap.screenWhy); }
+      else { want.held.set("attack", c.attack); ap.lastAttackT = ap.t; }
+    }
     if (this.mode === "hold") {
       // hold position: shoot what's in sight, never chase; switch to another visible enemy when this one hides
       if (th.los === false) {
@@ -893,9 +974,9 @@ class Pick extends Behaviour {
     // the game's answer to a call: false / {ok: false} / {error} is a refusal
     if (this.result !== undefined && !this.judged) {
       this.judged = true;
-      const r = this.callValue;
       if (this.callFailed) return this.fail(this.result);
-      if (r === false || (r && typeof r === "object" && (r.ok === false || r.legal === false || r.error))) return this.fail(`${this.desc}: the game refused it${r && typeof r === "object" && (r.error || r.reason || r.message) ? ` ("${clip(String(r.error || r.reason || r.message), 120)}")` : ""}`);
+      const why = refusalOf(this.callValue);
+      if (why != null) return this.fail(`${this.desc}: the game refused it${why ? ` ("${clip(why, 120)}")` : ""}`);
     }
     const what = [];
     if (w.dialogue && JSON.stringify(w.dialogue) !== this.dlg0) what.push(`${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 100)}"`);
@@ -940,6 +1021,7 @@ class WaitTurn extends Behaviour {
   }
 }
 const TURN_NO = /^(goto|go|run|explore|follow|fight|flee|talk|pickup|interact|stomp|jump|look|reload|weapon|block|dodge)$/;
+const DEFENSE_NO = /^(goto|go|run|explore|follow|flee|talk|pickup|stomp|jump|look|dodge)$/;
 function controlEventRaw(c, down) { return controlEvent(c, down, { x: 0, y: 0 }); }
 
 class Pickup extends Behaviour {
@@ -972,6 +1054,14 @@ class Tap extends Behaviour {
   tick(w, want) {
     const ap = this.ap, gap = Math.max(6, ap.cfg.controls.tapFrames * 3) / ap.fps;
     if (this.dir) this.ap.moveTo(w, this.dir, want);
+    if (this.c.type === "target" && this.n < this.times && ap.t >= this.next - 1e-9) {
+      // "press attack" with attack "tap:target": tap the nearest enemy
+      const th = w.things.filter((x) => x.rel === "hostile" && !x.dead).sort((a, b) => a.dist - b.dist)[0];
+      if (!th) return this.fail(`nothing to ${this.c.via}: no enemy is listed`);
+      if (!ap.tapAt(want, th, this.c.via, w)) return this.fail(ap.screenWhy);
+      this.n++; this.next = ap.t + gap; this.tapped = th.key; return this.run();
+    }
+    if (this.c.type === "target") return this.n >= this.times && ap.t >= this.next - 1e-9 ? this.done(`${this.desc} (${this.c.via === "click" ? "clicked" : "tapped"} ${this.tapped})${this.times > 1 ? ` ×${this.times}` : ""}`) : this.run();
     if (this.n < this.times && ap.t >= this.next - 1e-9) { want.taps.push({ label: `tap:${controlLabel(this.c)}`, c: this.c, frames: ap.cfg.controls.tapFrames }); this.n++; this.next = ap.t + gap; return this.run(); }
     if (this.n >= this.times && ap.t >= this.next - 1e-9) return this.done(`${this.desc}${this.times > 1 ? ` ×${this.times}` : ""}`);
     return this.run();
@@ -1015,6 +1105,10 @@ class CallOrder extends Behaviour {
   constructor(o, ap, w) { super(o, ap, w); this.phase = "call"; }
   tick() {
     if (this.phase === "call") { this.phase = "after"; return { status: "call", name: this.o.name, args: this.o.args || [] }; }
+    // the game's answer: a throw, false, {ok: false}, {error} is a failure with its reason (null: done, no result)
+    if (this.callFailed) return this.fail(this.result);
+    const why = refusalOf(this.callValue);
+    if (why != null) return this.fail(`${this.result ?? `called ${this.o.name}`}: the game refused it${why ? ` ("${clip(why, 120)}")` : ""}`);
     return this.done(this.result ?? `called ${this.o.name}`);
   }
 }
@@ -1062,7 +1156,7 @@ class Standing extends Behaviour {
   constructor(o, ap, w) { super(o, ap, w); this.guardable = true; this.standing = true; this.label = "standing by"; }
   tick(w, want) {
     const ap = this.ap, cfg = ap.cfg, c = cfg.controls;
-    if (!w.player || !w.player.p2 || w.dead || w.dialogue) return this.run();
+    if (((!w.player || !w.player.p2) && cfg.profile !== "defense") || w.dead || w.dialogue) return this.run();
     if (ap.platform) { ap.platform.guard(w, want); return this.run(); }
     if (cfg.profile === "fps") {
       const th = ap.visibleFoe(w);
@@ -1070,9 +1164,10 @@ class Standing extends Behaviour {
       else if (w.player.ammo === 0 && c.reload) want.taps.push({ label: "reload", c: c.reload, frames: 2 });
       return this.run();
     }
+    if (cfg.profile === "defense") { const th = w.things.filter((x) => x.rel === "hostile" && !x.dead).sort((a, b) => a.dist - b.dist)[0]; if (th) ap.attack(want, th, w); return this.run(); }
     const reach = reachW(w, cfg.reach.attack);
     const th = w.things.filter((x) => x.rel === "hostile" && !x.dead && dist2(x.p2, w.player.p2) <= reach * 1.6).sort((a, b) => a.dist - b.dist)[0];
-    if (th && ap.profile.face(w, th.p2, want)) ap.attack(want);
+    if (th && ap.profile.face(w, th.p2, want)) ap.attack(want, th, w);
     return this.run();
   }
 }
@@ -1087,7 +1182,7 @@ export class Autopilot {
     this.policy = { retreat: cfg.retreat, heal: cfg.heal, guard: cfg.guard, reaction: cfg.reaction, autofight: cfg.autofight ?? cfg.profile !== "platformer" };
     this.standingMode = false;   // live mode: a Standing behaviour runs whenever no order does
     this.lastHurtT = -1e9; this.lastHp = null; this.dot = new DotClassifier();
-    this.ctrl = new Controller(size);
+    this.ctrl = new Controller(size); this.size = size;
     this.profile = makeProfile(cfg.profile, this);
     this.platform = cfg.profile === "platformer" ? new PlatformRunner(this) : null;
     this.queue = []; this.cur = null; this.results = [];
@@ -1126,7 +1221,10 @@ export class Autopilot {
     if (w.player.ammo === 0 && c.reload) { want.taps.push({ label: "reload", c: c.reload, frames: 2 }); return; }
     const aim = this.profile.aim(w, th, want);
     const size = Math.atan2(0.45, Math.max(0.5, d));
-    if (Math.abs(aim.yawErr) < size * this.cfg.fps.aimTolerance + 0.01 && Math.abs(aim.pitchErr) < size * 1.6 + 0.02 && c.attack) { want.held.set("attack", c.attack); this.lastAttackT = this.t; }
+    if (Math.abs(aim.yawErr) < size * this.cfg.fps.aimTolerance + 0.01 && Math.abs(aim.pitchErr) < size * 1.6 + 0.02 && c.attack) {
+      if (c.attack.type === "target") this.attack(want, th, w);   // tap:target: tap the enemy, not a held key
+      else { want.held.set("attack", c.attack); this.lastAttackT = this.t; }
+    }
   }
   currentLabel() { return this.cur ? this.cur.label : null; }
   replaceWith(b, why) { this.cur = b; this.emit("reflex", why); }
@@ -1145,7 +1243,7 @@ export class Autopilot {
       this.grid.reset(); this.windupSeen.clear(); this.prevP = null;
       if (this.platform) this.platform.reset();
       // (a turn/menu game has no map: its scene changes are just the tracker's "scene: home → table")
-      if (this.cfg.profile !== "turn") this.emit("scene", `${this.sceneArrival ? `entered ${this.sceneArrival}: ` : ""}new scene/level (${w.sceneKey}): map knowledge reset`);
+      if (this.cfg.profile !== "turn") this.emit("scene", `${this.sceneArrival ? `entered ${this.sceneArrival}: ` : ""}new scene/level (${w.sceneKey})${this.cfg.profile === "defense" ? "" : ": map knowledge reset"}`);
     }
     this.prevW = w;
     if (this.cfg.mapWindow) this.grid.windowed = true;
@@ -1251,15 +1349,34 @@ export class Autopilot {
     return true;
   }
 
-  attack(want) {
+  /** Attack: the attack control, or with attack "tap:target" / "click:target" a tap on `th` ("noscreen" if it can't be placed). */
+  attack(want, th = null, w = this.prevW) {
     const c = this.cfg.controls;
     if (!c.attack) return;
+    if (c.attack.type === "target") {
+      if (!th || this.t - this.lastAttackT < c.attackEvery - 1e-9) return;
+      if (!this.tapAt(want, th, c.attack.via, w)) return "noscreen";
+      this.lastAttackT = this.t; return;
+    }
     if (c.attackMode === "hold") { want.held.set("attack", c.attack); this.lastAttackT = this.t; return; }
     if (this.t - this.lastAttackT >= c.attackEvery - 1e-9) { want.taps.push({ label: "attack", c: c.attack, frames: c.tapFrames }); this.lastAttackT = this.t; }
   }
 
+  /** Tap (touch, finger 0) or click `th` where it is on the screen; false (and screenWhy) when it can't be placed. */
+  tapAt(want, th, via = "tap", w = this.prevW) {
+    const s = screenOf(th, w, this.cfg, this.size);
+    if (!s.xy) { this.screenWhy = s.why; return false; }
+    const [x, y] = s.xy, f = this.cfg.controls.tapFrames;
+    if (via === "click") want.raw.push({ at: 0, type: "mouse", x, y }, { at: 0, type: "mouse", x, y, button: 0, down: true }, { at: f, type: "mouse", x, y, button: 0, down: false });
+    else want.raw.push({ at: 0, type: "touch", id: 0, x, y, phase: "down" }, { at: f, type: "touch", id: 0, x, y, phase: "up" });
+    this.ctrl.mouse.x = x; this.ctrl.mouse.y = y;
+    this.lastTap = { key: th.key, x, y, how: s.how };
+    return true;
+  }
+
   moveTo(w, dir, want) {
     if (!dir || len(dir) < 1e-9) return;
+    if (this.cfg.profile === "defense") return;   // a defense game never moves (its move keys, if any, stay up)
     this.wantedMoveNow = true;
     if (this.cfg.profile === "fps") {
       // shooting on the move: the mouse aims at the enemy while the keys keep walking the path (relative to the look)
@@ -1358,7 +1475,9 @@ export class Autopilot {
   make(o, w) {
     if (this.cfg.profile === "turn" && TURN_NO.test(o.verb))
       throw new OrderError(`"${o.text}": this is a turn-based / menu game, there's nothing to ${o.verb === "goto" || o.verb === "go" ? "walk to" : o.verb}`, ORDER_CARD_TURN);
-    if ((!w.player || !w.player.p2) && this.cfg.profile !== "turn" && !/^(press|hold|wait|stop|set|call|choose|use|respawn|combo)$/.test(o.verb))
+    if (this.cfg.profile === "defense" && (DEFENSE_NO.test(o.verb) || (o.verb === "interact" && o.target)))
+      throw new OrderError(`"${o.text}": this is a defense game, you don't move${o.verb === "pickup" || o.verb === "interact" ? " (collect things with the game's own control: press <it>)" : ""}`, ORDER_CARD_DEFENSE);
+    if ((!w.player || !w.player.p2) && this.cfg.profile !== "turn" && !/^(press|hold|wait|stop|set|call|choose|use|respawn|combo)$/.test(o.verb) && !(this.cfg.profile === "defense" && o.verb === "fight"))
       throw new OrderError("there's no player in the game right now (an intro, a cutscene or a menu?)", "wait, or press the key the screen asks for (press enter)");
     try { return this.make1(o, w); }
     catch (e) {
@@ -1542,7 +1661,7 @@ export class Autopilot {
         return this.finish(b, { status: "fail", msg: `a dialogue is open (${w.dialogue.speaker || "someone"}: "${clip(w.dialogue.text, 60)}") — choose an option or press cancel first` }, want);
       // no player in the snapshot (a cutscene, an intro, a title screen): only orders that don't move can run
       if (!w.player || !w.player.p2) {
-        if (!(b instanceof Tap || b instanceof Wait || b instanceof Hold || b instanceof Instant || b instanceof Choose || b instanceof Pick || b instanceof WaitTurn || b instanceof CallOrder))
+        if (!(b instanceof Tap || b instanceof Wait || b instanceof Hold || b instanceof Instant || b instanceof Choose || b instanceof Pick || b instanceof WaitTurn || b instanceof CallOrder || (this.cfg.profile === "defense" && (b instanceof Fight || b instanceof Standing))))
           return this.finish(b, { status: "fail", msg: "there's no player in the game right now (an intro, a cutscene or a menu?) — wait, or press the key the screen asks for" }, want);
         const res0 = b.tick(w, want);
         if (res0.status === "call") { this.wantedMove = false; return { want, k: 1, status: "call", name: res0.name, args: res0.args }; }
@@ -1559,7 +1678,7 @@ export class Autopilot {
         want.taps.push({ label: "heal", c: this.cfg.controls.heal, frames: this.cfg.controls.tapFrames }); this.lastHealT = this.t;
         this.emit("reflex", `healing at ${Math.round(pct)}% hp`);
       }
-      if (this.policy.retreat && pct != null && pct < this.policy.retreat && !(b instanceof Flee) && !(b instanceof Fight) && w.things.some((th) => th.rel === "hostile" && th.dist <= this.cfg.alert)) {
+      if (this.policy.retreat && pct != null && pct < this.policy.retreat && this.cfg.profile !== "defense" && !(b instanceof Flee) && !(b instanceof Fight) && w.things.some((th) => th.rel === "hostile" && th.dist <= this.cfg.alert)) {
         this.cur = new Flee({ verb: "flee", text: "flee (low hp)" }, this, w); this.cur.t0 = this.t;
         this.emit("reflex", `retreating at ${Math.round(pct)}% hp`);
         continue;
@@ -1609,4 +1728,4 @@ export class Autopilot {
   }
 }
 
-export { GoTo, Fight, Flee, Talk, Choose, Pick, WaitTurn, StateWatch, Pickup, Explore, Tap, Hold, Wait, Behaviour, Look, hpPct, reachW, fmtCell };
+export { CallOrder, GoTo, Fight, Flee, Talk, Choose, Pick, WaitTurn, StateWatch, Pickup, Explore, Tap, Hold, Wait, Behaviour, Look, hpPct, reachW, fmtCell };

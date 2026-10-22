@@ -131,7 +131,7 @@ of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` bes
 |---|---|---|
 | `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--wall-minutes 20` `--idle 300` `--until "<expr>"` `--game-hours N` `--clock "<expr>"` `--allow-calls` `--no-map` `--model NAME` `--out DIR` `--force` `--json` `--live` `--watch` `--speed 1` `--horizon 4` `--pause-after 15` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). `--wall-minutes`: a hard stop after that many real minutes (`--minutes` is its old name here). `--until` / `--game-hours`: see [Playing until a game time](#playing-until-a-game-time---until---game-hours). `--live` / `--watch`: see [Live mode](#live-mode-and-watching). |
 | `play do "<orders>"` | `-s t1` `--for S` `--json` | Turn-based: runs an order chain until it's done, failed, interrupted by a wake event, or hits the time cap. Live: replaces the plan at once and answers at the first of done/failed, an important event, or the horizon (`--for S`, default 4 s); the game keeps going. Prints the observation. |
-| `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. |
+| `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` `--full` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. `--full`: also the latest game call's answer, uncut (an order's answer shows the first `play.resultChars`, 800, and says when it cut). |
 | `play next` | `-s t1` `--for S` | Live mode: the same as `look --wait`. |
 | `play shot` | `-s t1` `--scale K` | Screenshot → PNG path (open it with the Read tool). Frames narrower than 600 px are upscaled 2× (nearest). |
 | `play note "<text>"` | `--bug` `--confusing` `--fun` `--idea` `--shot` `-s t1` | Adds a note to the timeline and a mark to the replay. `--bug` notes always take a screenshot. |
@@ -168,7 +168,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `go <dir> [n]` | walk, move, head, step; a bare direction (`north 3`) | n cells (default 5) that way. Directions: n s e w ne nw se sw, north…, up/down/left/right, up-right…; fps: forward/back/left/right. |
 | `explore [dir]` | wander, scout, search, roam | Frontier exploration of unvisited ground, biased toward dir. Runs until the time cap or nothing is left. |
 | `follow <thing>` | | Stay near it (teammates, NPCs). |
-| `fight [thing] [mode]` | attack, kill, engage, hit, slay, defeat, battle, strike, shoot, destroy | Approach, face, attack, react to telegraphs. No target: nearest hostiles. A plural (`wolves`, `all enemies`) fights until none is near. |
+| `fight [thing] [mode]` | attack, kill, engage, hit, slay, defeat, battle, strike, shoot, destroy | Approach, face, attack, react to telegraphs. No target: nearest hostiles. A plural (`wolves`, `all enemies`) fights until none is near. With a time given (`fight enemies for 25s`), reaching it is the plan: `✔ done: fought for 25s as ordered: 4 enemies defeated, 2 still on the field` (without one it still fails at 60 s). `fight enemies when they come` (also `as they arrive`, `incoming`; always in the defense profile) waits for the next enemy instead of failing on an empty field: with a time, it fights and waits until the time is up; without, it ends when a kill clears the field or after `play.fightWait` (20 s) with none. With no move control (`"move": false`, or the defense profile) it attacks from where it stands and never presses a move key. |
 | `flee [from thing]` | retreat, escape, evade, run away, back off, get away | Move to the reachable spot farthest from hostiles; done when none is within 1.6 × alert. |
 | `talk <who>` | talk to/with, speak to/with, chat, greet, ask | Walk up, face, press interact, wait for `dialogue`; retries closer, fails after 3 tries. When the dialogue names a `speaker` that isn't the target (by name or type), it says `X answered instead of Guard#4`, presses cancel, steps closer and tries again; without a cancel control, or after 2 wrong answers, it fails with that message and leaves the dialogue open. No target: nearest NPC. |
 | `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; with no change at all it fails. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). |
@@ -179,20 +179,20 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `hold <key\|control> <s>` | | Hold for s seconds (default 1). |
 | `block [s]` | guard | Hold block (default 0.8 s). |
 | `dodge [dir]` | roll | Tap dodge while moving (default: away from the nearest hostile). |
-| `wait [s]` | idle, pause, stay, rest | Let time pass (default 1 s); reflexes stay on. Turn profile: until your turn, new choices or a dialogue (at most s, or `play.turnWait`). |
+| `wait [s]` | idle, pause, stay, rest | Let time pass (default 1 s); reflexes stay on. Turn profile: until your turn, new choices or a dialogue (at most s, or `play.turnWait`). `wait 5 quiet` (also `ignore`): only the big things wake it (death, low hp, a dialogue, the goal, an error, a scene change), not alerts, hits, items or kills, and it runs its full 5 s. |
 | `wait for <thing>` | | Until it passes, moves away, or 8 s. |
 | `stop` | halt, freeze | Release everything. |
 | `respawn` | revive, continue | Press confirm while dead, again every 1.5 s (a "press Enter" prompt often shows a second after the death), for up to 8 s. |
 | `set <k> <v>` | | Standing policies: `set retreat 30`, `set heal 40`, `set guard on\|off`, `set reaction 0.3`. Applies at once, also while dead or at low hp (no reflex replaces it). |
 | `combo <name>` | special; a bare combo name | A frame-exact input sequence from `play.combos` (left/right mirror when the foe is on the left). |
-| `call <name> [args]` | | A game `call` (cheats, setup). Only with `--allow-calls` or `play.allowCalls`; recorded in the replay. |
+| `call <name> [args]` | | A game `call` (cheats, setup). Only with `--allow-calls` or `play.allowCalls`; recorded in the replay. The game's answer decides the result: `false`, `{ok: false}`, `{legal: false}`, `{error: "…"}` or a throw is `✖ failed` with the game's reason (`called buy(wall) → false: the game refused it`); no result (`null`/nothing) is `✔ done … → (no result)`; anything else (a string, a number, an object) is done and shown, cut at `play.resultChars` (800; `look --full` shows all). |
 | platformer: `run <left\|right> [n] [to x]` · `jump [left\|right] [short\|long\|high]` · `stomp [thing]` | hop, leap; dash, sprint | Side-view locomotion (see Profiles). |
 | fps: `look <dir\|thing\|up\|down>` · `reload` · `weapon <n\|name>` | look at, aim at, turn to, face; switch to, equip | Aim, reload, switch weapons. Outside fps, `look` turns to face. |
 
 **Modifiers** (movement and fight orders): `for 6s` (time cap for this order; works on every order), `block` /
 `dodge` / `backoff` / `aggressive` (fight mode; synonyms parry, shield, roll, evade, spacing, trade, rush…),
 `retreat 30%` (flee below that hp), `kite 4` (keep 4 cells away while attacking), `careful` (wake on anything:
-items appearing, notices, pickups, kills), `using <x>`.
+items appearing, notices, pickups, kills), `quiet` (also `ignore`: only the big things wake it, not alerts or hits), `using <x>`.
 
 **Fight modes.** `block`: hold block facing the attacker through the strike, then keep attacking. `dodge`: dash away
 and sideways just before the strike lands. `backoff`: step out of reach. `aggressive`: ignore windups. `hold` (fps;
@@ -429,11 +429,13 @@ A `do` returns when its chain is done or failed, at the time cap, or on a **wake
 | dialogue | a dialogue opens or changes, unless the order is talk / interact / choose / press / use |
 | outside fights | being hurt by a hit (a small loss, ≤ 8% of max hp (0.5 when there's no max), with nobody near and no enemy in view attacking, is damage over time when no enemy is in view at all or another such loss came within 2.5 s: poison, burning; it goes in the timeline only, and autofight doesn't answer it); a hostile entering the alert range (`play.alert`, 6 cells), unless it's the order's own target. `flee` ignores both. In the platformer profile, an approaching enemy doesn't wake run / goto / go / explore / pickup / jump (the runner jumps or stomps on its own). With **autofight** on (below), neither wakes a movement order (goto, go, explore, follow, pickup, talk) or anything in live mode: the reflex layer deals with it and reports it as an event. |
 | `careful` | also items or NPCs appearing, notices, pickups, kills |
+| `quiet` | never alerts, hits, items appearing, notices, pickups or kills (the "always" row and dialogues still wake) |
+| `play.alerts` | alerts wake only when `true` (default; `"events"` in the defense profile lists them in the events line without waking; `false` or `play.alert: 0` makes none). The defense profile isn't woken by the base being hit either (low hp still wakes). |
 
 **Time cap** (game seconds): `--for S` if given. Otherwise, if every order is open-ended (explore, wait, follow,
 run, wait for, hold, block) or has its own `for`: the largest `for` (default 6) + 0.5 s. Otherwise max(25, largest
 `for` + 1). Behaviours also give up on their own: goto 30 s, fight 60 s, flee 6 s, talk 30 s, pickup 40 s,
-wait for 8 s.
+wait for 8 s. A timed `wait N` in the defense profile, and any `wait N quiet`, counts as N (not 6) in that cap.
 
 A movement or fight order fails at once if a dialogue is open ("choose an option or press cancel first"), and any
 order except taps/waits fails if you're dead.
@@ -540,7 +542,8 @@ need a push; it costs one field. In the platformer profile a goto just arrives (
 
 ## Profiles
 
-`play.profile`: `topdown` (default), `platformer`, `fps`, `turn` (also written `card`, `menu`, `board`, `turn-based`).
+`play.profile`: `topdown` (default), `platformer`, `fps`, `turn` (also written `card`, `menu`, `board`, `turn-based`),
+`defense` (also `static`, `tower`, `tower-defense`, `stationary`).
 
 | profile | movement | needs from the snapshot | needs from the controls |
 |---|---|---|---|
@@ -592,6 +595,41 @@ no movement: the observation is the game's own fields and the choices it offers,
   scene or phase, hand, dialogue, outcome), and `witness play suggest` proposes `"profile": "turn"` (with `show`)
   when the snapshot has choices or `yourTurn` and no player position.
 
+### The `defense` profile (static, tower and base defense games)
+
+For games where you never move: a fort, a tower or a base sits still and enemies come to it in waves; you fire, tap
+the enemies, use specials and buy upgrades between waves.
+
+```json
+"play": { "profile": "defense", "controls": { "attack": "tap:target", "frag": "action:frag" }, "allowCalls": true }
+```
+
+* **No movement.** No move control is needed (none is auto-picked; move keys a game names are never pressed), and
+  goto / go / explore / follow / flee / talk / pickup / look / dodge are refused with the defense order card. The base
+  is `state.player` (`pos` to measure distances from, `hp`); without one, taps, waits, calls and `fight` still run.
+* **`fight [enemies|thing] [for 25s]`** stands and attacks the nearest enemy (any distance), switches to the next when
+  it dies, and **waits for the next one** when the field is empty (an event says so, and another when it comes). With a
+  time, reaching it is a success (`fought for 25s as ordered: …`); without, it ends when a kill clears the field, or
+  after `play.fightWait` (20 s) with no enemy. No telegraph reflex (a `block` mode holds block on a windup if there is
+  a block control); no retreat flee.
+* **`attack: "tap:target"`** (or `"click:target"`, in any profile) taps (touch, finger 0) or clicks the target where it is
+  drawn, every `attackEvery` seconds: from the entity's `screen: [x, y]` (or `{x, y}`), else `play.screen` (an
+  expression with `e`, or `"world"` when positions already are screen pixels), else `state.camera` `{pos: [x, y]
+  (or x, y), zoom (or scale), center?}` (screen = (world − camera) × zoom, plus half the screen with `center: true`; the
+  same convention `measure` reads). A target it can't place fails the fight with what to add; one off the screen too.
+  The taps are ordinary input events, so the replay is exact. `press attack` taps the nearest enemy.
+* **Waits and alerts**: alerts are events, not wakes (`play.alerts` `"events"`), and the base being hit doesn't wake
+  either; low hp, death, a dialogue (a perk or upgrade pick), the goal and errors do. A timed `wait N` runs its N
+  seconds.
+* **The observation**: `base hp`, the game's stats, then `enemies: 14 on the field, 6 within 12 cells (closest first;
+  cells from the base):`, one line each (up to 10, the rest counted by type): distance, hp, `BOSS` (entity `boss`),
+  `WINDUP` or a state, `closing 2.5 cells/s (there in ~3s)` / `moving away` / `holding` (from the measured velocity), and
+  `screen x,y` when the game gives screen positions. Items on one line; dialogue, `game says:`, events. No cell, no map,
+  no compass. `--json`: `{t, frame, profile: "defense", base, stats, enemies[{key, type, dist, hp, maxHp, closing, eta,
+  screen, boss, windup, state}], items[], dialogue, goal, notice, dead, won, result, events[]}`.
+* `witness play check` uses the defense checklist (the base with pos and hp, entities with id/type/pos, hostile flags,
+  screen positions for `tap:target`, outcome, dialogue). No coverage map in the report.
+
 **Settling animations.** After an order that changed the scene or a dialogue, and before `play shot` / `look --shot`
 (turn-taking sessions), the session steps the game until the adapter reports no running animations, at most 0.5 s of
 game time, so a CSS crossfade isn't screenshotted half way ("Home drawn over Profile"). It evals
@@ -627,12 +665,12 @@ entity) and `player`.
 
 ### Controls
 
-A control is `"j"` (a key), `"key:j"`, `"action:attack"`, `"pad:x"`, `"mouse:left"` (`middle`, `right`) or
-`"axis:leftx"`.
+A control is `"j"` (a key), `"key:j"`, `"action:attack"`, `"pad:x"`, `"mouse:left"` (`middle`, `right`),
+`"axis:leftx"`, or (for `attack`) `"tap:target"` / `"click:target"`: a tap or click where the target is drawn (see the defense profile).
 
 | field | default | meaning |
 |---|---|---|
-| `move` | topdown: `wasd` if the game lists those keys (or no arrows), else `arrows`; platformer: arrows left/right/down (no up: it's often jump); fps: `wasd` | `wasd` · `arrows` · `zqsd` · `{up, down, left, right}` (or `forward`/`back`) · `{axis: ["leftx", "lefty"]}` |
+| `move` | topdown: `wasd` if the game lists those keys (or no arrows), else `arrows`; platformer: arrows left/right/down (no up: it's often jump); fps: `wasd`; defense: none | `wasd` · `arrows` · `zqsd` · `{up, down, left, right}` (or `forward`/`back`) · `{axis: ["leftx", "lefty"]}` · `false` / `"none"` (no movement: fights attack from where you stand) |
 | `attack` | topdown: first of `j` `x` `f` in hello.keys; fps: `mouse:left` | attack |
 | `attackMode`, `attackEvery` | `tap` (fps `hold`), 0.35 s | tap every N seconds, or hold |
 | `block`, `dodge`, `heal`, `crouch`, `aim` | none | block (held), dodge (tapped), heal (tapped), crouch, aim down sights |
@@ -668,25 +706,28 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 
 | field | default | meaning |
 |---|---|---|
-| `profile` | `topdown` | `topdown` · `platformer` · `fps` · `turn` |
+| `profile` | `topdown` | `topdown` · `platformer` · `fps` · `turn` · `defense` |
 | `choices`, `yourTurn` | `state.choices`…, `state.yourTurn`… | expressions for the game's choices and whose turn it is (turn profile; `choices` works in any profile) |
 | `show` | auto | turn profile: the fields the observation shows (`["score", "hand", "state.trick", {"label": "trump", "expr": "state.round.trump"}]`) |
 | `pick` | `"auto"` | how a pick reaches the game: `{"call": "<fn>", "args": ["id"]}`, `"click"`, `"keys"` |
 | `turnWait` | 30 | seconds a bare `wait` may wait for your turn (turn profile) |
-| `resultChars` | 400 | how much of a call's result the order's answer shows (was 120) |
+| `resultChars` | 800 | how much of a call's result the order's answer shows (400 in 0.7.5; `look --full` shows it all) |
+| `fightWait` | 20 | seconds a waiting fight (`when they come`, the defense profile) waits for an enemy when no time was given |
+| `screen` | none | per-thing screen position expression (`e`) for `tap:target`, or `"world"` (positions are screen pixels) |
 | `plane` | `[0,1]`, fps `[0,2]` | which position components form the ground plane |
 | `north` | `-y`, fps `-z` | the world direction that is "up" on screen |
 | `cell` | the map's `cell`, else the player's size × 1.25, else 16 (large coordinates) or 1 | world units per nav cell (all distances in orders and observations) |
 | `speed` | measured | walking speed in world units/s |
 | `reach` | `{attack: 1.2, interact: 1.2, pickup: 0.5}` | in cells |
-| `alert` | 6 | cells: a hostile this close wakes the tester |
+| `alert` | 6 | cells: a hostile this close is an alert (it wakes the tester when `alerts` is on); `0` turns alerts off |
+| `alerts` | `true` (defense: `"events"`) | `true`: alerts wake waits and other non-fight orders; `"events"`: listed in the events line only; `false`: none |
 | `stuckDead` | 20 | game seconds dead, with key presses and no state change (a respawn countdown going down is a change), before the session ends as `stuck dead` (0 = off; raise it above a long respawn the state has no countdown for) |
 | `leash` | 14 | cells: a melee fight stops chasing a target this far from where the fight started (0 = never stop) |
 | `sight` | 3 | cells around the path counted as seen when exploring |
 | `reaction` | 0.25 (or the persona's) | seconds before the guard reacts to a windup |
 | `tick`, `combatTick` | 3, 1 | frames per decision normally / near hostiles |
-| `guard` | `true` | the telegraph reflex |
-| `autofight` | on (topdown, fps), off (platformer) | fight enemies met during movement orders, then resume |
+| `guard` | `true` (defense: `false`) | the telegraph reflex |
+| `autofight` | on (topdown, fps), off (platformer, defense) | fight enemies met during movement orders, then resume |
 | `autofightLeash` | 6 | cells an autofight may chase before the move resumes |
 | `live` | `{horizon: 4, pauseAfter: 15, speed: 1}` | live-mode defaults (the start flags override them) |
 | `guardMode` | none: block if a block control exists, else dodge, else back off | force `block`, `dodge` or `backoff` for the guard and default fights |
@@ -694,7 +735,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `retreat`, `heal` | 0, 0 | standing hp % policies (0 = off) |
 | `combos` | `{}` | name → Witness input spec (`"down@0-0.05, right@0.05-0.12, p@0.1"`) |
 | `mirrorCombos` | `true` | swap left/right in combos when the nearest enemy is on your left (fighting games) |
-| `brief` | none | developer notes added to `witness play brief` (same as `--extra`) |
+| `brief` | none | developer notes added to `witness play brief` (same as `--extra`); backticks in it become quotes (the brief tells testers a backtick breaks a command) |
 | `allowCalls` | `false` | allow `call` orders (same as `--allow-calls`) |
 | `logs` | `true` | which game info logs become events: `true`, `false`, or a regex |
 | `maxShots` | 24 | cap on automatic key-moment screenshots |
@@ -781,7 +822,8 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
   tester). Entries that don't answer (a crash, a reboot) are checked first and don't hold a slot. Each session is one
   game plus one light daemon. Every game or browser launch, playtests included, also takes a slot of the machine-wide
   budget (`WITNESS_MAX_PROCS`, default 3; `WITNESS_MAX_BROWSERS`, default 1): a daemon waits up to
-  `WITNESS_BUDGET_WAIT` seconds (default 90) for one, and `start` shows its "waiting for a free slot" line.
+  `WITNESS_BUDGET_WAIT` seconds (default 90) for one, and `start` shows its "waiting for a free slot" lines (each
+  holder and how long it has run). `play batch` itself queues up to 10 min for a free slot before starting each tester.
   `play suggest` runs a game too but isn't counted as a session.
 * **Cleanup.** `witness play list` shows what's alive. `witness play stop --all` ends every live session.
   `witness play list --clean` marks unresponsive ones ended and forgets entries older than a day or whose folder was

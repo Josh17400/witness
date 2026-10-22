@@ -12,7 +12,7 @@ import { makeBrief, PERSONAS, configArg, cmdRoot, launchArgs } from "./brief.js"
 import { resolvePlayConfig, describeControls } from "./config.js";
 import { readEntry, pidAlive, shimPath, shimCommand, acquireBatchLock, validName, LOCK_BEAT_MS, localTime } from "./registry.js";
 import { prune, fmtBytes } from "../core/clean.js";
-import { budgetLimits } from "../core/budget.js";
+import { budgetLimits, acquireSlot } from "../core/budget.js";
 import { UntilWatch, fmtHours } from "./until.js";
 
 const r1 = (x) => Math.round(x * 10) / 10;
@@ -186,7 +186,15 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
       resolve();
     });
   });
+  // the batch queues for the machine-wide budget itself (up to 10 min, WITNESS_BUDGET_WAIT): a tester's own 'play start'
+  // waits only 90 s (inside its Bash call's 120 s), so a tester starts only once a slot is free (taken, then handed over)
+  const gate = async (r) => {
+    if (cfg.launch && cfg.launch.attach) return;   // attach testers take no slot (openGame skips it): nothing to queue for
+    try { (await acquireSlot({ browser: web, label: `${cfg.name || "game"}: witness play batch (#${r.i} ${r.name} waiting to start)`, log: (m) => console.log(`  #${r.i} ${r.name}: ${m}`) })).release(); }
+    catch (e) { console.log(`  #${r.i} ${r.name}: ⚠ ${e.message}; starting the tester anyway`); }
+  };
   const runOne = async (r) => {
+    await gate(r);
     console.log(`  #${r.i} ${r.name}: started — ${r.goal}`);
     await attempt(r, r.brief);
     let b = !r.timedOut && !interrupted ? blockedBy({ denials: r.denials, reply: r.reply, report: r.report }) : null;
@@ -196,6 +204,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
       console.log(`  #${r.i} ${r.name}: ${blockedText(b)}, 0 orders; retrying once with the exact allowed command`);
       if (r.dir && r.report && !(r.report.stats && r.report.stats.orders)) { try { fs.rmSync(r.dir, { recursive: true, force: true }); } catch { /* busy */ } }
       r.dir = null; r.report = null;
+      await gate(r);
       await attempt(r, nudge(r.brief, b, r.name));
       b = !r.timedOut && !interrupted ? blockedBy({ denials: r.denials, reply: r.reply, report: r.report }) : null;
     }

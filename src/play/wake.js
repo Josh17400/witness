@@ -2,7 +2,7 @@
 // Pure: the daemon and the unit tests share it.
 
 /**
- * The text of the first event that should wake the tester, or null. `b` = {verb, careful, target} of the running
+ * The text of the first event that should wake the tester, or null. `b` = {verb, careful, quiet, target} of the running
  * order; `ctx` = {ap, world, cfg, live}.
  */
 export function wakeFor(ev, b, { ap, world, cfg, live = false }) {
@@ -10,6 +10,9 @@ export function wakeFor(ev, b, { ap, world, cfg, live = false }) {
   // with autofight on, enemies met while moving are the reflex layer's job: only the big things wake the tester
   const moving = /^(goto|go|explore|follow|pickup|talk|run)$/.test(b?.verb || "") || !!ap.suspended;
   const reflexes = ap.policy.autofight && (moving || live);
+  // alerts only wake when play.alerts is on (a defense game lists them as events: enemies coming is its normal state),
+  // and a quiet order ("wait 5 quiet") wakes only for the big things; a defense game isn't woken by the base taking hits
+  const calm = (b && b.quiet) || cfg.alerts !== true, tough = (b && b.quiet) || cfg.profile === "defense";
   for (const e of ev) {
     // a scene change the order caused on purpose (it walked into the inn it was sent to) finishes it instead
     if (e.kind === "scene" && ap.sceneArrival) continue;
@@ -21,6 +24,8 @@ export function wakeFor(ev, b, { ap, world, cfg, live = false }) {
     if (e.kind === "hurt" && e.data && e.data.dot) continue;
     if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return e.text;
     if (reflexes && (e.kind === "hurt" || e.kind === "alert")) continue;
+    if ((calm && e.kind === "alert") || (tough && e.kind === "hurt")) continue;
+    if (b && b.quiet && ["appear", "notice", "pickup", "kill"].includes(e.kind)) continue;
     if (!combat && e.kind === "hurt" && b?.verb !== "flee") return e.text;
     // platformer runs jump or stomp enemies on their own: an approaching enemy isn't worth a wake there
     const runner = cfg.profile === "platformer" && /^(run|goto|go|explore|pickup|jump)$/.test(b?.verb || "");

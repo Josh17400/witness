@@ -582,4 +582,41 @@ console.log("\naudio analysis — raw game audio (analyzePCM)");
   void secondAttack;
 }
 
+// ---- comparing captures (doctor / test --repeat / match): tolerance, render-quantum padding, sample rates
+{
+  const { comparePCM, describePCMDiff } = await import("../../src/media/audio-compare.js");
+  const { Matcher } = await import("../../src/core/compare.js");
+  const cap = (a, rate = 24000) => ({ sampleRate: rate, channels: 1, format: "f32", data: Buffer.from(new Float32Array(a).buffer).toString("base64") });
+  const base = Array.from({ length: 4800 }, (_, i) => 0.5 * Math.sin(i / 7));
+  const noisy = base.map((v, i) => (i > 2400 && i % 3 === 0 ? v + 4.21e-7 : v));
+  let d = comparePCM(cap(base), cap(noisy));
+  ok("audio compare: 4.21e-7 float noise is within the default 1e-5 tolerance, counted apart", d.same && d.count === 0 && d.noise > 700 && /audio: \d+ samples differed by at most 4\.\d+e-7 \(within the ±1\.0e-5 tolerance/.test(describePCMDiff(d)), describePCMDiff(d));
+  d = comparePCM(cap(base), cap(noisy), { tol: 0 });
+  ok("audio compare: tol 0 is exact: the same noise fails, from where it starts", !d.same && d.first === 2403 && /audio differs from 0\.1001 s into the capture: \d+ samples off by more than ±0, max sample difference 4\.\d+e-7/.test(describePCMDiff(d)), describePCMDiff(d));
+  const loud = base.slice(); loud[3000] += 0.7;
+  d = comparePCM(cap(base), cap(loud));
+  ok("audio compare: a dropped / extra sound still fails, with where and how much", !d.same && d.count === 1 && /from 0\.1250 s .*1 sample off by more than ±1\.0e-5, max sample difference 0\.700/.test(describePCMDiff(d)), describePCMDiff(d));
+  d = comparePCM(cap(base), cap(base.concat(new Array(128).fill(0))));
+  ok("audio compare: one silent render quantum longer is padding, not a difference", d.same && d.tail.frames === 128 && /extra 128 are silent render-quantum padding/.test(describePCMDiff(d)), describePCMDiff(d));
+  d = comparePCM(cap(base), cap(base.concat(new Array(129).fill(0))));
+  ok("audio compare: more than a quantum longer is a difference (lengths named)", !d.same && /\(lengths 4800 vs 4929 frames\)/.test(describePCMDiff(d)), describePCMDiff(d));
+  d = comparePCM(cap(base), cap(base.concat([0.2])));
+  ok("audio compare: a tail that sounds is a difference", !d.same && /peak at 0\.200/.test(describePCMDiff(d)), describePCMDiff(d));
+  d = comparePCM(cap(new Array(4410).fill(0), 22050), cap(new Array(4800).fill(0), 24000));
+  ok("audio compare: two silent captures at 22050 vs 24000 Hz are the same (said so)", d.same && /both captures silent, at 22050 vs 24000 Hz \(lengths 4410 vs 4800 frames\)/.test(describePCMDiff(d)), describePCMDiff(d));
+  d = comparePCM(cap(base.slice(0, 4410), 22050), cap(base, 24000));
+  ok("audio compare: sound at different rates is a difference naming the rates", !d.same && /sample rates 22050 vs 24000 Hz/.test(describePCMDiff(d)), describePCMDiff(d));
+  const m = new Matcher();
+  await m.check("x", { snap: { state: {} }, audio: cap(base) });
+  let r = await m.check("x", { snap: { state: {} }, audio: cap(noisy) });
+  ok("Matcher: audio within the default tolerance passes with a note", r.ok && r.notes.length === 1 && /^audio: \d+ samples differed/.test(r.notes[0]), JSON.stringify(r));
+  const m0 = new Matcher({ audioTol: 0 });
+  await m0.check("x", { snap: { state: {} }, audio: cap(base) });
+  r = await m0.check("x", { snap: { state: {} }, audio: cap(noisy) });
+  ok("Matcher audioTol 0: exact", !r.ok && /^audio differs from 0\.1001 s/.test(r.problems[0]), JSON.stringify(r));
+  const { audioTolOf } = await import("../../src/core/compare.js");
+  ok("audioTolOf: --audio-tol over witness.json audioTol over 1e-5; nonsense refused", audioTolOf({ "audio-tol": "0" }, { audioTol: 1e-3 }) === 0 && audioTolOf({}, { audioTol: 1e-3 }) === 1e-3 && audioTolOf({}, {}) === 1e-5
+    && (() => { try { audioTolOf({ "audio-tol": "x" }); return false; } catch (e) { return /--audio-tol/.test(e.message); } })());
+}
+
 done("audio");

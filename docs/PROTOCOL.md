@@ -227,7 +227,9 @@ adapter writes a replay:
 7. `witness doctor` checks this: a scripted run, a *different* run, then the first run again in the
    same process must give identical state, `digest`, screenshot and audio. For long scenarios (a
    journey, a fight) use `"match"` steps in tests or `witness test --repeat 2`, which compares every
-   step of every test against the first pass.
+   step of every test against the first pass. Audio matches when every sample is within `--audio-tol`
+   (witness.json `"audioTol"`, default 1e-5: float rounding in compressors / convolvers; 0 = exact); a capture longer
+   by at most one silent 128-frame render quantum matches too.
 
 ## 7. Transports
 

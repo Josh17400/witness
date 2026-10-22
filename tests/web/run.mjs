@@ -192,6 +192,16 @@ else {
   j = json(r);
   ok("unlock done right: doctor's probe says a tap at the centre unlocked it at frame 4", j && j.summary.web.audioLocked === false && /running after a tap at the centre \(finger lifted at frame 4\)/.test(j.summary.web.unlock || ""), r.stdout + r.stderr);
 
+  // a Fort-like sound engine: live voices counted down by onended (and by setTimeout), new sounds dropped at the cap,
+  // a fresh context opened lazily after each reset through compressor ×2 + waveshaper + convolver. onended on the
+  // virtual clock (never before the end, at most a frame + a quantum after), the capture's rate fixed before any
+  // context exists (was 4410 vs 4800 frames), float noise within --audio-tol: every step repeats
+  r = witness(P("voices"), ["test", "--repeat", "2"], env);
+  ok("voices: test --repeat 2 identical at every step (onended voice cap, setTimeout voices, compressors + convolver, lazy context)", r.status === 0 && /4 passed, 0 failed/.test(r.stdout) && /identical at every step/.test(r.stdout) && !/lengths \d+ vs/.test(r.stdout), r.stdout + r.stderr);
+  r = witness(P("voices"), ["doctor", "--json"], env);
+  j = json(r);
+  ok("voices: doctor deterministic (state, screenshot and audio)", j && j.summary.deterministic === true && /✔ deterministic .*audio/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
+
   // captured audio is silent while suspended and sounds after the tap (sample-exact, through the CLI's own modules)
   {
     const { findConfig, openGame } = await import(pathToFileURL(path.join(root, "src", "core", "launch.js")).href);
@@ -338,7 +348,7 @@ else {
     ok("dom page suite (tests/web/dom.mjs)", d.status === 0 && m && +m[2] === 0, d.stdout + d.stderr);
   }
   for (const d of shots) fs.rmSync(d, { recursive: true, force: true });
-  for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "safe-nocover", "mixed"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
+  for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "safe-nocover", "mixed", "voices"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);

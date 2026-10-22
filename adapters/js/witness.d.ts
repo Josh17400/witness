@@ -157,6 +157,8 @@ export interface WitnessConfig {
   audioSeconds?: number;
   /** Sample rate of captured AudioContexts that don't ask for one (default 24000). */
   audioRate?: number;
+  /** false: a source node's "ended" comes from the offline renderer (uneven timing) instead of the virtual clock. */
+  virtualEnded?: boolean;
   /** false: iPhone-Safari audio policy on pages without the CLI's init script (contexts start suspended; resume()
    *  only during a gesture). Browser launches take it from --no-auto-unlock instead. ?witness_audio_unlock=0 */
   audioUnlock?: boolean;

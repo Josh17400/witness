@@ -166,20 +166,22 @@ export function pixelDiffImage(A, B, tol = 0) {
   return out;
 }
 
-/** Where two audio captures first differ: {seconds, maxDiff} (decoded through the media module when available). */
-async function audioDiff(a, b) {
+/** Two audio captures compared within tol: src/media/audio-compare.js comparePCM + its words (null: not decodable). */
+async function audioDiff(a, b, tol) {
   try {
-    const m = await import("../media/index.js");
-    const da = m.decodePCM(a), db = m.decodePCM(b);
-    const ca = da.channels[0], cb = db.channels[0];
-    const n = Math.min(ca.length, cb.length);
-    let first = -1, maxDiff = 0;
-    for (let c = 0; c < Math.min(da.channels.length, db.channels.length); c++) {
-      const x = da.channels[c], y = db.channels[c];
-      for (let i = 0; i < n; i++) { const d = Math.abs(x[i] - y[i]); if (d > 0 && (first < 0 || i < first)) first = i; if (d > maxDiff) maxDiff = d; }
-    }
-    return { seconds: first < 0 ? null : first / da.sampleRate, maxDiff, lengths: [ca.length, cb.length], sampleRate: da.sampleRate };
+    const m = await import("../media/audio-compare.js");
+    const d = m.comparePCM(a, b, { tol });
+    return { ...d, text: m.describePCMDiff(d) };
   } catch { return null; }
+}
+
+/** The audio tolerance from --audio-tol, else witness.json "audioTol", else 1e-5 (per sample, full scale 1; 0 = exact). */
+export function audioTolOf(opt = {}, cfg = {}) {
+  const v = opt["audio-tol"] !== undefined && opt["audio-tol"] !== true ? opt["audio-tol"] : cfg && cfg.audioTol;
+  if (v === undefined || v === null || v === "") return 1e-5;
+  const n = +v;
+  if (!(n >= 0 && n <= 2)) throw new RangeError(`--audio-tol / "audioTol" wants a per-sample difference 0..2 (default 1e-5; full scale is 1), got ${JSON.stringify(v)}`);
+  return n;
 }
 
 /**
@@ -188,7 +190,8 @@ async function audioDiff(a, b) {
  */
 export class Matcher {
   /** shotTol: per-channel screenshot difference allowed (0 = exact; doctor uses 2: GPU / anti-aliasing noise). */
-  constructor({ shotTol = 0 } = {}) { this.refs = new Map(); this.shotTol = Math.max(0, +shotTol || 0); }
+  /** audioTol: per-sample audio difference allowed (default 1e-5: WebAudio float noise; 0 = exact). */
+  constructor({ shotTol = 0, audioTol = 1e-5 } = {}) { this.refs = new Map(); this.shotTol = Math.max(0, +shotTol || 0); this.audioTol = Math.max(0, +audioTol || 0); }
   has(label) { return this.refs.has(label); }
 
   /**
@@ -223,9 +226,10 @@ export class Matcher {
         : `screenshot differs${sizes}`);
     }
     if (ref.audioHash && cur.audioHash && ref.audioHash !== cur.audioHash) {
-      const ad = await audioDiff(ref.audio, cur.audio);
-      problems.push(ad ? `audio differs${ad.seconds != null ? ` from ${ad.seconds.toFixed(4)} s into the capture` : ""}${ad.lengths[0] !== ad.lengths[1] ? ` (lengths ${ad.lengths[0]} vs ${ad.lengths[1]} frames)` : ""}, max sample difference ${ad.maxDiff.toPrecision(3)}`
-        : "audio differs");
+      const ad = await audioDiff(ref.audio, cur.audio, this.audioTol);
+      if (!ad) problems.push("audio differs");
+      else if (!ad.same) problems.push(ad.text);
+      else if (ad.text) notes.push(ad.text);
     }
     const shots = problems.some((p) => p.startsWith("screenshot")) ? [ref.shot, cur.shot] : undefined;
     if (release) this.refs.delete(label);

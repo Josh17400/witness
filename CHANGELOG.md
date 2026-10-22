@@ -3,6 +3,76 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.6 (2026-10-21)
+
+From The Fort (a single-file canvas tap-to-shoot fort-defense web game) adopting 0.7.5.
+
+**WebAudio determinism (JS adapter)**
+- A source node's `ended` event runs on the virtual clock: Witness computes each voice's end (start + the buffer's
+  playable length over offset/duration/`playbackRate`/`detune`/`loop`, or its `stop()` time) and fires `onended` /
+  `addEventListener("ended")` handlers after the render of the frame that reaches it, the same frame every run, never
+  before the sound was rendered. The browser's own (unevenly timed) `ended` is ignored; a closed context's sources
+  never end. Live-voice counters (`src.onended = () => live--`) no longer drop different sounds in different runs.
+  `WITNESS_CONFIG.virtualEnded=false` (or `?witness_virtualEnded=0`) turns it off.
+- A context created mid-run measures from the reset (it measured from page load, so frames on a 128-frame render
+  boundary rounded differently between passes). Closed contexts leave the capture at the next reset; with no context
+  yet, the capture uses the rate a context would get (the first step of pass 1 was 4410 frames, pass 2 4800).
+- Audio compares with a per-sample tolerance: `--audio-tol` on `test` and `doctor` (witness.json `"audioTol"`,
+  default 1e-5: Chrome's compressor/convolver differ by ~1e-7 run to run; 0 = exact). A match only within it is one
+  `·` note per test, not a failure. A capture longer by one silent 128-frame quantum matches.
+
+**A `defense` play profile** (`"play": {"profile": "defense"}`; `static`, `tower`, `tower-defense`, `stationary`)
+- No movement: no move control needed (move keys are never pressed), movement orders are refused with the defense
+  order card, guard/autofight off. The observation is the base hp, the game's stats and the enemies closest first
+  (cells from the base, hp, BOSS/windup, `closing 2.5 cells/s (there in ~3s)`, screen position): no map or compass.
+- Alerts go in the events line instead of waking the tester, and the base being hit doesn't wake (low hp, death,
+  dialogues, the goal and errors still do). `fight enemies for 25s` waits for the next enemy on an empty field and
+  ends on its time as a success (`✔ done: fought for 25s as ordered: 4 defeated, 2 still on the field`; in every
+  profile now). `fight enemies when they come` waits for the next wave in any profile.
+- `"attack": "tap:target"` / `"click:target"` (any profile) taps or clicks where the target is drawn: from the
+  entity's `screen: [x, y]`, `play.screen` (an expression, or `"world"`) or `state.camera {pos, zoom, center?}`. Taps
+  are ordinary recorded input; a target it can't place fails the fight with what to add. In a fight standing still, an
+  enemy off the edge of the screen (a portrait phone over a wide field) is skipped for one in view, or waited for.
+- `"move": false` / `"none"` in any profile: fights attack from where they stand.
+- `play check`, the brief and the report fit defense games (no coverage map).
+- A fight only counts an enemy as defeated if it saw it alive (a second `fight enemies` right after a cleared field
+  no longer reports a remembered enemy as defeated).
+
+**Play, any profile**
+- `wait 5 quiet` (or `ignore`): only big events (death, low hp, a dialogue, the goal, an error, a scene change) wake
+  it, and it runs its full time. `"alert": 0` / `"alerts": false` turns alerts off.
+- A `call` the game answers with `false`, `{ok: false}`, `{legal: false}`, `{error: "…"}` or a throw fails with the
+  game's reason; `null` is "done (no result)"; anything else is done and shown. Call answers show 800 characters
+  (`play.resultChars`) and say when they were cut; `play look --full` shows the latest one whole.
+- Backticks in `play.brief` become quotes (the brief tells testers a backtick breaks a command).
+
+**Machine budget waits**
+- The waiting line names each holder, its pid and how long it has held the slot
+  (`the-fort: witness play _daemon b1 (pid 123, running 4 min)`), with a progress line every ~60 s.
+- `test`, `doctor` and `play batch` wait up to 600 s by default (others stay at 90 s; `WITNESS_BUDGET_WAIT`
+  overrides); a long wait says to run the command in the background. `play batch` queues for a free slot before
+  starting each tester, so testers no longer give up after 90 s on a busy machine.
+
+**Adoption steps** (written for The Fort; other games: only the ones that match)
+0. Re-copy the JS adapter (`adapters/js/witness.js` and `witness.d.ts` into your `witness/` folder, or `witness init`):
+   the ended/audio and CSS fixes live in it.
+1. Drop the `transition:none!important; animation:none!important` style injection in `witness/fort.js`: CSS
+   animations and transitions have run on the virtual clock since 0.7.5. Re-check screenshots once
+   (`shot --save-ref` after looking) since DOM overlays now animate.
+2. Drop the `AU.live` override (`Object.defineProperty(AU, "live", { get: () => 0 … })`): `ended` now fires on the
+   virtual clock, so the game's own voice cap is deterministic. Then run `witness test --repeat 2` and `witness
+   doctor`; the audio must match (a `·` note about tiny differences within `audioTol` is fine).
+3. Switch `play` to `"profile": "defense"` and drop the `action:lock` attack and the F13-F16 `move` workaround: set
+   `"attack": "tap:target"` (give enemies `screen: [x, y]` or the state a `camera`; for The Fort
+   `st.camera = { pos: [0, 0], zoom: sc, center: true }` matches its render transform) or keep `"action:lock"` if
+   lock-on is the intended play; remove `move`, `autofight: false` and `guard: false` (the profile's defaults), and rewrite the brief's battle rhythm around `fight enemies for 25s` and `wait N quiet`.
+4. Drop the shop-in-`state.notice` workaround: call answers now show 800 characters (`look --full` shows all), so
+   `call base` can return the armory list itself.
+5. Return `{error: "why"}` (or `false`) from calls that fail (`buy` of a locked or unaffordable item, `research`
+   that can't start, `theater` that can't switch) instead of a plain sentence: the order then fails with that
+   reason instead of reading as done.
+6. *Optional:* set `"audioTol"` in witness.json if your mix needs a looser (or exact, `0`) audio match.
+
 ## 0.7.5 (2026-10-21)
 
 From the first real DOM/card-game test (Euchre Unleashed: a pure-DOM iPhone web game, 3 Sonnet testers, 5 matches).

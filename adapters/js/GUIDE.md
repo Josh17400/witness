@@ -263,7 +263,12 @@ started "now" lands on the same sample whatever ran before the reset), so sounds
 "Audio unlock" below): by default contexts are `"running"` from the start; while a context is not running
 (`suspend()`, the iPhone policy, `close()`) it is **frozen** as in browsers: it doesn't render, `currentTime` stays
 put, sounds scheduled meanwhile wait, and the capture is silent; after `resume()` it carries on from where it
-stopped (music queued while locked plays from its start after the tap). This works
+stopped (music queued while locked plays from its start after the tap). A source node's `ended` event
+(`src.onended = () => live--`, the usual live-voice cap) fires on the virtual clock: after the render of the frame whose
+128-frame quantum reaches the source's end (start time + the buffer's playable length over `playbackRate`/`detune`,
+or its `stop()` time), the same frame every run and never before the sound was rendered; a closed context's sources
+never end. Timers (`setTimeout` voice counters) are virtual too. A context the game closed is dropped from the
+capture at the next reset. This works
 for Phaser's WebAudio sound manager, Howler.js (WebAudio mode), three.js `AudioListener`, Tone.js
 and hand-written graphs. Limits:
 * `<audio>`/`HTMLAudioElement` playback and `createMediaElementSource` are **not** captured (a
@@ -591,7 +596,7 @@ witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(
 witness.animating()          // finite CSS / Web Animations still running; also globalThis.__witnessAnimating()
 ```
 Page config, read at import: `globalThis.WITNESS_CONFIG = { addr, record, seed, takeover, raf,
-timers, webaudio, console, animations, videos, audioSeconds, audioRate, epoch }` (also
+timers, webaudio, console, animations, videos, audioSeconds, audioRate, virtualEnded, epoch }` (also
 `?witness_<name>=0` in the URL for the on/off ones, `?witness_epoch=`, and `WITNESS_EPOCH` in Node).
 `witness.json` for browser games also takes `launch.inject`, `launch.reset`, `launch.keepStorage`
 and `"clock": { "epoch": … }`.

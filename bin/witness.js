@@ -7,7 +7,7 @@ import { CONFIG_NAME } from "../src/core/launch.js";
 import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay } from "../src/core/runner.js";
 import { evaluate, fmt, keyPaths, ExprError, usesPrev, hint } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
-import { Matcher, diffValues, digestOf, pathFilter } from "../src/core/compare.js";
+import { Matcher, diffValues, digestOf, pathFilter, audioTolOf } from "../src/core/compare.js";
 import { prune, pruneRegistry, fmtBytes, markGenerated } from "../src/core/clean.js";
 import { CLI, die, say, forgetDie, DieError, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay, configFlag } from "../src/cli/common.js";
 import { parseNamedRects, stateLayers } from "../src/cli/scale-regions.js";
@@ -70,7 +70,8 @@ Common options:
   --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
 Times are seconds, or frames with an "f": --at 90f, --every 1f, space@60f. "+2f" = 2 frames after the input's frame.
 Machine-wide limit: at most 3 games/browsers run at once (WITNESS_MAX_PROCS; 0 = no limit), 1 of them a headless
-browser (WITNESS_MAX_BROWSERS); a launch over it waits, then gives up after 90 s (WITNESS_BUDGET_WAIT).
+browser (WITNESS_MAX_BROWSERS); a launch over it waits (naming each holder and how long it has run; a line every
+~60 s), then gives up after 90 s, or 600 s for test, doctor and play batch (WITNESS_BUDGET_WAIT overrides).
 
 Run 'witness help <command>' for details. Protocol: docs/PROTOCOL.md`;
 
@@ -107,6 +108,7 @@ const CMD_HELP = {
   capture of that label in this run must be identical (e.g. the same fight run twice, or a plain start after other tests).
   --repeat N   run the whole selection N times in one game process; every step must equal the same step of pass 1
                (state, digest, screenshot and audio): the strongest determinism check. --no-shots / --no-audio skip those.
+               --audio-tol 1e-5 (witness.json "audioTol"): per-sample audio difference allowed (0 = exact).
   An adapter without 'reset' gets a fresh game process for every test (not possible with --attach: one test at a
   time there); measure steps need 'reset'.`,
   eval: `witness eval [--at 0.5,2,90f] "expr" ["expr2" ...] [--input ...] [--json]
@@ -355,12 +357,14 @@ const CMD_HELP = {
       --background auto|first|median|<file.png>  (auto: median for 8+ frames; median needs movers to move their own
       size) · --camera auto|static|moving|state (state: the game's state.camera, exact) · --min-size 6 (smallest object, px) · --threshold 16`,
   doctor: `witness doctor [--time 3] [--device iphone-15] [--engine webkit] [--no-auto-unlock] [--safe-insets]
-              [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."] [--shot-tol 2]
+              [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."] [--shot-tol 2] [--audio-tol 1e-5]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
   Screenshots (rgba8 or PNG, e.g. --capture screen) match when every channel is within --shot-tol levels (default 2:
   Chromium anti-aliasing noise; 0 = exact); a mismatch reports the pixel count, box and largest difference and writes
   doctor-determinism-A.png / -A-again.png / -diff.png to the shots folder (pruned like other generated files).
+  Audio matches when every sample is within --audio-tol (witness.json "audioTol"; default 1e-5: float rounding in
+  WebAudio compressors / convolvers; 0 = exact); a capture longer by at most one silent 128-frame render quantum matches.
   For long game-specific scenarios (journeys, fights) use test steps with "match", or witness test --repeat 2.
   Browser games also get: the engine and device; the page (CSS viewport, DPR, screen, touch points, platform; ⚠ a
   touch profile reporting < 2 touch points); safe areas (--safe-insets emulates them; else the measure ui --safe preset to check); how
@@ -422,7 +426,9 @@ const commands = {
         const scriptB = "left@0.1-0.9, down@0.4-1.4, click:60,40@0.6, right@1.5-2.6, space@1.1, up@2.7-3";
         const shotTol = opt["shot-tol"] !== undefined && opt["shot-tol"] !== true ? +opt["shot-tol"] : 2;
         if (!(shotTol >= 0 && shotTol <= 255)) die("--shot-tol wants a per-channel level 0..255 (default 2)");
-        const matcher = new Matcher({ shotTol });
+        let audioTol;
+        try { audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
+        const matcher = new Matcher({ shotTol, audioTol });
         const exactAudio = caps.includes("audio") && h.audio_exact !== false;
         if (caps.includes("audio") && !exactAudio) report.push("  (hello says audio_exact: false — audio follows real time here, so it isn't compared)");
         const run = async (seed, input) => {
@@ -543,7 +549,9 @@ const commands = {
     const results = [];
     const shotDir = path.resolve(root, cfg.shots);
     const repeat = Math.max(1, Math.floor(+(opt.repeat === true ? 2 : opt.repeat || 1)));
-    const matcher = new Matcher();
+    let audioTol;
+    try { audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
+    const matcher = new Matcher({ audioTol });
     const matchMedia = { shot: !opt["no-shots"], audio: !opt["no-audio"] };
     const schedule = [];
     for (let p = 1; p <= repeat; p++) for (const t of tests) schedule.push(repeat > 1 ? { ...t, name: `${t.name}  [pass ${p}/${repeat}]`, _lastPass: p === repeat } : t);
@@ -713,6 +721,7 @@ function printTest(res, root) {
   console.log(`${res.ok ? "✔ pass" : "✖ FAIL"}  ${res.name}  (${ex.passed} expect${ex.passed === 1 ? "" : "s"} passed${ex.failed ? `, ${ex.failed} failed` : ""})${rel ? `  ${rel}` : ""}`);
   for (const f of res.failures || []) {
     if (f.kind === "warn") console.log(`    ⚠ ${f.message}`);
+    else if (f.kind === "note") console.log(`    · ${f.message}`);
     else console.log(`    ${f.kind === "expect" ? `expect failed at ${f.at}${/^-?[\d.]+$/.test(String(f.at)) ? "s" : ""}:` : "✖"} ${f.message}`);
   }
   for (const [p, vals] of Object.entries(res.probes || {})) console.log(`    probe ${p}: ${vals.map(([t, v]) => `${fmtT(t)}=${fmt(v, 40)}`).join("  ")}`);

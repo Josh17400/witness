@@ -206,7 +206,7 @@ export async function openGame(cfg, root, opts = {}) {
   const launch = cfg.launch || {};
   const attach = opts.attach || launch.attach;
   if (!attach && !launch.url && !launch.command) throw new WitnessError(`${CONFIG_NAME} has no "launch" — add {"launch": {"command": "path/to/game", "args": []}} (or "attach": true, or "url": "..."). Run 'witness init' for a template.`);
-  const slot = attach ? null : await acquireSlot({ browser: !!launch.url, label: `${cfg.name || "game"}: witness ${process.argv.slice(2).join(" ")}`.slice(0, 160) });
+  const slot = attach ? null : await acquireSlot({ browser: !!launch.url, label: `${cfg.name || "game"}: witness ${process.argv.slice(2).map((x) => (path.isAbsolute(x) ? path.basename(x) : x)).join(" ")}`.slice(0, 160) });   // a daemon's session folder → its name
   let srv;
   try { srv = await listen({ port: attach ? (opts.port || launch.port || DEFAULT_ATTACH_PORT) : 0 }); }
   catch (e) { if (slot) slot.release(); throw e.code === "EADDRINUSE" ? new WitnessError(`port ${e.port || opts.port || launch.port || DEFAULT_ATTACH_PORT} is in use: another Witness is waiting there (or pass --port)`) : e; }

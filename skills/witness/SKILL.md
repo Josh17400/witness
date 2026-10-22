@@ -179,12 +179,19 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
 `${CLAUDE_PLUGIN_ROOT}/docs/PLAYTEST.md`.
 
 1. **Config.** Add a `"play"` section to `witness.json`: at least `controls` (move, attack, block, dodge,
-   interact, heal, choose…), plus `profile` (`topdown` | `platformer` | `fps` | `turn`) if it isn't top-down.
+   interact, heal, choose…), plus `profile` (`topdown` | `platformer` | `fps` | `turn` | `defense`) if it isn't top-down.
    **Turn-based, card, board or menu games** use `"profile": "turn"`: expose `state.choices = [{label, id}]` (what the
    player can click or play now; `legal: false` for moves it can't take) and `state.yourTurn`, and say how a pick
    reaches the game (`"pick": {"call": "<fn>"}` gets the choice's id; or `"click"` on a choice `rect`). Testers then
    `pick <n|words>` and `wait` (until their turn), and see the game's own fields (`"show": ["score", "hand"]`) instead
    of a map. `play suggest` detects such games.
+   **Static / tower / base defense games** (you never move, enemies come in waves) use `"profile": "defense"`: no move
+   control needed, the base is `state.player` (pos, hp), enemies are listed closest first with arrival times, alerts
+   don't break waits, and `fight enemies for 25s` waits for the next wave and ends on its time as a success. For a
+   tap-to-shoot game set `"attack": "tap:target"` (or `"click:target"`) and give entities `screen: [x, y]` or the
+   state a `camera: {pos, zoom}`. In any profile, `wait 5 quiet` isn't woken by alerts or hits, and a `call` the game
+   answers with `false` / `{ok: false}` / `{error}` (or a throw) fails with its reason (`look --full` shows a long
+   answer whole).
    `witness play suggest` probes the game and proposes one (`--write` saves it). The harness works much better when
    the snapshot follows the playtest conventions (entity `hostile`/`item`/`talk`, enemy `state: "windup"` or
    `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`, doors with `leadsTo` and, for an exit you push into,
@@ -246,8 +253,10 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
   iteration. `doctor` shows which state fields differ.
 * A command "didn't answer": the game is blocked (an infinite loop, or waiting on real time).
 * "waiting for a free slot": the machine already runs 3 Witness games/browsers (1 headless browser) — another
-  agent's tests or playtests. It waits, then gives up after 90 s ("no free slot after ..."), inside the Bash tool's
-  default 120 s. To wait longer, set WITNESS_BUDGET_WAIT=<seconds> and give the Bash call a longer timeout to match.
+  agent's tests or playtests; the line names each holder and how long it has run. Quick commands (play start/do,
+  shot, eval ...) give up after 90 s ("no free slot after ..."), inside the Bash tool's default 120 s; test, doctor
+  and play batch queue up to 10 min (a line every ~60 s), so run those in the background. To change the wait, set
+  WITNESS_BUDGET_WAIT=<seconds> and give the Bash call a timeout to match.
   Don't start more in parallel; finish or stop (`witness play stop --all`) what you started. Limits:
   WITNESS_MAX_PROCS / WITNESS_MAX_BROWSERS.
 * Engines you can't launch headlessly (editor-based): `witness <cmd> --attach`, then start

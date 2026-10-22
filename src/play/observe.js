@@ -4,7 +4,8 @@ import { r1, clip, oneLine, fmtT, compass, len } from "./util.js";
 import { thingLabel } from "./perceive.js";
 import { lookOf } from "./profiles.js";
 import { describeControls } from "./config.js";
-import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS, ORDER_CARD_TURN } from "./orders.js";
+import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS, ORDER_CARD_TURN, ORDER_CARD_DEFENSE } from "./orders.js";
+import { screenOf } from "./autopilot.js";
 import { cellOf } from "./events.js";
 
 const IDLE = /^(idle|none|normal|walk|walking|stand|standing|wander|patrol|default)$/i;
@@ -52,6 +53,7 @@ function letterTable(things) {
 export function observeData(w, ctx) {
   const { cfg, grid, ap } = ctx;
   if (cfg.profile === "turn") return turnData(w, ctx);
+  if (cfg.profile === "defense") return defenseData(w, ctx);
   const P = w.player;
   const data = { t: +w.t.toFixed(2), frame: w.frame, player: null, stats: {}, near: [], farther: {}, remembered: [], dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, dead: w.dead, won: w.won, result: ctx.result || null, events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })), map: null };
   if (P && P.p2) {
@@ -107,6 +109,7 @@ function platformWindow(w, marks) {
 /** The text a tester reads. */
 export function observeText(w, ctx) {
   if (ctx.cfg.profile === "turn") return turnText(w, ctx);
+  if (ctx.cfg.profile === "defense") return defenseText(w, ctx);
   const d = observeData(w, ctx), cfg = ctx.cfg, L = [];
   const head = [`[t ${fmtT(w.t)}${ctx.live ? ` · ${ctx.live}` : ""}]`];
   if (d.player) {
@@ -233,6 +236,86 @@ function turnText(w, ctx) {
     const ctl = describeControls(cfg);
     if (ctl) L.push(`controls: ${ctl}`);
     L.push(`orders: ${ORDER_CARD_TURN.split("\n").join("\n        ")}`);
+  }
+  return L.join("\n");
+}
+
+// ------------------------------------------------------------------ static / tower / base defense games
+/**
+ * The defense observation's data: the base (hp, the game's stats), every enemy on the field closest first with its
+ * distance from the base (cells), how fast it closes in, when it would arrive, and where it is on the screen (when the
+ * game says: entity screen, state.camera, play.screen); items; no cell, no map, no compass.
+ */
+function defenseData(w, ctx) {
+  const { cfg, ap } = ctx, P = w.player, fps = (ap && ap.fps) || 60, size = (ap && ap.size) || [640, 360];
+  const stats = {};
+  for (const s of w.stats) stats[s.label] = s.value;
+  const one = (th) => {
+    let closing = null;
+    if (P && P.p2 && th.v && Number.isFinite(th.dist)) {
+      const d = [P.p2[0] - th.p2[0], P.p2[1] - th.p2[1]], L = Math.hypot(d[0], d[1]);
+      if (L > 1e-9) closing = +(((th.v[0] * d[0] + th.v[1] * d[1]) / L) * fps / w.cell).toFixed(2);
+    }
+    const sc = screenOf(th, w, cfg, size);
+    return { key: th.key, type: th.type, name: th.name, dist: Number.isFinite(th.dist) ? +th.dist.toFixed(1) : null, hp: th.hp, maxHp: th.maxHp,
+      closing, eta: closing > 0.05 && Number.isFinite(th.dist) ? +(th.dist / closing).toFixed(1) : null, screen: sc.xy || null,
+      boss: !!(th.raw && th.raw.boss), windup: !!th.telegraph, state: th.state && !IDLE.test(th.state) ? th.state : null };
+  };
+  const live = w.things.filter((th) => !th.dead);
+  const byDist = (a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity);
+  return { t: +w.t.toFixed(2), frame: w.frame, profile: "defense", base: P ? { hp: P.hp, maxHp: P.maxHp } : null, stats,
+    enemies: live.filter((th) => th.rel === "hostile").map(one).sort(byDist), items: live.filter((th) => th.rel === "item").map(one).sort(byDist),
+    others: live.filter((th) => th.rel !== "hostile" && th.rel !== "item").length,
+    dialogue: w.dialogue, goal: w.goal ? w.goal.text : null, notice: w.notice, dead: w.dead, won: w.won, result: ctx.result || null,
+    events: (ctx.events || []).map((e) => ({ t: +e.t.toFixed(2), kind: e.kind, text: e.text })) };
+}
+
+function defenseText(w, ctx) {
+  const d = defenseData(w, ctx), cfg = ctx.cfg, L = [];
+  const head = [`[t ${fmtT(w.t)}${ctx.live ? ` · ${ctx.live}` : ""}]`];
+  if (d.base && d.base.hp != null) head.push(`base hp ${r1(d.base.hp)}${d.base.maxHp ? `/${r1(d.base.maxHp)}` : ""}`);
+  for (const [k, v] of Object.entries(d.stats)) head.push(`${k} ${typeof v === "number" ? r1(v) : typeof v === "boolean" ? (v ? "yes" : "no") : clip(String(v), 20)}`);
+  L.push(head.join(" · "));
+  if (ctx.clock) L.push(ctx.clock);
+  if (ctx.first && ctx.session && ctx.session.goal) L.push(`your goal: ${ctx.session.goal}`);
+  if (d.goal) L.push(`goal: ${clip(oneLine(d.goal), 140)}`);
+  if (d.result) L.push(d.result.line);
+  if (ctx.live && ctx.order && !(d.result && /^(✔|✖)/.test(d.result.line || ""))) L.push(`your order (still running): ${ctx.order}`);
+  else if (ctx.live && !ctx.order) L.push("no order running: standing by (attacking the nearest enemy) while the game plays on");
+  if (w.dead) L.push(`THE BASE HAS FALLEN${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}`);
+  else if (w.won) L.push("★ GOAL REACHED (the game reports a win)");
+  const fmt = (e, enemy) => {
+    const bits = [];
+    if (e.hp != null) bits.push(`hp ${r1(e.hp)}${e.maxHp ? `/${r1(e.maxHp)}` : ""}`);
+    if (e.boss) bits.push("BOSS");
+    if (e.windup) bits.push("WINDUP");
+    else if (e.state) bits.push(e.state);
+    if (enemy && e.closing != null) bits.push(e.closing > 0.05 ? `closing ${r1(e.closing)} cells/s${e.eta != null ? ` (there in ~${Math.max(0, Math.round(e.eta))}s)` : ""}` : e.closing < -0.05 ? "moving away" : "holding");
+    if (e.screen) bits.push(`screen ${e.screen.join(",")}`);
+    if (e.name && !/^\d+$/.test(e.name)) bits.push(`"${clip(e.name, 24)}"`);
+    return bits.join("  ");
+  };
+  if (d.enemies.length) {
+    const near = d.enemies.filter((e) => e.dist != null && e.dist <= cfg.alert).length, shown = d.enemies.slice(0, 10);
+    L.push(`enemies: ${d.enemies.length} on the field${near ? `, ${near} within ${r1(cfg.alert)} cells` : ""} (closest first; cells from the base):`);
+    const kw = Math.min(16, Math.max(...shown.map((e) => e.key.length)));
+    for (const e of shown) L.push(`  ${e.key.padEnd(kw)}  ${e.dist == null ? "    ?" : e.dist.toFixed(1).padStart(5)}  ${fmt(e, true)}`);
+    if (d.enemies.length > shown.length) { const rest = {}; for (const e of d.enemies.slice(shown.length)) rest[e.type] = (rest[e.type] || 0) + 1; L.push(`  … +${d.enemies.length - shown.length} farther: ${Object.entries(rest).map(([k, v]) => `${k}×${v}`).join(", ")}`); }
+  } else L.push("enemies: none on the field (between waves? \"fight enemies for 25s\" waits for the next)");
+  if (d.items.length) L.push(`items: ${d.items.slice(0, 6).map((e) => `${e.key} ${e.dist == null ? "" : `${e.dist} `}${e.screen ? `(screen ${e.screen.join(",")})` : ""}`.trim()).join(" · ")}${d.items.length > 6 ? ` +${d.items.length - 6}` : ""}`);
+  if (w.dialogue) {
+    const dl = w.dialogue;
+    L.push(`dialogue — ${dl.speaker ? `${dl.speaker}: ` : ""}"${clip(oneLine(dl.text), 220)}"`);
+    if (dl.options.length) L.push(`  ${dl.options.map((o, i) => `${i + 1}) ${clip(oneLine(o), 60)}`).join("   ")}    (choose ${dl.options.map((_, i) => i + 1).join(" / ")})`);
+  }
+  if (w.menu) L.push(`menu open: ${clip(typeof w.menu === "string" ? w.menu : JSON.stringify(w.menu), 140)}`);
+  if (d.notice && !w.dead) L.push(`game says: "${clip(oneLine(d.notice), 140)}"`);
+  const evs = (ctx.events || []).filter((e) => !e.dup && e.kind !== "bump");
+  if (evs.length) { const shown = evs.slice(-9); L.push(`events: ${shown.map((e) => `${r1(e.t)} ${e.text}`).join(" · ")}${evs.length > shown.length ? ` (+${evs.length - shown.length} earlier)` : ""}`); }
+  if (ctx.first) {
+    const ctl = describeControls(cfg);
+    if (ctl) L.push(`controls: ${ctl}`);
+    L.push(`orders: ${ORDER_CARD_DEFENSE.split("\n").join("\n        ")}`);
   }
   return L.join("\n");
 }

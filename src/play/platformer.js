@@ -305,7 +305,7 @@ export class PlatformRunner {
       const dir = Math.sign(dx);
       if (dir > 0 && c.move.right) want.held.set("move:right", c.move.right); else if (dir < 0 && c.move.left) want.held.set("move:left", c.move.left);
       this.holdJump(w, want);
-      this.ap.attack(want);
+      if (this.ap.attack(want, th, w) === "noscreen") return fb.fail(this.ap.screenWhy);
       return null;
     }
     return this.stompTick(w, want, th);

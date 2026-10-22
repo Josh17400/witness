@@ -12,7 +12,7 @@ import { loadReplay } from "../../src/core/runner.js";
 import { listen, Session } from "../../src/core/session.js";
 import { prune, markGenerated, unsafeDir, GENERATED, MANIFEST } from "../../src/core/clean.js";
 import { stampSkill, staleSkillCopies, isInstalledPlugin } from "../../src/core/init.js";
-import { acquireSlot, scanSlots, startKeys, pidAlive } from "../../src/core/budget.js";
+import { acquireSlot, scanSlots, startKeys, pidAlive, defaultWaitSec, fmtAge, who } from "../../src/core/budget.js";
 import { killTree } from "../../src/core/procs.js";
 import { Matcher } from "../../src/core/compare.js";
 import { loopSeam } from "../../src/media/hygiene.js";
@@ -273,9 +273,34 @@ ok("splitRange: bad", splitRange("0.9") === null && splitRange("1..2..3") === nu
   try { await acquireSlot({ dir, max: 2, waitMs: 1200, pollMs: 200, log: (m) => { waited = m; } }); } catch (e) { msg = e.message; }
   ok("budget: a live holder makes it wait (said once), then a clear failure", /waiting for a free slot/.test(waited) && /no free slot after/.test(msg) && Date.now() - t0 >= 1100, `${waited} | ${msg}`);
   // a waiting launch gets the slot when the holder dies
-  setTimeout(() => sleeper.kill(), 400);
+  setTimeout(() => sleeper.kill(), 2000);
+  const tq = Date.now();
   const d = await acquireSlot({ dir, max: 2, waitMs: 8000, pollMs: 200, log: () => {} });
   ok("budget: the wait ends when a holder exits", d.files.length === 1);
+  const mine = who(scanSlots(dir).find((r) => r.file === d.files[0]));
+  ok("budget: running time counts from taking the slot, not from queueing", Date.now() - tq >= 1900 && /running [01] s/.test(mine), mine);
+  // holders named with what they are and how long they've run; an older slot file without "at" uses its mtime
+  const s2 = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { stdio: "ignore" });
+  await sleep(200);
+  const k2 = startKeys([s2.pid]).get(s2.pid);
+  fs.writeFileSync(path.join(dir, "slot-1.json"), JSON.stringify({ pid: s2.pid, key: k2, token: "old" }));   // 0.7.5 format: no at, no label
+  fs.utimesSync(path.join(dir, "slot-1.json"), new Date(Date.now() - 125000), new Date(Date.now() - 125000));
+  const lines = []; msg = "";
+  try { await acquireSlot({ dir, max: 2, waitMs: 1500, pollMs: 100, progressMs: 500, log: (m) => lines.push(m) }); } catch (e) { msg = e.message; }
+  ok("budget: old slot file → its age from mtime", (lines[0] || "").includes(`pid ${s2.pid} (running 2 min)`) && /running 2 min/.test(msg), `${lines[0]} | ${msg}`);
+  ok("budget: progress lines while waiting", lines.length >= 2 && lines.slice(1).every((l) => /^▸ still waiting for a free slot \(\d+ s of \d+ s\): in use by .*pid \d+ \(running 2 min\)/.test(l)), lines.join("\n"));
+  ok("budget: a short wait has no background hint", !/background/.test(lines[0] || ""), lines[0]);
+  fs.writeFileSync(path.join(dir, "slot-1.json"), JSON.stringify({ pid: s2.pid, key: k2, token: "new", at: new Date(Date.now() - 240000).toISOString(), label: "the-fort: witness play _daemon b1" }));
+  lines.length = 0; msg = "";
+  try { await acquireSlot({ dir, max: 2, waitMs: 120000, pollMs: 100, log: (m) => { lines.push(m); throw new Error("stop"); } }); } catch (e) { msg = e.message; }
+  ok("budget: holder label + pid + running time; over 110 s → run it in the background", (lines[0] || "").includes(`the-fort: witness play _daemon b1 (pid ${s2.pid}, running 4 min)`) && /gives up after 120 s: .*run this command in the background .*WITNESS_BUDGET_WAIT/.test(lines[0] || ""), lines[0]);
+  s2.kill();
+  try { fs.unlinkSync(path.join(dir, "slot-1.json")); } catch { /* reclaimed */ }
+  ok("budget: who() without owner / without label", who({ owner: null }) === "a launch starting" && /^pid 7 \(running 5 s\)$/.test(who({ owner: { pid: 7, at: new Date(1e12).toISOString() } }, 1e12 + 5000)));
+  ok("budget: fmtAge", fmtAge(40000) === "40 s" && fmtAge(240000) === "4 min" && fmtAge(3900000) === "1 h 5 min");
+  ok("budget: default wait 600 s for test/doctor/play batch, 90 s otherwise",
+    defaultWaitSec(["test"]) === 600 && defaultWaitSec(["doctor"]) === 600 && defaultWaitSec(["play", "batch"]) === 600
+    && defaultWaitSec(["play", "start"]) === 90 && defaultWaitSec(["play", "_daemon", "x"]) === 90 && defaultWaitSec(["shot"]) === 90 && defaultWaitSec(["eval"]) === 90 && defaultWaitSec([]) === 90);
   d.release(); a.release();
   ok("budget: max 0 = no limit", (await acquireSlot({ dir, max: 0 })).files.length === 0);
 }

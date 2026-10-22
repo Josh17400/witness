@@ -9,6 +9,9 @@ export function parseControl(spec) {
   if (spec == null || spec === false || spec === "") return null;
   if (typeof spec === "object") return spec.type ? spec : null;
   const s = String(spec).trim();
+  // "tap:target" / "click:target": tap (touch) or click the target's screen position (attack in a tap-to-shoot game)
+  const tm = /^(tap|touch|click):(target|enemy|it)$/i.exec(s);
+  if (tm) return { type: "target", via: /^click$/i.test(tm[1]) ? "click" : "tap" };
   const m = /^(key|action|pad|mouse|axis):(.+)$/i.exec(s);
   if (!m) return { type: "key", key: s.toLowerCase() };
   const kind = m[1].toLowerCase(), v = m[2].trim();
@@ -19,9 +22,11 @@ export function parseControl(spec) {
   const b = { left: 0, l: 0, "0": 0, middle: 1, m: 1, "1": 1, right: 2, r: 2, "2": 2 }[v.toLowerCase()];
   return { type: "mouse", button: b ?? 0 };
 }
-export const controlLabel = (c) => !c ? "?" : c.type === "key" ? c.key : c.type === "action" ? `action:${c.action}` : c.type === "pad" ? `pad:${c.button}` : c.type === "mouse" ? `mouse:${["left", "middle", "right"][c.button] || c.button}` : `axis:${c.axis}`;
+export const controlLabel = (c) => !c ? "?" : c.type === "target" ? `${c.via}:target` : c.type === "key" ? c.key : c.type === "action" ? `action:${c.action}` : c.type === "pad" ? `pad:${c.button}` : c.type === "mouse" ? `mouse:${["left", "middle", "right"][c.button] || c.button}` : `axis:${c.axis}`;
 
 function parseMove(spec, keys, profile) {
+  // no movement: "move": false / "none", and a defense game unless it names its move keys
+  if (spec === false || spec === null || /^(none|off|no)$/i.test(String(spec ?? "")) || (profile === "defense" && spec == null)) return {};
   if (spec && typeof spec === "object" && Array.isArray(spec.axis)) return { axis: spec.axis.map(String) };
   if (spec && typeof spec === "object") {
     const o = {};
@@ -42,9 +47,13 @@ function parseMove(spec, keys, profile) {
   return wasd || !arrows ? mk("w", "s", "a", "d") : mk("up", "down", "left", "right");
 }
 
-const PROFILES = ["topdown", "platformer", "fps", "turn"];
+const PROFILES = ["topdown", "platformer", "fps", "turn", "defense"];
 // turn-based / card / board / menu games: no body to walk, the game offers choices (cards, buttons, moves)
 const TURN_ALIASES = /^(turn|turns|turn-based|turnbased|card|cards|board|menu|menus)$/i;
+// static / tower / base defense: you never move, enemies come to you in waves; you fire, tap and build
+const DEFENSE_ALIASES = /^(defense|defence|static|tower|towers|tower-defense|tower-defence|towerdefense|stationary|base|fort)$/i;
+/** True when `c` names a control that moves (any key of up/down/left/right, or a stick). */
+export const canMove = (mv) => !!(mv && (mv.axis || mv.up || mv.down || mv.left || mv.right));
 
 /**
  * Resolve the play config. `raw` = witness.json "play" (may be undefined), `hello` = the adapter hello.
@@ -53,7 +62,8 @@ const TURN_ALIASES = /^(turn|turns|turn-based|turnbased|card|cards|board|menu|me
 export function resolvePlayConfig(raw = {}, hello = {}) {
   raw = raw || {};
   const keys = (hello.keys || []).map((k) => String(k).toLowerCase());
-  const profile = PROFILES.includes(raw.profile) ? raw.profile : TURN_ALIASES.test(String(raw.profile || "")) ? "turn" : "topdown";
+  const profile = PROFILES.includes(raw.profile) ? raw.profile : TURN_ALIASES.test(String(raw.profile || "")) ? "turn" : DEFENSE_ALIASES.test(String(raw.profile || "")) ? "defense" : "topdown";
+  const defense = profile === "defense";
   const c = raw.controls || {};
   const pick = (name, cands) => (name in c ? parseControl(c[name]) : cands ? parseControl(firstIn(keys, cands)) : null);
   const controls = {
@@ -109,14 +119,18 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     cell: raw.cell != null ? +raw.cell : null,           // world units per nav cell (null: from the map, else measured)
     speed: raw.speed != null ? +raw.speed : null,         // world units per second when walking (null: measured)
     reach: { attack: 1.2, interact: 1.2, pickup: 0.5, ...(raw.reach || {}) },   // in cells
-    alert: +(raw.alert ?? 6),                // cells: a hostile this close wakes the tester
+    // cells: a hostile this close is an alert (and wakes the tester when alerts wake); 0 = alerts off (6 for ranges)
+    alert: +(raw.alert ?? 6) || 6,
+    // alerts: true = they wake waits/moves, "events" = listed in events only (defense default), false = none (alert 0)
+    alerts: raw.alert === 0 || raw.alerts === false || /^(off|none|no)$/i.test(String(raw.alerts ?? "")) ? false
+      : raw.alerts === true || /^(on|wake|yes)$/i.test(String(raw.alerts ?? "")) ? true : raw.alerts === "events" || defense ? "events" : true,
     leash: +(raw.leash ?? 14),               // cells: a fight stops chasing a target this far from where it started
     sight: +(raw.sight ?? 3),                // cells around the path counted as "seen" when exploring without a map
     reaction: +(raw.reaction ?? 0.25),       // seconds before the reflex layer reacts to a telegraph
     tick: Math.max(1, Math.round(+(raw.tick ?? 3))),
     combatTick: Math.max(1, Math.round(+(raw.combatTick ?? 1))),
-    guard: raw.guard !== false,
-    autofight: raw.autofight != null ? !!raw.autofight : null,   // null: on for topdown and fps, off for platformers
+    guard: raw.guard != null ? raw.guard !== false : !defense,   // a defense game has nothing to block with by stepping
+    autofight: raw.autofight != null ? !!raw.autofight : defense ? false : null,   // null: on for topdown and fps, off for platformers
     autofightLeash: +(raw.autofightLeash ?? 6),    // cells an autofight may chase before it gives up and the move resumes
     live: { horizon: 4, pauseAfter: 15, speed: 1, ...(raw.live || {}) },   // live mode: check-in horizon (game s), auto-pause after (wall s), pace
     guardMode: ["block", "dodge", "backoff"].includes(raw.guardMode) ? raw.guardMode : null,   // null: block if possible, else dodge, else back off
@@ -131,7 +145,9 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     platformer: { jumpFrames: 18, runJumpFrames: 22, stomp: true, ...(raw.platformer || {}) },
     fps: { sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2, ...(raw.fps || {}) },
     module: raw.module || null,
-    resultChars: Math.max(40, +(raw.resultChars ?? 400) || 400),   // how much of a call's result an observation shows
+    resultChars: Math.max(40, +(raw.resultChars ?? 800) || 800),   // how much of a call's result an observation shows (look --full: all)
+    screen: raw.screen || null,              // per-thing screen position expression with `e` (tap:target); null: e.screen, state.camera
+    fightWait: Math.max(1, +(raw.fightWait ?? 20) || 20),   // s a waiting fight ("when they come", defense) waits without a "for"
     // turn profile (also read by any profile when the game lists choices): the game's choices, whose turn it is, the
     // fields the observation shows, how a pick reaches the game, how long a bare `wait` may wait for your turn
     choices: raw.choices || null, yourTurn: raw.yourTurn || null,
@@ -168,7 +184,7 @@ export function parsePick(p) {
 /** Short description of the controls for the brief / first observation. */
 export function describeControls(cfg) {
   const c = cfg.controls, out = [];
-  if (cfg.profile === "turn") {   // no movement: only the controls the game named itself
+  if (cfg.profile === "turn" || cfg.profile === "defense") {   // no movement: only the controls the game named itself
     for (const [k, v] of Object.entries(cfg.named)) if (!["confirm", "cancel"].includes(k) && v && !(k in c && !(cfg.rawControls || {})[k])) out.push(`${k} ${controlLabel(v)}`);
     return out.join(" · ");
   }

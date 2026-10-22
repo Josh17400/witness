@@ -78,7 +78,7 @@ function driver(g, play = TURN_PLAY) {
   const c = resolvePlayConfig({ profile: "cards" }, {});
   ok("config: card/menu aliases resolve to the turn profile", c.profile === "turn" && resolvePlayConfig({ profile: "menu" }).profile === "turn" && resolvePlayConfig({}).profile === "topdown");
   ok("config: play.pick forms", parsePick({ call: "choose" }).mode === "call" && parsePick("click").mode === "click" && parsePick("call:pickCard").call === "pickCard" && parsePick(undefined).mode === "auto" && parsePick({ call: "x", args: ["index"] }).args[0] === "index");
-  ok("config: call results show 400 characters by default (was 120), play.resultChars changes it", c.resultChars === 400 && resolvePlayConfig({ resultChars: 1000 }).resultChars === 1000);
+  ok("config: call results show 800 characters by default (400 in 0.7.5, 120 before), play.resultChars changes it", c.resultChars === 800 && resolvePlayConfig({ resultChars: 1000 }).resultChars === 1000);
 }
 
 // ---- choices

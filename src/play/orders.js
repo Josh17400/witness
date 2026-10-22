@@ -57,6 +57,11 @@ export const ORDER_CARD_TURN = [
   "choose <n|words> (a dialogue option; pick works there too) · wait [s] (until your turn, new choices or a dialogue; cap s)",
   "press <key|control> [xN] · hold <key|control> <s> · stop",
 ].join("\n");
+export const ORDER_CARD_DEFENSE = [
+  "fight [enemies|thing] [for 25s] (stays put and attacks; waits for the next enemy when the field is empty; reaching the time is a success)",
+  "press <key|control> [xN] · hold <key|control> <s> · wait [s] [quiet] (quiet: only big things wake it) · stop",
+  "choose <n|words> (a dialogue option) · call <name> [args] (when calls are on) · set heal <hp%>",
+].join("\n");
 export const ORDER_CARD_FPS = "fight [thing] [hold] · look <dir|thing> · reload · weapon <n|name> · go forward|back|left|right [cells]";
 
 function tokenize(s) {
@@ -102,6 +107,8 @@ function takeModifiers(words) {
     if (/^(backoff|back-off|spacing|retreating)$/.test(w) || (w === "back" && nx === "off")) { mods.mode = "backoff"; if (w === "back") i++; continue; }
     if (/^(aggressive|aggressively|trade|reckless|rush|berserk)$/.test(w)) { mods.mode = "aggressive"; continue; }
     if (/^(careful|carefully|cautious|cautiously|slowly)$/.test(w)) { mods.careful = true; continue; }
+    // quiet: only the big things (death, low hp, a dialogue, the goal, an error) wake this order, not alerts or hits
+    if (/^(quiet|quietly|ignore|ignoring|uninterrupted|undisturbed)$/.test(w)) { mods.quiet = true; continue; }
     if ((w === "using" || w === "with") && nx) { mods.using = words[i + 1].w; i++; continue; }
     if (/^(shooting|ranged)$/.test(w)) { mods.mode = mods.mode || "ranged"; continue; }
     if (/^(hold|stay|camp|defensive|stationary)$/.test(w) || (w === "in" && nx === "place")) { mods.mode = "hold"; if (w === "in") i++; continue; }
@@ -207,6 +214,10 @@ function parseOne(text, ctx) {
     case "explore": o.dir = parseDir(rest[0]?.w) || null; break;
     case "fight": {
       if (/^(stomp|jump on)$/.test(lowRest)) { o.mode = "stomp"; break; }
+      // "fight enemies when they come" / "as they arrive": wait for the next one instead of failing on an empty field
+      const wi = rest.findIndex((x, j) => !x.q && /^(when|as|once|if|until)$/i.test(x.w) && /^(they|it|one|some|enemies|any|the|more|next)$/i.test(rest[j + 1]?.w || "") && j > 0 || (!x.q && j === 0 && /^(when|as|once)$/i.test(x.w)));
+      if (wi >= 0) { o.await = true; rest = rest.slice(0, wi); }
+      else if (rest.length && /^(waiting|await|incoming|waves?)$/i.test(rest.at(-1).w) && !rest.at(-1).q) { o.await = true; rest = rest.slice(0, -1); }
       o.target = rest.length ? parseTarget(rest) : null;
       if (o.target && o.target.pluralWord) o.target.plural = true;
       if (/^shoot$/i.test(text.split(/\s+/)[0])) o.mode = o.mode || "ranged";

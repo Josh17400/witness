@@ -53,7 +53,7 @@ function readConfig() {
     if (c.seed == null && q.has("witness_seed")) c.seed = +q.get("witness_seed");
     if (c.audioUnlock == null && q.has("witness_audio_unlock")) c.audioUnlock = q.get("witness_audio_unlock") !== "0";
     if (c.epoch == null && q.has("witness_epoch")) c.epoch = q.get("witness_epoch");
-    for (const k of ["takeover", "raf", "timers", "webaudio", "console", "animations", "videos"]) {
+    for (const k of ["takeover", "raf", "timers", "webaudio", "console", "animations", "videos", "virtualEnded"]) {
       if (c[k] == null && q.has(`witness_${k}`)) c[k] = q.get(`witness_${k}`) !== "0";
     }
   }
@@ -555,14 +555,114 @@ function frameTime(t, rate) {
   return (n + 0.5) / rate;
 }
 
+// "ended" of a source node (AudioBufferSourceNode, OscillatorNode, ConstantSourceNode) on the virtual clock. The offline
+// renderer posts its ended events whenever the render and the main thread get there: a frame early or late, not the
+// same one each run, so a game counting live voices with src.onended = () => live-- dropped a different set of
+// sounds each run (The Fort). Witness swallows the browser's event and fires its own, after the frame's render, for
+// every source whose end (start time + the buffer's playable length over its playbackRate/detune, or its stop time) is
+// at or before the render quantum the context's virtual clock is in: the same frame every run, never before the sound
+// was rendered (a handler that disconnects the voice can't cut its tail). WITNESS_CONFIG.virtualEnded = false: off.
+const endedQueue = new Map();   // node -> {node, tap, at, stopAt, off, dur, seq}
+let endedSeq = 0;
+const taps = new WeakMap();     // a captured context -> its tap
+let tapRate = 0;                // a captured context's default rate (the capture's rate before any context exists)
+function endOf(v) {
+  const n = v.node;
+  let e = v.stopAt;
+  if (n.buffer && (!n.loop || v.dur != null) && n.playbackRate) {
+    const r = n.playbackRate.value * Math.pow(2, (n.detune ? n.detune.value : 0) / 1200);
+    const left = n.loop ? v.dur : Math.min(v.dur != null ? v.dur : Infinity, Math.max(0, n.buffer.duration - v.off));
+    if (r > 0) e = Math.min(e, v.at + left / r);
+  }
+  return Math.max(v.at, e);   // stopped before it started: ends when it would have started
+}
+function fireEnded() {
+  const due = [];
+  for (const v of endedQueue.values()) {
+    const by = v.tap.endedBy();
+    if (by == null) { endedQueue.delete(v.node); continue; }   // closed context: its sources never end
+    const e = endOf(v);
+    if (e <= by + 1e-9) due.push([e, v]);
+  }
+  due.sort((a, b) => a[0] - b[0] || a[1].seq - b[1].seq);
+  for (const [, v] of due) {
+    endedQueue.delete(v.node);
+    try { v.node.dispatchEvent(new Event("ended")); } catch (e) { reportError(e, "onended"); }
+  }
+}
+function installVirtualEnded() {
+  const SSN = G.AudioScheduledSourceNode && G.AudioScheduledSourceNode.prototype;
+  if (!SSN || CFG.virtualEnded === false || !G.EventTarget) return;
+  // the game's ended handlers are wrapped to ignore the browser's own (trusted) event: only Witness's reaches them
+  // (a capture listener calling stopImmediatePropagation doesn't do it: Chrome runs an onended set earlier first)
+  const ours = (n) => { try { return taps.has(n.context); } catch { return false; } };
+  const skipTrusted = (fn, self) => function (e) { if (e && e.isTrusted) return; return typeof fn === "function" ? fn.call(self || this, e) : fn.handleEvent(e); };
+  const od = Object.getOwnPropertyDescriptor(SSN, "onended");
+  if (od && od.set) {
+    const handlers = new WeakMap();
+    Object.defineProperty(SSN, "onended", { configurable: true, enumerable: od.enumerable,
+      get() { return handlers.has(this) ? handlers.get(this) : od.get.call(this); },
+      set(fn) {
+        if (!ours(this)) return od.set.call(this, fn);
+        handlers.set(this, typeof fn === "function" ? fn : null);
+        od.set.call(this, typeof fn === "function" ? skipTrusted(fn) : null);
+      } });
+  }
+  const nAdd = G.EventTarget.prototype.addEventListener, nRemove = G.EventTarget.prototype.removeEventListener;
+  const wrapped = new WeakMap();   // node -> Map(listener -> [wrapper per capture flag])
+  const cap = (o) => (typeof o === "boolean" ? o : !!(o && o.capture));
+  SSN.addEventListener = function (type, fn, opts) {
+    if (type !== "ended" || !fn || !ours(this)) return nAdd.call(this, type, fn, opts);
+    let m = wrapped.get(this);
+    if (!m) wrapped.set(this, (m = new Map()));
+    const ws = m.get(fn) || [null, null], c = +cap(opts);
+    if (ws[c]) return;   // already added, as addEventListener does
+    const once = opts && typeof opts === "object" && opts.once;
+    const node = this, inner = skipTrusted(fn);
+    ws[c] = function (e) { if (e && e.isTrusted) return; if (once) node.removeEventListener("ended", fn, { capture: !!c }); return inner.call(this, e); };
+    m.set(fn, ws);
+    return nAdd.call(this, type, ws[c], typeof opts === "object" && opts ? { ...opts, once: false } : opts);
+  };
+  SSN.removeEventListener = function (type, fn, opts) {
+    const m = type === "ended" && fn ? wrapped.get(this) : null, ws = m && m.get(fn), c = +cap(opts);
+    if (!ws || !ws[c]) return nRemove.call(this, type, fn, opts);
+    nRemove.call(this, type, ws[c], opts);
+    ws[c] = null;
+  };
+  const ABS = G.AudioBufferSourceNode && G.AudioBufferSourceNode.prototype;
+  for (const P of [SSN, ABS]) {
+    if (!P || !Object.prototype.hasOwnProperty.call(P, "start")) continue;
+    const nStart = P.start;
+    P.start = function (when, offset, duration) {
+      const r = nStart.apply(this, arguments);
+      const tap = taps.get(this.context);
+      if (tap) {
+        const ab = P === ABS;
+        endedQueue.set(this, { node: this, tap, at: Math.max(+when || 0, tap.nowRendered()), stopAt: Infinity,
+          off: ab ? Math.max(0, +offset || 0) : 0, dur: ab && duration != null ? Math.max(0, +duration) : null, seq: endedSeq++ });
+      }
+      return r;
+    };
+  }
+  const nStop = SSN.stop;
+  SSN.stop = function (when) {
+    const r = nStop.apply(this, arguments);
+    const v = endedQueue.get(this);
+    if (v) v.stopAt = Math.max(+when || 0, v.tap.nowRendered());   // a later stop() replaces the earlier one, as in WebAudio
+    return r;
+  };
+}
+
 /** In witness mode every AudioContext the game creates is an OfflineAudioContext rendered in step with simulated time. */
 function installWebAudioTap() {
   const Native = G.OfflineAudioContext;
   if (!Native || !G.AudioWorkletNode) return;
+  tapRate = +CFG.audioRate || 24000;
   const nSuspend = Native.prototype.suspend, nResume = Native.prototype.resume;
   const destGet = Object.getOwnPropertyDescriptor(G.BaseAudioContext ? G.BaseAudioContext.prototype : Native.prototype, "destination").get;
   const timeGet = Object.getOwnPropertyDescriptor(G.BaseAudioContext ? G.BaseAudioContext.prototype : Native.prototype, "currentTime").get;
   const seconds = +CFG.audioSeconds || 300;
+  installVirtualEnded();
   function WitnessAudioContext(opts = {}) {
     const rate = (opts && opts.sampleRate) || +CFG.audioRate || 24000;
     const ctx = new Native({ numberOfChannels: 1, length: Math.ceil(rate * seconds), sampleRate: rate });
@@ -624,6 +724,12 @@ function installWebAudioTap() {
     tap.frozenAt = (o) => { let f = tap.frozenBase; for (const [g0, g1] of gaps) { if (g0 >= o) break; f += Math.min(o, g1) - g0; } return f; };
     tap.ctxAt = (o) => o - tap.frozenAt(o);
     tap.read = Math.round(audioReadSince * rate);   // created mid-run: start reading where the capture is
+    // the context's clock in seconds: as rendered (where a start "now" lands), and the render quantum simulated time
+    // is in (sources ending by then fire "ended" this frame; null: closed, they never end)
+    tap.nowRendered = () => (tap.full ? timeGet.call(ctx) + (entry.st === "running" ? audioClock.t - tap.fullAt : 0) : timeGet.call(ctx));
+    tap.endedBy = () => (entry.st === "closed" ? null : tap.dead ? tap.nowRendered() : (Math.floor(tap.ctxAt(tap.outNow()) / 128) * 128) / rate);
+    tap.closed = () => entry.st === "closed";
+    taps.set(ctx, tap);
     tap.prepare = () => {
       if (!tap.ready) {
         tap.ready = (async () => {
@@ -640,16 +746,20 @@ function installWebAudioTap() {
     // WebAudio renders in 128-frame quanta and ctx.currentTime moves in those steps. A sound a game starts "now"
     // lands on the last quantum boundary, so where the boundaries fall relative to a reset must not depend on how
     // long the process ran before it: every reset anchors the capture on a boundary (tap.anchor), and from there
-    // simulated time maps to anchor + since x rate.
-    tap.anchor = null;
+    // simulated time maps to anchor + since x rate. A context made mid-run is anchored on the time since the reset
+    // too (since is summed from 0 at each reset: the same floats every run), not on the clock since the page loaded:
+    // its quanta then line up with the frames the same way every run (with 400 samples a frame, every 8th frame ends
+    // exactly on a quantum and float noise in t - born floored it either side: a frame's render, currentTime and
+    // the frame a source's "ended" fired at differed between runs).
+    tap.anchor = -Math.round(audioClock.since * rate);
     tap.render = async (ceil) => {
       if (tap.dead) return;
       const pos = tap.ctxAt(tap.outNow()) / 128;
       await tap.renderTo((ceil ? Math.ceil(pos) : Math.floor(pos)) * 128);
     };
-    tap.realign = async () => {
+    tap.realign = async (prevSince) => {   // prevSince: the run's since just before the reset zeroed it
       if (tap.dead) return;
-      const o = (audioClock.t - tap.born) * rate;
+      const o = tap.anchor != null && prevSince != null ? tap.anchor + prevSince * rate : (audioClock.t - tap.born) * rate;
       const open = gaps.length && gaps[gaps.length - 1][1] === Infinity;
       if (open) { tap.anchor = Math.round(o); return; }   // frozen: nothing renders, the output timeline just goes on
       const target = Math.ceil(tap.ctxAt(o) / 128) * 128;
@@ -720,7 +830,9 @@ async function readAudio() {
   await renderAudio(true);
   for (const s of sources) if (s.full) warnOnce("audio-full", `audio capture is full (${+CFG.audioSeconds || 300}s per AudioContext; set WITNESS_CONFIG.audioSeconds): later audio reads are silent`);
   for (const s of sources) if (s.settle) await s.settle();
-  const rate = sources.length ? sources[0].rate : 22050;
+  // no source yet: the rate a captured context would have, so a read before the game opens its audio (in the first
+  // run) is as long as the same read once an earlier run's context exists (was 22050 vs 24000 Hz: 4410 vs 4800 frames)
+  const rate = sources.length ? sources[0].rate : tapRate || 22050;
   const t1 = audioClock.t;
   // every read covers [what was read before, all of the time since the epoch): consecutive replies tile exactly
   const total = (r) => Math.max(0, Math.round(audioClock.since * r));
@@ -1376,6 +1488,7 @@ async function doStep(m) {
     applyInputs(sim.frame);
     runFrame(dt);
     if (sources.length) await renderAudio(false);
+    if (endedQueue.size) fireEnded();   // sources that ended in what this frame rendered (see endedQueue)
     if (anim.flush) await renderingUpdate();
     sim.frame++;
     sim.time += dt;
@@ -1395,13 +1508,17 @@ async function doReset(m) {
   if (ep != null) { clock.epoch = ep; clock.dateBase = ep - clock.now(); } else clock.align();
   // the audio epoch first, so sounds the game's reset starts (music...) belong to the new run
   audioMark = audioEpoch = audioClock.t;
+  const prevSince = audioClock.since;
   audioClock.since = 0;
   audioReadSince = 0;
   // a reset starts silent: tails still ringing from the previous run must not leak into this one
   // (WebAudio nodes the game scheduled are its own: its reset should stop them)
+  // a context the game closed before the reset never sounds again: leave it out (a game that opens a fresh context
+  // per run would otherwise pile up 300 s offline contexts, the first of them setting the capture's rate)
+  for (let i = sources.length - 1; i >= 0; i--) if (sources[i].closed && sources[i].closed()) sources.splice(i, 1);
   for (const s of sources) {
     s.read = 0;
-    if (s.realign) await s.realign();
+    if (s.realign) await s.realign(prevSince);
     const a = epochIndex(s);
     if (s.clear) s.clear(a); else s.drop(a);
   }
