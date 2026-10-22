@@ -1,0 +1,12 @@
+{
+  "name": "old-adapter",
+  "launch": {
+    "url": "http://127.0.0.1:5318/old.html",
+    "server": {
+      "command": "node ../../serve.mjs 5318"
+    }
+  },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 40
+}

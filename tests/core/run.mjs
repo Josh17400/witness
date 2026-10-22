@@ -47,6 +47,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (const d of ["src", "bin", path.join("adapters", "js")]) walkF(path.join(root, d));
   const bad = files.map((f) => [f, spawnSync(process.execPath, ["--check", f], { encoding: "utf8" })]).filter(([, r]) => r.status !== 0);
   ok(`syntax: all ${files.length} source files parse`, !bad.length, bad.map(([f, r]) => `${path.relative(root, f)}: ${r.stderr.split("\n").slice(0, 4).join(" | ")}`).join("\n"));
+  // the JS adapter names the Witness release it came from, so the CLI can say when a game's copy is older
+  const pkgV = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+  const adV = (fs.readFileSync(path.join(root, "adapters", "js", "witness.js"), "utf8").match(/const WITNESS_VERSION = "([^"]+)"/) || [])[1];
+  ok("version: adapters/js/witness.js WITNESS_VERSION equals package.json (bump both)", adV === pkgV, `adapter ${adV}, package ${pkgV}`);
+  const { staleAdapterNote } = await import(pathToFileURL(path.join(root, "src", "core", "launch.js")).href);
+  ok("stale adapter note: a copy without a version (≤ 0.7.8) or an older one is named; same/newer or a non-JS adapter is quiet",
+    String(staleAdapterNote({ adapter: "witness-js 1.0.0" }, "0.7.9")).includes("from Witness 0.7.8 or earlier, older than this CLI (0.7.9)") && String(staleAdapterNote({ adapter: "witness-js 1.0.0", witness: "0.7.9" }, "0.7.10")).includes("from Witness 0.7.9, older than this CLI (0.7.10)")
+    && staleAdapterNote({ adapter: "witness-js 1.0.0", witness: "0.7.9" }, "0.7.9") === null && staleAdapterNote({ adapter: "witness-js 1.0.0", witness: "0.8.0" }, "0.7.9") === null && staleAdapterNote({ adapter: "witness-cpp 1" }, "0.7.9") === null);
   ok("args: --watch takes a value except for play", parseArgs(["--watch", "state.x"], "trace").opt.watch === "state.x" && parseArgs(["start", "--watch", "--goal", "g"], "play").opt.watch === true);
   const pic = parseArgs(["ui", "--picture", "shot.png"], "measure"), dom = parseArgs(["palette", "--dominant", "a.png"], "measure");
   ok("args: --picture/--dominant/--write/--clean/--no-* never eat the next word", pic.opt.picture === true && pic.pos[1] === "shot.png" && dom.pos[1] === "a.png"

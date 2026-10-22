@@ -3,6 +3,25 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.9 (2026-10-22)
+
+A back-compat fix, reported by Euchre Unleashed.
+
+- **A newer CLI no longer fails every test of a game with an older vendored JS adapter.** Since 0.7.5 a browser game
+  without a reset handler was reset by reloading the page, then sent a reset marked `reloaded`. An adapter copy from
+  before 0.7.5 refuses that ("this game has no reset handler"), so every test failed. The reload way is now used only
+  when the adapter says it takes it (a new `reload` capability in the hello); an older copy gets the old way (a fresh
+  page per test) and its tests pass. `launch.reset: "reload"` with an old copy says to re-copy the adapter.
+- **The CLI says once when the game's adapter copy is older than itself**: `⚠ the game's witness.js is from Witness
+  0.7.8 or earlier, older than this CLI (0.7.9): it works, but re-copy adapters/js/witness.js (or run witness init)
+  for the newer features`. The JS adapter's hello now carries `witness: "<release>"` (a core test keeps it equal to
+  package.json). `WITNESS_QUIET_ADAPTER=1` hides the note.
+- A browser test keeps a copy of the 0.7.4 adapter and runs a game on it under the current CLI.
+
+**Adoption steps**
+1. Nothing required: games with an older vendored `witness.js` work again. Re-copy `adapters/js/witness.js` when
+   convenient (the note says when); copies from 0.7.9 on are recognised.
+
 ## 0.7.8 (2026-10-22)
 
 From Euchre Unleashed's 1.2.0 release (pure-DOM iPhone web card game: 362 Witness tests and Sonnet play batches on

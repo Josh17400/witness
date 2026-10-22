@@ -27,6 +27,9 @@ const NODE = typeof process !== "undefined" && !!(process.versions && process.ve
 function createWitness() {
 const DEFAULT_ADDR = "127.0.0.1:7357";
 const VERSION = "1.0.0";
+// the Witness release this copy came from: the CLI says so when a game's copy is older than the CLI (a core test keeps
+// it equal to package.json)
+const WITNESS_VERSION = "0.7.9";
 
 // The real APIs, captured before any takeover. The adapter only ever uses these.
 const real = {
@@ -1552,7 +1555,8 @@ function hello() {
   if (H.screenshot || BROWSER) caps.push("screenshot");
   if (H.audio || (CFG.audioCapture !== false && (sources.length || (BROWSER && G.OfflineAudioContext && CFG.webaudio !== false)))) caps.push("audio");
   if (H.calls && Object.keys(H.calls).length) caps.push("call");
-  const msg = { protocol: 1, name: H.name || (BROWSER ? document.title : "") || "game", engine: detectEngine(), language: H.language || "javascript", fps, capabilities: caps, adapter: `witness-js ${VERSION}` };
+  if (BROWSER) caps.push("reload");   // takes a reset with reloaded: true after the CLI reloaded the page (0.7.5+)
+  const msg = { protocol: 1, name: H.name || (BROWSER ? document.title : "") || "game", engine: detectEngine(), language: H.language || "javascript", fps, capabilities: caps, adapter: `witness-js ${VERSION}`, witness: WITNESS_VERSION };
   const size = BROWSER ? dom.logicalSize() : H.size;
   if (Array.isArray(size)) msg.size = size.map((n) => Math.round(n));
   const calls = callsList();

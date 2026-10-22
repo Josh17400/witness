@@ -10,6 +10,7 @@ const pages = path.join(here, "pages");
 const port = +process.argv[2] || +process.env.PORT || 5318;
 const alias = {
   "/witness/witness.js": path.join(here, "..", "..", "adapters", "js", "witness.js"),
+  "/witness/witness-074.js": path.join(here, "vendor", "witness-074.js"),   // an old vendored copy (back-compat test)
   "/witness/witness_emscripten.js": path.join(here, "..", "..", "adapters", "cpp", "witness_emscripten.js"),
 };
 const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css" };

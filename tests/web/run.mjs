@@ -379,6 +379,14 @@ else {
   }
   for (const n of ["realtime", "realtime-inject"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
 
+  // back-compat: a game whose vendored adapter is from 0.7.4 (no reset handler, no reloaded resets) still runs every
+  // test under this CLI, a fresh page per test as before, and is told once that its copy is old
+  r = witness(P("old-adapter"), ["test"], env);
+  ok("old vendored adapter (0.7.4, no reset handler): every test passes (no 'no reset handler'), with one note to re-copy", r.status === 0 && /2 passed, 0 failed/.test(r.stdout) && !/no reset handler/.test(r.stdout + r.stderr) && (r.stderr.match(/the game's witness\.js is from Witness 0\.7\.8 or earlier, older than this CLI/g) || []).length === 1, r.stdout + r.stderr);
+  r = witness(P("old-adapter"), ["eval", "state.frames > 0", "--at", "0.3"], env);
+  ok("old vendored adapter: eval works too", r.status === 0 && /true/.test(r.stdout), r.stdout + r.stderr);
+  for (const f of fs.readdirSync(path.join(P("old-adapter"), "witness"))) if (f !== "old.witness.json") fs.rmSync(path.join(P("old-adapter"), "witness", f), { recursive: true, force: true });
+
   // lazy drawing (step "draw": "last"): an expensive draw() gated by witness.drawing runs only on each step's last
   // frame; the state, the final picture and perf.lazy_draw say the rest is identical (draws counted, no timing)
   {

@@ -5,6 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { listen, WitnessError } from "./session.js";
 import { acquireSlot } from "./budget.js";
 import { track, untrack } from "./procs.js";
+import { fileURLToPath } from "node:url";
 
 export const CONFIG_NAME = "witness.json";
 export const DEFAULT_ATTACH_PORT = 7357;
@@ -156,7 +157,10 @@ function setupReload(session, web, launch, srv, timeoutMs) {
   const mode = String(launch.reset || "auto").toLowerCase();
   if (!["auto", "reload", "handler"].includes(mode)) throw new WitnessError(`launch.reset ${JSON.stringify(launch.reset)}: use "auto" (reload the page when the game has no reset handler), "reload" or "handler"`);
   const handler = session.has("reset");
-  if (mode === "handler" || (mode === "auto" && handler)) return;
+  // an adapter copy from before 0.7.5 doesn't know a reloaded reset (it refuses every reset without a handler): auto
+  // keeps the old way for it (a fresh browser per test)
+  if (mode === "handler" || (mode === "auto" && (handler || !session.has("reload")))) return;
+  if (!handler && !session.has("reload")) throw new WitnessError(`launch.reset "reload" needs the JS adapter from Witness 0.7.5 or later: this game's copy is older (re-copy adapters/js/witness.js, or run witness init)`);
   web.resetMode = "reload";
   if (!handler) (session.hello.capabilities || (session.hello.capabilities = [])).push("reset");
   let fresh = true;   // nothing ran since the page loaded
@@ -181,6 +185,21 @@ function setupReload(session, web, launch, srv, timeoutMs) {
 }
 
 const tail = (out, n = 3000) => out.join("").slice(-n);
+
+const PKG_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")).version; } catch { return "0.0.0"; } })();
+
+/** The game's JS adapter copy is from an older Witness than this CLI: say so once per process (newer features need it). */
+let staleSaid = false;
+export function staleAdapterNote(hello, cliVersion = PKG_VERSION) {
+  if (!hello || !/^witness-js( |$)/.test(String(hello.adapter || ""))) return null;
+  const v = hello.witness, older = (a, b) => { const x = String(a).split(".").map(Number), y = String(b).split(".").map(Number); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); } return false; };
+  if (v && !older(v, cliVersion)) return null;
+  return `the game's witness.js is from ${v ? `Witness ${v}` : "Witness 0.7.8 or earlier"}, older than this CLI (${cliVersion}): it works, but re-copy adapters/js/witness.js (or run witness init) for the newer features`;
+}
+function staleAdapter(hello, quiet) {
+  const n = staleSaid || quiet || process.env.WITNESS_QUIET_ADAPTER ? null : staleAdapterNote(hello);
+  if (n) { staleSaid = true; console.error(`⚠ ${n}`); }
+}
 
 /** The per-request wait in seconds: WITNESS_CALL_TIMEOUT (env) or launch.callTimeout, else null (Session's 60 s). */
 export function callTimeout(cfg) {
@@ -272,6 +291,7 @@ export async function openGame(cfg, root, opts = {}) {
     if (cfg.fps) session.hello.fps = cfg.fps;
     session.epoch = epoch;
     if (callSec) session.requestTimeoutMs = callSec * 1000;
+    staleAdapter(session.hello, opts.quiet);
     if (web) {
       await attachWeb(session, web);
       setupReload(session, web, launch, srv, (opts.timeout || cfg.timeout || 60) * 1000);

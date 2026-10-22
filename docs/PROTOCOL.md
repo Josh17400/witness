@@ -50,7 +50,10 @@ Right after connecting, the adapter sends:
   "keys": ["w", "a", "s", "d", "space", "e", "escape"]}}
 ```
 
-`capabilities` lists which commands below are implemented. `calls` advertises custom
+`capabilities` lists which commands below are implemented (plus `reload`: a browser adapter that takes a `reset`
+with `reloaded: true` after the CLI reloaded the page; without it, a game with no reset handler gets a fresh page per
+test). The JS adapter also sends `witness` (the Witness release it came from), so the CLI can say when a game's copy is
+older than itself. `calls` advertises custom
 commands for `call`, and `keys` (optional) lists the keys the game actually uses. `epoch` (optional, ms since
 1970): the virtual wall clock's own configured start (the JS adapter's `WITNESS_CONFIG.epoch` / `?witness_epoch=` /
 `WITNESS_EPOCH`); after a test with its own `epoch`, `witness test` sends it back with the next test's `reset`.

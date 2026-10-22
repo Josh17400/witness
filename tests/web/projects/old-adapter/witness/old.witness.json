@@ -1,0 +1,26 @@
+{
+  "tests": [
+    {
+      "name": "first",
+      "steps": [
+        {
+          "at": 0.5,
+          "expect": [
+            "state.frames > 10"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "second starts fresh",
+      "steps": [
+        {
+          "at": 0.2,
+          "expect": [
+            "state.frames < 30"
+          ]
+        }
+      ]
+    }
+  ]
+}
