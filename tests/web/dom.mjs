@@ -1,6 +1,6 @@
 // A pure-DOM page (no canvas) through the JS adapter: CSS transitions / animations on the virtual clock (screenshots
 // reproducible mid-transition, end events still fire, __witnessAnimating() counts down), the adapter injected before
-// an inline classic script (launch.inject), a page reload for reset (launch.reset), the clock epoch (clock.epoch),
+// an inline classic script (launch.inject), dom: input on the real-time watch, a page reload for reset (launch.reset), the clock epoch (clock.epoch),
 // "browser (DOM)" and the viewport capture. Run: node tests/web/dom.mjs (also run by tests/web/run.mjs).
 // Needs Playwright (WITNESS_PLAYWRIGHT, or npm install in examples/js-browser); one browser at a time.
 import fs from "node:fs";
@@ -42,7 +42,7 @@ else {
   process.env.WITNESS_PLAYWRIGHT = pwDir;
   const P = (n) => path.join(here, "projects", n);
   const { findConfig, openGame } = await import(pathToFileURL(path.join(root, "src", "core", "launch.js")).href);
-  const { begin, stepTo } = await import(pathToFileURL(path.join(root, "src", "core", "runner.js")).href);
+  const { begin, stepTo, queueInput } = await import(pathToFileURL(path.join(root, "src", "core", "runner.js")).href);
   const shotOf = async (s) => { const r = await s.screenshot(); return decodePNG(Buffer.from(r.data, "base64")); };
   const px = (im, x, y) => Array.from(im.data.slice((y * im.width + x) * 4, (y * im.width + x) * 4 + 3));
   const same = (a, b) => a && b && a.width === b.width && a.height === b.height && Buffer.compare(Buffer.from(a.data), Buffer.from(b.data)) === 0;
@@ -121,6 +121,23 @@ else {
     } finally { await g.stop(); }
   }
 
+  // 2c. real-time watch: the CLI's dom:click is driven input, boundary events (mouseover / pointerenter, before the
+  // move) included; an inline classic script that only sets window.WITNESS_CONFIG is not an early script
+  {
+    const f = findConfig(P("hover"));
+    const g = await openGame(f.config, f.root, { quiet: true });
+    try {
+      const s = g.session;
+      const st = await begin(s, { seed: 1 });
+      await queueInput(s, st, [{ frame: 12, type: "dom", kind: "click", x: 80, y: 45 }]);
+      await stepTo(s, st, 30);
+      await new Promise((r) => setTimeout(r, 300));   // let any late compatibility events land while Witness is idle
+      const a = (await s.snapshot()).state, rtr = (await s.request("perf")).realtime;
+      ok("dom:click with mouseover / pointerenter draw handlers: the handlers ran, nothing counted as real time", a.hovers >= 2 && a.clicks === 1 && rtr && rtr.calls === 0, { a, rtr });
+      ok("an inline window.WITNESS_CONFIG script is not counted as an early classic script (no inject tip)", rtr && rtr.early_scripts.inline === 0, rtr);
+    } finally { await g.stop(); }
+  }
+
   // 3. the CLI, two separate processes: the same shot mid-transition, byte for byte
   const files = [1, 2].map((i) => path.join(os.tmpdir(), `witness-dom-${process.pid}-${i}.png`));
   const runs = files.map((out) => spawnSync(process.execPath, [cli, "shot", "--at", "0.8", "--input", "space@0.3", "--out", out], { cwd: P("dom"), encoding: "utf8", timeout: 180000, env: process.env }));
@@ -132,7 +149,8 @@ else {
   try { j = JSON.parse(doc.stdout); } catch { /* below */ }
   const lines = j ? j.data.lines.join("\n") : doc.stdout + doc.stderr;
   ok("doctor on the DOM page: deterministic, no 'no visible <canvas>' warning, the DOM capture and the epoch named", j && j.summary.deterministic === true && !/⚠ no visible <canvas>/.test(lines) && /DOM page \(no visible <canvas>\)/.test(lines) && /clock: the game's Date starts at 2026-06-15/.test(lines) && /browser \(DOM\)/.test(lines), lines);
-  for (const n of ["dom", "dom-plain", "dom-boot"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
+  ok("doctor on the DOM page (launch.inject, transitions, a rAF loop, end events): nothing on real time between frames, no inject tip", j && j.summary.web.realtime && j.summary.web.realtime.calls === 0 && !/real time between frames|inline classic/.test(lines), lines);
+  for (const n of ["dom", "dom-plain", "dom-boot", "hover"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);

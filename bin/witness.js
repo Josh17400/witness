@@ -356,8 +356,8 @@ const CMD_HELP = {
       background, one to measure), or reads PNG files.
       --background auto|first|median|<file.png>  (auto: median for 8+ frames; median needs movers to move their own
       size) · --camera auto|static|moving|state (state: the game's state.camera, exact) · --min-size 6 (smallest object, px) · --threshold 16`,
-  doctor: `witness doctor [--time 3] [--device iphone-15] [--engine webkit] [--no-auto-unlock] [--safe-insets]
-              [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."] [--shot-tol 2] [--audio-tol 1e-5]
+  doctor: `witness doctor [--time 3] [--scene <name>] [--params '{...}'] [--device iphone-15] [--engine webkit] [--no-auto-unlock] [--safe-insets]
+              [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."] [--shot-tol 2] [--audio-tol 1e-5] [--realtime-wait 2.5]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
   Screenshots (rgba8 or PNG, e.g. --capture screen) match when every channel is within --shot-tol levels (default 2:
@@ -366,6 +366,12 @@ const CMD_HELP = {
   Audio matches when every sample is within --audio-tol (witness.json "audioTol"; default 1e-5: float rounding in
   WebAudio compressors / convolvers; 0 = exact); a capture longer by at most one silent 128-frame render quantum matches.
   For long game-specific scenarios (journeys, fights) use test steps with "match", or witness test --repeat 2.
+  Lazy drawing: with "play": {"lazyDraw": true}, or a JS game that reads witness.drawing, run A runs once more in steps
+  of 4 frames sent with "draw": "last" (only each step's last frame drawn) and must end in the same state, digest,
+  audio, picture and number of Math.random calls; else ⚠ drawing changes game state: lazyDraw unsafe for this game
+  (⚠ draw() reads Math.random, ⚠ ... changes the picture). A game that never asks witness.drawing during the run gets
+  ⚠ lazy drawing not exercised (it may only draw in a scene the default reset doesn't reach): --scene / --params go to
+  every determinism run's reset, e.g. witness doctor --params '{"run":true}'.
   Browser games also get: the engine and device; the page (CSS viewport, DPR, screen, touch points, platform; ⚠ a
   touch profile reporting < 2 touch points); safe areas (--safe-insets emulates them; else the measure ui --safe preset to check); how
   the main canvas lands on the screen (backing size → CSS box → device px: an exact ×k, a fractional scale with
@@ -388,7 +394,7 @@ const commands = {
     const report = [];
     const ok = (m) => report.push(`✔ ${m}`), bad = (m) => report.push(`✖ ${m}`), warn = (m) => report.push(`⚠ ${m}`);
     const mark = ([m, t]) => report.push(m ? `${m} ${t}` : `  ${t}`);
-    let webSummary = null;
+    let webSummary = null, lazySummary = null;
     await withGame(opt, async (s, cfg, root) => {
       const h = s.hello;
       ok(`connected over ${s.conn.kind}: "${h.name}" (${h.engine || "?"}, ${h.language || "?"}), protocol ${h.protocol}, ${s.fps} fps${h.size ? `, ${h.size.join("×")}` : ""}`);
@@ -431,8 +437,9 @@ const commands = {
         const matcher = new Matcher({ shotTol, audioTol });
         const exactAudio = caps.includes("audio") && h.audio_exact !== false;
         if (caps.includes("audio") && !exactAudio) report.push("  (hello says audio_exact: false — audio follows real time here, so it isn't compared)");
+        const ro = runOpts(opt, cfg), at = { scene: ro.scene, params: ro.params };   // --scene/--params: reach a scene the default reset doesn't (a battle behind a menu)
         const run = async (seed, input) => {
-          const st2 = await begin(s, { seed, input });
+          const st2 = await begin(s, { seed, input, ...at });
           if (caps.includes("audio")) await s.audio();
           await stepTo(s, st2, Math.round(T * s.fps));
           const cap = { snap: await s.snapshot() };
@@ -470,6 +477,45 @@ const commands = {
           report.push("    tip: look for unseeded RNGs, wall-clock reads, threads, and state a reset doesn't clear (timers, id counters, caches, UI)");
         }
         if (digestOf(first.snap) == null) report.push("  tip: add a snapshot \"digest\" (a hash of the full internal state) so hidden state is compared too");
+        // lazy drawing (play.lazyDraw, or a JS game that reads witness.drawing): run A again in steps of 4 frames sent
+        // with "draw": "last" (only each step's last frame drawn, as witness play does). Drawing must not change state,
+        // audio or the seeded random stream: a draw() that reads Math.random, ages particles or starts sounds makes the
+        // playtest desync from its replay. perf.lazy_draw.rng (seeded draws since the reset) catches Math.random in
+        // draw() even when the shifted stream hasn't reached the state yet within --time.
+        const perfLazy = async () => (caps.includes("perf") ? s.request("perf").then((p) => (p && p.lazy_draw) || null, () => null) : null);
+        const lz0 = await perfLazy(), lazyCfg = !!(cfg.play && cfg.play.lazyDraw);
+        if (r.ok && (lazyCfg || (lz0 && lz0.reads > 0))) {
+          const st3 = await begin(s, { seed: 7, input: scriptA, ...at });
+          if (caps.includes("audio")) await s.audio();
+          const N = Math.round(T * s.fps);
+          let undrawn = 0;
+          while (st3.frame < N) { const k = Math.min(4, N - st3.frame); const r3 = await s.request("step", { frames: k, draw: "last" }); st3.frame = r3.frame ?? st3.frame + k; undrawn += k - 1; }
+          const cap3 = { snap: await s.snapshot() };
+          if (first.shot) { try { cap3.shot = await s.screenshot(); } catch { /* reported below */ } }
+          if (caps.includes("audio")) { try { const au = await s.audio(); if (au && au.data && exactAudio) cap3.audio = au; } catch { /* reported below */ } }
+          const lm = new Matcher({ shotTol, audioTol });
+          await lm.check("A", { snap: first.snap, shot: first.shot, audio: first.audio }, "run A");
+          const lr = await lm.check("A", cap3, "the hinted run");
+          const lz1 = await perfLazy(), asked = lz0 && lz1 ? lz1.reads - lz0.reads : null;
+          const rngA = lz0 && lz0.rng != null ? lz0.rng : null, rngL = lz1 && lz1.rng != null ? lz1.rng : null;
+          const stateBad = lr.problems.filter((p) => !p.startsWith("screenshot")), picBad = lr.problems.filter((p) => p.startsWith("screenshot"));
+          const rngBad = rngA != null && rngL != null && rngA !== rngL;
+          const how = `run A stepped 4 frames at a time with "draw": "last" (${undrawn} of ${N} frames undrawn)`, off = lazyCfg ? '; turn "play": {"lazyDraw"} off until draw() only draws' : "";
+          if (stateBad.length) {
+            const au = stateBad.some((p) => !/^(state|digest) differs/.test(p));   // the rest are audio diffs
+            warn(`drawing changes game ${au ? "state/audio" : "state"}: lazyDraw unsafe for this game — ${how} ended in a different ${au ? "state or audio" : "state"} than run A (a draw() that reads Math.random, ages particles, advances timers or starts sounds; adapters/js/GUIDE.md §8)${off}`);
+            for (const p of stateBad) report.push(`    ${p}`);
+          }
+          if (rngBad) warn(`draw() reads Math.random (${Math.abs(rngA - rngL)} ${rngL < rngA ? "fewer" : "more"} calls with the hint: ${rngL} vs ${rngA} in run A): lazyDraw unsafe for this game — it shares the seeded stream, so every skipped draw shifts later gameplay randomness (use a cosmetic generator for shake/jitter; adapters/js/GUIDE.md §8)${off}`);
+          if (!stateBad.length && picBad.length) {
+            warn(`lazy drawing changes the picture (not the state): ${how} ended in the same state but a different screenshot (a picture that builds on earlier frames: trails, a frame-time quality governor, a cached layer): playtest shots may differ from replays`);
+            for (const p of picBad) report.push(`    ${p}`);
+          }
+          const exercised = asked !== 0;
+          if (!exercised) warn(`lazy drawing not exercised: the game never asked witness.drawing during doctor's scripted run (it may only draw in a scene doctor didn't reach: try  witness doctor --scene <name> / --params '{...}'; or its draw isn't gated yet: adapters/js/GUIDE.md §8)`);
+          else if (!stateBad.length && !rngBad && !picBad.length) ok(`lazy drawing safe: ${how} ended in the same ${["state", digestOf(first.snap) != null ? "digest" : null, cap3.shot ? "screenshot" : null, cap3.audio ? "audio" : null, rngA != null ? `random stream (${rngA} draws)` : null].filter(Boolean).join(", ")}`);
+          lazySummary = { configured: lazyCfg, safe: stateBad.length || rngBad ? false : exercised ? true : null, samePicture: !picBad.length, reads: asked, ...(rngA != null ? { rng: [rngA, rngL] } : {}) };
+        } else if (lazyCfg && !r.ok) report.push("  (lazy drawing not checked: the game isn't deterministic without it either)");
         report.push(`  for long scenarios (journeys, fights, menus): add "match" steps to tests, or run  witness test --repeat 2${configFlag(opt)}`);
       }
       if (caps.includes("screenshot")) {
@@ -503,6 +549,26 @@ const commands = {
         const au = await s.web.audio();
         if (au) webSummary.audio = { state: au.state, contexts: au.contexts.length, blocked: au.blocked };
       }
+      // game code that ran on real time between frames (the JS adapter's perf.realtime): a timer or listener made
+      // before the takeover (The Fort's setInterval(idleBake, 2000) from a classic script) keeps a real clock
+      if (caps.includes("perf")) {
+        let rtr = await s.request("perf").then((p) => p && p.realtime, () => null);
+        // the checks are back-to-back commands: a periodic timer (The Fort's 2 s) mostly fires while Witness drives,
+        // so watch the page idle (no command in flight) long enough for it to fire on its own (--realtime-wait s)
+        const rtWait = Math.max(0, +(opt["realtime-wait"] ?? 2.5));
+        if (rtr && rtWait > 0) { await new Promise((r) => setTimeout(r, rtWait * 1000)); rtr = await s.request("perf").then((p) => (p && p.realtime) || rtr, () => rtr); }
+        if (rtr) {
+          const inline = (rtr.early_scripts && rtr.early_scripts.inline) || 0, injected = !!(s.web && s.web.inject);
+          const fix = s.web && !injected ? ` use "launch": {"inject": true} (adapters/js/GUIDE.md §1b)` : " (adapters/js/GUIDE.md §1b)";
+          if (rtr.calls > 0) {
+            const f = rtr.sites[0];
+            warn(`game code ran ${rtr.calls} time${rtr.calls === 1 ? "" : "s"} on real time between frames (first at ${f ? f.at : "?"}${f ? `: ${f.api}${f.fn ? ` in ${f.fn}` : ""}` : ""}) — a timer or listener made before Witness took over?${fix}${injected ? "; with inject on it is more likely a listener the browser fires on its own (resize, visibilitychange, a network / worker message) or a real-time wait (fetch, an image load): move that work into the frame or a Witness-driven call" : ""}`);
+            for (const x of rtr.sites.slice(0, 4)) report.push(`    ${x.api} at ${x.stack || x.at}${x.frame != null ? ` (after frame ${x.frame})` : ""}`);
+            report.push(`    calls by kind: ${Object.entries(rtr.apis || {}).map(([k, v]) => `${k} ×${v}`).join(" · ")}`);
+          } else if (s.web && !injected && inline > 0) report.push(`  tip: ${inline} inline classic <script>${inline === 1 ? "" : "s"} ran before witness.js was imported: a timer, rAF loop or listener they start before the takeover stays on real time (none ran between frames in these checks or ${rtWait} s of watching the page idle); "launch": {"inject": true} runs the adapter first (adapters/js/GUIDE.md §1b)`);
+          if (webSummary) webSummary.realtime = { calls: rtr.calls, first: rtr.sites[0] ? rtr.sites[0].at : null, sites: rtr.sites, earlyInlineScripts: inline };
+        }
+      }
       // every run's logs (read before each reset, which may clear the adapter's buffer)
       const logs = await s.drainLogs();
       if (logs.some((l) => l.level === "error")) warn(`the game logged ${logs.filter((l) => l.level === "error").length} error(s) during the checks: ${logs.filter((l) => l.level === "error").slice(0, 3).map((l) => `${l.frame != null ? `f${l.frame} ` : ""}${String(l.message).slice(0, 100)}`).join(" · ")}`);
@@ -511,7 +577,7 @@ const commands = {
       for (const c of staleSkillCopies(root, VERSION)) warn(`${path.relative(root, c.file)} is a stale copy of the Witness skill (${c.why}): delete its folder; with the Witness plugin installed that's all (the plugin provides the skill), else run  witness init  again to write a fresh copy (files that exist are kept)`);
     });
     const failed = report.some((l) => l.startsWith("✖"));
-    if (opt.json) printJSON(envelope("doctor", { ok: !failed, verdict: failed ? "doctor found problems" : "all good", summary: { problems: report.filter((l) => l.startsWith("✖")).length, warnings: report.filter((l) => l.startsWith("⚠")).length, deterministic: report.some((l) => /^✔ deterministic/.test(l)) ? true : report.some((l) => /NOT deterministic/.test(l)) ? false : null, ...(webSummary ? { web: webSummary } : {}) }, data: { lines: report } }));
+    if (opt.json) printJSON(envelope("doctor", { ok: !failed, verdict: failed ? "doctor found problems" : "all good", summary: { problems: report.filter((l) => l.startsWith("✖")).length, warnings: report.filter((l) => l.startsWith("⚠")).length, deterministic: report.some((l) => /^✔ deterministic/.test(l)) ? true : report.some((l) => /NOT deterministic/.test(l)) ? false : null, ...(lazySummary ? { lazyDraw: lazySummary } : {}), ...(webSummary ? { web: webSummary } : {}) }, data: { lines: report } }));
     else {
       console.log(report.join("\n"));
       console.log(failed ? "doctor found problems" : "all good — Witness can drive this game");

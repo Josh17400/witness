@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Real-time bake</title><style>body { margin: 0; background: #123; } canvas { width: 320px; height: 180px; image-rendering: pixelated; }</style></head>
+<body>
+  <canvas id="c" width="160" height="90"></canvas>
+  <!-- The Fort's bug in miniature: a classic script starts an idle "bake" interval at boot, before the adapter is
+       loaded (by a later dynamic import), so without launch.inject it stays on a REAL timer and re-draws the terrain
+       at wall-clock moments. With launch.inject it is a virtual timer like any other. -->
+  <script>
+    var game = { bakes: 0, x: 20, noise: 0 };
+    var ctx = document.getElementById("c").getContext("2d");
+    // like idleBake: re-draws the terrain strip (the same picture whenever it runs, so doctor's comparison passes
+    // either way: only the real-time watch can tell; Math.random stands in for the bake's own noise)
+    function idleBake() {
+      game.bakes++;
+      game.noise = Math.random();
+      ctx.fillStyle = "rgb(60,90,60)";
+      ctx.fillRect(0, 60, 160, 30);
+    }
+    idleBake();
+    setInterval(idleBake, 2000);   // The Fort's period: fires in doctor's idle watch, not by brute force between commands
+    function frame() {
+      ctx.fillStyle = "#123"; ctx.fillRect(0, 0, 160, 60);
+      ctx.fillStyle = "#fc0"; ctx.fillRect(game.x, 20, 10, 10);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    import("/witness/witness.js").then(function (m) {
+      var witness = m.default;
+      return witness.start({ name: "realtime-bake", fps: 60, reset: function () { game.x = 20; },
+        calls: { move: function () { game.x += 5; return game.x; } },
+        snapshot: function () { return { x: game.x }; } });
+    });
+  </script>
+</body>
+</html>

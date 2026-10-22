@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Lazy draw</title><style>body { margin: 0; background: #123; } canvas { width: 320px; height: 180px; image-rendering: pixelated; }</style></head>
+<body>
+  <canvas id="c" width="160" height="90"></canvas>
+  <!-- Lazy drawing (step "draw": "last"): an expensive draw() (2000 fillRects, a stand-in for The Fort's 2D canvas on
+       SwiftShader) gated by witness.drawing, so a hinted step draws only its last frame. calls.draws counts draws (not
+       in the snapshot: state must match with and without the hint). ?bad=1: draw() reads Math.random into the game
+       state (the unsafe case doctor must catch). ?trail=1: no clear, a trail builds over frames (the picture depends
+       on earlier draws, the state doesn't), drawn through the witness.draw(fn) helper. ?rng=1: draw() jitters with
+       Math.random but stores nothing (only perf.lazy_draw.rng shows it). ?sound=1: draw() beeps every 12th draw (audio
+       differs, state doesn't). ?menu=1: a menu that never draws until reset params {"run": true} (doctor's default
+       runs never exercise the gate). -->
+  <script type="module">
+    import witness from "/witness/witness.js";
+    const q = new URLSearchParams(location.search), BAD = q.get("bad") === "1", TRAIL = q.get("trail") === "1", RNG = q.get("rng") === "1", SOUND = q.get("sound") === "1", MENU = q.get("menu") === "1";
+    const ac = SOUND ? new AudioContext() : null;
+    const c = document.getElementById("c"), ctx = c.getContext("2d");
+    const keys = new Set(), game = {}, stats = { draws: 0 };
+    addEventListener("keydown", (e) => keys.add(e.key));
+    addEventListener("keyup", (e) => keys.delete(e.key));
+    function reset(o) { Object.assign(game, { x: 40, y: 45, t: 0, sparkle: 0, running: !MENU || !!(o && o.params && o.params.run) }); ctx.fillStyle = "#123"; ctx.fillRect(0, 0, 160, 90); }
+    function update(dt) {
+      game.t = Math.round((game.t + dt) * 1e6) / 1e6;
+      if (keys.has("ArrowRight")) game.x += 1; if (keys.has("ArrowLeft")) game.x -= 1;
+      if (keys.has("ArrowDown")) game.y += 1; if (keys.has("ArrowUp")) game.y -= 1;
+    }
+    function draw() {
+      stats.draws++;
+      if (!TRAIL) { ctx.fillStyle = "#123"; ctx.fillRect(0, 0, 160, 90); }
+      for (let i = 0; i < 2000; i++) { ctx.fillStyle = `rgb(${(i * 7) % 64},${(i * 13) % 64},${80 + (i % 40)})`; ctx.fillRect((i * 17 + game.t * 30) % 160, (i * 11) % 60 + 30, 2, 2); }
+      if (BAD) game.sparkle = Math.random();
+      if (RNG) ctx.fillRect(Math.floor(Math.random() * 4), 0, 1, 1);   // screen-shake style jitter: nothing stored
+      if (SOUND && stats.draws % 12 === 0) { const o = ac.createOscillator(); o.connect(ac.destination); o.start(ac.currentTime); o.stop(ac.currentTime + 0.05); }
+      ctx.fillStyle = "#fc0"; ctx.fillRect(Math.round(game.x), Math.round(game.y), 6, 6);
+    }
+    function loop(now) {
+      update(1 / 60);
+      if (!game.running) { /* the menu: nothing drawn, witness.drawing never asked */ } else if (TRAIL) witness.draw(draw); else if (witness.drawing !== false) draw();
+      requestAnimationFrame(loop);
+    }
+    reset();
+    requestAnimationFrame(loop);
+    await witness.start({ name: "lazy-draw", fps: 60, canvas: c, keys: ["left", "right", "up", "down"], reset, snapshot: () => ({ ...game }),
+      calls: { draws: () => stats.draws } });
+  </script>
+</body>
+</html>

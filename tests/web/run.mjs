@@ -166,6 +166,8 @@ else {
   const env = { WITNESS_PLAYWRIGHT: pwDir };
   const P = (n) => path.join(here, "projects", n);
   const shots = [];
+  // doctor on every correctly wired page: no "game code ran on real time between frames" (perf.realtime calls 0)
+  const rtQuiet = [];
 
   // the Emscripten shim in a page: a JS stand-in for the compiled C side on a real WebAssembly.Memory
   let r = witness(P("bridge"), ["test", "--device", "iphone-15", "--no-auto-unlock"], env);
@@ -173,6 +175,7 @@ else {
   shots.push(path.join(P("bridge"), "witness", "shots"));
   r = witness(P("bridge"), ["doctor", "--device", "iphone-15", "--no-auto-unlock", "--json"], env);
   let j = json(r);
+  rtQuiet.push(["bridge, --device, iphone-15, --no-auto-unlock, --json", j]);
   ok("shim page: doctor deterministic, tap unlocks, screenshot answered by the shim", j && j.ok && j.summary.deterministic && j.summary.web.audioLocked === false && /screenshot 64×36/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
   ok("shim page: 64 px canvas over 393 CSS px at DPR 3 = ×18.4219, fractional", j && j.summary.web.display.scale[0] === 18.4219 && j.summary.web.display.problem === "fractional" && j.summary.web.display.pixels.fractional, j && j.summary.web);
 
@@ -185,11 +188,13 @@ else {
   ok("unlock: a second unlock test in the same page is warned about", /already unlocked when this test began/.test(r.stdout), r.stdout);
   r = witness(P("unlock-bug"), ["doctor", "--no-auto-unlock", "--json"], env);
   j = json(r);
+  rtQuiet.push(["unlock-bug, --no-auto-unlock, --json", j]);
   // the probe's tap and click each set the start flag, so the loop's resume() is blocked twice (more later in the doctor's runs)
   ok("unlock bug (resume() from the game loop): doctor warns, 2 resume() calls blocked in the probe", j && j.summary.web.audioLocked === true && j.summary.web.audio.state === "suspended" && /2 resume\(\) call\(s\) blocked/.test(j.summary.web.unlock), r.stdout + r.stderr);
   ok("unlock bug: 160×90 at 320×180 CSS px, DPR 3 = exact ×6, confirmed cell by cell", j && j.summary.web.display.scale[0] === 6 && j.summary.web.display.pixels.exact === true && j.summary.web.display.pixels.k === 6, j && j.summary.web.display);
   r = witness(P("unlock"), ["doctor", "--json"], env);
   j = json(r);
+  rtQuiet.push(["unlock, --json", j]);
   ok("unlock done right: doctor's probe says a tap at the centre unlocked it at frame 4", j && j.summary.web.audioLocked === false && /running after a tap at the centre \(finger lifted at frame 4\)/.test(j.summary.web.unlock || ""), r.stdout + r.stderr);
 
   // a Fort-like sound engine: live voices counted down by onended (and by setTimeout), new sounds dropped at the cap,
@@ -200,6 +205,7 @@ else {
   ok("voices: test --repeat 2 identical at every step (onended voice cap, setTimeout voices, compressors + convolver, lazy context)", r.status === 0 && /4 passed, 0 failed/.test(r.stdout) && /identical at every step/.test(r.stdout) && !/lengths \d+ vs/.test(r.stdout), r.stdout + r.stderr);
   r = witness(P("voices"), ["doctor", "--json"], env);
   j = json(r);
+  rtQuiet.push(["voices, --json", j]);
   ok("voices: doctor deterministic (state, screenshot and audio)", j && j.summary.deterministic === true && /✔ deterministic .*audio/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
 
   // captured audio is silent while suspended and sounds after the tap (sample-exact, through the CLI's own modules)
@@ -236,6 +242,7 @@ else {
   const ex = path.join(root, "examples", "js-browser");
   r = witness(ex, ["doctor", "--device", "iphone-15", "--json"], env);
   j = json(r);
+  rtQuiet.push(["ex, --device, iphone-15, --json", j]);
   ok("coins on iphone-15: doctor all good", j && j.ok && j.summary.deterministic === true, r.stdout + r.stderr);
   ok("coins on iphone-15: display ×3.3844 fractional, measured from device pixels within 0.5%", j && j.summary.web.display.scale[0] === 3.3844 && j.summary.web.display.problem === "fractional"
     && j.summary.web.display.pixels.fractional && j.summary.web.display.pixels.agrees && Math.abs(j.summary.web.display.pixels.scale[0] - 3.384375) / 3.384375 < 0.005, j && j.summary.web);
@@ -245,6 +252,7 @@ else {
   // iPhone SE (DPR 2): 343 CSS px = 686 device px = ×2.14375: the rounded border's 1-px runs made it ×1.67 × 1.58
   r = witness(ex, ["doctor", "--device", "iphone-se", "--json"], env);
   j = json(r);
+  rtQuiet.push(["ex, --device, iphone-se, --json", j]);
   const sp = j && j.summary.web.display.pixels;
   ok("coins on iphone-se: layout ×2.1437, the picture agrees within 0.5%, 14.4% of game pixels 3 px wide", sp && j.summary.web.display.scale[0] === 2.1437 && sp.agrees && sp.fractional && Math.abs(sp.scale[0] - 686 / 320) / (686 / 320) < 0.005 && /14\.4% of game pixels are 3 device px wide/.test(j.data.lines.join("\n")) && !/✔ pixels on screen/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
   const seShot = path.join(os.tmpdir(), `witness-web-se-${process.pid}.png`);
@@ -257,6 +265,7 @@ else {
   ok("--capture element with --crop: refused (game pixels vs device pixels)", r.status === 1 && /works in game pixels, but --capture element/.test(r.stderr) && !fs.existsSync(seShot), r.stdout + r.stderr);
   r = witness(ex, ["doctor", "--device", "ipad", "--json"], env);
   j = json(r);
+  rtQuiet.push(["ex, --device, ipad, --json", j]);
   ok("coins on ipad: the page reports platform MacIntel and 5 touch points (the iPad check passes)", j && /screen 820×1180, maxTouchPoints 5/.test(j.data.lines.join("\n")) && /platform MacIntel/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
   const shotFile = path.join(os.tmpdir(), `witness-web-shot-${process.pid}.png`);
   r = witness(ex, ["shot", "--at", "1", "--device", "iphone-15", "--capture", "element", "--out", shotFile], env);
@@ -271,10 +280,12 @@ else {
   // a WebGL2 game that opens no audio in witness mode: doctor names the renderer and says there is nothing to unlock
   r = witness(P("gl"), ["doctor", "--no-auto-unlock", "--time", "1", "--json"], env);
   j = json(r);
+  rtQuiet.push(["gl, --no-auto-unlock, --time, 1, --json", j]);
   ok("webgl: doctor reports the game's webgl2 canvas and Chromium's SwiftShader renderer (software)", j && j.ok && j.summary.web.webgl && j.summary.web.webgl.webgl2 === true && j.summary.web.webgl.canvasContext === "webgl2" && /SwiftShader/.test(j.summary.web.webgl.renderer) && j.summary.web.webgl.software === true && /✔ WebGL: the game's canvas draws with webgl2 · WebGL 2 · renderer ANGLE/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
   ok("no AudioContext in witness mode: --no-auto-unlock says so and how to fix it (audioLocked null, not false)", j && j.summary.web.audioLocked === null && j.summary.web.noAudioContext === true && /no AudioContext was created .* open audio in witness mode too/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
   r = witness(P("unlock"), ["doctor", "--time", "1", "--json"], env);
   j = json(r);
+  rtQuiet.push(["unlock, --time, 1, --json", j]);
   ok("a 2d canvas: the WebGL line is information only, naming the canvas's 2d context", j && j.summary.web.webgl && j.summary.web.webgl.canvasContext === "2d" && /^ {2}WebGL: WebGL 2 · renderer .* · the game's canvas uses 2d$/m.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
 
   // safe areas: env(safe-area-inset-*) is 0 in a headless page; --safe-insets rewrites every use to the device's insets
@@ -290,6 +301,7 @@ else {
   ok("--safe-insets, portrait: top 59 (the fallback in env(..., 7px) unused), bottom 34, a later element's inline style 59px", st.hudTop === "59px" && st.hudLeft === "0px" && st.sab === "34px" && st.lateTop === "59px", st);
   r = witness(P("safe"), ["doctor", "--time", "0.5", "--safe-insets", "--json"], env);
   j = json(r);
+  rtQuiet.push(["safe, --time, 0.5, --safe-insets, --json", j]);
   ok("doctor --safe-insets: says the insets were emulated and how many distinct env() uses were rewritten (15, not one per frame)", j && j.summary.web.safe && j.summary.web.safe.emulated && j.summary.web.safe.rewritten === 15 && j.summary.web.safe.rewrites > 15 && j.summary.web.safe.viewportFitCover === true && j.summary.web.safe.missed.count === 0 && /✔ safe areas emulated \(--safe-insets, iphone-landscape\): env\(safe-area-inset-\*\) = right 59 · bottom 21 · left 59 CSS px; 15 env\(\) uses in the page's CSS rewritten \(9 in style sheets, 2 inline, 4 set from script\)/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
   ok("doctor --safe-insets: printed follow-up commands keep --safe-insets", j && /witness test --repeat 2 --safe-insets/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
   // the same page without viewport-fit=cover (and a keyframe set by name from script, which Chromium can't rewrite)
@@ -297,12 +309,16 @@ else {
   ok("no viewport-fit=cover: env() is 0 with --safe-insets too, as on the device", st.hudLeft === "0px" && st.barHeight === "20px" && st.impLeft === "0px" && st.safe && st.safe.cover === false && st.safe.rewritten === 15, st);
   r = witness(P("safe-nocover"), ["doctor", "--time", "0.5", "--safe-insets", "--json"], env);
   j = json(r);
+  rtQuiet.push(["safe-nocover, --time, 0.5, --safe-insets, --json", j]);
   const nc = j ? j.data.lines.join("\n") : r.stdout + r.stderr;
   ok("doctor: no viewport-fit=cover is ⚠ (0 as on the device, letterboxed there), never ✔ emulated", j && j.summary.web.safe.viewportFitCover === false && /⚠ safe areas emulated \(--safe-insets, iphone-landscape\): the page has no viewport-fit=cover, so env\(safe-area-inset-\*\) is 0, as on the device, where the page is letterboxed inside the safe area/.test(nc) && /15 env\(\) uses in the page's CSS rewritten to 0/.test(nc) && !/✔ safe areas/.test(nc), nc);
   ok("doctor: a use Witness couldn't rewrite is ⚠ with where it is", j && j.summary.web.safe.missed.count === 1 && /⚠ 1 env\(safe-area-inset-\*\) use could not be rewritten and stays 0 here: @keyframes pulse 0% \(style sheet\)/.test(nc), nc);
   r = witness(P("safe"), ["doctor", "--time", "0.5", "--json"], env);
   j = json(r);
+  rtQuiet.push(["safe, --time, 0.5, --json", j]);
   ok("doctor without it: not emulated, and names --safe-insets", j && !j.summary.web.safe && /safe areas are not emulated.*--safe-insets emulates them/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  // safe.html's inline classic script (a viewport tweak) ran before the module: a tip, not a warning
+  ok("an inline classic script before the adapter, nothing on real time: doctor tips launch.inject (no ⚠)", j && /^ {2}tip: 1 inline classic <script> ran before witness\.js was imported: .*"launch": \{"inject": true\}/m.test(j.data.lines.join("\n")) && !/⚠ .*inline classic/.test(j.data.lines.join("\n")) && j.summary.web.realtime.earlyInlineScripts === 1, j && j.data.lines.join("\n"));
   // --safe-overlay: drawn over screenshots after capture (viewport capture at DPR 3, and the game's own 160×90 canvas)
   const ovFile = path.join(os.tmpdir(), `witness-web-ov-${process.pid}.png`);
   const px = (im, x, y) => Array.from(im.data.slice((y * im.width + x) * 4, (y * im.width + x) * 4 + 3)).join("/");
@@ -319,6 +335,7 @@ else {
   // two scales in one picture (an SDL-style canvas at device resolution: world ×5, UI layer 622×287 stretched ×4.11)
   r = witness(P("mixed"), ["doctor", "--time", "0.5", "--scale-rect", "world=0,0,2556,940; ui=0,945,2556,234", "--json"], env);
   j = json(r);
+  rtQuiet.push(["mixed, --time, 0.5, --scale-rect, world=0,0,2556,940; ui=0,945,2556,234, --json", j]);
   const mp = j && j.summary.web.display.pixels, mtxt = j ? j.data.lines.join("\n") : r.stdout + r.stderr;
   // UI rows 230+ of 287 start at device row 945 (pixel centres: 945.5 × 287 / 1179 = 230.2): 234 of 1179 rows = 19.8%
   ok("mixed scales: doctor reads world ×5 (whole, 80.2%) and ui ×4.11 (fractional, 19.8%), named from state.layers, not \"couldn't read\"", mp && mp.mixed && mp.regions.length === 2 && mp.regions[0].name === "world" && mp.regions[0].whole && mp.regions[0].scale.join() === "5,5" && mp.regions[1].name === "ui" && mp.regions[1].fractional && Math.abs(mp.regions[1].scale[0] - 2556 / 622) < 0.01 && /⚠ pixels on screen .*: 2 scales in one picture: world ×5 \(whole, 80\.2% of the picture\) · ui ×4\.11 \(fractional, 19\.8%\)/.test(mtxt) && !/couldn't read/.test(mtxt), mtxt);
@@ -328,18 +345,97 @@ else {
   // WebKit (iPhone Safari's engine) when Playwright's build is installed
   r = witness(ex, ["doctor", "--engine", "webkit", "--device", "iphone-15", "--json"], env);
   j = json(r);
+  rtQuiet.push(["ex, --engine, webkit, --device, iphone-15, --json", j]);
   if (!j && /isn't installed/.test(r.stderr)) ok("webkit missing: the error says how to install it", /npx playwright install webkit/.test(r.stderr), r.stderr);
   else {
     ok("coins in webkit on iphone-15: doctor deterministic", j && j.summary.deterministic === true && j.summary.web.engine === "webkit", r.stdout + r.stderr);
     ok("coins in webkit on iphone-15: maxTouchPoints 5 and platform iPhone (it said 0 and Win32)", j && /maxTouchPoints 5/.test(j.data.lines.join("\n")) && /platform iPhone/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
     r = witness(P("gl"), ["doctor", "--engine", "webkit", "--time", "1", "--json"], env);
     j = json(r);
+    rtQuiet.push(["gl, --engine, webkit, --time, 1, --json", j]);
     ok("webgl in webkit (Windows build): WebGL 2 renders; the renderer is WebKit's generic \"Apple GPU\"", j && j.ok && j.summary.web.webgl.webgl2 === true && j.summary.web.webgl.renderer === "Apple GPU" && j.summary.web.webgl.canvasContext === "webgl2" && /WebKit's generic name/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
     st = safeState(["--safe-insets", "--engine", "webkit"]);
     ok("--safe-insets in webkit: the same 15 rewrites and values (59px left, 41px bar, 21px var, @import, shadow root, …)", st.hudLeft === "59px" && st.barHeight === "41px" && st.sab === "21px" && st.inlLeft === "59px" && st.jsPad === "21px" && left59(st) && st.safe && st.safe.rewritten === 15 && st.safe.missed.count === 0, st);
     r = witness(P("bridge"), ["test", "--engine", "webkit", "--device", "iphone-15", "--no-auto-unlock"], env);
     ok("shim page in webkit: test passes", r.status === 0 && /2 passed, 0 failed/.test(r.stdout), r.stdout + r.stderr);
   }
+  // real-time activity: a classic script's setInterval made before the adapter (loaded by a later import()) stays on
+  // a real timer and draws between frames (The Fort's idleBake): doctor names its site; launch.inject puts it on the
+  // virtual clock (no warning, deterministic)
+  r = witness(P("realtime"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  let rtx = j ? j.data.lines.join("\n") : r.stdout + r.stderr;
+  const rtr = j && j.summary.web && j.summary.web.realtime;
+  ok("real-time interval before the adapter: doctor warns, with the site (realtime.html, idleBake) and the inject fix", rtr && rtr.calls > 0 && /^realtime\.html:\d+$/.test(rtr.first) && rtr.sites[0].fn === "idleBake" && /⚠ game code ran \d+ times? on real time between frames \(first at realtime\.html:\d+: (Math\.random|Canvas2D\.fillRect) in idleBake\) — a timer or listener made before Witness took over\? use "launch": \{"inject": true\} \(adapters\/js\/GUIDE\.md §1b\)/.test(rtx) && /idleBake \(realtime\.html:\d+:\d+\)/.test(rtx), rtx);
+  ok("real-time interval: perf.realtime counts by kind (Math.random and Canvas2D.fillRect) and saw the inline classic script", rtr && /Math\.random ×\d+/.test(rtx) && /Canvas2D\.fillRect ×\d+/.test(rtx) && rtr.earlyInlineScripts === 1, rtr);
+  r = witness(P("realtime-inject"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  rtQuiet.push(["realtime-inject", j]);
+  rtx = j ? j.data.lines.join("\n") : r.stdout + r.stderr;
+  ok("the same page with launch.inject: deterministic, no real-time warning, no inject tip", j && j.ok && j.summary.deterministic === true && j.summary.web.realtime && j.summary.web.realtime.calls === 0 && j.summary.web.realtime.earlyInlineScripts === 0 && !/real time between frames|inline classic/.test(rtx), rtx);
+  {
+    const loud = rtQuiet.filter(([, d]) => d && (/on real time between frames/.test(d.data.lines.join("\n")) || (d.summary.web && d.summary.web.realtime && d.summary.web.realtime.calls > 0)));   // no JSON: failed above
+    ok(`no real-time warning on correctly wired pages (${rtQuiet.length} doctor runs)`, rtQuiet.length >= 10 && !loud.length, loud.map(([n, d]) => `${n}: ${d ? d.data.lines.filter((l) => /real time|    \S/.test(l)).join(" | ") : "no JSON"}`).join("\n"));
+  }
+  for (const n of ["realtime", "realtime-inject"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
+
+  // lazy drawing (step "draw": "last"): an expensive draw() gated by witness.drawing runs only on each step's last
+  // frame; the state, the final picture and perf.lazy_draw say the rest is identical (draws counted, no timing)
+  {
+    const { findConfig, openGame } = await import(pathToFileURL(path.join(root, "src", "core", "launch.js")).href);
+    const { begin, stepTo } = await import(pathToFileURL(path.join(root, "src", "core", "runner.js")).href);
+    const f = findConfig(P("lazy"));
+    const g = await openGame(f.config, f.root, { quiet: true });
+    try {
+      const s = g.session, draws = async () => (await s.call("draws", [])).result;
+      const lz = async () => (await s.request("perf")).lazy_draw;
+      let st = await begin(s, { seed: 1, input: "right@0-0.5, down@0.2-0.8" });
+      const d0 = await draws(), p0 = await lz();
+      for (let i = 0; i < 10; i++) await s.request("step", { frames: 6, draw: "last" });
+      const dLazy = (await draws()) - d0, p1 = await lz();
+      const a = await s.snapshot(), shotA = await s.screenshot();
+      ok("lazy draw: 10 steps of 6 frames with draw:last → 10 draws, not 60 (frames 0-4 of each step skipped)", dLazy === 10 && a.frame === 60, { dLazy, frame: a.frame });
+      ok("lazy draw: perf.lazy_draw counts 50 frames run undrawn and the game reading witness.drawing every frame", p1.skipped - p0.skipped === 50 && p1.reads - p0.reads >= 60, { p0, p1 });
+      st = await begin(s, { seed: 1, input: "right@0-0.5, down@0.2-0.8" });
+      const d1 = await draws();
+      await stepTo(s, st, 60);
+      const dFull = (await draws()) - d1;
+      const b = await s.snapshot(), shotB = await s.screenshot();
+      ok("lazy draw: the same run without the hint draws all 60 frames", dFull === 60, dFull);
+      ok("lazy draw: identical state with and without the hint (x, y, t after 60 frames of input)", JSON.stringify(a.state) === JSON.stringify(b.state) && a.state.x > 40 && a.state.y > 45, [a.state, b.state]);
+      ok("lazy draw: the final screenshot is fully drawn and pixel-identical to the unhinted run's", shotA.data === shotB.data && shotA.width === 160, [shotA.width, shotA.data === shotB.data]);
+      const d2 = await draws();
+      await s.request("step", { frames: 1, draw: "last" });
+      await s.request("step", { frames: 5 });
+      ok("lazy draw: a 1-frame hinted step draws its frame; a step without the hint draws every frame", (await draws()) - d2 === 6);
+      ok("lazy draw: witness.drawing is true again between steps (read by eval)", (await s.eval("witness.drawing")).value === true);
+    } finally { await g.stop(); }
+  }
+  // doctor: play.lazyDraw on → the extra run with the hint; safe page ✔, draw() mutating state ⚠, picture-only ⚠
+  const dl = (d, rr) => (d ? d.data.lines.join("\n") : rr.stdout + rr.stderr);
+  r = witness(P("lazy"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("doctor, lazyDraw safe page: ✔ lazy drawing safe (same state and screenshot), summary.lazyDraw.safe", j && j.ok && j.summary.lazyDraw && j.summary.lazyDraw.safe && j.summary.lazyDraw.samePicture && j.summary.lazyDraw.reads > 0 && /^✔ lazy drawing safe: run A stepped 4 frames at a time with "draw": "last" \(45 of 60 frames undrawn\) ended in the same state, screenshot(, audio)?, random stream \(0 draws\)$/m.test(dl(j, r)) && !/not exercised/.test(dl(j, r)), dl(j, r));
+  r = witness(P("lazy-bad"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("doctor, draw() reads Math.random into state: ⚠ drawing changes game state: lazyDraw unsafe (deterministic otherwise)", j && j.summary.deterministic === true && j.summary.lazyDraw && j.summary.lazyDraw.safe === false && /⚠ drawing changes game state: lazyDraw unsafe for this game/.test(dl(j, r)) && /state differs from run A at \d+ path\(s\): state\.sparkle/.test(dl(j, r)), dl(j, r));
+  r = witness(P("lazy-trail"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("doctor, a trail drawn through witness.draw(): same state, ⚠ the picture differs", j && j.summary.lazyDraw && j.summary.lazyDraw.safe === true && j.summary.lazyDraw.samePicture === false && /⚠ lazy drawing changes the picture \(not the state\)/.test(dl(j, r)), dl(j, r));
+  r = witness(P("lazy-rng"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("doctor, draw() jitters with Math.random but stores nothing: same state, ⚠ draw() reads Math.random (45 fewer calls)", j && j.summary.deterministic === true && j.summary.lazyDraw && j.summary.lazyDraw.safe === false && JSON.stringify(j.summary.lazyDraw.rng) === "[60,15]" && /⚠ draw\(\) reads Math\.random \(45 fewer calls with the hint: 15 vs 60 in run A\): lazyDraw unsafe for this game/.test(dl(j, r)) && !/✔ lazy drawing safe/.test(dl(j, r)), dl(j, r));
+  r = witness(P("lazy-sound"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("doctor, draw() starts a sound: same state, ⚠ drawing changes game state/audio: lazyDraw unsafe", j && j.summary.deterministic === true && j.summary.lazyDraw && j.summary.lazyDraw.safe === false && /⚠ drawing changes game state\/audio: lazyDraw unsafe for this game/.test(dl(j, r)) && !/✔ lazy drawing safe/.test(dl(j, r)), dl(j, r));
+  r = witness(P("lazy-menu"), ["doctor", "--time", "1", "--json"], env);
+  j = json(r);
+  ok("doctor, a game that draws only past a menu doctor's reset doesn't leave: ⚠ lazy drawing not exercised, safe null (no ✔)", j && j.summary.lazyDraw && j.summary.lazyDraw.safe === null && j.summary.lazyDraw.reads === 0 && /⚠ lazy drawing not exercised: the game never asked witness\.drawing during doctor's scripted run/.test(dl(j, r)) && !/✔ lazy drawing safe/.test(dl(j, r)), dl(j, r));
+  r = witness(P("lazy-menu"), ["doctor", "--time", "1", "--params", '{"run":true}', "--json"], env);
+  j = json(r);
+  ok("doctor --params '{\"run\":true}' reaches the drawing scene: ✔ lazy drawing safe", j && j.summary.lazyDraw && j.summary.lazyDraw.safe === true && j.summary.lazyDraw.reads > 0 && /✔ lazy drawing safe/.test(dl(j, r)) && !/not exercised/.test(dl(j, r)), dl(j, r));
+  for (const n of ["lazy", "lazy-bad", "lazy-trail", "lazy-rng", "lazy-sound", "lazy-menu"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
+
   // a pure-DOM page: CSS animations on the virtual clock, launch.inject, witness.boot(), reset by reload, clock.epoch
   {
     const d = spawnSync(process.execPath, [path.join(here, "dom.mjs")], { encoding: "utf8", timeout: 900000, env: { ...process.env, ...env } });

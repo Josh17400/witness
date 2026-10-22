@@ -19,7 +19,7 @@ import { wallCapFor } from "./batch.js";
 export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the game and report back (docs/PLAYTEST.md)
 
   witness play start [--name t1] [--goal "…"] [--persona newbie|explorer|speedrunner|breaker|fighter]
-                     [--seed N] [--scene S] [--params JSON] [--wall-minutes 20] [--idle 300] [--allow-calls] [--no-map]
+                     [--seed N] [--scene S] [--params JSON] [--wall-minutes 20] [--idle 300] [--allow-calls] [--no-map] [--lazy-draw]
                      [--until "<expr>"] [--game-hours N] [--clock "<expr>"] [--model sonnet] [--out DIR] [--force] [--json] [--cmd "<launch>"]
                      [--live] [--watch] [--speed 1] [--horizon 4] [--pause-after 15]
                      → launches the game + a background session daemon, prints the first observation
@@ -27,6 +27,8 @@ export const PLAY_HELP = `witness play — let a cheap Claude model PLAY the gam
                      --watch: live, and the game shows its window for a human to watch (WITNESS_WATCH=1)
                      --watch --turns: watched, but the game waits while the tester thinks (orders play at real speed)
                      --wall-minutes: hard stop after that many real minutes (old name: --minutes)
+                     --lazy-draw: steps tell the game only their last frame is seen (play.lazyDraw; the game opts in
+                     with witness.drawing, adapters/js/GUIDE.md §8; witness doctor checks it is safe)
                      --until "state.hour >= 18": play until it's true (checked every step), then orders stop and the
                      tester ENDs (outcome "until reached"); --game-hours 4: until the game clock (play.clock in
                      witness.json, or --clock: an expression giving in-game hours) has advanced 4 hours
@@ -187,7 +189,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       const opts = {
         goal: opt.goal && opt.goal !== true ? String(opt.goal) : null, persona: opt.persona && opt.persona !== true ? String(opt.persona) : null,
         seed: opt.seed !== undefined && opt.seed !== true ? +opt.seed : cfg.seed ?? 1, scene: opt.scene && opt.scene !== true ? String(opt.scene) : null, params: params ?? null,
-        wallMinutes: opt["wall-minutes"] && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : opt.minutes && opt.minutes !== true ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], model: opt.model && opt.model !== true ? String(opt.model) : null,
+        wallMinutes: opt["wall-minutes"] && opt["wall-minutes"] !== true ? +opt["wall-minutes"] : opt.minutes && opt.minutes !== true ? +opt.minutes : 20, idle: opt.idle ? +opt.idle : 300, allowCalls: !!opt["allow-calls"], noMap: !!opt["no-map"], lazyDraw: !!opt["lazy-draw"], model: opt.model && opt.model !== true ? String(opt.model) : null,
         live: !!(opt.live || (opt.watch && !opt.turns)), watch: !!opt.watch, turns: !!opt.turns, speed: opt.speed && opt.speed !== true ? +opt.speed : undefined,
         horizon: opt.horizon && opt.horizon !== true ? +opt.horizon : undefined, pauseAfter: opt["pause-after"] && opt["pause-after"] !== true ? +opt["pause-after"] : undefined,
         until: opt.until && opt.until !== true ? String(opt.until) : null, gameHours: opt["game-hours"] !== undefined && opt["game-hours"] !== true ? +opt["game-hours"] : null,

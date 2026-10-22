@@ -60,6 +60,7 @@ export async function runDaemon(dir) {
   const rawPlay = { ...(spec.cfg.play || {}) };
   if (opts.noMap) rawPlay.map = false;
   if (opts.allowCalls) rawPlay.allowCalls = true;
+  if (opts.lazyDraw) rawPlay.lazyDraw = true;
   const persona = PERSONAS[opts.persona] ? opts.persona : null;
   if (persona && rawPlay.reaction == null) rawPlay.reaction = PERSONAS[persona].reaction;
   let cfg;
@@ -83,6 +84,10 @@ export async function runDaemon(dir) {
   let parseErrors = 0, lastLogFrame = 0, firstLook = true, lastCall = null;
   const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, epoch: S.epoch ?? null, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null } : null });
   const dts = (k) => Array(k).fill(1 / fps);
+  // play.lazyDraw / --lazy-draw: multi-frame steps say only their last frame is observed ("draw": "last", PROTOCOL.md
+  // §3), so a game that checks witness.drawing skips drawing the others. Not when watched: the viewer sees every frame.
+  const lazy = cfg.lazyDraw ? { on: !opts.watch, steps: 0, undrawn: 0, game: null } : null;
+  if (lazy) { setStatus({ lazyDraw: lazy.on }); log(`lazy drawing ${lazy.on ? "on: steps send draw:last" : "off while watched"}`); }
 
   // ---- live mode: one loop owns the game and steps it continuously, paced to real time; commands steer it
   const liveCfg = cfg.live || {};
@@ -159,7 +164,7 @@ export async function runDaemon(dir) {
   // the timeline keeps one line per run of regen ticks (or damage over time with no attacker), not one per tick
   let regenRun = null;
   function timelinePush(e) {
-    const dot = e.kind === "hurt" && e.data && !e.data.by;
+    const dot = e.kind === "hurt" && e.data && (!e.data.by || e.data.dot);
     if ((e.kind === "heal" || dot) && e.data && e.data.amount != null) {
       const last = timeline.at(-1);
       if (regenRun && last === regenRun.entry && regenRun.kind === e.kind && e.t - regenRun.tEnd < 1.5) {
@@ -214,9 +219,11 @@ export async function runDaemon(dir) {
   // watched turn-taking (--watch --turns): an order plays at real-time speed, the game waits while the tester thinks
   const turnPace = { wall: 0, frame: 0 };
   async function stepWorld(k) {
-    try { await S.request("step", { frames: k, dts: dts(k) }, Math.max(hangMs, k * 50)); }
+    const hint = lazy && lazy.on && k > 1;
+    try { await S.request("step", { frames: k, dts: dts(k), ...(hint ? { draw: "last" } : {}) }, Math.max(hangMs, k * 50)); }
     catch (e) { if (!S.closed && /didn't answer/.test(e.message)) hung ??= { t: world.t, frame }; throw e; }
     frame += k;
+    if (hint) { lazy.steps++; lazy.undrawn += k - 1; }
     if (opts.watch && !live.on) { const ahead = turnPace.wall + ((frame - turnPace.frame) / fps) * 1000 - Date.now(); if (ahead > 1) await new Promise((r) => setTimeout(r, ahead)); }
     const snap = await S.snapshot();
     let logs = [];
@@ -225,7 +232,9 @@ export async function runDaemon(dir) {
     const nw = perceiver.perceive(snap, frame);
     if (until && !until.hit && (until.active || until.clock) && until.check(snap, nw.t)) untilReached();
     ap.observe(nw);
-    const ev = tracker.update(world, nw, { lastAttackT: ap.lastAttackT, logs, retreat: ap.policy.retreat });
+    // order: the running fight order (a still fight is one row per fight order and wave); target: what it's hitting
+    const fo = ap.activeOrder();
+    const ev = tracker.update(world, nw, { lastAttackT: ap.lastAttackT, logs, retreat: ap.policy.retreat, order: fo && fo.o?.verb === "fight" ? fo : null, target: ap.cur && /^(fight|stomp)$/.test(ap.cur.o?.verb || "") ? ap.cur.target ?? null : null });
     for (const e of ap.drainEvents()) ev.push({ t: nw.t, frame, ...e });
     world = nw;
     world.remembered = world.remembered.filter((th) => !(perceiver.memory.get(th.id) || {}).gone);
@@ -489,7 +498,8 @@ export async function runDaemon(dir) {
 
   function look(result, asJson, full = false) {
     const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: coalesceEvents(pending.splice(0)), first: firstLook, session: { goal: opts.goal, name: spec.name },
-      live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null, clock: until ? until.line() : null };
+      live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null, clock: until ? until.line() : null,
+      death: world.dead || world.over ? (tracker.deaths.at(-1)?.cause ?? null) : null };
     firstLook = false;
     // look --full: the latest game call's answer, whole (observations cut it at play.resultChars)
     const whole = lastCall ? (lastCall.failed ? lastCall.msg : lastCall.value == null ? "(no result)" : typeof lastCall.value === "string" ? lastCall.value : JSON.stringify(lastCall.value, null, 1)) : null;
@@ -520,6 +530,7 @@ export async function runDaemon(dir) {
       wallSeconds: Math.round((Date.now() - wall0) / 1000), gameSeconds: world.t, frames: frame, fps, orders, timeline, tracker,
       until: until ? until.report() : null, incidents: ap.incidents, coverage: cfg.profile === "turn" || cfg.profile === "defense" ? null : coverage(), shots, errors, notes, parseErrors, profile: cfg.profile, pace: paceStats(),
       replay: { file: path.join(dir, "replay.jsonl"), frames: frame, calls: recorder ? [...recorder.frames.values()].reduce((a, x) => a + x.calls.length, 0) : 0 },
+      lazyDraw: lazy ? { on: lazy.on, steps: lazy.steps, framesUndrawn: lazy.undrawn, frames: frame, game: lazy.game } : null,
       ...extra,
     };
   }
@@ -547,6 +558,8 @@ export async function runDaemon(dir) {
     pace.frozenSince = null;   // the final pause (writing feedback) isn't play time
     let endState = null;
     try { if (!S.closed && !hung) { const snap = await S.snapshot(); endState = snap.state; for (const l of await S.drainLogs()) if (l.level === "error") errors.push({ t: +world.t.toFixed(2), text: `game error: ${l.message}` }); } } catch (e) { log(`final snapshot failed: ${e.message}`); }
+    // lazy drawing: did the game act on the hint? (perf.lazy_draw: how often it read witness.drawing, frames run undrawn)
+    if (lazy && S.has("perf") && !S.closed && !hung) { try { const p = await S.request("perf", {}, 5000); if (p && p.lazy_draw) lazy.game = { reads: +p.lazy_draw.reads || 0, skipped: +p.lazy_draw.skipped || 0 }; } catch { /* optional */ } }
     tracker.finish(world.t);
     const st0 = {};
     if (!outcome) outcome = until && until.hit ? "until reached" : world.won ? "won" : world.dead ? "died" : "ended";

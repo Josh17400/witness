@@ -3,8 +3,29 @@
 // dialogues. Events carry a `kind` the daemon uses to decide whether to wake the tester.
 import { dist2, r1, clip, oneLine } from "./util.js";
 import { thingLabel } from "./perceive.js";
+import { canMove } from "./config.js";
 
 const LOW_HP = 35;
+
+/**
+ * `state.lastHit` (or `state.player.lastHit`): what hit the player last, in the game's own words, for damage no entity
+ * dealt (a bomb, a missile, artillery, a trap). `{by, type?}` reads "Bomber bomb"; a string is used as it is. Null when
+ * the game doesn't say.
+ */
+const lastHitRaw = (state) => state && typeof state === "object" ? state.lastHit ?? (state.player && typeof state.player === "object" ? state.player.lastHit : null) : null;
+/** True when state.lastHit changed between the two states (a fresh hit; a value left over from an old bomb is stale). */
+export function lastHitChanged(prevState, curState) {
+  const a = lastHitRaw(curState), b = lastHitRaw(prevState);
+  if (a == null || a === "" || a === false) return false;
+  try { return JSON.stringify(a) !== JSON.stringify(b); } catch { return a !== b; }
+}
+export function lastHitOf(state) {
+  const h = lastHitRaw(state);
+  if (h == null || h === "" || h === false) return null;
+  if (typeof h !== "object") return clip(oneLine(String(h)), 60);
+  const s = [h.by ?? h.name ?? h.source, h.type ?? h.kind ?? h.weapon].filter((x) => x != null && x !== "").map(String).join(" ");
+  return s ? clip(oneLine(s), 60) : null;
+}
 
 /**
  * Damage over time (poison, burning, hunger) vs a hit: a small loss (8% of max hp, or 0.5 when the max isn't known)
@@ -30,12 +51,15 @@ export class EventTracker {
     this.cfg = cfg;
     this.perceiver = perceiver;
     this.fights = []; this.active = null; this.fightN = 0;
+    // still fights (defense, or top-down with no move control): the enemies come to you and die far away, so a fight
+    // is an engagement with everyone on the field (trackEngagement), not a duel with whoever is near
+    this.still = cfg.profile === "defense" || (cfg.profile === "topdown" && !canMove(cfg.controls && cfg.controls.move));
     this.deaths = []; this.pickups = []; this.dialogues = []; this.kills = [];
     this.tele = { windups: 0, avoided: 0, hits: 0 };
     this.pendingStrikes = [];   // {id, key, t}
     this.hurtTimes = [];        // t of every hurt
     this.alerted = new Set();   // hostiles already announced
-    this.lastHurtBy = null;
+    this.lastHurtBy = null; this.lastHurtNamed = false;
     this.lowWarned = false;
     this.logRe = typeof cfg.logs === "string" ? new RegExp(cfg.logs, "i") : null;
     this.seenTypes = new Set();
@@ -87,11 +111,15 @@ export class EventTracker {
       if (d < 0) {
         const src = cur.things.concat(prev.things).filter((th) => th.rel === "hostile" && th.dist <= reach * 2.6)
           .sort((a, b) => (b.telegraph || /strike|attack|bite|hit/i.test(b.state || "") ? 1 : 0) - (a.telegraph || /strike|attack|bite|hit/i.test(a.state || "") ? 1 : 0) || a.dist - b.dist)[0];
-        this.lastHurtBy = src ? src.key : null;
         this.hurtTimes.push(t);
         // damage over time (poison, burning, hunger): timeline only, it doesn't wake the tester or stop an order (wake.js)
         const dot = this.dot.loss(t, -d, P.maxHp, { near: !!src, things: cur.things });
-        ev.push({ t, frame, kind: "hurt", text: `you took ${r1(-d)} damage${src ? ` from ${src.key}` : ""} (hp ${r1(from)}→${r1(P.hp)})`, data: { amount: -d, by: src ? src.key : null, from, to: P.hp, ...(dot ? { dot: true } : {}) } });
+        // the game's own word on what hit (state.lastHit: a bomb, a missile) beats the nearest-enemy guess when it changed
+        // with this hit; a value left standing from an old bomb only names a hit no enemy (and no DoT tick) explains
+        const named = lastHitOf(cur.snap && cur.snap.state), fresh = named != null && lastHitChanged(prev.snap && prev.snap.state, cur.snap && cur.snap.state);
+        const by = fresh ? named : src ? src.key : !dot ? named : null;
+        this.lastHurtBy = by; this.lastHurtNamed = by != null && by === named && !(src && by === src.key);
+        ev.push({ t, frame, kind: "hurt", text: `you took ${r1(-d)} damage${by ? ` from ${by}` : ""} (hp ${r1(from)}→${r1(P.hp)})`, data: { amount: -d, by, from, to: P.hp, ...(dot ? { dot: true } : {}) } });
         const pct = P.maxHp ? (100 * P.hp) / P.maxHp : null;
         const lowAt = Math.max(LOW_HP, ctx.retreat || 0);
         if (pct != null && pct < lowAt && pct > 0 && !this.lowWarned) { this.lowWarned = true; push("lowhp", `hp low: ${r1(P.hp)}/${r1(P.maxHp)}`); }
@@ -107,7 +135,11 @@ export class EventTracker {
       const cell = P && P.p2 ? cellOf(cur, P.p2) : null;
       // the game's own words beat our guess ("fell into a pit", "hit by Piranha#27")
       const said = this.recentLogs.slice().reverse().find((l) => /(died|death|killed|fell|pit|lava|drown|slain|you lose|game over)/i.test(l.text) && !/\b(player|you) (killed|defeated|slew)\b/i.test(l.text));   // not "player killed X"
-      const cause = said ? clip(oneLine(said.text), 120) : this.lastHurtBy ? `last hit by ${this.lastHurtBy}` : "unknown";
+      // state.lastHit (the game naming what hit: "Bomber bomb") first, then its log line, then the nearest-enemy guess
+      // (fresh: it changed with the killing blow, or named the last hit we saw; a stale one doesn't outrank a Wolf)
+      const fresh = lastHitChanged(prev.snap && prev.snap.state, cur.snap && cur.snap.state) ? lastHitOf(cur.snap && cur.snap.state) : null;
+      const named = fresh ?? (this.lastHurtNamed && t - (this.hurtTimes.at(-1) ?? -1e9) < 3 ? this.lastHurtBy : null);
+      const cause = named ? `killed by ${named}` : said ? clip(oneLine(said.text), 120) : this.lastHurtBy ? `last hit by ${this.lastHurtBy}` : "cause unknown";
       this.deaths.push({ t, cell, cause });
       push("death", `YOU DIED (${cause})`);
     }
@@ -121,6 +153,17 @@ export class EventTracker {
     const teamGame = !!(P && P.team != null);   // teammates shoot too: only count damage/kills while you were firing
     let dealtNow = 0;
     const killedNow = [];
+    // still fights: an enemy that vanishes was killed, wherever it was (a tap or the artillery got it far out), unless it
+    // flew off the field (far and moving away) or blew itself up on the base (right there as the base took a hit)
+    const baseHit = !!(P && PP && P.hp != null && PP.hp != null && P.hp < PP.hp), bp = P && P.p2;
+    const leftField = (th, far) => {
+      if (baseHit && th.dist <= Math.max(reach * 2.5, 2.5)) return true;
+      return far && !!(bp && th.v && th.p2) && (th.p2[0] - bp[0]) * th.v[0] + (th.p2[1] - bp[1]) * th.v[1] > 0;
+    };
+    const tapped = (id) => attackedRecently && ctx.target != null && String(ctx.target) === String(id);   // the one we were hitting
+    // ...and could hit from there: still fights, a tap/click-the-target attack, or within the attack reach (play.reach.attack:
+    // a shooter sets its range); a far full-hp target leaving a top-down list (culled, behind a wall) is only gone
+    const ranged = !!(cfg.controls && cfg.controls.attack && cfg.controls.attack.type === "target");
     // a thing that flickers at the edge of the list (in, out, in, out) is gone once, not once per flicker
     const gone = (th, label) => {
       const last = this.goneAt.get(th.id);
@@ -134,10 +177,10 @@ export class EventTracker {
       if (th.dead) { this.perceiver.forget(id, "killed"); continue; }
       const near = th.dist <= 3.5, far = th.dist > Math.max(cur.maxListed, prev.maxListed) * 0.6 && th.dist > 8;
       if (th.rel === "hostile") {
-        if ((th.hp != null && th.hp <= 2 && th.dist <= 6) || near || (!far && th.hp != null && th.maxHp && th.hp < th.maxHp)) {
+        if ((th.hp != null && th.hp <= 2 && th.dist <= 6) || near || (!far && th.hp != null && th.maxHp && th.hp < th.maxHp) || (tapped(id) && (this.still || ranged || th.dist <= reach * 1.5)) || (this.still && !leftField(th, far))) {
           if (!teamGame || attackedRecently) this.kills.push({ t, key: th.key, type: th.type });
           killedNow.push(th);
-          if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; if (th.hp != null) dealtNow += th.hp; }
+          if (this.active && !this.active.still && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; if (th.hp != null) dealtNow += th.hp; }
           pushInf("kill", `${th.key} died`, { id }, th.key);
           this.perceiver.forget(id, "killed");
         } else if (!far) { gone(th, th.key); }
@@ -152,7 +195,7 @@ export class EventTracker {
       if (was && !was.dead && th.dead && th.rel === "hostile") {
         if (!teamGame || attackedRecently) this.kills.push({ t, key: th.key, type: th.type });
         killedNow.push(was);
-        if (this.active && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; }
+        if (this.active && !this.active.still && this.active.participants.has(id)) { this.active.kills++; this.active.participants.get(id).dead = true; }
         if (was.hp != null && th.hp != null && was.hp > th.hp) dealtNow += was.hp - th.hp;
         pushInf("kill", `${th.key}${th.name ? ` "${th.name}"` : ""} died`, { id }, th.key);
         continue;
@@ -203,7 +246,7 @@ export class EventTracker {
       if (cur.dialogue) {
         const d = cur.dialogue;
         this.dialogues.push({ t, speaker: d.speaker, text: d.text, options: d.options });
-        push("dialogue", `${prev.dialogue ? "dialogue" : "dialogue opened"} — ${d.speaker ? `${d.speaker}: ` : ""}"${clip(d.text, 120)}"${d.options.length ? ` [${d.options.map((o, i) => `${i + 1}) ${clip(o, 40)}`).join(" ")}]` : ""}`);
+        push("dialogue", `${prev.dialogue ? "dialogue" : "dialogue opened"} — ${d.speaker ? `${d.speaker}: ` : ""}"${clip(d.text, 120)}"${d.options.length ? ` [${d.options.map((o, i) => `${i + 1}) ${clip(o, 40)}`).join(" ")}]` : ""}`, { opened: !prev.dialogue, options: d.options.length });
       } else push("dialogue-close", "dialogue closed");
     }
     if (cur.notice && cur.notice !== prev.notice) { if (!sameSaid(cur.notice)) push("notice", `game says: "${clip(oneLine(cur.notice), 140)}"`); this.said.push({ t, k: sayKey(cur.notice) }); }
@@ -217,7 +260,8 @@ export class EventTracker {
       && (cfg.profile !== "turn" || ((s.value == null || typeof s.value !== "object") && String(s.value).length <= 40)));
     if (changes.length && changes.length <= 3) push("stat", changes.map((s) => `${s.label} ${fmtV(ps.get(s.label))}→${fmtV(s.value)}`).join(", "));
 
-    this.trackFight(prev, cur, ev, dealtNow, attackedRecently, killedNow);
+    if (this.still) this.trackEngagement(prev, cur, ev, killedNow, ctx);
+    else this.trackFight(prev, cur, ev, dealtNow, attackedRecently, killedNow);
     return ev;
   }
 
@@ -247,9 +291,62 @@ export class EventTracker {
     if (result) this.closeFight(result, t);
   }
 
+  /**
+   * A still fight (defense, or a top-down game with no move control) is an engagement: it opens on the first exchange
+   * (a hit, a kill, the base hurt) with enemies on the field and lasts until the field is clear (won), you die (lost),
+   * the fight order it ran under ends or another starts with enemies left (held; `ctx.order` is the daemon's running
+   * fight order), or 15 s pass with no exchange (broke off). Everyone on the field takes part (named by type and
+   * count); damage is every hp the enemies lost, from any source (your taps, towers, the squad), at most each one's
+   * max hp, so a healing boss can't run it up.
+   */
+  trackEngagement(prev, cur, ev, killedNow, ctx) {
+    const t = cur.t;
+    let f = this.active;
+    if (cur.dead) { if (f) this.closeFight("lost", t); return; }
+    const foes = cur.things.filter((th) => th.rel === "hostile" && !th.dead);
+    const hurt = ev.some((e) => e.kind === "hurt" && !(e.data && e.data.dot)), hit = killedNow.length > 0 || ev.some((e) => e.kind === "hit" || e.kind === "kill");
+    const order = ctx.order === undefined ? (f ? f.order : null) : ctx.order;
+    if (f && order !== f.order) { this.closeFight("held", t); f = null; }
+    if (!f) {
+      if (!(hurt || hit) || !(foes.length || killedNow.length)) return;
+      f = this.active = { n: ++this.fightN, t0: t, still: true, order, orderText: order ? clip(oneLine(order.label ?? order.text ?? ""), 60) || null : null, participants: new Map(), dealt: 0,
+        taken: ev.filter((e) => e.kind === "hurt").reduce((a, e) => a + (e.data?.amount || 0), 0), kills: 0, windups: 0, avoided: 0, hits: 0, lastExchange: t };
+    }
+    const add = (p, d) => { if (!(d > 0)) return; const x = Math.min(d, p.maxHp ? Math.max(0, p.maxHp - p.dealt) : d); p.dealt += x; f.dealt += x; };
+    const join = (th) => { const p = { key: th.key, type: th.type, dead: false, maxHp: th.maxHp || null, hp: th.hp, dealt: 0 }; f.participants.set(th.id, p); return p; };
+    // a newcomer counts from its hp a frame ago (the hit that opened the fight is part of it)
+    const before = new Map(prev.things.map((th) => [th.id, th.hp]));
+    for (const th of foes) {
+      const p = f.participants.get(th.id) || Object.assign(join(th), { hp: before.get(th.id) ?? th.hp });
+      if (p.hp != null && th.hp != null && th.hp < p.hp) add(p, p.hp - th.hp);
+      p.hp = th.hp;
+    }
+    for (const th of killedNow) {
+      const p = f.participants.get(th.id) || join(th);
+      if (p.dead) continue;
+      add(p, p.hp ?? th.hp);
+      p.dead = true; p.hp = 0; f.kills++;
+    }
+    // gone without a kill (flew off, blew up on the base): out of the fight
+    for (const [id, p] of f.participants) if (!p.dead && !foes.some((th) => th.id === id)) p.dead = true;
+    if (hurt || hit) f.lastExchange = t;
+    if (!foes.length) this.closeFight(f.kills ? "won" : "broke off", t);
+    else if (t - f.lastExchange > 15) this.closeFight("broke off", t);
+  }
+
   closeFight(result, t) {
     const f = this.active; if (!f) return;
     this.active = null;
+    if (f.still) {
+      // one row per engagement: who it was against by type and count, how many died; never an empty row
+      if (!f.participants.size) { if (f.n === this.fightN) this.fightN--; return; }
+      const types = new Map();
+      for (const p of f.participants.values()) types.set(p.type, (types.get(p.type) || 0) + 1);
+      const targets = [...types.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))).map(([ty, n]) => (n > 1 ? `${ty} ×${n}` : String(ty)));
+      this.fights.push({ n: f.n, targets, start: +f.t0.toFixed(2), seconds: +Math.max(0, (result === "broke off" ? f.lastExchange : t) - f.t0).toFixed(2), result, dealt: +f.dealt.toFixed(2), taken: +f.taken.toFixed(2),
+        kills: f.kills, windups: Math.max(f.windups, f.avoided + f.hits), avoided: f.avoided, hits: f.hits, still: true, enemies: f.participants.size, order: f.orderText });
+      return;
+    }
     const targets = [...f.participants.values()].map((p) => p.key);
     f.windups = Math.max(f.windups, f.avoided + f.hits);
     this.fights.push({ n: f.n, targets, start: +f.t0.toFixed(2), seconds: +Math.max(0, (result === "broke off" ? f.lastExchange : t) - f.t0).toFixed(2), result, dealt: +f.dealt.toFixed(2), taken: +f.taken.toFixed(2), kills: f.kills, windups: f.windups, avoided: f.avoided, hits: f.hits });
@@ -275,7 +372,7 @@ export function coalesceEvents(events) {
   const healsAll = events.filter((e) => e.kind === "heal" && e.data && e.data.amount != null);
   const med = healsAll.length ? healsAll.map((e) => e.data.amount).sort((x, y) => x - y)[Math.floor(healsAll.length / 2)] : 0;
   const heals = healsAll.filter((e) => e.data.amount <= Math.max(med * 3, 1));
-  const dots = events.filter((e) => e.kind === "hurt" && e.data && e.data.amount != null && !e.data.by);
+  const dots = events.filter((e) => e.kind === "hurt" && e.data && e.data.amount != null && (!e.data.by || e.data.dot));
   const merged = new Set();
   const mergeOf = (list, fmt) => {
     if (list.length < 2) return;

@@ -811,6 +811,9 @@ class Interact extends Behaviour {
   }
 }
 
+/** Which dialogue it is (speaker and options), not its line: a line still typing out is the same dialogue. */
+const dlgKey = (d) => d ? JSON.stringify([d.speaker ?? null, d.options ?? null]) : null;
+
 class Choose extends Behaviour {
   constructor(o, ap, w) {
     super(o, ap, w);
@@ -831,40 +834,65 @@ class Choose extends Behaviour {
   }
   tick(w, want) {
     const ap = this.ap, c = ap.cfg.controls, ch = c.choose;
+    const fw = (this.waitFrames || 0) / ap.fps, said = () => `${this.readyWaited ? ` (waited ${r1(this.readyWaited)}s for the dialogue to accept picks)` : ""}${this.presses > 1 ? ` (pressed ${this.presses}×: the game ignored the first)` : ""}`;
     if (this.phase === "press") {
-      if (ch.mode === "list") { const k = ch.keys[this.idx - 1]; if (!k) return this.fail(`no control configured for option ${this.idx}`); want.taps.push({ label: "choose", c: k, frames: c.tapFrames }); }
-      else if (ch.mode === "numbers") want.taps.push({ label: "choose", c: parseControl(String(this.idx)), frames: c.tapFrames });
-      else {
-        // arrows: move the cursor from `selected` (0-based) or from the top, then confirm
-        const d = w.dialogue, sel = d.selected != null ? d.selected : null;
-        const up = c.move.up || parseControl("up"), down = c.move.down || parseControl("down");
-        const seq = [];
-        if (sel == null) for (let i = 0; i < d.options.length; i++) seq.push(up);
-        const from = sel == null ? 0 : sel, to = this.idx - 1;
-        for (let i = from; i < to; i++) seq.push(down);
-        for (let i = from; i > to; i--) seq.push(up);
-        seq.push(c.confirm || parseControl("enter"));
-        let at = 0;
-        for (const k of seq) { want.raw.push({ at, ...controlEventRaw(k, true) }, { at: at + 2, ...controlEventRaw(k, false) }); at += 6; }
-        this.waitFrames = at;
+      // dialogue.ready false: the game still ignores picks (an anti-misclick lockout after it opens): wait, at most 2 s
+      if (w.dialogue && w.dialogueReady === false) {
+        this.readyT ??= ap.t;
+        if (ap.t - this.readyT < 2) return this.run();
+        this.forced = true;   // still not ready after 2 s: press anyway (and retry below)
       }
-      this.phase = "wait"; this.waitT = ap.t;
+      if (this.readyT != null) {
+        // the dialogue closed or became another one while we waited: a bare number key now would land in the game
+        if (!w.dialogue || dlgKey(w.dialogue) !== dlgKey(JSON.parse(this.text0))) return this.fail(`the dialogue ${w.dialogue ? "changed" : "closed"} before it accepted picks (waited ${r1(ap.t - this.readyT)}s); nothing pressed`);
+        this.readyWaited = ap.t - this.readyT;
+        if (JSON.stringify(w.dialogue) !== this.text0) this.text0 = JSON.stringify(w.dialogue);   // its line typed on meanwhile
+      }
+      if (!this.press(w, want)) return this.fail(`no control configured for option ${this.idx}`);
+      this.phase = "wait"; this.waitT = this.lastPress = ap.t; this.presses = 1;
+      this.watch = new StateWatch(w);   // what changes from here on is the pick's doing
       return this.run();
     }
     const now = w.dialogue ? JSON.stringify(w.dialogue) : null;
-    if (now !== this.text0) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}"${w.dialogue ? ` → ${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 100)}"` : " → dialogue closed"}`);
+    if (now !== this.text0) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}"${w.dialogue ? ` → ${w.dialogue.speaker ? `${w.dialogue.speaker}: ` : ""}"${clip(w.dialogue.text, 100)}"` : " → dialogue closed"}${said()}`);
     // a choice that only toggles something (a difficulty button gets a CSS class): the snapshot changed and stayed so
     // (after the dialogue has had half a second to answer, so a slow dialogue still reports its new line)
     const changed = this.watch.check(w);
-    if (changed && ap.t - this.waitT > 0.5 + (this.waitFrames || 0) / ap.fps) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}": state changed (${changed}), dialogue unchanged`);
+    if (changed && ap.t - this.waitT > 0.5 + fw) return this.done(`chose ${this.idx}) "${clip(this.chosen, 50)}": state changed (${changed}), dialogue unchanged${said()}`);
     // many games swallow the first confirm while the text is still typing out: press it once more
-    if (ch.mode === "arrows" && !this.again && ap.t - this.waitT > 0.35 + (this.waitFrames || 0) / ap.fps) {
+    if (ch.mode === "arrows" && !this.again && ap.t - this.waitT > 0.35 + fw) {
       this.again = true;
       want.taps.push({ label: "confirm", c: c.confirm || parseControl("enter"), frames: c.tapFrames });
       return this.run();
     }
-    if (ap.t - this.waitT > 1.0 + (this.waitFrames || 0) / ap.fps) return this.fail(`chose ${this.idx} but nothing changed: not the dialogue, not the game state (is play.controls.choose right?)`);
+    // no ready field (or still not ready after 2 s): a game that ignores picks for a moment after the dialogue opens
+    // (anti-misclick) gets the same key again every 0.25 s for up to 1 s, while the same dialogue stays open and nothing
+    // changed. Game time decides it, and the presses are ordinary recorded input
+    if (ch.mode !== "arrows" && (w.dialogueReady == null || this.forced) && !changed && ap.t - this.waitT < 1.0 - 1e-9 && ap.t - this.lastPress >= 0.25 - 1e-9) {
+      this.press(w, want); this.lastPress = ap.t; this.presses++;
+      return this.run();
+    }
+    if (ap.t - this.waitT > 1.0 + fw && ap.t - this.lastPress > 0.6) return this.fail(`chose ${this.idx} but nothing changed: not the dialogue, not the game state (${this.presses > 1 ? `pressed ${this.presses}× over ${r1(this.lastPress - this.waitT)}s; ` : ""}is play.controls.choose right?)`);
     return this.run();
+  }
+  /** Send the pick: the option's key (list / numbers) or the cursor moves and confirm (arrows). False: no control for it. */
+  press(w, want) {
+    const c = this.ap.cfg.controls, ch = c.choose;
+    if (ch.mode === "list") { const k = ch.keys[this.idx - 1]; if (!k) return false; want.taps.push({ label: "choose", c: k, frames: c.tapFrames }); return true; }
+    if (ch.mode === "numbers") { want.taps.push({ label: "choose", c: parseControl(String(this.idx)), frames: c.tapFrames }); return true; }
+    // arrows: move the cursor from `selected` (0-based) or from the top, then confirm
+    const d = w.dialogue, sel = d.selected != null ? d.selected : null;
+    const up = c.move.up || parseControl("up"), down = c.move.down || parseControl("down");
+    const seq = [];
+    if (sel == null) for (let i = 0; i < d.options.length; i++) seq.push(up);
+    const from = sel == null ? 0 : sel, to = this.idx - 1;
+    for (let i = from; i < to; i++) seq.push(down);
+    for (let i = from; i > to; i--) seq.push(up);
+    seq.push(c.confirm || parseControl("enter"));
+    let at = 0;
+    for (const k of seq) { want.raw.push({ at, ...controlEventRaw(k, true) }, { at: at + 2, ...controlEventRaw(k, false) }); at += 6; }
+    this.waitFrames = at;
+    return true;
   }
 }
 
@@ -893,7 +921,8 @@ class StateWatch {
     this.last = now;
     if (!last) return null;
     const keys = new Set([...Object.keys(now), ...Object.keys(this.base)]);
-    const changed = [...keys].filter((k) => now[k] !== this.base[k] && now[k] === last[k]);
+    // (a dialogue becoming ready for picks is not something a pick changed)
+    const changed = [...keys].filter((k) => now[k] !== this.base[k] && now[k] === last[k] && !/^(dialogue|dialog|conversation)\.ready$/.test(k));
     if (!changed.length) return null;
     const named = changed.filter((k) => !/(^|\.)digest$/.test(k));
     const top = [...new Set(named.map((k) => k.split(".").slice(0, 2).join(".")))];
@@ -951,6 +980,13 @@ class Pick extends Behaviour {
   tick(w, want) {
     const ap = this.ap, cfg = ap.cfg, c = this.choice;
     if (this.phase === "send") {
+      // dialogue.ready false: the game still ignores picks (an anti-misclick lockout): wait for it, at most 2 s
+      if (w.dialogue && w.dialogueReady === false) { this.readyT ??= ap.t; this.lockDlg ??= dlgKey(w.dialogue); if (ap.t - this.readyT < 2) return this.run(); }
+      if (this.readyT != null) {
+        // the dialogue that held the lockout closed or became another one: don't send the pick into whatever is there now
+        if (!w.dialogue || dlgKey(w.dialogue) !== this.lockDlg) return this.fail(`the dialogue ${w.dialogue ? "changed" : "closed"} before it accepted picks (waited ${r1(ap.t - this.readyT)}s); nothing sent`);
+        this.watch = new StateWatch(w); this.dlg0 = JSON.stringify(w.dialogue); this.sig0 = choiceSig(w); this.turn0 = w.yourTurn; this.scene0 = w.scene;
+      }
       const how = this.route();
       this.phase = "wait"; this.waitT = ap.t;
       if (how === "call") {

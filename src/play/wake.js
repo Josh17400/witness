@@ -22,7 +22,7 @@ export function wakeFor(ev, b, { ap, world, cfg, live = false }) {
     if (world.dead && (e.kind === "alert" || e.kind === "hurt")) continue;
     // damage over time (poison ticks, no attacker): timeline only; low hp and death still wake
     if (e.kind === "hurt" && e.data && e.data.dot) continue;
-    if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return e.text;
+    if (e.kind === "dialogue" && !/^(talk|interact|choose|press|use)$/.test(b?.verb || "")) return dialogueWake(e, b, ap);
     if (reflexes && (e.kind === "hurt" || e.kind === "alert")) continue;
     if ((calm && e.kind === "alert") || (tough && e.kind === "hurt")) continue;
     if (b && b.quiet && ["appear", "notice", "pickup", "kill"].includes(e.kind)) continue;
@@ -33,4 +33,15 @@ export function wakeFor(ev, b, { ap, world, cfg, live = false }) {
     if (careful && ["appear", "notice", "pickup", "kill"].includes(e.kind)) return e.text;
   }
   return null;
+}
+
+/**
+ * The wake line for a dialogue that stopped an order (a perk pick every few waves stops a chain of fights): what
+ * stopped, what to do (choose 1-3) and that the rest of the chain didn't run, so the tester chooses, then carries on.
+ */
+export function dialogueWake(e, b, ap) {
+  const n = e.data && e.data.options != null ? e.data.options : 0, left = ap && ap.queue ? ap.queue.length : 0;
+  const what = e.data && e.data.opened === false ? "the dialogue changed" : "a dialogue opened";
+  const todo = n ? `choose ${n > 1 ? `1-${n}` : "1"}` : "press confirm or cancel to close it";
+  return `stopped${b && b.verb ? ` ${b.verb}` : ""}: ${what} (${todo}, then give your orders again${left ? `; ${left} queued order${left > 1 ? "s" : ""} not run` : ""}) — ${e.text.replace(/^dialogue( opened)? — /, "")}`;
 }

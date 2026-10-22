@@ -83,6 +83,11 @@ engine's key codes to Witness names.
 Rules: no third-party dependencies (stdlib only); thread-safe enough for engines with a
 render thread; never block the game when Witness isn't active; zero cost when inactive.
 
+Optional: the `step` hint `"draw": "last"` (protocol section 3, lazy drawing): expose a "should I draw this frame?"
+accessor that is false during a hinted step's frames except its last (the JS adapter's `witness.drawing`, `witness.h`'s
+`witness_drawing()`). The other adapters (Python, Lua, Godot, Unity, C#, Go, Java, Rust) ignore the hint for now, which
+is always correct: their games draw every frame, or only for screenshots, as before.
+
 ## Playtest-friendly snapshots
 
 Adapters don't need anything new for agent playtests (`witness play`): the harness uses protocol v1 only. What

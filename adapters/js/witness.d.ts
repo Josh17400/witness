@@ -159,6 +159,8 @@ export interface WitnessConfig {
   audioRate?: number;
   /** false: a source node's "ended" comes from the offline renderer (uneven timing) instead of the virtual clock. */
   virtualEnded?: boolean;
+  /** false: don't watch for game code running on real time between Witness's frames (perf.realtime, doctor's warning). */
+  realtimeWatch?: boolean;
   /** false: iPhone-Safari audio policy on pages without the CLI's init script (contexts start suspended; resume()
    *  only during a gesture). Browser launches take it from --no-auto-unlock instead. ?witness_audio_unlock=0 */
   audioUnlock?: boolean;
@@ -231,6 +233,12 @@ export interface WitnessApi {
   /** Frames / simulated seconds since the last reset. */
   readonly frame: number;
   readonly time: number;
+  /** False during frames nobody will see (a step sent with "draw": "last": all but its final frame); true otherwise and
+   *  outside witness mode. In a loop: update(dt); if (witness.drawing !== false) draw(). Drawing must not change state. */
+  readonly drawing: boolean;
+  /** Calls fn() unless this frame is skipped (returns whether it drew); fn is also kept to repaint before a screenshot
+   *  that follows an undrawn frame (only after a step that failed part way). */
+  draw(fn: () => void): boolean;
   /** The real, un-virtualized timer and clock functions. */
   readonly real: {
     setTimeout: typeof setTimeout;

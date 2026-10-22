@@ -129,7 +129,7 @@ of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` bes
 
 | command | options | what it does |
 |---|---|---|
-| `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--wall-minutes 20` `--idle 300` `--until "<expr>"` `--game-hours N` `--clock "<expr>"` `--allow-calls` `--no-map` `--model NAME` `--out DIR` `--force` `--json` `--live` `--watch` `--speed 1` `--horizon 4` `--pause-after 15` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). `--wall-minutes`: a hard stop after that many real minutes (`--minutes` is its old name here). `--until` / `--game-hours`: see [Playing until a game time](#playing-until-a-game-time---until---game-hours). `--live` / `--watch`: see [Live mode](#live-mode-and-watching). |
+| `play start` | `--name t1` `--goal "…"` `--persona P` `--seed N` `--scene S` `--params JSON` `--wall-minutes 20` `--idle 300` `--until "<expr>"` `--game-hours N` `--clock "<expr>"` `--allow-calls` `--no-map` `--lazy-draw` `--model NAME` `--out DIR` `--force` `--json` `--live` `--watch` `--speed 1` `--horizon 4` `--pause-after 15` | Launches the game and a detached session daemon, prints the first observation (with the goal, the controls and the order card). `--wall-minutes`: a hard stop after that many real minutes (`--minutes` is its old name here). `--until` / `--game-hours`: see [Playing until a game time](#playing-until-a-game-time---until---game-hours). `--live` / `--watch`: see [Live mode](#live-mode-and-watching). `--lazy-draw`: the same as `play.lazyDraw`. |
 | `play do "<orders>"` | `-s t1` `--for S` `--json` | Turn-based: runs an order chain until it's done, failed, interrupted by a wake event, or hits the time cap. Live: replaces the plan at once and answers at the first of done/failed, an important event, or the horizon (`--for S`, default 4 s); the game keeps going. Prints the observation. |
 | `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` `--full` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. `--full`: also the latest game call's answer, uncut (an order's answer shows the first `play.resultChars`, 800, and says when it cut). |
 | `play next` | `-s t1` `--for S` | Live mode: the same as `look --wait`. |
@@ -171,7 +171,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `fight [thing] [mode]` | attack, kill, engage, hit, slay, defeat, battle, strike, shoot, destroy | Approach, face, attack, react to telegraphs. No target: nearest hostiles. A plural (`wolves`, `all enemies`) fights until none is near. With a time given (`fight enemies for 25s`), reaching it is the plan: `✔ done: fought for 25s as ordered: 4 enemies defeated, 2 still on the field` (without one it still fails at 60 s). `fight enemies when they come` (also `as they arrive`, `incoming`; always in the defense profile) waits for the next enemy instead of failing on an empty field: with a time, it fights and waits until the time is up; without, it ends when a kill clears the field or after `play.fightWait` (20 s) with none. With no move control (`"move": false`, or the defense profile) it attacks from where it stands and never presses a move key. |
 | `flee [from thing]` | retreat, escape, evade, run away, back off, get away | Move to the reachable spot farthest from hostiles; done when none is within 1.6 × alert. |
 | `talk <who>` | talk to/with, speak to/with, chat, greet, ask | Walk up, face, press interact, wait for `dialogue`; retries closer, fails after 3 tries. When the dialogue names a `speaker` that isn't the target (by name or type), it says `X answered instead of Guard#4`, presses cancel, steps closer and tries again; without a cancel control, or after 2 wrong answers, it fails with that message and leaves the dialogue open. No target: nearest NPC. |
-| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; with no change at all it fails. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). |
+| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; with no change at all it fails, only after the retry window below. **Pick lockouts**: a game that ignores picks for a moment after a dialogue opens (an anti-misclick delay) can say so with `dialogue.ready: false`; `choose` (and `pick`) then wait until it's `true`, at most 2 s, and press once (`… (waited 0.6s for the dialogue to accept picks)`). Without a `ready` field (or still not ready after 2 s), `choose` presses the option's key again every 0.25 s for up to 1 s while the same dialogue stays open and nothing changed (`… (pressed 3×: the game ignored the first)`); timed by game frames, the presses are ordinary recorded input. So `choose 2; fight enemies for 25s` works right after a dialogue stopped a fight, no `wait 1` first. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). |
 | `pickup [thing]` | pick up, get, grab, collect, take, loot, fetch | Walk onto the item; press interact if it's still there. No target: nearest item. Plural: collects them all nearby. |
 | `use <control\|item>` | drink, quaff, eat, heal | Tap a control. `use potion` / `heal` / `drink` → the heal control. An unknown word becomes `interact <it>`. |
 | `interact [thing]` | interact with, activate, open, unlock, inspect, read, examine | Walk up, face, press interact (no target: press it here). Reports a new `notice`, or a dialogue that opened. |
@@ -426,7 +426,7 @@ A `do` returns when its chain is done or failed, at the time cap, or on a **wake
 | when | wakes on |
 |---|---|
 | always | death, goal reached (`won`), a game error log, a scene change, low hp (first drop below 35% or the retreat level; re-armed after healing above 45%). A scene change the order caused on purpose doesn't wake: a goto that was next to its goal (or by a door leading to it) is done, and any walking order whose target is still listed in the new scene carries on. |
-| dialogue | a dialogue opens or changes, unless the order is talk / interact / choose / press / use |
+| dialogue | a dialogue opens or changes, unless the order is talk / interact / choose / press / use. The line says what to do: `stopped fight: a dialogue opened (choose 1-3, then give your orders again; 2 queued orders not run) — Command: "…" [1) … 2) … 3) …]`. A perk pick every few waves stops a chain of fight orders this way on purpose; choose, then send the rest again |
 | outside fights | being hurt by a hit (a small loss, ≤ 8% of max hp (0.5 when there's no max), with nobody near and no enemy in view attacking, is damage over time when no enemy is in view at all or another such loss came within 2.5 s: poison, burning; it goes in the timeline only, and autofight doesn't answer it); a hostile entering the alert range (`play.alert`, 6 cells), unless it's the order's own target. `flee` ignores both. In the platformer profile, an approaching enemy doesn't wake run / goto / go / explore / pickup / jump (the runner jumps or stomps on its own). With **autofight** on (below), neither wakes a movement order (goto, go, explore, follow, pickup, talk) or anything in live mode: the reflex layer deals with it and reports it as an event. |
 | `careful` | also items or NPCs appearing, notices, pickups, kills |
 | `quiet` | never alerts, hits, items appearing, notices, pickups or kills (the "always" row and dialogues still wake) |
@@ -629,6 +629,13 @@ the enemies, use specials and buy upgrades between waves.
   screen, boss, windup, state}], items[], dialogue, goal, notice, dead, won, result, events[]}`.
 * `witness play check` uses the defense checklist (the base with pos and hp, entities with id/type/pos, hostile flags,
   screen positions for `tap:target`, outcome, dialogue). No coverage map in the report.
+* **Fights in the report** are engagements, not duels (also in a top-down game with no move control): one row from the
+  first exchange (a hit, a kill, the base hurt) with enemies on the field until the field is clear (won), the base
+  falls (lost), the fight order it ran under ends or another starts with enemies left (held), or 15 s pass with no
+  exchange (broke off). A row names its order and everyone it was against by type and count (`Grunt ×12, Air:Bomber
+  ×3`), how many of them died, and the damage the enemies took from every source (your taps, towers, the squad), at
+  most each one's max hp. An enemy that vanishes counts as killed wherever it was (a tap far out), unless it flew off
+  (far and moving away) or blew up on the base as the base took a hit. Rows with nobody in them aren't written.
 
 **Settling animations.** After an order that changed the scene or a dialogue, and before `play shot` / `look --shot`
 (turn-taking sessions), the session steps the game until the adapter reports no running animations, at most 0.5 s of
@@ -737,6 +744,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `mirrorCombos` | `true` | swap left/right in combos when the nearest enemy is on your left (fighting games) |
 | `brief` | none | developer notes added to `witness play brief` (same as `--extra`); backticks in it become quotes (the brief tells testers a backtick breaks a command) |
 | `allowCalls` | `false` | allow `call` orders (same as `--allow-calls`) |
+| `lazyDraw` | `false` | steps of more than one frame tell the game only their last frame is observed (`"draw": "last"`, [PROTOCOL.md](PROTOCOL.md) §3), so a game that checks `witness.drawing` skips drawing the others: a busy 2D canvas on a software renderer plays several times faster. Shots and `look --shot` still see a fully drawn frame; a watched session (`--watch`) draws every frame. The game opts in ([adapters/js/GUIDE.md](../adapters/js/GUIDE.md) §8) and must not change state while drawing: `witness doctor` checks it when this is on. The report says how many frames ran undrawn and whether the game read the hint (same as `--lazy-draw`) |
 | `logs` | `true` | which game info logs become events: `true`, `false`, or a regex |
 | `maxShots` | 24 | cap on automatic key-moment screenshots |
 | `platformer` | `{jumpFrames: 18, runJumpFrames: 22, stomp: true}` | also `run` (false: never hold run), `stuckLimit` (7 s), `airAccel` (air control per frame, default 0.005 cells) |
@@ -761,7 +769,8 @@ ones.
 | entity `hostile` / `item` / `talk` (or `npc`) / `team` | exact classification (else type-name guesses) |
 | entity `state: "windup"` or `telegraph: <seconds left>` | blocking/dodging at human speed, telegraph stats, `WINDUP` in observations |
 | entity `locked` | `locked`/`open` in observations, "try interact" hints when stuck at a door |
-| `state.dialogue = {speaker, text, options[], selected?}` (null when closed) | talk/choose, dialogues in the report |
+| `state.dialogue = {speaker, text, options[], selected?, ready?}` (null when closed) | talk/choose, dialogues in the report; `ready: false` while the game still ignores picks (an anti-misclick lockout after it opens) makes `choose`/`pick` wait for `true` (at most 2 s) instead of pressing into the lockout |
+| `state.lastHit = {by, type?}` or a string (`{by: "Bomber", type: "bomb"}`, `"artillery shell"`); also `player.lastHit` | what hit the player last, for damage no entity dealt (bombs, missiles, artillery, traps): hurt events say `from Bomber bomb`, the death `killed by Bomber bomb` (event, report, observation). Set it **with every hit** (clear it, or give it a counter, `{by, type, n}`, when an enemy hits or the same bomb hits again): Witness trusts it when it changes with the hp drop; a value left standing only names a hit no nearby attacker or damage-over-time tick explains. Without it the cause is the game's log line, else the nearest attacker (`last hit by Wolf#3`), else `cause unknown` |
 | `state.goal` (text or `{text, pos}`), `state.notice` | goal and "game says" lines; `goto goal` with a pos |
 | `state.map = {cell, origin, rows[], solid?}` | walls known up front (rows of characters; `#` solid unless `solid` lists others), coverage % of the open map |
 | map `door` (default `"+"`) and `avoid` (default none): characters for cells to keep off; map `window: true` | paths go round doors and the like unless the goal is there; a window that follows the player is merged as it moves, and outside it is unknown ground |
@@ -843,7 +852,9 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
    errors, pace (mode, orders per game minute, frozen time);
 3. **Tester feedback**: fun and difficulty (1–5), the feedback text, then notes grouped as Bugs suspected, Confusing
    moments, Ideas, Fun moments, Notes (time, cell, screenshot link);
-4. Game errors · Fights (table: against, start, length, result, dealt, taken, windups avoided/hit) · Stuck incidents
+4. Game errors · Fights (table: against, start, length, result, dealt, taken, windups avoided/hit; still fights in the
+   defense profile: one row per engagement with order, against by type and count, start, length, result
+   (won/lost/held/broke off), killed of how many, dealt, taken) · Stuck incidents
    (grouped into **spots**: incidents within 2 cells of each other in the same scene, the scene named when there are
    several, most incidents first, a table row per spot with its
    count, unresolved count, total stuck time, first–last time, headings and one `witness replay … --at <t> --shot`
@@ -855,13 +866,15 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 
 **report.json**: `session, game, persona, goal, seed, scene, params, model, startedAt, endedAt, wallSeconds,
 gameSeconds, frames, fps, status, outcome, endReason, orders[{t, text, status, msg, seconds}], timeline[{t, frame,
-kind, text}], fights[{n, targets, start, seconds, result, dealt, taken, kills, windups, avoided, hits}],
+kind, text}], fights[{n, targets, start, seconds, result, dealt, taken, kills, windups, avoided, hits, still?, enemies?,
+order?}] (still fights: `targets` are `"Grunt ×3"` type counts),
 telegraphs{windups, avoided, hits}, stuck[{t, cell, heading, seconds, resolved, how, blocks, shot?}], stuckSpots[{cell,
 cells, count, unresolved, seconds, first, last, headings, replayAt, shot}], until{…} (above), deaths[{t, cell,
 cause}], kills[], pickups[], dialogues[{t, speaker, text, options}], coverage{cells, seen, openCells, percent,
 mapWindow?, bounds, png}, shots[{t, why, file}], errors[{t, text}], notes[{t, frame, kind, text, cell, shot?}],
 feedback{fun, difficulty, text}, replay{file, frames, calls}, profile, pace{mode, speed, wallSeconds, gameSeconds,
-freezes, frozenWallSeconds, frozenShare, orders, ordersPerGameMinute, ordersStoppedEarly}, stats{…counts…}`. Live
+freezes, frozenWallSeconds, frozenShare, orders, ordersPerGameMinute, ordersStoppedEarly}, lazyDraw{on, steps,
+framesUndrawn, frames, game{reads, skipped}} (null without `play.lazyDraw`; `game` from the adapter's `perf.lazy_draw`), stats{…counts…}`. Live
 orders can also end as `replaced` (a newer `do` replaced them) or `ended` (still running at the end).
 `coverage.mapWindow` is true when the game's `state.map` is a window that follows the player: then `openCells` only
 counts the open cells the window has revealed so far, and the percentage is labelled that way. Links in report.md are
@@ -892,6 +905,8 @@ the whole session and checks the final state against `replay.jsonl.state.json`; 
 * Allowed `call` orders are recorded as `calls` on the frame line and re-run by `witness replay` at that frame, before
   it steps ([PROTOCOL.md](PROTOCOL.md) §5). A call is always followed by a step, so it lands inside the recording.
 * The game itself must be deterministic (`witness doctor`), or the replay check fails.
+* `play.lazyDraw` changes only what the game draws, never the steps: replays step without the hint, so a game whose
+  drawing changes its state fails the replay check (`witness doctor` warns about it first).
 
 ## Limits and caveats
 

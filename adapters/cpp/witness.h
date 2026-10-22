@@ -228,6 +228,9 @@ WITNESS_API void witness_error(const char *fmt, ...) WITNESS_PRINTF(1, 2);
 
 WITNESS_API long long witness_frame(void); /* frames stepped since reset */
 WITNESS_API double witness_time(void);     /* simulated seconds since reset */
+/* 0 inside step() for a frame nobody will see (a step sent with "draw": "last": every frame but its last), else 1.
+ * A game that renders every step may skip rendering then; the simulation must not depend on it (docs/PROTOCOL.md §3). */
+WITNESS_API int witness_drawing(void);
 /* Seed your RNGs with this: the reset seed in witness mode, the recorded seed while
  * recording (WITNESS_SEED or the clock), else a clock-based seed chosen once. */
 WITNESS_API long long witness_seed(void);
@@ -1125,6 +1128,7 @@ typedef struct witness__state {
     double mouse_x, mouse_y;
     int mouse_buttons;
     int touch_native;                        /* hello.touch: no mouse fallback for finger 0 */
+    int undrawn;                             /* this frame runs undrawn (step "draw": "last", not its last frame) */
     int touch_down[WITNESS__MAX_TOUCHES];
     double touch_x[WITNESS__MAX_TOUCHES], touch_y[WITNESS__MAX_TOUCHES];
     /* logs + audio (shared with other threads, guarded by the lock) */
@@ -1176,6 +1180,7 @@ void witness_error(const char *fmt, ...) {
 
 int witness_connected(void) { return witness__g.connected; }
 long long witness_frame(void) { return witness__g.frame; }
+int witness_drawing(void) { return !witness__g.undrawn; }
 double witness_time(void) { return witness__g.time; }
 
 long long witness_seed(void) {
@@ -1792,6 +1797,7 @@ static void witness__dispatch(const witness_value *m) {
         const witness_value *dts = witness_get(m, "dts");
         const witness_value *dtv = dts && dts->type == WITNESS_ARRAY ? dts->child : NULL;
         double dt = witness_number(witness_get(m, "dt"), 1.0 / g->fps);
+        int lazy = strcmp(witness_string(witness_get(m, "draw"), ""), "last") == 0;
         if (frames < 1) { witness__reply_fail(id, "step: 'frames' must be >= 1"); return; }
         if (!(dt > 0)) dt = 1.0 / g->fps;
         for (i = 0; i < frames && !g->has_error; i++) {
@@ -1817,7 +1823,9 @@ static void witness__dispatch(const witness_value *m) {
                 if (g->h.input) g->h.input(g->h.user, &g->cur[k]);
 #endif
             }
+            g->undrawn = lazy && i < frames - 1;
             g->h.step(g->h.user, fdt);
+            g->undrawn = 0;
             g->cur_len = 0;
             g->frame++;
             g->time += fdt;

@@ -122,6 +122,9 @@ h.step = [&](double dt) {
   so `dt` is always one frame, normally `1/fps`. Replays pass the recorded real dts.
 * With a sim/view split, never render in `step`. Render only in the screenshot handler, so
   stepping thousands of frames stays fast.
+  A game that must render inside `step` (watch mode presents frames, a render that is hard to split out) can skip it
+  while `witness_drawing()` returns 0: a step sent with `"draw": "last"` (agent playtests with `play.lazyDraw`) runs
+  every frame but its last that way (docs/PROTOCOL.md §3). Rendering must never change simulation state.
 * Anything the loop did per frame besides `sim.update` that affects state (script timers,
   tweens, scheduled events, particle systems that gameplay reads) must also run inside
   `step`, with the given dt.

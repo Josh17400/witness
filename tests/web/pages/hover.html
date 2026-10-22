@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Hover draw</title><style>body { margin: 0; background: #123; } canvas { width: 320px; height: 180px; }</style></head>
+<body>
+  <canvas id="c" width="160" height="90"></canvas>
+  <!-- correctly wired: the documented page config (GUIDE §2) is the only inline classic script, so no inject tip -->
+  <script>
+    // page config, read at import
+    window.WITNESS_CONFIG = { animations: false, note: "a } in a string" };
+  </script>
+  <!-- the CLI's dom:click moves the mouse first: Chrome fires the boundary events (pointerover / pointerenter /
+       mouseover / mouseenter) before pointermove, and these handlers draw. That is driven input, not real time. -->
+  <script type="module">
+    import witness from "/witness/witness.js";
+    const c = document.getElementById("c"), ctx = c.getContext("2d");
+    const game = { hovers: 0, clicks: 0 };
+    const hover = () => { game.hovers++; ctx.fillStyle = "#3a6"; ctx.fillRect(0, 0, 20, 20); };
+    for (const t of ["pointerover", "pointerenter", "mouseover", "mouseenter"]) c.addEventListener(t, hover);
+    c.addEventListener("click", () => { game.clicks++; ctx.fillStyle = "#fc0"; ctx.fillRect(30, 0, 20, 20); });
+    function frame() { ctx.fillStyle = "#123"; ctx.fillRect(60, 0, 100, 90); requestAnimationFrame(frame); }
+    requestAnimationFrame(frame);
+    await witness.start({ name: "hover-draw", fps: 60, canvas: c, reset: () => { game.hovers = 0; game.clicks = 0; }, snapshot: () => ({ ...game }) });
+  </script>
+</body>
+</html>

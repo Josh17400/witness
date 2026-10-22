@@ -36,8 +36,9 @@ Work in this order and check each step with `witness doctor`:
    import witness from "./witness/witness.js";   // first: installs the takeover in witness mode
    import Phaser from "phaser";
    ```
-   For classic `<script>` games (inline scripts, no modules) see **§1b**: their scripts run
-   before any module, so boot timers and loops would start on real time.
+   For classic `<script>` games (inline scripts, no modules, or a module/`import()` that loads
+   the adapter after them) **set `"launch": { "inject": true }` in `witness.json`** (§1b): their
+   scripts run before the adapter, so boot timers, intervals and loops would start on real time.
 3. **Call `witness.start({...})` exactly once, after assets are loaded and the game can run.**
    In witness mode that is the hello. Until then frames run on the display clock (so engines can
    boot and preload); afterwards they run only on `step`. Typical places: the end of `main()`
@@ -72,7 +73,14 @@ skips it; `witness.ready()` is the same wait on its own.
 
 Inline classic `<script>`s run **before** any module, so before `import witness`: their
 `setTimeout` boot timers, `requestAnimationFrame` loops and first `Date` reads run on real time,
-and runs differ. Two supported ways, best first:
+and runs differ. A real `setInterval` made there keeps firing at wall-clock moments for the whole
+session (The Fort's `setInterval(idleBake, 2000)` re-drew terrain between frames: screenshots differed
+and it took a long hunt). `witness doctor` catches it: the adapter counts game code that runs while
+Witness isn't driving it (`Math.random`, `performance.now`, `Date`, canvas / WebGL draws, rAF
+registration between commands) and warns `game code ran N times on real time between frames (first
+at file:line)`, with the stack (after its checks it watches the page idle for 2.5 s, `--realtime-wait`,
+so a timer up to that period gets a chance to fire); it also tips `launch.inject` when inline classic
+scripts (other than a `window.WITNESS_CONFIG = {...}` one) ran before the adapter. **For any classic-script page, use `launch.inject`.** Two supported ways, best first:
 
 1. **Let the CLI inject the adapter (no page changes for the timing).** In `witness.json`:
    ```json
@@ -335,6 +343,38 @@ scene with a 2D UI canvas on top) at its backing resolution × `scale`, as exact
   canvas or `{width, height, data: Uint8Array RGBA}` (Node games render their own; see the Node
   example).
 
+### Skipping frames nobody sees (opt-in: `witness.drawing`)
+
+Headless play runs the game's rAF callback, draw included, for every frame it steps, although an agent playtest
+(`witness play`) only looks at the last one of each step: on a software rasterizer (SwiftShader) a busy 2D canvas can
+make a playtest run slower than real time. A step can say so (`"draw": "last"`, docs/PROTOCOL.md §3): the frames
+before its last run with `witness.drawing === false`. Opt in by gating the draw only, never the update:
+
+```js
+function loop(now) {
+  update(dt);                                   // the simulation: every frame, always
+  if (witness.drawing !== false) draw();        // or: witness.draw(draw)
+  requestAnimationFrame(loop);
+}
+```
+
+With `launch.inject` (no import) use `globalThis.__witnessApi?.drawing !== false`. Outside witness mode, and on every
+step without the hint (tests, replays, doctor, `witness see`), `drawing` is always `true`, so nothing changes until
+`witness.json` sets `"play": {"lazyDraw": true}` (or `witness play start --lazy-draw`). The last frame of every step is
+drawn, so screenshots always show a fully drawn frame (only a step that failed part way can end on an undrawn one;
+`witness.draw(fn)` keeps `fn` and repaints with it before the next screenshot).
+**The rule:** drawing must not change game state: no `Math.random()` in `draw()` (it shares the seeded stream), no
+particles aged, timers advanced or state cached there. Otherwise the run desyncs from its replay. `witness doctor`
+checks it whenever `play.lazyDraw` is on or the game reads `witness.drawing`: the same run with and without the hint
+must end in the same state, digest, audio, picture and number of `Math.random` calls (`⚠ drawing changes game state:
+lazyDraw unsafe for this game`, `⚠ draw() reads Math.random (N fewer calls with the hint)`). Typical fixes: screen
+shake / muzzle jitter from a cosmetic hash (e.g. of the frame number) instead of `Math.random`; camera/zoom easing in
+`update()`; sounds started from `update()`, never from a draw helper. If the game only draws past a menu, doctor's
+default reset never exercises the gate (`⚠ lazy drawing not exercised`): pass the scene or params that start play,
+e.g. `witness doctor --params '{"run":true}'`. Picture-only caches (motion trails, a frame-time based quality governor)
+may make the picture differ while the state matches: doctor says that apart. `perf.lazy_draw` = `{reads, skipped,
+rng}`: how often the game asked, frames run undrawn, and seeded random draws since the reset.
+
 ## 9. Recording replays in normal play
 
 * **Browser:** open the game with `?witness_record=<endpoint>` (e.g.
@@ -594,9 +634,11 @@ await witness.ready({ frames, ms, timeout })  // pictures decoded + fonts ready 
 await witness.boot()         // run <script type="text/witness"> deferred classic scripts (§1b)
 witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(root?) -> [{label, id}]
 witness.animating()          // finite CSS / Web Animations still running; also globalThis.__witnessAnimating()
+witness.drawing              // false on frames nobody sees (step "draw": "last"): if (witness.drawing !== false) draw() (§8)
+witness.draw(draw) -> bool   // the same as a call: draws unless skipped; repaints before a screenshot after an undrawn frame
 ```
 Page config, read at import: `globalThis.WITNESS_CONFIG = { addr, record, seed, takeover, raf,
-timers, webaudio, console, animations, videos, audioSeconds, audioRate, virtualEnded, epoch }` (also
+timers, webaudio, console, animations, videos, audioSeconds, audioRate, virtualEnded, realtimeWatch, epoch }` (also
 `?witness_<name>=0` in the URL for the on/off ones, `?witness_epoch=`, and `WITNESS_EPOCH` in Node).
 `witness.json` for browser games also takes `launch.inject`, `launch.reset`, `launch.keepStorage`
 and `"clock": { "epoch": … }`.

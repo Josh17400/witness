@@ -1,0 +1,8 @@
+{
+  "name": "lazy-bad",
+  "launch": { "url": "http://127.0.0.1:5318/lazy.html?bad=1", "server": { "command": "node ../../serve.mjs 5318" } },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 40,
+  "play": { "lazyDraw": true }
+}

@@ -191,7 +191,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    tap-to-shoot game set `"attack": "tap:target"` (or `"click:target"`) and give entities `screen: [x, y]` or the
    state a `camera: {pos, zoom}`. In any profile, `wait 5 quiet` isn't woken by alerts or hits, and a `call` the game
    answers with `false` / `{ok: false}` / `{error}` (or a throw) fails with its reason (`look --full` shows a long
-   answer whole).
+   answer whole). A pick dialogue that ignores input for a moment after opening: give it `dialogue.ready: false`
+   meanwhile (`choose` waits; without it, `choose` retries for 1 s). Damage no entity deals (bombs, artillery): set
+   `state.lastHit = {by, type}` (set with each hit, cleared when an enemy hits) so deaths read "killed by Bomber bomb". Defense fights report one row per engagement.
    `witness play suggest` probes the game and proposes one (`--write` saves it). The harness works much better when
    the snapshot follows the playtest conventions (entity `hostile`/`item`/`talk`, enemy `state: "windup"` or
    `telegraph`, `dialogue`, `goal`, `map`, `won`/`dead`, doors with `leadsTo` and, for an exit you push into,
@@ -220,6 +222,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    **Games with a day clock:** `--game-hours 4` (brief, batch, start) plays 4 in-game hours, given `play.clock` in
    witness.json (an expression giving in-game hours that keeps increasing: include the day, `"state.day*24 + state.hour"`); `--until "<expr>"` plays
    until any state condition. Orders stop there and the tester ENDs (outcome `until reached`).
+   **Slow headless web games** (a busy 2D canvas on SwiftShader: game time crawls slower than real time): gate the
+   game's draw call with `if (witness.drawing !== false) draw()` (update untouched) and set `"play": {"lazyDraw": true}`:
+   steps then draw only their last frame. Run `witness doctor` after: it warns if drawing changes game state.
 5. **Read `witness/playtests/t1/report.md`**: tester feedback and bug notes first, then fights (windups avoided vs
    hit), stuck spots (incidents grouped by place, most first, one replay command each), deaths, coverage. Open the
    key shots and `coverage.png`.

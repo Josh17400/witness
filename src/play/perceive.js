@@ -225,7 +225,10 @@ export class Perceiver {
 
     // ---- dialogue / menu / goal / notice / scene / outcome
     const pick = (fx, ...cands) => (fx ? fx(S) : cands.find((v) => v != null && v !== ""));
-    const dialogue = normDialogue(pick(this.fx.dialogue, state.dialogue, state.dialog, state.conversation));
+    const rawDlg = pick(this.fx.dialogue, state.dialogue, state.dialog, state.conversation), dialogue = normDialogue(rawDlg);
+    // dialogue.ready: false while the game still ignores picks (an anti-misclick lockout); kept out of the dialogue itself
+    // so the flip isn't a "dialogue changed"
+    const dialogueReady = dialogue && rawDlg && typeof rawDlg === "object" && typeof rawDlg.ready === "boolean" ? rawDlg.ready : null;
     const menu = pick(this.fx.menu, state.menu) || null;
     const g = pick(this.fx.goal, state.goal, state.objective, state.quest);
     const goal = g == null ? null : typeof g === "string" ? { text: g, p2: null } : typeof g === "object" ? { text: String(g.text ?? g.title ?? g.name ?? g.description ?? ""), p2: this.planeOf(rawPos(g)) } : { text: String(g), p2: null };
@@ -280,7 +283,7 @@ export class Perceiver {
       remembered.length = 0;
     }
     this.sceneKey = sceneKey;
-    const world = { snap, frame, t, player, things, remembered, sceneKey, newScene, maxListed, map, dialogue, menu, goal, choices, yourTurn, notice: notice ? String(notice) : null, scene, won, dead, over, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
+    const world = { snap, frame, t, player, things, remembered, sceneKey, newScene, maxListed, map, dialogue, dialogueReady, menu, goal, choices, yourTurn, notice: notice ? String(notice) : null, scene, won, dead, over, stats, cell, origin: this.geo.origin, northSign: cfg.northSign };
     this.prev = world;
     return world;
   }

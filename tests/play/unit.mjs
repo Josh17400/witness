@@ -6,6 +6,7 @@ import { ReplayRecorder } from "../../src/play/recorder.js";
 import { resolvePlayConfig, parseControl } from "../../src/play/config.js";
 import { Perceiver } from "../../src/play/perceive.js";
 import { EventTracker } from "../../src/play/events.js";
+import { wakeFor } from "../../src/play/wake.js";
 import { Autopilot } from "../../src/play/autopilot.js";
 import { observeText } from "../../src/play/observe.js";
 import { makeBrief } from "../../src/play/brief.js";
@@ -625,6 +626,54 @@ ok("help: units named", /brief .*--minutes 4 \(GAME minutes\)/.test(PLAY_HELP) &
   fs.writeFileSync(nodePath.join(d2, "claude.exe"), "");
   ok("claudeCommand: claude.exe wins; WITNESS_CLAUDE overrides; elsewhere plain claude", claudeCommand({ PATH: `${d1};${d2}` }, "win32")[0] === nodePath.join(d2, "claude.exe") && claudeCommand({ WITNESS_CLAUDE: "x/fake.mjs" }, "win32")[1] === "x/fake.mjs" && claudeCommand({ PATH: d1 }, "linux")[0] === "claude");
   fs.rmSync(tdir, { recursive: true, force: true });
+}
+
+// ---- 0.7.7: dialogue.ready, the dialogue wake line, a ranged kill of the fight's target, state.lastHit (top-down)
+{
+  const cfgU = resolvePlayConfig({ cell: 1 }), perU = new Perceiver(cfgU, { fps: 60 });
+  const dl = (ready) => perU.perceive({ frame: 0, state: { player: { pos: [0, 0] }, entities: [], dialogue: { speaker: "Command", text: "Pick", options: ["a", "b"], ...(ready == null ? {} : { ready }) } } }, 0);
+  ok("perceive: dialogue.ready → world.dialogueReady (false / true / null), and not part of the dialogue (its flip isn't a change)",
+    dl(false).dialogueReady === false && dl(true).dialogueReady === true && dl(null).dialogueReady === null && JSON.stringify(dl(false).dialogue) === JSON.stringify(dl(true).dialogue));
+  const apW = { inCombat: () => false, policy: { autofight: false }, suspended: null, queue: [{}, {}] }, w0 = { dead: false };
+  const dOpen = { kind: "dialogue", text: 'dialogue opened — Old Guard: "Hi" [1) Yes 2) No]', data: { opened: true, options: 2 } };
+  ok("wake: a dialogue opening names what stopped, what to do and the orders not run",
+    wakeFor([dOpen], { verb: "goto" }, { ap: apW, world: w0, cfg: cfgU }) === 'stopped goto: a dialogue opened (choose 1-2, then give your orders again; 2 queued orders not run) — Old Guard: "Hi" [1) Yes 2) No]');
+  ok("wake: a changed dialogue with no options says to close it; talk / choose still aren't woken",
+    wakeFor([{ kind: "dialogue", text: 'dialogue — Old Guard: "Bye"', data: { opened: false, options: 0 } }], { verb: "wait" }, { ap: { ...apW, queue: [] }, world: w0, cfg: cfgU }) === 'stopped wait: the dialogue changed (press confirm or cancel to close it, then give your orders again) — Old Guard: "Bye"'
+    && wakeFor([dOpen], { verb: "talk" }, { ap: apW, world: w0, cfg: cfgU }) === null && wakeFor([dOpen], { verb: "choose" }, { ap: apW, world: w0, cfg: cfgU }) === null);
+  // a full-hp enemy 9 cells out vanishes (a shooter, reach 10): "gone" normally, a kill when it was the fight's target and we just attacked
+  const snapR = (f, alive, extra = {}) => ({ frame: f, time: f / 60, state: { player: { pos: [0, 0], hp: 10, maxHp: 10 }, ...extra, entities: alive ? [{ id: 4, type: "Archer", pos: [9, 0], hp: 5, maxHp: 5, hostile: true }] : [] } });
+  const cfgG = resolvePlayConfig({ cell: 1, reach: { attack: 10 } });   // a shooter: its attack reaches 10 cells
+  const runR = (ctx) => { const p = new Perceiver(cfgG, { fps: 60 }), tr = new EventTracker(cfgG, p); let a = p.perceive(snapR(0, true), 0); tr.update(null, a, {}); const b = p.perceive(snapR(10, false), 10); const ev = tr.update(a, b, ctx); tr.finish(1); return { ev, tr }; };
+  const plain = runR({ lastAttackT: 10 / 60 }), aimed = runR({ lastAttackT: 10 / 60, target: 4 });
+  ok("ranged kill: the fight's target vanishing right after an attack is a kill (and a won fight); without that it's only gone",
+    !plain.ev.some((e) => e.kind === "kill") && aimed.ev.some((e) => e.kind === "kill") && aimed.tr.kills.length === 1 && aimed.tr.fights.length === 1 && aimed.tr.fights[0].result === "won" && !aimed.tr.fights[0].still, JSON.stringify([plain.ev, aimed.tr.fights]));
+  // state.lastHit in a top-down game: the hurt names it, the death says "killed by", the observation too
+  const pL = new Perceiver(cfgU, { fps: 60 }), trL = new EventTracker(cfgU, pL);
+  const sL = (f, hp, lastHit, dead = false) => ({ frame: f, time: f / 60, state: { player: { pos: [0, 0], hp, maxHp: 10 }, entities: [], dead, ...(lastHit ? { lastHit } : {}) } });
+  let a = pL.perceive(sL(0, 10), 0); trL.update(null, a, {});
+  let b = pL.perceive(sL(6, 6, "a falling rock"), 6); const evL = trL.update(a, b, {}); a = b;
+  b = pL.perceive(sL(12, 0, { by: "Catapult", type: "boulder" }, true), 12); const evD = trL.update(a, b, {});
+  ok("state.lastHit (top-down): hurt 'from a falling rock', death 'killed by Catapult boulder', observation says it",
+    evL.some((e) => e.kind === "hurt" && /from a falling rock/.test(e.text) && e.data.by === "a falling rock") && evD.some((e) => e.text === "YOU DIED (killed by Catapult boulder)") && trL.deaths[0].cause === "killed by Catapult boulder"
+    && /YOU ARE DEAD \(killed by Catapult boulder\)/.test(observeText(b, { cfg: cfgU, ap: null, events: [], session: {} })), JSON.stringify([evL, evD]));
+  // a lastHit left standing from an old rock doesn't take the blame for a Wolf's bites later (nor for DoT ticks)
+  const pS = new Perceiver(cfgU, { fps: 60 }), trS = new EventTracker(cfgU, pS);
+  const wolf = [{ id: 7, type: "Wolf", pos: [1, 0], hp: 5, maxHp: 5, hostile: true, state: "attack" }];
+  const sS = (f, hp, ents = [], dead = false) => ({ frame: f, time: f / 60, state: { player: { pos: [0, 0], hp, maxHp: 10 }, entities: ents, dead, lastHit: "a falling rock" } });
+  let sa = pS.perceive({ frame: 0, time: 0, state: { player: { pos: [0, 0], hp: 10, maxHp: 10 }, entities: [] } }, 0); trS.update(null, sa, {});
+  let sb = pS.perceive(sS(6, 9), 6); const evS0 = trS.update(sa, sb, {}); sa = sb;
+  sb = pS.perceive(sS(300, 9, wolf), 300); trS.update(sa, sb, {}); sa = sb;
+  sb = pS.perceive(sS(306, 3, wolf), 306); const evS1 = trS.update(sa, sb, {}); sa = sb;
+  sb = pS.perceive(sS(312, 0, wolf, true), 312); const evS2 = trS.update(sa, sb, {});
+  ok("state.lastHit stale: the fresh rock is named; later the Wolf's bites and the death are 'Wolf#7', not the old rock",
+    evS0.some((e) => e.kind === "hurt" && e.data.by === "a falling rock") && evS1.some((e) => e.kind === "hurt" && e.data.by === "Wolf#7") && evS2.some((e) => e.text === "YOU DIED (last hit by Wolf#7)") && trS.deaths[0].cause === "last hit by Wolf#7"
+    && !/killed by a falling rock/.test(observeText(sb, { cfg: cfgU, ap: null, events: [], session: {}, death: trS.deaths[0].cause })), JSON.stringify([evS1, evS2, trS.deaths]));
+  // a full-hp fight target 20+ cells away vanishing right after an attack (culled, behind a wall) is gone in top-down, not a kill
+  const snapF = (f, alive) => ({ frame: f, time: f / 60, state: { player: { pos: [0, 0], hp: 10, maxHp: 10 }, entities: [{ id: 9, type: "Bat", pos: [5, 0], hostile: true }, ...(alive ? [{ id: 4, type: "Archer", pos: [24, 0], hp: 5, maxHp: 5, hostile: true }] : []), { id: 8, type: "Rock", pos: [30, 0] }] } });
+  const pF = new Perceiver(cfgU, { fps: 60 }), trF = new EventTracker(cfgU, pF);
+  const fa = pF.perceive(snapF(0, true), 0); trF.update(null, fa, {}); const evF = trF.update(fa, pF.perceive(snapF(10, false), 10), { lastAttackT: 10 / 60, target: 4 });
+  ok("top-down: a far full-hp fight target dropping out of the list right after an attack is not a kill", !evF.some((e) => e.kind === "kill") && trF.kills.length === 0, JSON.stringify(evF));
 }
 
 // ---- regressions from a real game's reports (Embervale)

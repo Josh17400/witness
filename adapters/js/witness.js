@@ -53,7 +53,7 @@ function readConfig() {
     if (c.seed == null && q.has("witness_seed")) c.seed = +q.get("witness_seed");
     if (c.audioUnlock == null && q.has("witness_audio_unlock")) c.audioUnlock = q.get("witness_audio_unlock") !== "0";
     if (c.epoch == null && q.has("witness_epoch")) c.epoch = q.get("witness_epoch");
-    for (const k of ["takeover", "raf", "timers", "webaudio", "console", "animations", "videos", "virtualEnded"]) {
+    for (const k of ["takeover", "raf", "timers", "webaudio", "console", "animations", "videos", "virtualEnded", "realtimeWatch"]) {
       if (c[k] == null && q.has(`witness_${k}`)) c[k] = q.get(`witness_${k}`) !== "0";
     }
   }
@@ -145,8 +145,9 @@ const normSeed = (s) => {
 };
 
 let currentSeed = CFG.seed != null ? normSeed(CFG.seed) : MODE === "witness" ? 1 : Math.floor(real.random() * 4294967296);
-let rng = makeRng(currentSeed);
-function reseed(seed) { currentSeed = normSeed(seed); rng = makeRng(currentSeed); }
+let rng = makeRng(currentSeed), rngCalls = 0;   // rngCalls: seeded draws since the last reseed (perf.lazy_draw.rng: doctor's draw-reads-Math.random check)
+const rand = () => { rngCalls++; return rng(); };
+function reseed(seed) { currentSeed = normSeed(seed); rng = makeRng(currentSeed); rngCalls = 0; }
 
 // Yield to the event loop (all pending promise reactions of the game run before we continue).
 const macrotask = (() => {
@@ -163,6 +164,10 @@ const macrotask = (() => {
 
 const H = {};                       // the game's options/handlers (from start())
 const sim = { frame: 0, time: 0 };  // witness frame counter and simulated seconds since reset
+// Lazy drawing (step "draw": "last", docs/PROTOCOL.md §3): only the step's final frame is observed, so the frames before
+// it run with witness.drawing false and a game that checks it skips its draw there. reads: how often the game asked
+// (perf.lazy_draw; doctor checks such games for draws that change state); skipped: frames run with drawing off.
+const lazy = { drawing: true, stale: false, reads: 0, skipped: 0, redraw: null };
 let fps = 60;
 let started = false;
 const logs = [];
@@ -182,6 +187,82 @@ function warnOnce(key, message) {
 function reportError(e, where) {
   pushLog("error", `${where}: ${errText(e)}`);
   if (real.console) real.console.error.call(G.console, `[witness] ${where}:`, e);
+}
+
+// ------------------------------------------------------------------ real-time activity (browser, witness mode)
+//
+// Game code that runs while Witness is NOT driving it: between commands, on the browser's own clock. Typically a
+// timer, rAF loop or listener a classic <script> made before the adapter took over (it stays on a REAL timer: The
+// Fort's setInterval(idleBake, 2000) re-baked terrain at wall-clock moments, so screenshots differed). Cheap
+// observation points (Math.random, performance.now, Date.now / new Date(), canvas 2D and WebGL draws, rAF
+// registration) check one boolean; the first hits build a stack for their site. Witness is "driving" from a command's
+// arrival until one macrotask after its reply (so work the game queued meanwhile, e.g. a framework's MessageChannel
+// render, still counts as driven), and while trusted input (the CLI's dom: events) is dispatched. Armed after the
+// first command (code right after `await witness.start()` is boot). Reported in perf.realtime; doctor warns.
+const rt = { armed: false, on: false, busy: 0, idle: false, calls: 0, apis: {}, sites: [], seen: new Set(), stacks: {}, early: null };
+const rtSync = () => { rt.idle = rt.on && rt.busy === 0; };
+function rtHold() { rt.busy++; rt.idle = false; }
+function rtRelease() { macrotask().then(() => { rt.busy = Math.max(0, rt.busy - 1); if (rt.armed) rt.on = true; rtSync(); }); }
+const OWN_FRAME = /witness(-injected)?\.js|__playwright|<anonymous>|^\s*at (new )?Promise|^\s*at Array\./;
+function rtNote(api) {
+  rt.calls++;
+  rt.apis[api] = (rt.apis[api] || 0) + 1;
+  if ((rt.stacks[api] || 0) >= 4 || rt.sites.length >= 8) return;   // a few stacks per kind: one noisy source can't hide the next
+  rt.stacks[api] = (rt.stacks[api] || 0) + 1;
+  const frames = String(new Error().stack || "").split("\n").filter((l) => /:\d+:\d+\)?\s*$/.test(l) && !OWN_FRAME.test(l)).slice(0, 6);
+  const fmt = (l) => {
+    const m = /^\s*(?:at\s+)?(?:(.*?)\s+\()?(?:(.*?)@)?(.*?):(\d+):(\d+)\)?\s*$/.exec(l);
+    if (!m) return { at: l.trim(), fn: null, text: l.trim() };
+    const file = m[3].replace(/[?#].*$/, "").split(/[\\/]/).pop() || m[3], fn = (m[1] || m[2] || "").replace(/^async /, "") || null;
+    return { at: `${file}:${m[4]}`, fn, text: `${fn ? `${fn} ` : ""}(${file}:${m[4]}:${m[5]})` };
+  };
+  const top = frames.length ? fmt(frames[0]) : { at: "(unknown: no page frame on the stack)", fn: null };
+  if (rt.seen.has(top.at) || rt.sites.length >= 8) return;
+  rt.seen.add(top.at);
+  rt.sites.push({ api, at: top.at, fn: top.fn, frame: sim.frame, stack: frames.map((l) => fmt(l).text).join(" ← ") });
+}
+/** Only `window.WITNESS_CONFIG = {...}` (the documented page config, GUIDE §2): nothing that can start a timer. */
+function configOnly(text) {
+  const t = String(text || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'])\/\/[^\n]*/g, "$1").trim();
+  const m = /^(?:(?:window|globalThis|self)\.|var\s+)WITNESS_CONFIG\s*=\s*\{/.exec(t);
+  if (!m) return false;
+  let d = 0, q = null, i = m[0].length - 1;
+  for (; i < t.length; i++) {
+    const c = t[i];
+    if (q) { if (c === "\\") i++; else if (c === q) q = null; }
+    else if (c === '"' || c === "'" || c === "`") q = c;
+    else if (c === "{") d++;
+    else if (c === "}" && --d === 0) break;
+  }
+  return d === 0 && /^[\s;]*$/.test(t.slice(i + 1));
+}
+/** Classic scripts already in the page when the adapter loaded (they ran first: their timers stay on real time). */
+function earlyScripts() {
+  if (!BROWSER || !G.document || !G.document.scripts) return { inline: 0, src: [] };
+  const classic = Array.from(G.document.scripts).filter((s) => !s.type || /^(text|application)\/(x-)?(java|ecma|j)script$/i.test(s.type));
+  return { inline: classic.filter((s) => !s.src && !configOnly(s.text)).length, src: classic.filter((s) => s.src).map((s) => s.src.replace(/[?#].*$/, "").split("/").pop()).slice(0, 8) };
+}
+function realtimeReport() {
+  return { calls: rt.calls, apis: { ...rt.apis }, sites: rt.sites.slice(), early_scripts: rt.early || { inline: 0, src: [] } };
+}
+/** Wrap obj[name] so a call made while Witness is idle is counted (label: what the report calls it). */
+function observe(obj, name, label) {
+  const f = obj && Object.prototype.hasOwnProperty.call(obj, name) ? obj[name] : null;
+  if (typeof f !== "function") return;
+  obj[name] = function () { if (rt.idle) rtNote(label); return f.apply(this, arguments); };
+}
+function installRealtimeWatch() {
+  rt.early = earlyScripts();
+  for (const [cls, names] of [["CanvasRenderingContext2D", ["drawImage", "fillRect", "clearRect", "putImageData", "fillText", "fill", "stroke"]], ["OffscreenCanvasRenderingContext2D", ["drawImage", "fillRect", "clearRect", "putImageData"]],
+    ["WebGLRenderingContext", ["drawArrays", "drawElements"]], ["WebGL2RenderingContext", ["drawArrays", "drawElements", "drawArraysInstanced", "drawElementsInstanced"]]]) {
+    const P = G[cls] && G[cls].prototype;
+    if (P) for (const n of names) observe(P, n, `${cls.replace("RenderingContext", "").replace(/^WebGL2?$/, "WebGL")}.${n}`);
+  }
+  // trusted input (the CLI's dom: tap / click / key through Playwright, or a person on a watched page) is driven input
+  const ext = (e) => { if (e.isTrusted && rt.armed) { rtHold(); rtRelease(); } };
+  // (boundary events come before the move; a tap's compatibility mouse events come in a later task than touchend)
+  for (const t of ["keydown", "keyup", "keypress", "beforeinput", "input", "pointerdown", "pointermove", "pointerup", "pointercancel", "pointerover", "pointerenter", "pointerout", "pointerleave", "gotpointercapture", "lostpointercapture",
+    "mousedown", "mousemove", "mouseup", "mouseover", "mouseenter", "mouseout", "mouseleave", "click", "dblclick", "auxclick", "touchstart", "touchmove", "touchend", "touchcancel", "wheel", "contextmenu"]) G.addEventListener(t, ext, { capture: true, passive: true });
 }
 
 function formatArgs(args) {
@@ -410,14 +491,15 @@ function installTakeover({ raf = true, timers = true } = {}) {
   if (sched.on) return;
   sched.on = true;
   const P = G.performance;
-  if (P) Object.defineProperty(P, "now", { value: () => clock.now(), configurable: true, writable: true });
+  if (P) Object.defineProperty(P, "now", { value: () => { if (rt.idle) rtNote("performance.now"); return clock.now(); }, configurable: true, writable: true });
   const RealDate = real.Date;
   function WitnessDate(...a) {
+    if (rt.idle && !a.length) rtNote("Date");
     if (!new.target) return new RealDate(clock.date()).toString();
     return Reflect.construct(RealDate, a.length ? a : [clock.date()], new.target);
   }
   WitnessDate.prototype = RealDate.prototype;
-  WitnessDate.now = () => clock.date();
+  WitnessDate.now = () => { if (rt.idle) rtNote("Date.now"); return clock.date(); };
   WitnessDate.parse = RealDate.parse;
   WitnessDate.UTC = RealDate.UTC;
   G.Date = WitnessDate;
@@ -434,7 +516,7 @@ function installTakeover({ raf = true, timers = true } = {}) {
   }
   if (raf && (BROWSER || CFG.raf)) {
     sched.raf = true;
-    G.requestAnimationFrame = (cb) => { const id = sched.rafNext++; sched.rafs.set(id, cb); return id; };
+    G.requestAnimationFrame = (cb) => { if (rt.idle) rtNote("requestAnimationFrame"); const id = sched.rafNext++; sched.rafs.set(id, cb); return id; };
     G.cancelAnimationFrame = (id) => { sched.rafs.delete(id); if (sched.running) sched.running.delete(id); };
   }
 }
@@ -1204,6 +1286,7 @@ function patchCanvasContexts() {
 }
 
 async function screenshot(scale = 1) {
+  if (lazy.stale && lazy.redraw) { lazy.stale = false; try { lazy.redraw(); } catch (e) { reportError(e, "redraw before a screenshot"); } }
   if (H.screenshot) {
     const r = await H.screenshot({ scale });
     if (BROWSER && r && (r instanceof Element || (G.OffscreenCanvas && r instanceof G.OffscreenCanvas))) return grab([r], scale);
@@ -1482,17 +1565,27 @@ async function doStep(m) {
   const n = Math.max(1, m.frames | 0 || 1);
   const dflt = +m.dt > 0 ? +m.dt : 1 / fps;
   const yieldEach = sched.raf || sched.timers || H.yieldEachFrame;
+  const lazyStep = m.draw === "last";   // every frame but the last runs with witness.drawing false
   const t0 = real.now();
-  for (let i = 0; i < n; i++) {
-    const dt = Array.isArray(m.dts) && +m.dts[i] > 0 ? +m.dts[i] : dflt;
-    applyInputs(sim.frame);
-    runFrame(dt);
-    if (sources.length) await renderAudio(false);
-    if (endedQueue.size) fireEnded();   // sources that ended in what this frame rendered (see endedQueue)
-    if (anim.flush) await renderingUpdate();
-    sim.frame++;
-    sim.time += dt;
-    if (yieldEach) await macrotask();
+  try {
+    for (let i = 0; i < n; i++) {
+      const dt = Array.isArray(m.dts) && +m.dts[i] > 0 ? +m.dts[i] : dflt;
+      lazy.drawing = !lazyStep || i === n - 1;
+      if (!lazy.drawing) lazy.skipped++;
+      applyInputs(sim.frame);
+      runFrame(dt);
+      if (sources.length) await renderAudio(false);
+      if (endedQueue.size) fireEnded();   // sources that ended in what this frame rendered (see endedQueue)
+      if (anim.flush) await renderingUpdate();
+      sim.frame++;
+      sim.time += dt;
+      if (yieldEach) await macrotask();
+    }
+  } finally {
+    // the last frame of every step is drawn, so a screenshot always follows a drawn frame; only a step that failed
+    // part way (its error is the reply) can end on an undrawn one: the next screenshot redraws through witness.draw()
+    lazy.stale = !lazy.drawing;
+    lazy.drawing = true;
   }
   perfStats.frames = n;
   perfStats.ms = real.now() - t0;
@@ -1501,6 +1594,7 @@ async function doStep(m) {
 
 async function doReset(m) {
   releaseAllInput();
+  lazy.stale = false; lazy.drawing = true;   // a step that failed part way left an undrawn frame: the reset's own frame repaints, never the old draw()
   reseed(m.seed ?? 1);
   // an epoch with the reset (witness.json clock.epoch, or the replay's): Date restarts there exactly; without one the
   // Date goes on from where it was, lined up on a whole millisecond (what older replays were made with)
@@ -1560,7 +1654,7 @@ async function handle(m) {
     case "logs": return { logs: logs.splice(0) };
     case "perf": {
       const extra = H.perf ? jsonSafe(await H.perf()) : {};
-      return { frame_ms: perfStats.frames ? perfStats.ms / perfStats.frames : 0, ...extra, counts: { raf_callbacks: sched.rafs.size, timers: sched.tasks.size, ...(extra && extra.counts) } };
+      return { frame_ms: perfStats.frames ? perfStats.ms / perfStats.frames : 0, ...extra, counts: { raf_callbacks: sched.rafs.size, timers: sched.tasks.size, ...(extra && extra.counts) }, ...(rt.early ? { realtime: realtimeReport() } : {}), lazy_draw: { reads: lazy.reads, skipped: lazy.skipped, rng: rngCalls } };
     }
     case "quit": {
       real.setTimeout(() => quit(), 20);
@@ -1574,16 +1668,19 @@ function onMessage(line) {
   let m;
   try { m = JSON.parse(line); } catch { return; }
   if (!isObj(m) || m.cmd == null) return;
+  rtHold();   // Witness drives the game until one macrotask after the reply (real-time activity, above)
   chain = chain.then(async () => {
     let reply;
     try { reply = { id: m.id, ok: true, ...(await handle(m)) }; }
     catch (e) { reply = { id: m.id, ok: false, error: e && e.message ? e.message : String(e) }; }
     try { conn && conn.send(reply); } catch (e) { reportError(e, "sending a reply"); }
+    rtRelease();
   });
 }
 
 function detach() {
   // Back to normal play if the game keeps running (attached sessions, or the CLI went away).
+  rt.armed = rt.on = rt.idle = false;
   if (BROWSER && sched.on) startRealPump(realFrame);
 }
 
@@ -1765,6 +1862,7 @@ async function start(options = {}) {
     throw e;
   }
   pump = "step";              // from the hello on, frames run only on 'step'
+  rt.armed = !!rt.early;      // watched for real-time activity (browser) from the first command's end on
   conn.send(hello());
   return api;
 }
@@ -1801,7 +1899,7 @@ const api = {
   /** The seed for the game's own RNGs (from reset, the recording header, or random). */
   seed: () => currentSeed,
   /** Seeded random in [0, 1): the same stream Math.random uses in witness/record mode. */
-  random: () => rng(),
+  random: () => rand(),
   /** witness.log("coin collected") or witness.log("warn", "low fps"): a game log line for Witness. */
   log(level, ...message) {
     if (["info", "warn", "error"].includes(level)) pushLog(level, formatArgs(message));
@@ -1838,6 +1936,14 @@ const api = {
   animating: () => animatingCount(),
   get frame() { return sim.frame; },
   get time() { return sim.time; },
+  /**
+   * False while Witness runs a frame nobody will see (a step sent with "draw": "last": every frame but its last), true
+   * otherwise (always outside witness mode). A loop does update(dt); if (witness.drawing !== false) draw(); the
+   * simulation must not depend on drawing (doctor checks it when play.lazyDraw is on or the game reads this).
+   */
+  get drawing() { lazy.reads++; return lazy.drawing; },
+  /** witness.draw(draw): call draw() unless this frame is skipped (returns whether it drew); also kept to repaint before a screenshot that follows an undrawn frame. */
+  draw(fn) { if (typeof fn !== "function") return false; lazy.redraw = fn; lazy.reads++; if (!lazy.drawing) return false; fn(); return true; },
   /** The real (un-virtualized) timers and clocks, for code that must not be frozen. */
   real,
 };
@@ -1845,7 +1951,7 @@ const api = {
 // ------------------------------------------------------------------ install (runs at import)
 
 if (MODE === "witness") {
-  Math.random = () => rng();
+  Math.random = () => { if (rt.idle) rtNote("Math.random"); return rand(); };
   if (CFG.console !== false) captureConsole();
   captureErrors();
   if (BROWSER) {
@@ -1853,6 +1959,7 @@ if (MODE === "witness") {
     patchCanvasContexts();
     installVirtualGamepad();
     if (CFG.webaudio !== false) installWebAudioTap();
+    if (sched.on && CFG.realtimeWatch !== false) installRealtimeWatch();
     // Until the hello, frames follow the display so the engine can boot and load, but each one
     // advances exactly 1/fps: engines that average recent dts (Phaser) then never hold odd values.
     if (sched.on && CFG.animations !== false && G.document && typeof G.document.getAnimations === "function") {
@@ -1865,7 +1972,7 @@ if (MODE === "witness") {
     takeover({ raf: CFG.raf, timers: CFG.timers !== false });
   }
 } else if (MODE === "record") {
-  Math.random = () => rng();
+  Math.random = () => rand();
   if (BROWSER) {
     if (CFG.takeover !== false) installTakeover({ raf: CFG.raf !== false, timers: CFG.timers !== false });
     installRecorderListeners();

@@ -3,6 +3,52 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.7 (2026-10-21)
+
+From The Fort's 0.7.6 adoption and its 139-minute wave-100 playtest.
+
+**Doctor finds code running on real time** (JS adapter, browser)
+- After the takeover, the adapter notices game code that runs between frames while Witness isn't driving it: seeded
+  random, clock reads, rAF registration, 2D canvas / WebGL draws. Doctor watches the page idle for 2.5 s too
+  (`--realtime-wait <s>`, 0 = off) and warns: `game code ran N times on real time between frames (first at
+  game.js:120 idleBake)`: usually a timer made before Witness took over. A warning, never a failure.
+  `perf.realtime` carries the sites; `WITNESS_CONFIG.realtimeWatch=false` turns it off.
+- Doctor suggests `"launch": {"inject": true}` when inline classic scripts ran before the adapter (a script that only
+  sets `WITNESS_CONFIG` doesn't count). GUIDE §1/§1b now recommend inject for classic-script games.
+
+**Skip drawing unobserved frames (opt-in) for long playtests**
+- Protocol `step` takes an optional `"draw": "last"` hint: only the final frame will be observed (adapters that
+  don't know it ignore it). Only `witness play` sends it, with `play.lazyDraw: true` or `play start --lazy-draw`
+  (not tests, replays or `--watch`). Shots always follow a drawn final frame.
+- JS: `witness.drawing` (false on the skipped frames) and `witness.draw(fn)`; C++: `witness_drawing()`.
+  `perf.lazy_draw` reports reads, skipped frames and seeded-random calls; the report shows how much was skipped.
+- Doctor, when lazyDraw is on or the game reads `witness.drawing`, replays run A in hinted steps and compares state,
+  digest, audio, the picture and the number of seeded-random calls: `✔ lazy drawing safe`, or `⚠ drawing changes
+  game state … lazyDraw unsafe`, `⚠ draw() reads Math.random …`, or `lazy drawing not exercised` (doctor now takes
+  `--scene` / `--params` to reach the scene that draws).
+
+**Play**
+- Defense (and moveless topdown) fights are one row per engagement in the report: the order, who it was against
+  (`Grunt ×3`), how many fell, damage dealt / taken, and won / lost / held / broke off. No more one row per tap.
+  Ranged and tap kills count; `report.json` stats gain `fightsHeld`.
+- `choose` / `pick` honour `state.dialogue.ready: false` (waits up to 2 s, then presses once). Without it, `choose`
+  presses again every 0.25 s for up to 1 s while the same dialogue stays open and nothing changed (game frames,
+  recorded input). A dialogue that closes or changes during the wait fails the order and presses nothing.
+- `state.lastHit = {by, type?}` (or a string, or `player.lastHit`) names non-entity damage: `took 3 damage from Bomber
+  bomb`, `YOU DIED (killed by Bomber bomb)`, in the report too. Only a lastHit that changed with the hit is trusted.
+- The wake line when a dialogue stops an order chain says what to do: `stopped fight: a dialogue opened (choose 1-3,
+  then give your orders again; 1 queued order not run)`.
+
+**Adoption steps**
+1. Nothing required. Browser doctor runs take 2.5 s longer (the idle watch).
+2. *Optional, games with inline classic scripts:* if doctor warns about real-time code or suggests inject, set
+   `"launch": {"inject": true}`.
+3. *Optional, turn/defense games:* expose `dialogue.ready` during a pick lockout, and `state.lastHit` for damage no
+   entity deals (update it with every hit, or clear it).
+4. *Optional, long playtests:* gate drawing on `witness.drawing !== false` (or `witness.draw(fn)`), keep updates,
+   audio and anything that touches state or the seeded random OUT of draw, set `"play": {"lazyDraw": true}`, and run
+   `witness doctor` (with `--params` to reach gameplay) until it prints `✔ lazy drawing safe`.
+
 ## 0.7.6 (2026-10-21)
 
 From The Fort (a single-file canvas tap-to-shoot fort-defense web game) adopting 0.7.5.

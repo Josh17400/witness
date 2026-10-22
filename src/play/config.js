@@ -140,6 +140,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     heal: +(raw.heal ?? 0),
     combos: raw.combos || {},
     allowCalls: !!raw.allowCalls,
+    lazyDraw: !!raw.lazyDraw,                // steps send "draw": "last": the game may skip drawing frames nobody sees
     logs: raw.logs === false ? false : raw.logs || true,   // true | false | "regex" for which info logs count as game events
     maxShots: +(raw.maxShots ?? 24),
     platformer: { jumpFrames: 18, runJumpFrames: 22, stomp: true, ...(raw.platformer || {}) },

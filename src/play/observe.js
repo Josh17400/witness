@@ -6,7 +6,7 @@ import { lookOf } from "./profiles.js";
 import { describeControls } from "./config.js";
 import { ORDER_CARD, ORDER_CARD_PLATFORMER, ORDER_CARD_FPS, ORDER_CARD_TURN, ORDER_CARD_DEFENSE } from "./orders.js";
 import { screenOf } from "./autopilot.js";
-import { cellOf } from "./events.js";
+import { cellOf, lastHitOf } from "./events.js";
 
 const IDLE = /^(idle|none|normal|walk|walking|stand|standing|wander|patrol|default)$/i;
 
@@ -107,6 +107,14 @@ function platformWindow(w, marks) {
 }
 
 /** The text a tester reads. */
+/** " (killed by Bomber bomb)" when the game names what hit last (state.lastHit), else "". */
+const killedBy = (w, ctx) => {
+  // the tracker's death cause (it only trusts a lastHit that came with the hit); without one, the state's own word
+  const c = ctx && ctx.death;
+  if (c != null) return /^killed by /.test(c) ? ` (${c})` : "";
+  const h = lastHitOf(w.snap && w.snap.state); return h ? ` (killed by ${h})` : "";
+};
+
 export function observeText(w, ctx) {
   if (ctx.cfg.profile === "turn") return turnText(w, ctx);
   if (ctx.cfg.profile === "defense") return defenseText(w, ctx);
@@ -128,7 +136,7 @@ export function observeText(w, ctx) {
   if (d.result) L.push(d.result.line);
   if (ctx.live && ctx.order && !(d.result && /^(✔|✖)/.test(d.result.line || ""))) L.push(`your order (still running): ${ctx.order}`);
   else if (ctx.live && !ctx.order) L.push("no order running: standing by (holding, guarding, shooting back) while the game plays on");
-  if (w.dead) L.push(`YOU ARE DEAD${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}${cfg.controls.confirm ? ` (to continue: "respawn", or press the key the game names)` : ""}`);
+  if (w.dead) L.push(`YOU ARE DEAD${killedBy(w, ctx)}${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}${cfg.controls.confirm ? ` (to continue: "respawn", or press the key the game names)` : ""}`);
   else if (w.won) L.push("★ GOAL REACHED (the game reports a win) — keep exploring or end the session");
   if (d.near.length) {
     L.push("near (dist in cells, compass dir):");
@@ -282,7 +290,7 @@ function defenseText(w, ctx) {
   if (d.result) L.push(d.result.line);
   if (ctx.live && ctx.order && !(d.result && /^(✔|✖)/.test(d.result.line || ""))) L.push(`your order (still running): ${ctx.order}`);
   else if (ctx.live && !ctx.order) L.push("no order running: standing by (attacking the nearest enemy) while the game plays on");
-  if (w.dead) L.push(`THE BASE HAS FALLEN${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}`);
+  if (w.dead) L.push(`THE BASE HAS FALLEN${killedBy(w, ctx)}${w.notice ? ` — game says: "${clip(oneLine(w.notice), 100)}"` : ""}`);
   else if (w.won) L.push("★ GOAL REACHED (the game reports a win)");
   const fmt = (e, enemy) => {
     const bits = [];

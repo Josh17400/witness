@@ -12,7 +12,8 @@ import { parseOrders } from "../../src/play/orders.js";
 import { NavGrid } from "../../src/play/grid.js";
 import { resolvePlayConfig, parseControl, controlLabel, describeControls } from "../../src/play/config.js";
 import { Perceiver } from "../../src/play/perceive.js";
-import { EventTracker, coalesceEvents } from "../../src/play/events.js";
+import { EventTracker, coalesceEvents, lastHitOf } from "../../src/play/events.js";
+import { reportMarkdown, lazyLine } from "../../src/play/report.js";
 import { Autopilot, screenOf, refusalOf } from "../../src/play/autopilot.js";
 import { wakeFor } from "../../src/play/wake.js";
 import { observeText, observeData } from "../../src/play/observe.js";
@@ -43,7 +44,9 @@ function driver(g, play = DEF_PLAY, size = [320, 180]) {
     for (let i = 0; i < k; i++) g.step();
     const nw = per.perceive(g.snapshot(), g.frame);
     ap.observe(nw);
-    const ev = tr.update(w, nw, { lastAttackT: ap.lastAttackT, logs: (g.logs || []).splice(0) });
+    // as the daemon does: the running fight order (a still fight is one row per fight order and wave) and its target
+    const fo = ap.activeOrder();
+    const ev = tr.update(w, nw, { lastAttackT: ap.lastAttackT, logs: (g.logs || []).splice(0), order: fo && fo.o?.verb === "fight" ? fo : null, target: ap.cur && /^(fight|stomp)$/.test(ap.cur.o?.verb || "") ? ap.cur.target ?? null : null });
     for (const e of ap.drainEvents()) ev.push({ t: nw.t, frame: g.frame, ...e });
     w = nw; pending.push(...ev);
     return ev;
@@ -240,6 +243,91 @@ const moveKeys = (inputs) => inputs.filter((e) => e.type === "key" && /^(w|a|s|d
   ok("events: alert 0 makes no alert events; the default still does", !e1.some((e) => e.kind === "alert") && e6.some((e) => e.kind === "alert"), JSON.stringify([e1, e6]));
 }
 
+// ---- 0.7.7, from The Fort's wave-100 run: a still fight is an engagement (one row per wave or fight order, against
+// everyone by type, no empty rows), ranged kills count, state.lastHit names what killed you, choose waits out a
+// dialogue's pick lockout (dialogue.ready, else retries), and a dialogue that stops a chain of fights says what to do
+{
+  const TAP = { ...DEF_PLAY, controls: { attack: "tap:target" } };
+  const g = new FortGame(1), d = driver(g, TAP);
+  const r = d.do("fight enemies for 12s");
+  const F = d.tr.fights;
+  ok("still fights: one row per wave engagement (not per tap or kill), against everyone by type and count, sane length and damage, the order named",
+    r.status === "done" && F.length === 3 && F.every((f) => f.still && f.result === "won" && f.targets.join() === "Grunt ×3" && f.kills === 3 && f.enemies === 3 && f.dealt === 6 && f.seconds > 0.5 && f.seconds < 5 && f.order === "fight enemies for 12s"), JSON.stringify(F));
+  ok("still fights: ranged kills (taps far from the base) count as kills", g.kills === 9 && d.tr.kills.length === 9, JSON.stringify({ game: g.kills, tracked: d.tr.kills.length }));
+  // enemies that outlast the order: the row ends with the order (held), the next order starts a new row
+  const g2 = new FortGame(1, { gruntHp: 12 }), d2 = driver(g2, TAP);
+  d2.do("fight enemies for 2s"); d2.do("fight enemies for 1.5s"); d2.tr.finish(d2.world.t);
+  const F2 = d2.tr.fights;
+  ok("still fights: an order that ends with enemies left closes its row as held; the next fight order gets its own",
+    F2.length === 2 && F2[0].result === "held" && F2[0].order === "fight enemies for 2s" && F2[0].targets.join() === "Grunt ×3" && F2[0].kills === 0 && F2[0].dealt > 0 && F2[0].dealt <= 36 && F2[1].order === "fight enemies for 1.5s" && F2[1].result === "unresolved", JSON.stringify(F2));
+  // a bomb (no entity) kills the base: state.lastHit names it everywhere
+  const g3 = new FortGame(1, { baseHp: 5, bombAt: 60 }), d3 = driver(g3, TAP);
+  const r3 = d3.do("fight enemies for 5s");
+  const F3 = d3.tr.fights, death = r3.events.find((e) => e.kind === "death"), hurt = r3.events.find((e) => e.kind === "hurt");
+  ok("state.lastHit: the hurt event, the death and its cause name it (\"killed by Bomber bomb\", not \"last hit by unknown\"); the fight is lost",
+    d3.tr.deaths.length === 1 && d3.tr.deaths[0].cause === "killed by Bomber bomb" && death && death.text === "YOU DIED (killed by Bomber bomb)" && hurt && /you took 5 damage from Bomber bomb/.test(hurt.text) && F3.length === 1 && F3[0].result === "lost",
+    JSON.stringify({ deaths: d3.tr.deaths, ev: r3.events.map((e) => e.text), F3 }));
+  ok("state.lastHit: the observation says what killed the base", /THE BASE HAS FALLEN \(killed by Bomber bomb\)/.test(d3.look()), d3.look());
+  ok("lastHitOf: {by, type}, {by}, a string, player.lastHit; nothing → null",
+    lastHitOf({ lastHit: { by: "Bomber", type: "bomb" } }) === "Bomber bomb" && lastHitOf({ lastHit: { by: "Artillery" } }) === "Artillery" && lastHitOf({ lastHit: "a missile" }) === "a missile" && lastHitOf({ player: { lastHit: { by: "Mine" } } }) === "Mine" && lastHitOf({ lastHit: {} }) === null && lastHitOf({}) === null && lastHitOf(null) === null);
+  const g4 = new FortGame(1, { baseHp: 1 }), d4 = driver(g4, { ...DEF_PLAY, controls: { attack: "j" } });
+  d4.do("wait 8");
+  ok("no state.lastHit: the death falls back to the nearest attacker", d4.tr.deaths.length === 1 && /^last hit by Grunt#\d+$/.test(d4.tr.deaths[0].cause), JSON.stringify(d4.tr.deaths));
+  // the report: the engagement table, the deaths in plain words
+  const rep = { session: "f1", outcome: "died", seed: 1, frames: 600, gameSeconds: 10, wallSeconds: 2, profile: "defense", stats: { orders: 1, ordersFailed: 0, fightsWon: 3, fightsLost: 1, fightsHeld: 0, kills: 9, deaths: 2, pickups: 0, stuck: 0 },
+    replay: { file: "r.jsonl" }, notes: [], timeline: [], orders: [], errors: [], shots: [], deaths: [...d3.tr.deaths, ...d4.tr.deaths], dialogues: [], fights: [...F, ...F3].map((f, i) => ({ ...f, n: i + 1 })), stuck: [] };
+  const md = reportMarkdown(rep), fightsMd = md.split("## Fights")[1].split("\n## ")[0];
+  ok("report (still fights): one row per engagement with the order, who it was against, killed of how many; no empty 'against'",
+    /fights 4 \(3 won, 1 lost\): one per engagement/.test(md) && /\| # \| order \| against \| start \| length \| result \| killed \| dealt \| taken \|/.test(fightsMd) && /\| 1 \| fight enemies for 12s \| Grunt ×3 \| [\d.]+s \| [\d.]+s \| won \| 3 of 3 \| 6 \| 0 \|/.test(fightsMd) && fightsMd.split("\n").filter((l) => /^\| \d/.test(l)).every((l) => !/\| +\|/.test(l)), fightsMd);
+  ok("report: deaths read \"killed by Bomber bomb\" / \"last hit by Grunt#3\" (no doubled 'last hit by', no cell for a base)",
+    /- \[1s\]: killed by Bomber bomb/.test(md) && /- \[[\d.]+s\]: last hit by Grunt#\d+/.test(md) && !/last hit by last hit by|last hit by killed/.test(md), md.split("## Deaths")[1]);
+  // other profiles keep their duel tracking
+  const per = new Perceiver(resolvePlayConfig({}), { fps: 60 });
+  ok("still fights only for defense and move-less top-down games (top-down with moves, fps and platformers unchanged)",
+    new EventTracker(resolvePlayConfig({}, { keys: ["w", "a", "s", "d"] }), per).still === false && new EventTracker(resolvePlayConfig({ profile: "platformer" }), per).still === false && new EventTracker(resolvePlayConfig({ profile: "fps" }), per).still === false
+    && new EventTracker(resolvePlayConfig({ profile: "defense" }), per).still === true && new EventTracker(resolvePlayConfig({ controls: { move: false } }), per).still === true);
+}
+
+// ---- choose right after a dialogue opens: the game ignores picks for 650 ms (anti-misclick)
+{
+  const PLAY = { ...DEF_PLAY, controls: { attack: "j", choose: "numbers" } };
+  const picks = (d) => d.inputs.filter((e) => e.type === "key" && e.key === "2" && e.down === true).length;
+  // dialogue.ready: false until the lockout ends → choose waits for it, then presses once
+  const g = new FortGame(1, { dialogEvery: 1, readyField: true }), d = driver(g, PLAY);
+  let r = d.do("fight enemies for 30s; wait 1");
+  ok("wake: a dialogue that stops a chain of fights says so and what to do (choose 1-3, then go on; the rest of the chain didn't run)",
+    r.status === "interrupted" && /^stopped fight: a dialogue opened \(choose 1-3, then give your orders again; 1 queued order not run\) — Command: "Field commendation: pick one directive" \[1\) Walls/.test(r.msg), r.msg);
+  r = d.do("choose 2; fight enemies for 3s");
+  ok("choose with dialogue.ready false: waits until it's true (no lost press), then picks; the chain goes on",
+    r.status === "done" && g.perk === 2 && g.ignoredPicks === 0 && picks(d) === 1 && /^chose 2\) "Rapid fire" → dialogue closed \(waited 0\.\ds for the dialogue to accept picks\) → fought for 3/.test(r.msg), JSON.stringify({ r: r.msg, perk: g.perk, ignored: g.ignoredPicks, picks: picks(d) }));
+  // no ready field: the press is retried while the same dialogue stays open and nothing changed
+  const gn = new FortGame(1, { dialogEvery: 1 }), dn = driver(gn, PLAY);
+  dn.do("fight enemies for 30s");
+  r = dn.do("choose 2; fight enemies for 3s");
+  ok("choose without a ready field: retries the press (recorded key input) until the game takes it, then the chain goes on",
+    r.status === "done" && gn.perk === 2 && gn.ignoredPicks >= 1 && picks(dn) === gn.ignoredPicks + 1 && /^chose 2\) "Rapid fire" → dialogue closed \(pressed \d×: the game ignored the first\) → fought for 3/.test(r.msg), JSON.stringify({ r: r.msg, perk: gn.perk, ignored: gn.ignoredPicks, picks: picks(dn) }));
+  // a game that never takes the pick: "nothing changed" only after the retry window
+  const gx = new FortGame(1, { dialogEvery: 1, lockFrames: 1e9 }), dx = driver(gx, PLAY);
+  dx.do("fight enemies for 30s");
+  let f0 = gx.frame;
+  r = dx.do("choose 2");
+  ok("choose that never lands: fails with 'nothing changed' only after ~1 s of retries (and says how many presses)",
+    r.status === "fail" && /^chose 2 but nothing changed: not the dialogue, not the game state \(pressed [3-5]× over 0\.\ds; is play\.controls\.choose right\?\)$/.test(r.msg) && (gx.frame - f0) / 60 >= 1.2 && picks(dx) >= 3 && picks(dx) <= 5, JSON.stringify({ r: r.msg, s: (gx.frame - f0) / 60, picks: picks(dx) }));
+  const gy = new FortGame(1, { dialogEvery: 1, lockFrames: 1e9, readyField: true }), dy = driver(gy, PLAY);
+  dy.do("fight enemies for 30s");
+  f0 = gy.frame;
+  r = dy.do("choose 2");
+  ok("choose with dialogue.ready stuck false: waits 2 s at most, then presses (and retries) anyway",
+    r.status === "fail" && /^chose 2 but nothing changed/.test(r.msg) && (gy.frame - f0) / 60 >= 3 && picks(dy) >= 3, JSON.stringify({ r: r.msg, s: (gy.frame - f0) / 60, picks: picks(dy) }));
+  // the dialogue closes by itself while choose waits out dialogue.ready: nothing is pressed into the game behind it
+  const gz = new FortGame(1, { dialogEvery: 1, readyField: true, dialogClose: 24 }), dz = driver(gz, PLAY);
+  dz.do("fight enemies for 30s");
+  const open0 = !!gz.choosing;
+  r = dz.do("choose 2");
+  ok("choose: a dialogue that closes during the ready wait fails the order and sends no pick (no false 'dialogue closed' success)",
+    open0 && r.status === "fail" && /^the dialogue closed before it accepted picks \(waited 0\.\ds\); nothing pressed$/.test(r.msg) && picks(dz) === 0 && gz.perk == null, JSON.stringify({ open0, r: r.msg, picks: picks(dz), perk: gz.perk }));
+}
+
 // ---- brief and checklist
 {
   const b = makeBrief({ cli: "witness", configDir: "C:/g", profile: "defense", extra: "Send `fight enemies for 25s` then `press grab`; a lone ` stays" });
@@ -250,12 +338,19 @@ const moveKeys = (inputs) => inputs.filter((e) => e.type === "key" && /^(w|a|s|d
   ok("play check (defense): base, flags, screen (state.camera), outcome; no map/facing/doors", by.base.ok && by.screen.ok && by.outcome.ok && !by.map && !by.facing && !by.doors, JSON.stringify(items));
 }
 
+// ---- play.lazyDraw: the config switch and the report line
+{
+  ok("lazyDraw: off by default, play.lazyDraw true turns it on", resolvePlayConfig({}, {}).lazyDraw === false && resolvePlayConfig({ lazyDraw: true }, {}).lazyDraw === true);
+  ok("lazyDraw: report line with the share and whether the game read the hint", lazyLine({ on: true, steps: 10, framesUndrawn: 20, frames: 31, game: { reads: 31, skipped: 20 } }) === "lazy drawing: on; 20 of 31 frames hinted undrawn (65%) in 10 steps; the game checks witness.drawing (31× asked)"
+    && /never read witness\.drawing, so it drew every frame/.test(lazyLine({ on: true, steps: 1, framesUndrawn: 2, frames: 3, game: { reads: 0, skipped: 2 } })) && /off \(watched session/.test(lazyLine({ on: false })));
+}
+
 // ---- end to end: the real CLI and daemon on the defense game (one game process)
 {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "witness-defense-"));
   const env = { WITNESS_PLAY_REGISTRY: path.join(tmp, "registry"), WITNESS_PLAY_MAX: "3" };
   fs.writeFileSync(path.join(tmp, "witness.json"), JSON.stringify({ name: "Tiny Fort", launch: { command: process.execPath, args: [path.join(here, "defense-game.mjs")] },
-    play: { ...DEF_PLAY, controls: { attack: "tap:target", lock: "j" }, allowCalls: true, brief: "Use `fight enemies for 25s` in a wave." } }));
+    play: { ...DEF_PLAY, controls: { attack: "tap:target", lock: "j" }, allowCalls: true, lazyDraw: true, brief: "Use `fight enemies for 25s` in a wave." } }));
   try {
     let r = witness(["play", "brief"], { cwd: tmp, env });
     ok("e2e: play brief turns the game's backticks into quotes", r.code === 0 && /Use "fight enemies for 25s" in a wave/.test(r.out), r.out.split("NOTES")[1]);
@@ -282,6 +377,13 @@ const moveKeys = (inputs) => inputs.filter((e) => e.type === "key" && /^(w|a|s|d
     ok("e2e: the replay (touch taps and calls) ends in exactly the recorded state", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out);
     const rep = JSON.parse(fs.readFileSync(path.join(dir, "report.json"), "utf8"));
     ok("e2e: the report has no map coverage for a defense game", !rep.coverage && rep.profile === "defense", JSON.stringify(rep.coverage));
+    // play.lazyDraw: multi-frame steps carried "draw": "last"; the game's own count of undrawn frames is the daemon's,
+    // and the replay above (stepped without the hint) still ended in exactly the recorded state
+    const z = rep.lazyDraw;
+    ok("e2e lazyDraw: steps sent draw:last, the game skipped exactly the frames the daemon hinted, reported", z && z.on && z.steps > 0 && z.framesUndrawn > 0 && z.frames === rep.frames && z.game && z.game.skipped === z.framesUndrawn && z.game.reads === rep.frames, JSON.stringify(z));
+    const md = fs.readFileSync(path.join(dir, "report.md"), "utf8");
+    ok("e2e lazyDraw: report.md says it", new RegExp(String.raw`lazy drawing: on; ${z && z.framesUndrawn} of ${rep.frames} frames hinted undrawn \(\d+%\) in \d+ steps; the game checks witness\.drawing`).test(md), md.split("## Summary")[1]?.slice(0, 900));
+    ok("e2e lazyDraw: session.json records the setting", JSON.parse(fs.readFileSync(path.join(dir, "session.json"), "utf8")).lazyDraw === true);
   } finally {
     witness(["play", "stop", "--all"], { cwd: tmp, env });
     fs.rmSync(tmp, { recursive: true, force: true });

@@ -44,15 +44,22 @@ export function reportData(s) {
     fights, telegraphs: tele,
     stuck: s.incidents, stuckSpots: stuckSpots(s.incidents), until: s.until || null, deaths: tr.deaths, kills: tr.kills, pickups: tr.pickups, dialogues: tr.dialogues,
     coverage: s.coverage, shots: s.shots, errors: s.errors, notes: s.notes, feedback: s.feedback || null, stuckDead: s.stuckDead || null,
-    replay: s.replay, profile: s.profile, pace: s.pace || null,
+    replay: s.replay, profile: s.profile, pace: s.pace || null, lazyDraw: s.lazyDraw || null,
     stats: {
       orders: s.orders.length, ordersFailed: s.orders.filter((o) => o.status === "fail").length, parseErrors: s.parseErrors || 0,
-      fightsWon: fights.filter((f) => f.result === "won").length, fightsLost: fights.filter((f) => f.result === "lost").length,
+      fightsWon: fights.filter((f) => f.result === "won").length, fightsLost: fights.filter((f) => f.result === "lost").length, fightsHeld: fights.filter((f) => f.result === "held").length,
       damageDealt: +fights.reduce((a, f) => a + f.dealt, 0).toFixed(2), damageTaken: +fights.reduce((a, f) => a + f.taken, 0).toFixed(2),
       kills: tr.kills.length, deaths: tr.deaths.length, pickups: tr.pickups.length, stuck: s.incidents.length, stuckUnresolved: s.incidents.filter((i) => !i.resolved).length,
       windups: tele.windups, windupsAvoided: tele.avoided, windupsHit: tele.hits,
     },
   };
+}
+
+/** The lazyDraw summary line: frames stepped without drawing, and whether the game acted on the hint. */
+export function lazyLine(z) {
+  if (!z.on) return "lazy drawing: configured, off (watched session: every frame is drawn)";
+  const game = !z.game ? "" : z.game.reads ? `; the game checks witness.drawing (${z.game.reads}× asked)` : "; the game never read witness.drawing, so it drew every frame (adapters/js/GUIDE.md §8)";
+  return `lazy drawing: on; ${z.framesUndrawn} of ${z.frames} frames hinted undrawn (${z.frames ? Math.round((100 * z.framesUndrawn) / z.frames) : 0}%) in ${z.steps} steps${game}`;
 }
 
 /** report.md: readable, most useful first. `rel` makes paths relative to the project root. */
@@ -78,11 +85,12 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
   L.push("## Summary");
   const S = r.stats;
   const bits = [];
-  bits.push(`fights ${r.fights.length} (${S.fightsWon} won, ${S.fightsLost} lost)`);
+  bits.push(`fights ${r.fights.length} (${S.fightsWon} won, ${S.fightsLost} lost${S.fightsHeld ? `, ${S.fightsHeld} held` : ""})${r.fights.some((f) => f.still) ? ": one per engagement (a wave, or a fight order's share of it)" : ""}`);
   if (S.windups) bits.push(`enemy windups ${S.windups}: ${S.windupsAvoided} avoided, ${S.windupsHit} hit (${pct(S.windupsAvoided, S.windupsAvoided + S.windupsHit)} avoided)`);
   bits.push(`kills ${S.kills}`, `deaths ${S.deaths}`, `pickups ${S.pickups}`, `stuck incidents ${S.stuck}${S.stuck > 1 && r.stuckSpots ? ` in ${r.stuckSpots.length} spot${r.stuckSpots.length > 1 ? "s" : ""}` : ""}${S.stuckUnresolved ? ` (${S.stuckUnresolved} unresolved)` : ""}`);
   if (r.coverage) bits.push(`coverage ${r.coverage.cells} cells${r.coverage.percent != null ? ` (${r.coverage.percent}% of ${r.coverage.mapWindow ? "the open cells the moving map window revealed" : "the open map"})` : ""}`);
   if (r.errors.length) bits.push(`**${r.errors.length} game error(s)**`);
+  if (r.lazyDraw) bits.push(lazyLine(r.lazyDraw));
   if (r.pace) bits.push(`pace: ${r.pace.mode}; ${r.pace.orders} orders (${r.pace.ordersPerGameMinute} per game minute, ${r.pace.ordersStoppedEarly} stopped early); game frozen ${r.pace.freezes}× for ${r.pace.frozenWallSeconds}s of ${r.pace.wallSeconds}s wall (${Math.round(100 * r.pace.frozenShare)}%)`);
   L.push(`- ${bits.join("\n- ")}`);
   L.push("");
@@ -107,7 +115,15 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     for (const e of r.errors.slice(0, 20)) L.push(`- [${r1(e.t)}s] ${clip(oneLine(e.text), 300)}`);
     L.push("");
   }
-  if (r.fights.length) {
+  if (r.fights.some((f) => f.still)) {
+    // still fights (defense): one row per engagement, against everyone on the field by type; damage from every source
+    L.push("## Fights");
+    L.push("One row per engagement: from the first exchange with enemies on the field until the field is clear (won), the base falls (lost), the fight order ends with enemies left (held) or 15 s pass with no exchange (broke off). Dealt is every hp the enemies lost (your attacks and the defences'), at most each enemy's max hp.");
+    L.push("", "| # | order | against | start | length | result | killed | dealt | taken |");
+    L.push("|---|---|---|---|---|---|---|---|---|");
+    for (const f of r.fights) L.push(`| ${f.n} | ${f.order ? clip(f.order, 40) : "-"} | ${clip(f.targets.join(", "), 60)} | ${r1(f.start)}s | ${r1(f.seconds)}s | ${f.result} | ${f.kills}${f.enemies ? ` of ${f.enemies}` : ""} | ${r1(f.dealt)} | ${r1(f.taken)} |`);
+    L.push("");
+  } else if (r.fights.length) {
     L.push("## Fights");
     L.push("| # | against | start | length | result | dealt | taken | windups (avoided/hit) |");
     L.push("|---|---|---|---|---|---|---|---|");
@@ -133,7 +149,8 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
   }
   if (r.deaths.length) {
     L.push("## Deaths");
-    for (const d of r.deaths) L.push(`- [${r1(d.t)}s] at cell (${d.cell || "?"}), last hit by ${d.cause}`);
+    // cause: "killed by Bomber bomb" (state.lastHit), "last hit by Wolf#3" (the nearest attacker), or the game's log line
+    for (const d of r.deaths) L.push(`- [${r1(d.t)}s]${d.cell && r.profile !== "defense" ? ` at cell (${d.cell})` : ""}: ${/^(killed by|last hit by|cause unknown)/.test(d.cause) ? d.cause : !d.cause || d.cause === "unknown" ? "cause unknown" : `game says "${d.cause}"`}`);
     L.push("");
   }
   if (r.stuckDead) {
