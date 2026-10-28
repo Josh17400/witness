@@ -870,7 +870,8 @@ export function scaleRegions(input, { region, tile, tolerance = 0, minTiles = 2 
     return line >= 0 && most >= 0.25 * (horiz ? box.w : box.h) ? line : lo + Math.round((bs[0] + bs[b1]) / 2);
   };
   const out = comps.map((comp) => {
-    const i0 = Math.min(...comp.map((t) => t.i)), i1 = Math.max(...comp.map((t) => t.i)), j0 = Math.min(...comp.map((t) => t.j)), j1 = Math.max(...comp.map((t) => t.j));
+    let i0 = Infinity, i1 = -Infinity, j0 = Infinity, j1 = -Infinity;
+    for (const t of comp) { if (t.i < i0) i0 = t.i; if (t.i > i1) i1 = t.i; if (t.j < j0) j0 = t.j; if (t.j > j1) j1 = t.j; }
     return { comp, label: comp[0].label, ti: [i0, i1, j0, j1], box: { x: xs[i0], y: ys[j0], w: xs[i1 + 1] - xs[i0], h: ys[j1 + 1] - ys[j0] }, rectangular: comp.length === (i1 - i0 + 1) * (j1 - j0 + 1) };
   });
   if (cands.length > 1) {

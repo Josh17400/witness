@@ -29,7 +29,7 @@ const DEFAULT_ADDR = "127.0.0.1:7357";
 const VERSION = "1.0.0";
 // the Witness release this copy came from: the CLI says so when a game's copy is older than the CLI (a core test keeps
 // it equal to package.json)
-const WITNESS_VERSION = "0.7.9";
+const WITNESS_VERSION = "0.7.10";
 
 // The real APIs, captured before any takeover. The adapter only ever uses these.
 const real = {
@@ -1799,10 +1799,33 @@ async function boot({ selector = 'script[type="text/witness"], script[data-witne
   return n;
 }
 
+// The text a reader sees under el: rendered text nodes, skipping aria-hidden / hidden subtrees (decorative minis,
+// icon glyphs) and elements that aren't displayed; block elements and <br> break words apart.
+function visibleText(el) {
+  if (!el) return "";
+  const out = [], cs = (e) => (G.getComputedStyle ? G.getComputedStyle(e) : null);
+  const skip = (e) => e.getAttribute("aria-hidden") === "true" || e.hidden || /^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT)$/.test(e.tagName) || (cs(e) && cs(e).display === "none");
+  const walk = (n) => {
+    if (n.nodeType === 3) { out.push(n.nodeValue); return; }
+    if (n.nodeType !== 1 || skip(n)) return;
+    if (n.tagName === "BR") { out.push(" "); return; }
+    if (n.tagName === "INPUT" || n.tagName === "TEXTAREA") { if (n.value) out.push(` ${n.value} `); return; }
+    const block = cs(n) && !/^inline/.test(cs(n).display);
+    if (block) out.push(" ");
+    for (const c of n.childNodes) walk(c);
+    if (block) out.push(" ");
+  };
+  walk(el);
+  return out.join("").replace(/\s+/g, " ").trim();
+}
+
 function describeEl(el, plain = false) {
-  const text = (el.innerText || "").trim().replace(/\s+/g, " ");
-  const img = !text && el.querySelector ? el.querySelector("img[alt]") : null;
-  const label = text || el.getAttribute("aria-label") || el.getAttribute("title") || (img && img.alt) || (el.tagName === "IMG" && el.alt)
+  // the accessible name first (aria-label is what a screen reader says), then the visible text without decoration
+  const aria = (el.getAttribute("aria-label") || "").trim(), text = aria ? "" : visibleText(el);
+  const img = !aria && !text && el.querySelector ? el.querySelector("img[alt]") : null;
+  const field = el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !/^(button|submit|reset|checkbox|radio|range|color|file|image)$/i.test(el.type || ""));
+  const label = field ? `${aria || el.getAttribute("placeholder") || (el.labels && el.labels[0] ? visibleText(el.labels[0]) : "") || el.name || "text"} [text field${el.value ? `: ${el.value}` : ""}]`
+    : aria || text || el.getAttribute("title") || (img && img.alt) || (el.tagName === "IMG" && el.alt)
     || (el.tagName === "INPUT" && el.value ? String(el.value) : "") || (el.id ? `#${el.id}` : `<${el.tagName.toLowerCase()}>`);
   return plain ? label : `"${label}"`;
 }
@@ -1847,7 +1870,7 @@ const domHelpers = {
     if (!scope) return [];
     const els = Array.from(scope.querySelectorAll('button, [role="button"], a[href], input:not([type="hidden"]), select, textarea, [onclick]'));
     const visible = (el) => {
-      if (el.closest("[hidden]") || el.disabled) return false;
+      if (el.closest('[hidden], [aria-hidden="true"]') || el.disabled) return false;
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) return false;
       const cs = G.getComputedStyle(el);
@@ -1865,8 +1888,14 @@ const domHelpers = {
       const k = (seen.get(label) || 0) + 1;
       seen.set(label, k);
       if (k > 1) label = `${label.slice(0, 52)} #${k}`;
-      return { label, id: el.id || null };
+      return { label, id: el.id || null, ...(/\[text field(: .*)?\]$/.test(label) ? { input: true } : {}) };
     });
+  },
+  /** The visible text under root (an Element or a selector; default the body), aria-hidden / hidden parts left out: for
+   *  state.screenText, so play testers read a panel as a player does. */
+  text(root) {
+    if (!BROWSER) return "";
+    return visibleText(root ? (typeof root === "string" ? G.document.querySelector(root) : root) : G.document.body);
   },
 };
 
@@ -1971,7 +2000,7 @@ const api = {
   createMixer: (opts) => new Mixer(opts),
   ready,
   boot,
-  /** DOM games: dom.tap(elementOrSelector) -> "ok" | "blocked by …"; dom.tappables(root?) -> [{label, id}]. */
+  /** DOM games: dom.tap(elementOrSelector) -> "ok" | "blocked by …"; dom.tappables(root?) -> [{label, id, input?}]; dom.text(root?) -> string. */
   dom: domHelpers,
   /** Finite CSS / Web Animations still running (0 = settled): also globalThis.__witnessAnimating(). */
   animating: () => animatingCount(),

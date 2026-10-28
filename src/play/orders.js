@@ -60,7 +60,7 @@ export const ORDER_CARD_TURN = [
 export const ORDER_CARD_DEFENSE = [
   "fight [enemies|thing] [for 25s] (stays put and attacks; waits for the next enemy when the field is empty; reaching the time is a success)",
   "press <key|control> [xN] · hold <key|control> <s> · wait [s] [quiet] (quiet: only big things wake it) · stop",
-  "choose <n|words> (a dialogue option) · call <name> [args] (when calls are on) · set heal <hp%>",
+  "choose <n|words> (a dialogue option) · call <name> [args] (when calls are on; a several-word value in single quotes) · set heal <hp%>",
 ].join("\n");
 export const ORDER_CARD_FPS = "fight [thing] [hold] · look <dir|thing> · reload · weapon <n|name> · go forward|back|left|right [cells]";
 

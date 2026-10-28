@@ -285,7 +285,9 @@ async function uiMeasure(m, files, opt) {
       const need = minC ?? ((e.fontPx ?? e.h) >= 24 * (geo.device && geo.pxPerPt ? geo.pxPerPt : 1) ? 3 : 4.5);
       // gradient text (background-clip: text, marked fill: "gradient" or found from pixels): no one text colour
       if (e.fill === "gradient") { contrasts.push({ id: e.id, need, ratio: null, unmeasurable: "gradient text (marked in state.ui)" }); continue; }
-      const tc = ui.textContrast(img, scrolledPart.get(e.id) || e);
+      // one element the measurement can't handle is reported as not measurable, not a crash of the whole screen
+      let tc;
+      try { tc = ui.textContrast(img, scrolledPart.get(e.id) || e); } catch (err) { contrasts.push({ id: e.id, need, ratio: null, unmeasurable: `couldn't measure (${err.message}; element ${[e.x, e.y, e.w, e.h].map(Math.round).join(",")})` }); continue; }
       if (tc && tc.unreliable) { contrasts.push({ id: e.id, need, ratio: null, unmeasurable: `gradient text (its colour changes along ${tc.unreliable.axis}: ${tc.unreliable.channel} by ${tc.unreliable.range} levels)`, estimate: tc.ratio }); continue; }
       const outlined = tc && tc.outline && tc.outline.textVsOutline >= need;
       const plate = e.kind === "text" && !held(e) && !outlined && !scrolledPart.has(e.id) ? ui.plateCheck(img, e, { need }) : null;

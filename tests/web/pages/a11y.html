@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>A11y text</title>
+<style>body { margin: 0; background: #123; color: #fff; font: 16px sans-serif; } .mini { display: inline-block; width: 12px; }</style></head>
+<body>
+  <!-- witness.dom.text / tappables read a panel as a player does: aria-hidden decoration (Euchre's "D T" minis) is left
+       out, aria-label names a button, a text field says so (with its label, never typed text mixed into the label) -->
+  <div id="panel">
+    <h2>Tournament result</h2>
+    <p>You won <b>3</b> of 4 rounds.</p>
+    <span class="mini" aria-hidden="true">D</span><span class="mini" aria-hidden="true">T</span>
+    <p hidden>secret</p>
+    <button id="deal" aria-label="Deal again"><span aria-hidden="true">▶</span> go</button>
+    <label for="nm">Loadout name</label> <input id="nm" value="Night Owl">
+    <button id="deco" aria-hidden="true">decorative</button>
+  </div>
+  <script type="module">
+    import witness from "/witness/witness.js";
+    witness.start({ name: "a11y", fps: 60, size: [400, 300], snapshot: () => ({ text: witness.dom.text("#panel"), choices: witness.dom.tappables() }) });
+  </script>
+</body>
+</html>

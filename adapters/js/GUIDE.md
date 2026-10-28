@@ -113,7 +113,9 @@ whole viewport (`launch.capture` unset = `screen` for a page without a visible c
 **CSS transitions and animations run on the virtual clock** (§2). `witness.dom.tap(el)` taps an
 element (selector or Element) the way a finger does and says `"ok"` or `"blocked by #overlay"`;
 `witness.dom.tappables()` lists what can be tapped as `[{label, id}]` (in view first; labels from
-text, `aria-label`, `title`, `#id`; `(selected)` for `.sel` / `aria-pressed`): handy as
+`aria-label`, then the visible text, `title`, `#id`; aria-hidden elements and decoration are left out; a text field
+reads `Loadout name [text field: Night Owl]` with `input: true`; `(selected)` for `.sel` / `aria-pressed`), and
+`witness.dom.text(root?)` gives a panel's visible text without aria-hidden parts (for `state.screenText`): handy as
 `calls: { tap: (sel) => witness.dom.tap(sel) }` and `snapshot: () => ({ choices: witness.dom.tappables(), … })`,
 so a replay repeats the taps as calls.
 
@@ -633,7 +635,7 @@ witness.createMixer({ sampleRate, channels }).play(samples, { delay, volume })
 witness.real                 // the real setTimeout/requestAnimationFrame/now/Date
 await witness.ready({ frames, ms, timeout, each })  // pictures decoded + fonts ready (start() does it; each picture ≤ 2.5 s)
 await witness.boot()         // run <script type="text/witness"> deferred classic scripts (§1b)
-witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(root?) -> [{label, id}]
+witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(root?) -> [{label, id, input?}]; witness.dom.text(root?) -> string
 witness.animating()          // finite CSS / Web Animations still running; also globalThis.__witnessAnimating()
 witness.drawing              // false on frames nobody sees (step "draw": "last"): if (witness.drawing !== false) draw() (§8)
 witness.draw(draw) -> bool   // the same as a call: draws unless skipped; repaints before a screenshot after an undrawn frame

@@ -3,6 +3,28 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.10 (2026-10-28)
+
+From Euchre Unleashed's loadouts round.
+
+- **`measure ui` no longer crashes on a big element** ("Maximum call stack size exceeded" on a shop preview with a
+  large card image at DPR 3): the gradient-text check spread every ink pixel into `Math.min(...)`, which overflows at a
+  few hundred thousand. Those spots are loops now (and the text-row grouping is iterative). A single element the
+  contrast check still can't handle is reported as `contrast not measurable, couldn't measure (…)` with its rect, not a
+  crash of the whole screen.
+- **`witness.dom.text(root?)`** (new): a panel's visible text with aria-hidden / `hidden` parts left out (decorative
+  minis no longer read as "D T"), for `state.screenText`.
+- **`witness.dom.tappables()`** names a button by its `aria-label` first, then its visible text without aria-hidden
+  parts; skips aria-hidden elements; labels a text field `Loadout name [text field: Night Owl]` and marks it
+  `input: true`.
+- Play testers are told that a several-word value inside an order goes in single quotes (`call rename 'Night Owl'`);
+  unquoted, each word is its own argument.
+
+**Adoption steps**
+1. Nothing required for `measure ui`.
+2. *Optional, DOM games:* re-copy `adapters/js/witness.js` and build `state.screenText` with `witness.dom.text(panel)`;
+   tappables labels may change where buttons have an `aria-label` (re-check tests that match choice labels).
+
 ## 0.7.9 (2026-10-22)
 
 A back-compat fix, reported by Euchre Unleashed.

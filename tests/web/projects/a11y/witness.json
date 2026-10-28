@@ -1,0 +1,6 @@
+{
+  "name": "a11y-text",
+  "launch": { "url": "http://127.0.0.1:5318/a11y.html", "server": { "command": "node ../../serve.mjs 5318" }, "reset": "handler" },
+  "seed": 1,
+  "timeout": 40
+}

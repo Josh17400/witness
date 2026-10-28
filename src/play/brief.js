@@ -105,6 +105,7 @@ COMMANDS (run with your Bash tool, one at a time, exactly as written: the full p
   end:    ${S} end --fun <1-5> --difficulty <1-5> --feedback '<3-6 sentences>'
   (if ${S} isn't found, the long form works the same: ${W} do "<orders>" -s ${name}, ${W} next -s ${name}, …)
   Note and feedback text goes in single quotes, written plainly: no backticks, no $, no apostrophes inside (say "do not", "the guards sword"). A backtick makes the command fail.
+  Inside an order, a value of several words goes in single quotes, or each word becomes its own value: call rename 'Night Owl'.
 ${live ? "SPEED: every turn, send ONLY the next command. No text before or after it, no plans written out: typing costs you time while the game plays on. Think briefly, act." : `TURNS: send only the next command each turn (no commentary), but think it through first: the game waits for you${watch ? " (a person is watching, and each order plays at real speed)" : ""}, so use that time to pick the best move${turn ? "" : defense ? ": what to fire at, when to use a special, what to buy" : ": weapon for the range, cover, when to back off"}.`}
 
 ORDERS (chain several with ";"):

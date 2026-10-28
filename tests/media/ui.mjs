@@ -316,4 +316,17 @@ function village() {
   ok("textContrast: the same glyphs in one colour → a ratio, not unreliable", !tp.unreliable && tp.ratio > 10);
 }
 
+// a huge element at DPR 3 (Euchre's shop preview: a full-screen card back listed as text): hundreds of thousands of ink
+// pixels must not overflow the stack (Math.min(...pixels) did: "Maximum call stack size exceeded")
+{
+  const W = 1179, H = 1400, big = img(W, H, [250, 250, 250]);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (((x >> 2) + (y >> 2)) % 2 === 0) put(big, x, y, [40 + ((x * 200 / W) | 0), 230 - ((x * 200 / W) | 0), 90]);
+  let r = null, err = null;
+  try { r = textContrast(big, { x: 0, y: 0, w: W, h: H }); } catch (e) { err = e.message; }
+  ok("textContrast: a 1179×1400 element (800k ink pixels) is measured, no stack overflow", !err && r && (r.ratio > 0 || r.unreliable), err || JSON.stringify(r && { ratio: r.ratio, unreliable: r.unreliable }));
+  let rows = null; err = null;
+  try { rows = findTextRows(big); } catch (e) { err = e.message; }
+  ok("findTextRows on the same big busy picture: no stack overflow", !err && rows && Array.isArray(rows.rows), err);
+}
+
 done("ui");

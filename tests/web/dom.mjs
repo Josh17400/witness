@@ -147,6 +147,21 @@ else {
     } finally { await g.stop(); }
   }
 
+  // 2d. dom.text / dom.tappables read like a player: aria-hidden decoration and [hidden] left out, aria-label names a
+  // button, a text field is labelled "<label> [text field: value]" and marked input: true
+  {
+    const f = findConfig(P("a11y"));
+    const g = await openGame(f.config, f.root, { quiet: true });
+    try {
+      const s = g.session;
+      await stepTo(s, await begin(s, { seed: 1 }), 2);
+      const a = (await s.snapshot()).state, labels = (a.choices || []).map((c) => c.label);
+      ok("dom.text: the panel's words without aria-hidden minis (no 'D T') or hidden text", a.text === "Tournament result You won 3 of 4 rounds. go Loadout name Night Owl", a.text);
+      ok("dom.tappables: aria-label names the button; the text field says so; an aria-hidden button is not listed",
+        labels.includes("Deal again") && labels.includes("Loadout name [text field: Night Owl]") && !labels.some((l) => /decorative/.test(l)) && a.choices.find((c) => c.id === "nm").input === true, a.choices);
+    } finally { await g.stop(); }
+  }
+
   // 3. the CLI, two separate processes: the same shot mid-transition, byte for byte
   const files = [1, 2].map((i) => path.join(os.tmpdir(), `witness-dom-${process.pid}-${i}.png`));
   const runs = files.map((out) => spawnSync(process.execPath, [cli, "shot", "--at", "0.8", "--input", "space@0.3", "--out", out], { cwd: P("dom"), encoding: "utf8", timeout: 180000, env: process.env }));
@@ -159,7 +174,7 @@ else {
   const lines = j ? j.data.lines.join("\n") : doc.stdout + doc.stderr;
   ok("doctor on the DOM page: deterministic, no 'no visible <canvas>' warning, the DOM capture and the epoch named", j && j.summary.deterministic === true && !/⚠ no visible <canvas>/.test(lines) && /DOM page \(no visible <canvas>\)/.test(lines) && /clock: the game's Date starts at 2026-06-15/.test(lines) && /browser \(DOM\)/.test(lines), lines);
   ok("doctor on the DOM page (launch.inject, transitions, a rAF loop, end events): nothing on real time between frames, no inject tip", j && j.summary.web.realtime && j.summary.web.realtime.calls === 0 && !/real time between frames|inline classic/.test(lines), lines);
-  for (const n of ["dom", "dom-plain", "dom-boot", "hover"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
+  for (const n of ["dom", "dom-plain", "dom-boot", "hover", "a11y"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);

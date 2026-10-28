@@ -286,7 +286,8 @@ function inkGradient(img, labs, idx, lab, fgGroup, bgCore, W) {
     const n = pts.length, mp = pos.reduce((s, v) => s + v, 0) / n;
     const vp = pos.reduce((s, v) => s + (v - mp) ** 2, 0);
     if (vp <= 0) continue;
-    const lo = Math.min(...pos), hi = Math.max(...pos);
+    let lo = Infinity, hi = -Infinity;   // a loop, not Math.min(...pos): a big element at DPR 3 has 100k+ ink pixels
+    for (const v of pos) { if (v < lo) lo = v; if (v > hi) hi = v; }
     for (let ch = 0; ch < 3; ch++) {
       const cv = pts.map((p) => d[p * 4 + ch]), mc = cv.reduce((s, v) => s + v, 0) / n;
       let sxy = 0, vc = 0;
@@ -386,7 +387,7 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
       const top = [...counts].sort((p, q) => q[1] - p[1])[0][0], pc = [top >> 16, (top >> 8) & 255, top & 255];
       const inner = new Uint8Array(W * H);
       for (let y = b.y + 1; y < b.y + b.h - 1; y++) for (let x = b.x + 1; x < b.x + b.w - 1; x++) { const i = y * W + x; if (mask[i] && !near(i * 4, pc)) inner[i] = 1; }
-      glyphs.push(...components(inner, W, H, { region: { x: b.x + 1, y: b.y + 1, w: b.w - 2, h: b.h - 2 }, minPixels: 1 }).map((g) => ({ ...g, src: inner })));
+      for (const g of components(inner, W, H, { region: { x: b.x + 1, y: b.y + 1, w: b.w - 2, h: b.h - 2 }, minPixels: 1 })) glyphs.push({ ...g, src: inner });
       continue;
     }
     glyphs.push({ ...c, src: mask });
@@ -394,7 +395,7 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
   const cand = glyphs.filter((g) => g.bbox.h >= 2 && g.bbox.h <= 64 && g.bbox.w <= 3 * g.bbox.h + 2).map((g) => ({ ...g.bbox, count: g.count, stroke: strokeWidth(g.src, W, g.bbox) })).sort((a, b) => a.x - b.x);
   // union glyphs that sit side by side on a line
   const parent = cand.map((_, i) => i);
-  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const find = (i) => { let r = i; while (parent[r] !== r) r = parent[r]; while (parent[i] !== r) { const n = parent[i]; parent[i] = r; i = n; } return r; };   // iterative: long chains
   // candidates are sorted by x over the whole screen: stop at a bound that doesn't depend on the candidate (1.3x the
   // tallest glyph allowed), so a small shape elsewhere on screen can't end the search before a's real neighbour
   for (let i = 0; i < cand.length; i++) for (let j = i + 1; j < cand.length; j++) {
@@ -407,13 +408,13 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
     if (ov >= 0.5 * Math.min(a.h, b.h) && Math.max(a.h, b.h) <= 2.5 * Math.min(a.h, b.h)) parent[find(j)] = find(i);
   }
   const groups = new Map();
-  cand.forEach((c, i) => { const r = find(i); groups.set(r, (groups.get(r) || []).concat(c)); });
+  cand.forEach((c, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(c); });
   const rows = [];
   for (const g of groups.values()) {
     if (g.length < minGlyphs || g.filter((c) => c.w <= 1).length * 2 >= g.length) continue;   // mostly 1 px bars: a fence or planks, not letters
     if (g.every((c) => c.w === g[0].w && c.h === g[0].h && c.count === g[0].count)) continue;   // identical shapes: a row of icons (hearts, coins)
     const hs = g.map((c) => c.h).sort((a, b) => a - b), med = hs[hs.length >> 1];
-    const glyphPx = Math.max(...hs.filter((h) => h <= 1.5 * med));
+    const glyphPx = hs.filter((h) => h <= 1.5 * med).reduce((m, h) => (h > m ? h : m), -Infinity);
     // letters are strokes: their typical stroke (the shorter of the horizontal and vertical runs through each ink
     // pixel) is thin for their height; trees, houses, villagers and stones are filled shapes
     const strokes = g.map((c) => c.stroke).sort((a, b) => a - b), stroke = strokes[strokes.length >> 1];
@@ -421,8 +422,8 @@ export function findTextRows(img, { threshold = 24, minGlyphs = 3 } = {}) {
     // and they share a baseline: most glyph bottoms within 1 px of the row's (descenders and punctuation aside)
     const bots = g.map((c) => c.y + c.h).sort((a, b) => a - b), base = bots[bots.length >> 1];
     if (bots.filter((y) => Math.abs(y - base) <= 1).length * 2 < g.length) continue;
-    const x0 = Math.min(...g.map((c) => c.x)), y0 = Math.min(...g.map((c) => c.y));
-    const x1 = Math.max(...g.map((c) => c.x + c.w)), y1 = Math.max(...g.map((c) => c.y + c.h));
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const c of g) { x0 = Math.min(x0, c.x); y0 = Math.min(y0, c.y); x1 = Math.max(x1, c.x + c.w); y1 = Math.max(y1, c.y + c.h); }
     rows.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0, glyphs: g.length, glyphPx });
   }
   rows.sort((a, b) => a.y - b.y || a.x - b.x);

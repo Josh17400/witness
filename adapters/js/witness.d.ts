@@ -191,7 +191,9 @@ export interface WitnessDomHelpers {
    *  "ok", "blocked by <what covers it>" (warned), or "not found: <selector>". */
   tap(el: Element | string): string;
   /** What can be tapped (buttons, links, inputs, [role=button], [onclick]), visible, in view first. */
-  tappables(root?: Element | string): { label: string; id: string | null }[];
+  tappables(root?: Element | string): { label: string; id: string | null; input?: true }[];
+  /** The visible text under root (default the body), aria-hidden / hidden parts left out: for state.screenText. */
+  text(root?: Element | string): string;
 }
 
 export interface WitnessApi {
