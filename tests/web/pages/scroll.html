@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scroll page</title>
+  <!-- 0.7.11 (Euchre's settings page on an iPhone): a page taller than the screen with a fixed bottom tab bar over its
+       "Save current look" button, and a scrollable panel of its own. A tap on Save is refused while the bar covers it
+       (witness.dom.tap, as a finger would be); play's `scroll` order brings it clear with wheel input. -->
+  <style>
+    html, body { margin: 0; background: #123; color: #fff; font: 16px sans-serif; }
+    #panel { height: 120px; overflow: auto; background: #234; }
+    #panel div { height: 400px; }
+    #spacer { height: calc(100vh - 190px); }
+    #save { display: block; width: 80%; height: 40px; margin: 0 auto; }
+    #more { height: 600px; }
+    #tabs { position: fixed; left: 0; right: 0; bottom: 0; height: 90px; background: #345; display: flex; }
+    #tabs button { flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="panel"><div>A panel with its own scroll</div></div>
+  <div id="spacer"></div>
+  <button id="save">Save current look</button>
+  <div id="more"></div>
+  <nav id="tabs"><button id="tab-home">Home</button><button id="tab-looks">Looks</button></nav>
+  <script type="module">
+    import witness from "/witness/witness.js";
+    history.scrollRestoration = "manual";
+    const game = { saved: 0 };
+    document.getElementById("save").addEventListener("click", () => { game.saved++; });
+    await witness.start({
+      name: "scroll-page", fps: 60,
+      calls: { tap: (id) => witness.dom.tap(`#${id}`) },
+      snapshot: () => ({ saved: game.saved, y: Math.round(scrollY), panelY: Math.round(document.getElementById("panel").scrollTop), choices: witness.dom.tappables() }),
+    });
+  </script>
+</body>
+</html>

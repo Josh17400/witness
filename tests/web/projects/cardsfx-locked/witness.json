@@ -1,0 +1,7 @@
+{
+  "name": "cardsfx-locked",
+  "launch": { "url": "http://127.0.0.1:5338/cardsfx.html?eager=1", "server": { "command": "node ../../serve.mjs 5338" }, "audioUnlock": false },
+  "tests": "../cardsfx/witness",
+  "seed": 1,
+  "timeout": 40
+}

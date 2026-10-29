@@ -207,6 +207,16 @@ else {
   j = json(r);
   rtQuiet.push(["voices, --json", j]);
   ok("voices: doctor deterministic (state, screenshot and audio)", j && j.summary.deterministic === true && /✔ deterministic .*audio/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
+  // a pure-DOM card game's one-shots (Euchre): the context made by the first tap of a test in pass 1 but already there
+  // in pass 2, envelopes and starts at currentTime + 0.01 from a tap, a call, a timer, a rAF and a promise continuation,
+  // a decodeAudioData'd WAV a timer plays 20 ms after the tap; and under the iPhone policy a context made at load,
+  // frozen until the tap's resume() in pass 1, running all along in pass 2. Was: 36 of Euchre's tests had audio
+  // differing between passes (quanta off the reset's grid, half a sample at currentTime 0, the decode on real time);
+  // the first test makes / resumes it by a dom.tap call right after a capture at that time (was 128 samples off)
+  for (const n of ["cardsfx", "cardsfx-locked"]) {
+    r = witness(P(n), ["test", "--repeat", "2"], env);
+    ok(`${n}: test --repeat 2 identical audio at every step (lazy context on the first tap, ${n === "cardsfx" ? "decodeAudioData, one-shots from taps / calls / timers / rAF" : "resume() of a frozen context on a tap"}, also by a call at a capture's time)`, r.status === 0 && /6 passed, 0 failed/.test(r.stdout) && /identical at every step/.test(r.stdout) && !/repeat: audio differs/.test(r.stdout), r.stdout + r.stderr);
+  }
 
   // captured audio is silent while suspended and sounds after the tap (sample-exact, through the CLI's own modules)
   {
@@ -458,8 +468,15 @@ else {
     if (m) pass += +m[1];
     ok("media page suite (tests/web/media.mjs)", d.status === 0 && m && +m[2] === 0, d.stdout + d.stderr);
   }
+  // 0.7.11: wheel input scrolls a page like a browser; play's scroll order and the covered-pick fix on a real page
+  {
+    const d = spawnSync(process.execPath, [path.join(here, "scroll.mjs")], { encoding: "utf8", timeout: 600000, env: { ...process.env, ...env } });
+    const m = /(\d+) passed, (\d+) failed/.exec(d.stdout || "");
+    if (m) pass += +m[1];
+    ok("scroll page suite (tests/web/scroll.mjs)", d.status === 0 && m && +m[2] === 0, d.stdout + d.stderr);
+  }
   for (const d of shots) fs.rmSync(d, { recursive: true, force: true });
-  for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "safe-nocover", "mixed", "voices"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
+  for (const n of ["bridge", "unlock", "unlock-bug", "gl", "safe", "safe-nocover", "mixed", "voices", "cardsfx", "cardsfx-locked"]) fs.rmSync(path.join(P(n), "witness", "shots"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);

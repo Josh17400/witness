@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Card sounds</title>
+  <!-- A pure-DOM card game's sound effects, the way a card game makes them: no canvas, no audio until the first tap
+       (the AudioContext is made lazily then, and resumed on every tap while suspended), WebAudio one-shots from a
+       tap handler, from a game call, from a setTimeout (the AI's turn), from a rAF callback and from a promise
+       continuation, envelopes and starts relative to ctx.currentTime, and a decodeAudioData'd WAV. -->
+  <style>
+    html, body { margin: 0; background: #063; font: 16px sans-serif; color: #fff; }
+    button { position: absolute; width: 60px; height: 90px; border: 0; background: #eee; color: #000; }
+    #deal { left: 20px; top: 20px; width: 100px; height: 40px; background: #fc0; }
+  </style>
+</head>
+<body>
+  <button id="deal">Deal</button>
+  <button class="card" style="left:20px;top:100px">9</button>
+  <button class="card" style="left:90px;top:100px">10</button>
+  <button class="card" style="left:160px;top:100px">J</button>
+  <button class="card" style="left:230px;top:100px">Q</button>
+  <button class="card" style="left:300px;top:100px">K</button>
+  <script type="module" src="cardsfx.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "name": "cardsfx",
+  "launch": { "url": "http://127.0.0.1:5337/cardsfx.html", "server": { "command": "node ../../serve.mjs 5337" } },
+  "tests": "witness",
+  "seed": 1,
+  "timeout": 40
+}

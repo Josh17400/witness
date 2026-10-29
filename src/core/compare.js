@@ -1,6 +1,7 @@
 // Witness core: compare two moments of a game exactly (state, digest, screenshot, audio).
 // Used by `doctor` (same run twice, with a different run in between), test steps with
-// `"match": "label"`, `witness test --repeat N`, and replays checked against <file>.state.json.
+// `"match": "label"`, `witness test --repeat N`, and replays checked against <file>.state.json. Screenshots and
+// audio match within a tolerance (shotTolOf / audioTolOf); state and digest always exactly.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { decodePNG, isPNG } from "../media/png.js";
@@ -184,6 +185,15 @@ export function audioTolOf(opt = {}, cfg = {}) {
   return n;
 }
 
+/** The screenshot tolerance from --shot-tol, else witness.json "shotTol", else 2 (per channel, 0..255; 0 = exact). */
+export function shotTolOf(opt = {}, cfg = {}) {
+  const v = opt["shot-tol"] !== undefined && opt["shot-tol"] !== true ? opt["shot-tol"] : cfg && cfg.shotTol;
+  if (v === undefined || v === null || v === "") return 2;
+  const n = +v;
+  if (!(n >= 0 && n <= 255)) throw new RangeError(`--shot-tol / "shotTol" wants a per-channel level 0..255 (default 2; 0 = exact), got ${JSON.stringify(v)}`);
+  return n;
+}
+
 /**
  * A Matcher remembers the first capture of each label and compares later captures to it.
  * capture = { snap, shot?, audio? } (audio = {sampleRate, channels, format, data}).
@@ -221,7 +231,7 @@ export class Matcher {
     if (ref.shotHash && cur.shotHash && ref.shotHash !== cur.shotHash) {
       const px = shotDiff = shotPixelDiff(ref.shot, cur.shot, { tol: this.shotTol });
       const sizes = (() => { const A = shotImageOf(ref.shot), B = shotImageOf(cur.shot); return A && B && (A.width !== B.width || A.height !== B.height) ? ` (sizes ${A.width}×${A.height} vs ${B.width}×${B.height})` : ""; })();
-      if (px && px.count === 0) notes.push(`screenshot: ${px.noise} px differ by at most ${px.maxDelta} level${px.maxDelta === 1 ? "" : "s"} (within the ±${px.tol} tolerance: anti-aliasing / GPU noise)`);
+      if (px && px.count === 0) notes.push(`screenshot: ${px.noise} px differ by at most ${px.maxDelta} level${px.maxDelta === 1 ? "" : "s"} (within the ±${px.tol} tolerance, --shot-tol: anti-aliasing / GPU noise)`);
       else problems.push(px ? `screenshot differs: ${px.count} px (${px.percent.toFixed(3)}%) off by more than ${px.tol} level${px.tol === 1 ? "" : "s"}${px.bbox ? ` in box x=${px.bbox.x} y=${px.bbox.y} ${px.bbox.w}×${px.bbox.h}` : ""}, up to ${px.maxDelta} levels${px.noise ? ` (+${px.noise} px within ±${px.tol})` : ""}`
         : `screenshot differs${sizes}`);
     }

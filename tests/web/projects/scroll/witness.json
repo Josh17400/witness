@@ -1,0 +1,7 @@
+{
+  "name": "scroll-page",
+  "launch": { "url": "http://127.0.0.1:5318/scroll.html", "server": { "command": "node ../../serve.mjs 5318" }, "device": "iphone-15" },
+  "play": { "profile": "turn", "pick": { "call": "tap" } },
+  "seed": 1,
+  "timeout": 40
+}

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Animations started between frames</title>
+  <!-- Animations started outside a frame are held on the virtual clock the moment they exist (0.7.11): a call adds a
+       class that starts a transition, a key listener (input) starts another, boot code starts a keyframe animation,
+       and a call starts element.animate() and sets its rate. Euchre Unleashed needed its own "freezeNew" hold for this. -->
+  <style>
+    html, body { margin: 0; background: #000; }
+    .box { position: absolute; left: 20px; width: 40px; height: 40px; }
+    #a { top: 10px; background: rgb(255, 0, 0); transition: transform 1s linear; }
+    #b { top: 60px; background: rgb(0, 255, 0); transition: transform 1s linear; }
+    #c { top: 110px; background: rgb(0, 0, 255); }
+    #c.go { animation: slide 2s linear 1 forwards; }
+    #d { top: 160px; background: rgb(255, 255, 0); }
+    .go { transform: translateX(200px); }
+    @keyframes slide { from { transform: translateX(0); } to { transform: translateX(200px); } }
+  </style>
+</head>
+<body>
+  <div class="box" id="a"></div><div class="box" id="b"></div><div class="box" id="c"></div><div class="box" id="d"></div>
+  <script type="module">
+    import witness from "/witness/witness.js";
+    const $ = (s) => document.querySelector(s);
+    const game = { goAt: null, keyAt: null, waAt: null, runs: [], starts: [] };
+    $("#a").addEventListener("transitionrun", () => game.runs.push(performance.now()));
+    $("#c").addEventListener("animationstart", () => game.starts.push(performance.now()));
+    document.addEventListener("keydown", (e) => { if (e.key === "k") { game.keyAt = performance.now(); $("#b").classList.add("go"); } });
+    $("#c").classList.add("go");   // boot code: a keyframe animation from the first moment
+    let wa = null;
+    const ct = (el) => { const a = el.getAnimations()[0]; return a ? a.currentTime : null; };
+    await witness.start({
+      name: "anim-start", fps: 60, size: [400, 220],
+      calls: {
+        go: () => { game.goAt = performance.now(); $("#a").classList.add("go"); return true; },
+        wa: () => { game.waAt = performance.now(); wa = $("#d").animate([{ transform: "translateX(0)" }, { transform: "translateX(200px)" }], { duration: 1000, fill: "forwards" }); wa.playbackRate = 2; return true; },
+      },
+      snapshot: () => ({ ...game, now: performance.now(), a: ct($("#a")), b: ct($("#b")), c: ct($("#c")), d: wa ? wa.currentTime : null }),
+    });
+  </script>
+</body>
+</html>

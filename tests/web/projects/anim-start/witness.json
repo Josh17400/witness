@@ -1,0 +1,6 @@
+{
+  "name": "anim-start",
+  "launch": { "url": "http://127.0.0.1:5318/anim-start.html", "server": { "command": "node ../../serve.mjs 5318" } },
+  "seed": 1,
+  "timeout": 40
+}

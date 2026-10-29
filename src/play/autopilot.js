@@ -10,6 +10,7 @@ import { OrderError, resolveTarget, ORDER_CARD_TURN, ORDER_CARD_DEFENSE } from "
 import { thingLabel } from "./perceive.js";
 import { DotClassifier } from "./events.js";
 import { parseWitnessInput } from "../core/input-spec.js";
+import { measureExpr, choiceTarget, blockedOf, scrollAdvice, stepsFor, shortWords } from "./scroll.js";
 
 // ------------------------------------------------------------------ controller: wanted controls → protocol events
 export function newWant() { return { held: new Map(), taps: [], axes: {}, mouse: null, raw: [] }; }
@@ -1004,6 +1005,10 @@ class Pick extends Behaviour {
         const r = c.rect;
         if (!r) return this.fail(`choice ${c.n} has no rect or pos to click (give choices a rect, or set play.pick)`);
         const x = Math.round(r.length >= 4 ? r[0] + r[2] / 2 : r[0]), y = Math.round(r.length >= 4 ? r[1] + r[3] / 2 : r[1]);
+        // its centre isn't on the screen: a finger can't reach it there (nothing sent)
+        // (only against a size the game declared: a guessed 640×360 would refuse clicks on a bigger window)
+        const [W, H] = (ap.sizeKnown && ap.size) || [Infinity, Infinity];
+        if (y < 0 || y >= H || x < 0 || x >= W) { const dy = y - H / 2; return this.fail(`${this.desc.replace(/^picked/, "can't pick")}: it is off screen (${y < 0 ? "above" : y >= H ? "below" : "beside"} the ${W}×${H} view, nothing sent): ${x >= 0 && x < W ? `scroll ${dy > 0 ? "down" : "up"} ${stepsFor(dy, ap.cfg.scroll.step)} (or "scroll to ${shortWords(c.label)}"), then pick again` : "the game has to bring it on screen"}`); }
         want.raw.push({ at: 0, type: "mouse", x, y }, { at: 0, type: "mouse", x, y, button: 0, down: true }, { at: 2, type: "mouse", x, y, button: 0, down: false });
         return this.run();
       }
@@ -1014,10 +1019,21 @@ class Pick extends Behaviour {
       want.taps.push({ label: "pick", c: parseControl(String(c.n)), frames: cfg.controls.tapFrames });
       return this.run();
     }
+    // a measurement asked for below (why a tap didn't land): turn it into the fix
+    if (this.phase === "advise") {
+        if (this.evalValue === undefined && !this.evalFailed) return this.run();
+      const m = this.evalFailed ? null : this.evalValue;
+      const adv = scrollAdvice(c.label, m, this.blocked, cfg.scroll.step, c.rect, ap.sizeKnown ? ap.size : null);
+      if (!this.blocked && !adv) return this.fail(`${this.desc} but nothing changed (is play.pick right? choices: ${this.route()})`);
+      return this.fail(`${this.desc.replace(/^picked/, "couldn't pick")}${this.blocked ? ` (the tap was refused${this.result ? `: ${clip(oneLine(this.result), 80)}` : ""})` : ""}${adv ? `: ${adv}` : this.blocked ? `: covered by ${this.blocked.what}` : ""}`);
+    }
     // the game's answer to a call: false / {ok: false} / {error} is a refusal
     if (this.result !== undefined && !this.judged) {
       this.judged = true;
       if (this.callFailed) return this.fail(this.result);
+      // a tap the page refused because something covers the choice (witness.dom.tap: "blocked by #tabs"): say why and the fix
+      this.blocked = blockedOf(this.callValue);
+      if (this.blocked) return this.advise();
       const why = refusalOf(this.callValue);
       if (why != null) return this.fail(`${this.desc}: the game refused it${why ? ` ("${clip(why, 120)}")` : ""}`);
     }
@@ -1032,8 +1048,17 @@ class Pick extends Behaviour {
     const changed = this.watch.check(w);
     if (changed) return this.done(`${this.desc}: state changed (${changed})`);
     if (this.result !== undefined && !this.callFailed && ap.t - this.waitT > 0.5) return this.done(`${this.desc}: the game accepted it (${this.result}), nothing visible changed yet`);
-    if (ap.t - this.waitT > 1.0) return this.fail(`${this.desc} but nothing changed (is play.pick right? choices: ${this.route()})`);
+    if (ap.t - this.waitT > 1.0) {
+      // a click on a page that changed nothing: maybe a bar covers the choice (measured when the game can eval)
+      if (this.route() === "click" && !this.advised) return this.advise();
+      return this.fail(`${this.desc} but nothing changed (is play.pick right? choices: ${this.route()})`);
+    }
     return this.run();
+  }
+  /** Ask the page where the choice is (the daemon answers in evalValue / evalFailed); the next tick words the fix. */
+  advise() {
+    this.advised = true; this.phase = "advise"; this.evalValue = undefined; this.evalFailed = false;
+    return { status: "eval", expr: measureExpr(choiceTarget(this.choice)) };
   }
 }
 /** The game's notice says something new: not gone, and more than its numbers changed (a countdown ticking isn't). */
@@ -1066,6 +1091,113 @@ class WaitTurn extends Behaviour {
     return this.run();
   }
 }
+/**
+ * scroll down|up [n] (n × play.scroll.step px of wheel), scroll top|bottom, scroll to <choice>: wheel input at the
+ * middle of the screen (or over the choice's scroller), recorded like any input so a replay scrolls the same; the
+ * page is measured with an eval that only reads the layout (games without eval: the choice's rect, else blind). With
+ * play.scroll.call, `scroll to` asks the game instead (a recorded call).
+ */
+class Scroll extends Behaviour {
+  constructor(o, ap, w) {
+    super(o, ap, w);
+    this.step = ap.cfg.scroll.step; this.tries = 0;
+    if (o.to) {
+      try { this.choice = w.choices ? matchChoice(w.choices, o) : null; }
+      catch (e) { if (o.option != null) throw e; this.choice = null; }   // words not among the choices: looked for on the page
+      if (!this.choice && o.option != null) throw new OrderError("there are no choices right now to scroll to by number: scroll to <words on the page>", ORDER_CARD_TURN);
+      this.target = this.choice ? choiceTarget(this.choice) : { id: null, label: o.optionText };
+      this.name = this.choice ? `${this.choice.n}) "${clip(this.choice.label, 50)}"` : `"${clip(o.optionText, 50)}"`;
+      this.phase = ap.cfg.scroll.call && this.choice ? "call" : "measure";
+    } else this.phase = o.dir === "top" || o.dir === "bottom" ? "page0" : "wheel";
+  }
+  eval(expr, next) { this.phase = next; this.evalValue = undefined; this.evalFailed = false; return { status: "eval", expr }; }
+  got() { return this.evalValue !== undefined || this.evalFailed; }
+  page() { return !this.evalFailed && this.evalValue && this.evalValue.page ? this.evalValue : null; }
+  /** Wheel dy px over (x, y) (game pixels; null: at the pointer), then let the page settle a few frames. */
+  wheel(want, dy, at, next) {
+    const ev = { at: 0, type: "wheel", dy: Math.round(dy) };
+    if (at) { ev.x = at[0]; ev.y = at[1]; }
+    want.raw.push(ev); this.sent = (this.sent || 0) + Math.round(dy); this.phase = next; this.waitT = this.ap.t;
+    return this.run();
+  }
+  mid() { const [W, H] = this.ap.size || [640, 360]; return [Math.round(W / 2), Math.round(H / 2)]; }
+  tick(w, want) {
+    const ap = this.ap, cfg = ap.cfg, o = this.o;
+    const settled = () => ap.t - this.waitT >= 3 / ap.fps - 1e-9;
+    const label = this.choice ? this.choice.label : o.optionText;
+    switch (this.phase) {
+      // ---- down / up / top / bottom: where the page is, the wheel, where it is now
+      case "page0": case "wheel": {
+        if (!this.p0asked) { this.p0asked = true; return this.eval(measureExpr({ page: true }), this.phase); }
+        if (!this.got()) return this.run();
+        const p0 = this.p0 = this.page(), at = p0 && !p0.canvas ? this.mid() : null;
+        if (this.phase === "wheel") return this.wheel(want, (o.dir === "up" ? -1 : 1) * (o.n || 1) * this.step, at, "after");
+        const dy = p0 ? (o.dir === "top" ? -p0.y : p0.max - p0.y) : (o.dir === "top" ? -1 : 1) * 50 * this.step;
+        if (p0 && !dy) return this.done(`already at the ${o.dir} (page ${p0.y} of ${p0.max} px)`);
+        return this.wheel(want, dy, at, "after");
+      }
+      case "after": {
+        if (!settled()) return this.run();
+        if (!this.p1asked) { this.p1asked = true; return this.eval(measureExpr({ page: true }), "after"); }
+        if (!this.got()) return this.run();
+        const p0 = this.p0, p1 = this.page(), what = o.dir === "top" || o.dir === "bottom" ? `scrolled to the ${o.dir}` : `scrolled ${o.dir} ${o.n || 1} (${Math.abs(this.sent)} px)`;
+        if (!p0 || !p1) return this.done(`${what}: wheel sent (this game can't say where its page is: look at the choices or a screenshot)`);
+        if (p1.y === p0.y) return this.done(`${what}: nothing moved (${p1.max ? `already at the ${this.sent > 0 ? "bottom" : "top"}, page ${p1.y} of ${p1.max} px` : "the page fits the screen; the game may scroll its own way"})`);
+        return this.done(`${what}: page ${p0.y} → ${p1.y} of ${p1.max} px${p1.y >= p1.max - 1 ? " (the bottom)" : p1.y <= 0 ? " (the top)" : ""}`);
+      }
+      // ---- scroll to <choice>: the game's own scroll call
+      case "call": {
+        const c = this.choice;
+        const args = cfg.scroll.args.map((a) => (a === "index" || a === "n" ? c.n - 1 : a === "number" ? c.n : a === "label" ? c.label : a === "choice" ? c.raw : c.id));
+        this.phase = "called"; this.waitT = ap.t;
+        return { status: "call", name: cfg.scroll.call, args };
+      }
+      case "called": {
+        if (this.result === undefined) return this.run();
+        if (this.callFailed) return this.fail(this.result);
+        const why = refusalOf(this.callValue);
+        if (why != null) return this.fail(`scroll to ${this.name}: the game refused it${why ? ` ("${clip(why, 120)}")` : ""}`);
+        if (!settled()) return this.run();
+        return this.done(`scrolled to ${this.name} (${this.result})`);
+      }
+      // ---- scroll to <choice>: measured on the page, reached with wheel input (up to 3 wheels)
+      case "measure": {
+        if (!this.asked) { this.asked = true; return this.eval(measureExpr(this.target), "measure"); }
+        if (!this.got()) return this.run();
+        this.asked = false;
+        const m = this.evalFailed ? null : this.evalValue;
+        if (!m || !m.found) {
+          // nothing to measure (no eval, or not a DOM element): the choice's own rect against the screen
+          // (the same choice again, by id, as the game lists it now: its rect moved if the game scrolled)
+          const cur = this.choice && (w.choices || []).find((c) => String(c.id) === String(this.choice.id) && c.label === this.choice.label);
+          const r = cur ? cur.rect : this.tries ? null : this.choice && this.choice.rect, [, H] = ap.size || [640, 360];
+          if (r) {
+            const y = r.length >= 4 ? r[1] + r[3] / 2 : r[1];
+            if (y >= 0 && y < H) return this.done(this.tries ? `scrolled ${Math.abs(this.sent)} px ${this.sent > 0 ? "down" : "up"}: ${this.name} is on screen now (its centre at y ${Math.round(y)} of ${H})` : `${this.name} is on screen already (its centre at y ${Math.round(y)} of ${H})`);
+            if (this.tries && this.lastY === Math.round(y)) return this.fail(`scroll to ${this.name}: the wheel didn't move it (still at y ${Math.round(y)} of ${H}): this game doesn't scroll with the wheel; give it a play.scroll call`);
+            if (this.tries < 3) { this.tries++; this.lastY = Math.round(y); return this.wheel(want, y - H / 2, null, "settle"); }
+          }
+          if (this.tries) return this.done(`scrolled ${Math.abs(this.sent)} px ${this.sent > 0 ? "down" : "up"} toward ${this.name} (look at the choices or a screenshot)`);
+          return this.fail(m && m.found === false ? `scroll to ${this.name}: nothing on the page reads like that (choices: ${(w.choices || []).slice(0, 8).map((c) => `${c.n}) ${clip(c.label, 24)}`).join("  ") || "none"})`
+            : `scroll to ${this.name}: this game can't say where things are (no eval, no rect on the choice): use "scroll down [n]" / "scroll up [n]", or give the game a play.scroll call`);
+        }
+        if (m.overlay && !m.inView) return this.fail(`scroll to ${this.name}: covered by ${m.coveredBy}: close it first (scrolling won't clear it)${this.tries ? `; scrolled ${Math.abs(this.sent)} px` : ", nothing sent"}`);
+        if (m.inView) return this.done(this.tries ? `scrolled ${Math.abs(this.sent)} px ${this.sent > 0 ? "down" : "up"}: ${this.name} is in view now${m.bars.bottom || m.bars.top ? ", clear of the fixed bars" : ""}` : `${this.name} is in view already`);
+        const stuck = this.tries && this.lastY === m.rect[1];
+        if (stuck || this.tries >= 3 || (m.room < 1 && !this.tries)) {
+          const adv = scrollAdvice(label, m, null, this.step);
+          return this.fail(`scroll to ${this.name}: ${stuck || m.room < 1 ? "the page can't scroll further" : "still not clear after 3 tries"}${adv ? ` (${adv.replace(/[:,] (scroll|and the page) .*$/, "")})` : ""}`);
+        }
+        this.tries++; this.lastY = m.rect[1];
+        // a page without a canvas: game pixels are page pixels, so wheel over the choice's scroller; with one, at the pointer
+        return this.wheel(want, m.dy, m.canvas ? null : m.at, "settle");
+      }
+      case "settle": if (!settled()) return this.run(); this.phase = "measure"; return this.run();
+    }
+    return this.run();
+  }
+}
+
 const TURN_NO = /^(goto|go|run|explore|follow|fight|flee|talk|pickup|interact|stomp|jump|look|reload|weapon|block|dodge)$/;
 const DEFENSE_NO = /^(goto|go|run|explore|follow|flee|talk|pickup|stomp|jump|look|dodge)$/;
 function controlEventRaw(c, down) { return controlEvent(c, down, { x: 0, y: 0 }); }
@@ -1220,7 +1352,7 @@ class Standing extends Behaviour {
 
 // ------------------------------------------------------------------ the autopilot
 export class Autopilot {
-  constructor(cfg, { fps = 60, grid, perceiver, size = [640, 360] } = {}) {
+  constructor(cfg, { fps = 60, grid, perceiver, size, sizeKnown } = {}) {
     this.cfg = cfg; this.fps = fps; this.grid = grid; this.perceiver = perceiver;
     // autofight: enemies met during a move (goto/explore/follow/go) are fought on the spot and the move then resumes,
     // instead of waking the tester (fps shoots on the move; topdown stops, fights near, resumes). Platformer runners
@@ -1228,6 +1360,8 @@ export class Autopilot {
     this.policy = { retreat: cfg.retreat, heal: cfg.heal, guard: cfg.guard, reaction: cfg.reaction, autofight: cfg.autofight ?? cfg.profile !== "platformer" };
     this.standingMode = false;   // live mode: a Standing behaviour runs whenever no order does
     this.lastHurtT = -1e9; this.lastHp = null; this.dot = new DotClassifier();
+    // sizeKnown: the game declared its size (hello.size); else [640, 360] is a guess, not a screen edge to refuse clicks at
+    this.sizeKnown = sizeKnown ?? !!size; size = size || [640, 360];
     this.ctrl = new Controller(size); this.size = size;
     this.profile = makeProfile(cfg.profile, this);
     this.platform = cfg.profile === "platformer" ? new PlatformRunner(this) : null;
@@ -1612,6 +1746,7 @@ export class Autopilot {
       case "waitfor": if (cfg.profile === "turn") return new WaitTurn({ ...o, untimed: true }, this, w);
         return new WaitFor(o, this, w, resolveTarget(o.target, w, { allowRemembered: false }).things[0]);
       case "stop": return new Instant(o, this, w, () => ({ status: "done", msg: "stopped" }));
+      case "scroll": return new Scroll(o, this, w);
       case "set": return new Instant(o, this, w, () => {
         const k = o.key, v = o.value;
         if (/^(retreat|flee)$/.test(k)) { this.policy.retreat = v === false ? 0 : +v || 0; return { status: "done", msg: `retreat below ${this.policy.retreat}% hp` }; }
@@ -1707,10 +1842,11 @@ export class Autopilot {
         return this.finish(b, { status: "fail", msg: `a dialogue is open (${w.dialogue.speaker || "someone"}: "${clip(w.dialogue.text, 60)}") — choose an option or press cancel first` }, want);
       // no player in the snapshot (a cutscene, an intro, a title screen): only orders that don't move can run
       if (!w.player || !w.player.p2) {
-        if (!(b instanceof Tap || b instanceof Wait || b instanceof Hold || b instanceof Instant || b instanceof Choose || b instanceof Pick || b instanceof WaitTurn || b instanceof CallOrder || (this.cfg.profile === "defense" && (b instanceof Fight || b instanceof Standing))))
+        if (!(b instanceof Tap || b instanceof Wait || b instanceof Hold || b instanceof Instant || b instanceof Choose || b instanceof Pick || b instanceof WaitTurn || b instanceof CallOrder || b instanceof Scroll || (this.cfg.profile === "defense" && (b instanceof Fight || b instanceof Standing))))
           return this.finish(b, { status: "fail", msg: "there's no player in the game right now (an intro, a cutscene or a menu?) — wait, or press the key the screen asks for" }, want);
         const res0 = b.tick(w, want);
         if (res0.status === "call") { this.wantedMove = false; return { want, k: 1, status: "call", name: res0.name, args: res0.args }; }
+        if (res0.status === "eval") { this.wantedMove = false; return { want, k: 0, status: "eval", expr: res0.expr }; }
         if (res0.status === "run") { this.wantedMove = false; return { want, k: this.cfg.tick, status: "run" }; }
         const out0 = this.finish(b, res0, want);
         if (out0.status === "fail" || !this.queue.length) return out0;
@@ -1750,6 +1886,7 @@ export class Autopilot {
       const res = b.tick(w, want);
       if (this.aimTarget && this.cfg.profile === "fps") this.shootAt(w, want, this.aimTarget);
       if (res.status === "call") { this.wantedMove = false; return { want, k: 1, status: "call", name: res.name, args: res.args }; }
+      if (res.status === "eval") { this.wantedMove = false; return { want, k: 0, status: "eval", expr: res.expr }; }
       if (res.status === "run") { this.wantedMove = this.wantedMoveNow; return { want, k: b.fast ? 1 : this.k, status: "run" }; }
       if (b.auto) {
         // an autofight is the reflex layer's business: it isn't a result of the tester's order, just an event
@@ -1774,4 +1911,4 @@ export class Autopilot {
   }
 }
 
-export { CallOrder, GoTo, Fight, Flee, Talk, Choose, Pick, WaitTurn, StateWatch, Pickup, Explore, Tap, Hold, Wait, Behaviour, Look, hpPct, reachW, fmtCell };
+export { Scroll, CallOrder, GoTo, Fight, Flee, Talk, Choose, Pick, WaitTurn, StateWatch, Pickup, Explore, Tap, Hold, Wait, Behaviour, Look, hpPct, reachW, fmtCell };

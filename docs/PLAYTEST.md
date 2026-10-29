@@ -181,6 +181,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `dodge [dir]` | roll | Tap dodge while moving (default: away from the nearest hostile). |
 | `wait [s]` | idle, pause, stay, rest | Let time pass (default 1 s); reflexes stay on. Turn profile: until your turn, new choices or a dialogue (at most s, or `play.turnWait`). `wait 5 quiet` (also `ignore`): only the big things wake it (death, low hp, a dialogue, the goal, an error, a scene change), not alerts, hits, items or kills, and it runs its full 5 s. |
 | `wait for <thing>` | | Until it passes, moves away, or 8 s. |
+| `scroll <down\|up> [n]` · `scroll top\|bottom` · `scroll to <n\|words>` | swipe (`swipe up` = scroll down) | Move a page that's taller than the screen (0.7.11; any profile, made for the turn profile's web pages). `scroll down 2` sends wheel input of 2 × `play.scroll.step` (200 px) over the middle of the screen; the answer says where the page is (`scrolled down 2 (400 px): page 0 → 400 of 1210 px`, or `nothing moved (already at the bottom …)`). `scroll to <choice>` brings one choice into the part of the screen no fixed bar covers: with `play.scroll.call` the game's own call (with the choice's id, recorded); else, on a game that answers `eval` (the JS adapter), the page is measured (a read-only eval, not recorded) and reached with wheel input over its scroller (`scrolled 431 px down: 1) "Save current look" is in view now, clear of the fixed bars`); else from the choice's `rect` against the screen. The wheel input is recorded, so a replay scrolls the same; the JS adapter scrolls the page (or the scrollable element under the pointer) the way a browser does, unless the page cancels the wheel. |
 | `stop` | halt, freeze | Release everything. |
 | `respawn` | revive, continue | Press confirm while dead, again every 1.5 s (a "press Enter" prompt often shows a second after the death), for up to 8 s. |
 | `set <k> <v>` | | Standing policies: `set retreat 30`, `set heal 40`, `set guard on\|off`, `set reaction 0.3`. Applies at once, also while dead or at low hp (no reflex replaces it). |
@@ -581,6 +582,13 @@ no movement: the observation is the game's own fields and the choices it offers,
   done after 0.5 s ("the game accepted it"); nothing at all after 1 s fails. When a dialogue with options is open,
   `pick` chooses in it (as `choose` does in any profile); in any profile, `choose` picks from `state.choices` when no
   dialogue with options is open.
+* **Covered or off-screen choices** (0.7.11): a pick a finger couldn't make isn't sent blindly. A call answered like
+  `witness.dom.tap`'s `"blocked by #tab-looks"` (or `{error: "… covered by …"}`, `"off screen"`), a `click` pick
+  whose rect lies outside the screen, and a `click` that changed nothing on a page that can be measured all fail
+  with the reason and the fix: `couldn't pick 4) "Save current look" (the tap was refused: called tap(save) →
+  "blocked by #tab-looks"): covered by the fixed bar at the bottom (#tabs): scroll down 1 (or "scroll to save
+  current look"), then pick again` (the step count is the least scrolling that clears the bar; a page that can't
+  scroll that far says so: a layout bug a player would hit too).
 * **`wait`**: until it's your turn (`state.yourTurn` turns true; also `your_turn`, `myTurn`, `isYourTurn`,
   `playerTurn`, or the `play.yourTurn` expression), a dialogue opens or changes, the scene changes, the game ends, or
   the choices change while it is your turn (the others' moves showing up while it isn't don't end it). A bare `wait`
@@ -721,6 +729,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `show` | auto | turn profile: the fields the observation shows (`["score", "hand", "state.trick", {"label": "trump", "expr": "state.round.trump"}]`) |
 | `pick` | `"auto"` | how a pick reaches the game: `{"call": "<fn>", "args": ["id"]}`, `"click"`, `"keys"` |
 | `turnWait` | 30 | seconds a bare `wait` may wait for your turn (turn profile) |
+| `scroll` | `{"step": 200}` | the `scroll` order: `step` = px of wheel per `scroll down 1`; `{"call": "<fn>", "args": ["id"]}` makes `scroll to <choice>` call the game (`"args"` as `pick`'s) instead of measuring the page |
 | `textCap` | `{dialogue: 600, notice: 600, menu: 600, screen: 1200}` | characters of the game's texts an observation shows before it says `(cut, N more chars; look --full)`: a number for all, or per field (`{"dialogue": 800, "notice": 600}`); 220 / 140 / 140 before 0.7.8 |
 | `screenText` | `state.screenText` | an expression for the game's full readable text of the current screen (a string, or a list of lines), shown as `screen text:` |
 | `resultChars` | 800 | how much of a call's result the order's answer shows (400 in 0.7.5; `look --full` shows it all) |

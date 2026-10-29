@@ -285,7 +285,7 @@ async function runTestOn(session, test, { shotDir, onShot, matcher, matchAll = f
   }
   if (!steps.length && !ranges.length && !measures.length) res.failures.push({ kind: "warn", message: "this test has no steps, so it checks nothing" });
   const matching = matcher && (matchAll || steps.some((st) => st.match));
-  const tolNotes = { n: 0, first: null };
+  const tolNotes = { audio: { n: 0, first: null }, shot: { n: 0, first: null } };
   // hello "audio_exact": false — the adapter can only capture audio in real time, so it isn't compared
   const useAudio = matching && matchMedia.audio && session.has("audio") && session.hello?.audio_exact !== false;
   const useShot = matching && matchMedia.shot && session.has("screenshot");
@@ -400,7 +400,7 @@ async function runTestOn(session, test, { shotDir, onShot, matcher, matchAll = f
         for (const label of labels) {
           // a --repeat step's reference is needed until the last pass compares it (match: labels may come back later)
           const r = await matcher.check(label, cap, `"${test.name}" ${where}`, { release: label.startsWith("step:") && !!test._lastPass });
-          for (const n of r.notes || []) if (n.startsWith("audio:")) { tolNotes.n++; if (!tolNotes.first) tolNotes.first = `${n} (${where})`; }
+          for (const n of r.notes || []) { const k = n.startsWith("audio:") ? "audio" : n.startsWith("screenshot:") ? "shot" : null; if (k) { tolNotes[k].n++; if (!tolNotes[k].first) tolNotes[k].first = `${n} (${where})`; } }
           if (!r.ok) {
             const what = label.startsWith("match:") ? `match "${label.slice(6)}"` : "repeat";
             for (const p of r.problems) res.failures.push({ kind: "match", at: st._at, message: `${what}: ${p}` });
@@ -524,8 +524,8 @@ async function runTestOn(session, test, { shotDir, onShot, matcher, matchAll = f
   for (const l of await session.drainLogs()) {
     if (l.level === "error") res.failures.push({ kind: "error", message: `game error${l.frame != null ? ` (frame ${l.frame})` : ""}: ${l.message}` });
   }
-  // audio that matched only within the tolerance: said once per test, not at every step
-  if (tolNotes.n) res.failures.push({ kind: "note", message: `${tolNotes.first}${tolNotes.n > 1 ? `; ${tolNotes.n - 1} more match(es) like it` : ""}` });
+  // screenshots / audio that matched only within the tolerance (--shot-tol / --audio-tol): said once per test, not at every step
+  for (const t of [tolNotes.shot, tolNotes.audio]) if (t.n) res.failures.push({ kind: "note", message: `${t.first}${t.n > 1 ? `; ${t.n - 1} more match(es) like it` : ""}` });
   res.ok = !res.failures.some((f) => f.kind === "expect" || f.kind === "error" || f.kind === "match");
   return res;
 }

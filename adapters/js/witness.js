@@ -29,7 +29,7 @@ const DEFAULT_ADDR = "127.0.0.1:7357";
 const VERSION = "1.0.0";
 // the Witness release this copy came from: the CLI says so when a game's copy is older than the CLI (a core test keeps
 // it equal to package.json)
-const WITNESS_VERSION = "0.7.10";
+const WITNESS_VERSION = "0.7.11";
 
 // The real APIs, captured before any takeover. The adapter only ever uses these.
 const real = {
@@ -410,54 +410,117 @@ function runFrame(dt) {
 // The Web Animations timeline runs on real time: a CSS transition or keyframe animation would be wherever the real
 // clock put it when a screenshot is taken. Every frame each animation of the document (CSS transitions, CSS
 // animations, element.animate()) is held at playbackRate 0 and its currentTime set from the virtual clock, counted
-// from the frame Witness first saw it. Past its end it is finished (rate restored, finish()), so animationend /
+// from the virtual time it was created at. Past its end it is finished (rate restored, finish()), so animationend /
 // transitionend still fire; those events (and the start / iteration ones) are dispatched by the browser's next
 // rendering update, so a frame that started, finished or wrapped an animation waits for one real display frame before
 // the next frame runs: the game's handlers run at the same virtual time in every run. Infinite animations are moved
 // along too, and <video> elements are paused (they play on real time). Off: WITNESS_CONFIG.animations = false.
-const anim = { on: false, state: new WeakMap(), flush: false, videos: true };
+// One started between frames (a call, an input listener, boot code, an async callback) is held from the moment it
+// exists, not from the end of the next frame (0.7.11): element.animate() is hooked, a MutationObserver (class / style /
+// attributes / inserted elements) and animationstart / transitionrun listeners catch CSS ones in a real animation-frame
+// callback (before the browser draws them), a call waits for that before it answers, and a step catches any left
+// before its first frame. So the first frame drawn or screenshotted shows it at its virtual start, in every run.
+const anim = { on: false, state: new WeakMap(), flush: false, videos: true, pending: false, rafQueued: false, mo: null };
 
-function syncAnimations() {
+/** Hold one animation on the virtual clock at now (st.rate null: created by the element.animate() hook at st.t0). */
+function syncOne(a, now, tl) {
+  if (a.timeline && tl && a.timeline !== tl) return;   // scroll-driven: not a clock
+  let st = anim.state.get(a), fresh = false;
+  const ps = a.playState;
+  if (ps === "idle") return;
+  if (!st || st.rate == null) {
+    fresh = true;
+    st = { t0: st ? st.t0 : now, rate: a.playbackRate > 0 ? a.playbackRate : 1, done: ps === "finished", iter: null };
+    anim.state.set(a, st);
+    if (st.done) return;   // already over (fill: forwards): it stays where it ended
+    anim.flush = true;   // start events (animationstart, transitionrun/start) go out with the next rendering update
+  }
+  if (ps === "paused") { st.t0 = now - (+a.currentTime || 0) / st.rate; return; }   // the game paused it: resume from there
+  if (st.done) {
+    if (ps === "finished") return;
+    st.done = false; st.t0 = now - (+a.currentTime || 0) / st.rate;   // played again (a.play() after the end)
+  } else if (!fresh && a.playbackRate > 0) { st.rate = a.playbackRate; st.t0 = now - (+a.currentTime || 0) / st.rate; }   // the game set a rate: on from here
+  const t = (now - st.t0) * st.rate;
+  const timing = a.effect ? a.effect.getComputedTiming() : null;
+  const end = timing ? timing.endTime : Infinity;
+  if (Number.isFinite(end) && t >= end) {
+    a.playbackRate = st.rate;
+    a.finish();
+    st.done = true;
+    anim.flush = true;
+    return;
+  }
+  if (a.playbackRate !== 0) a.playbackRate = 0;
+  a.currentTime = t;
+  if (G.CSSAnimation && a instanceof G.CSSAnimation && a.effect) {
+    const it = a.effect.getComputedTiming().currentIteration;
+    if (st.iter != null && it !== st.iter) anim.flush = true;   // animationiteration
+    st.iter = it;
+  }
+}
+
+/** all: every animation (the end of a frame); else only the ones not held yet (caught between frames). */
+function syncAnimations(all = true) {
   let list;
+  anim.pending = false;
+  if (anim.mo) anim.mo.takeRecords();   // mutations so far are covered by this flush: no extra catch frame for them
   try { list = G.document.getAnimations(); } catch { return; }   // also flushes style: new transitions exist from here
   const now = clock.now(), tl = G.document.timeline;
   for (const a of list) {
-    try {
-      if (a.timeline && tl && a.timeline !== tl) continue;   // scroll-driven: not a clock
-      let st = anim.state.get(a);
-      const ps = a.playState;
-      if (ps === "idle") continue;
-      if (!st) {
-        st = { t0: now, rate: a.playbackRate > 0 ? a.playbackRate : 1, done: ps === "finished", iter: null };
-        anim.state.set(a, st);
-        if (st.done) continue;   // already over (fill: forwards): it stays where it ended
-        anim.flush = true;   // start events (animationstart, transitionrun/start) go out with the next rendering update
-      }
-      if (ps === "paused") { st.t0 = now - (+a.currentTime || 0) / st.rate; continue; }   // the game paused it: resume from there
-      if (st.done) {
-        if (ps === "finished") continue;
-        st.done = false; st.t0 = now - (+a.currentTime || 0) / st.rate;   // played again (a.play() after the end)
-      }
-      const t = (now - st.t0) * st.rate;
-      const timing = a.effect ? a.effect.getComputedTiming() : null;
-      const end = timing ? timing.endTime : Infinity;
-      if (Number.isFinite(end) && t >= end) {
-        a.playbackRate = st.rate;
-        a.finish();
-        st.done = true;
-        anim.flush = true;
-        continue;
-      }
-      if (a.playbackRate !== 0) a.playbackRate = 0;
-      a.currentTime = t;
-      if (G.CSSAnimation && a instanceof G.CSSAnimation && a.effect) {
-        const it = a.effect.getComputedTiming().currentIteration;
-        if (st.iter != null && it !== st.iter) anim.flush = true;   // animationiteration
-        st.iter = it;
-      }
-    } catch (e) { warnOnce("css-anim", `a CSS / Web Animation could not be put on the virtual clock: ${e && e.message}`); }
+    if (!all) { const st = anim.state.get(a); if (st && st.rate != null) continue; }
+    try { syncOne(a, now, tl); } catch (e) { warnOnce("css-anim", `a CSS / Web Animation could not be put on the virtual clock: ${e && e.message}`); }
   }
-  if (anim.videos) for (const v of G.document.querySelectorAll("video")) if (!v.paused) { try { v.pause(); } catch { /* gone */ } }
+  if (all && anim.videos) for (const v of G.document.querySelectorAll("video")) if (!v.paused) { try { v.pause(); } catch { /* gone */ } }
+}
+/** Something may have started an animation: catch it in the next real animation frame, before it is drawn. */
+function animSoon() {
+  anim.pending = true;
+  if (anim.rafQueued || !real.requestAnimationFrame) return;
+  anim.rafQueued = true;
+  real.requestAnimationFrame(() => { anim.rafQueued = false; if (anim.on && anim.pending) syncAnimations(false); });
+}
+/** A mutation that can start one: an attribute (class / style / data-*) or an inserted element; text updates are skipped. */
+const animRecord = (r) => r.type === "attributes" || Array.prototype.some.call(r.addedNodes, (n) => n.nodeType === 1);
+/** Did anything that can start an animation happen since the last catch? (takes the observer's queued records) */
+function animMutated() {
+  if (anim.pending || !anim.mo) return true;
+  return anim.mo.takeRecords().some(animRecord);
+}
+/** Hold one animation not held yet (no style flush: it is already made). */
+function catchOne(a) {
+  const st = anim.state.get(a);
+  if (anim.on && !(st && st.rate != null)) { try { syncOne(a, clock.now(), G.document.timeline); } catch { /* the frame catches it */ } }
+}
+/** Hook element.animate() and watch the DOM for the CSS kind (installed with anim.on). */
+function installAnimationCatch() {
+  const EP = G.Element && G.Element.prototype;
+  if (EP && typeof EP.animate === "function" && !EP.animate.__witness) {
+    const realAnimate = EP.animate;
+    EP.animate = function animate(...args) {
+      const a = realAnimate.apply(this, args);
+      // the virtual time it was made at (a timer mid-frame: its own time); held in a microtask or the next real frame,
+      // whichever comes first, after the caller's own setup (a.playbackRate = 2, a.pause()) ran
+      if (anim.on && a) { try { anim.state.set(a, { t0: clock.now(), rate: null }); animSoon(); queueMicrotask(() => catchOne(a)); } catch { /* odd engine */ } }
+      return a;
+    };
+    EP.animate.__witness = true;
+  }
+  if (typeof G.MutationObserver === "function" && G.document.documentElement) {
+    // a syncAnimations takes the records it covers, so a frame's own mutations cost no extra catch frame
+    const mo = anim.mo = new G.MutationObserver((recs) => { if (anim.on && !anim.pending && recs.some(animRecord)) animSoon(); });
+    mo.observe(G.document.documentElement, { attributes: true, childList: true, subtree: true });
+  }
+  // started by something no mutation shows (:hover, a media query): the events come one rendering update in
+  const onStart = (e) => { if (anim.on && e.target && e.target.getAnimations) for (const a of e.target.getAnimations()) catchOne(a); };
+  for (const t of ["animationstart", "transitionrun", "transitionstart"]) G.document.addEventListener(t, onStart, true);
+}
+
+/** After a call: animations it started are held at the call's virtual time and their start events sent before the
+ *  reply (the MutationObserver's microtask runs before this continuation), whether a real frame came between or not. */
+async function animSettle() {
+  await null;
+  if (anim.pending) syncAnimations(false);
+  if (anim.flush) await renderingUpdate();
 }
 
 /** One real rendering update, so animation events queued by this frame are dispatched before the next one. */
@@ -569,6 +632,10 @@ let audioMark = 0;
 // frame (22050 Hz, 60 fps) an absolute count rounds differently depending on how many frames ran before, so the
 // same sound would land a sample earlier or later in a later run.
 let audioEpoch = 0, audioReadSince = 0;
+// since of the last frame's render (to the quantum boundary at or before then) and of the last audio read (rendered to
+// the boundary at or AFTER then): a running context's currentTime reads the furthest of the two, so one made or
+// resumed now starts on that boundary too, whatever ran before (see tap.gridNow)
+let audioFloorSince = 0, audioCeilSince = 0;
 // (a WebAudio tap anchors its epoch on a 128-frame render quantum instead: see tap.realign)
 const epochIndex = (src) => (src.anchor != null ? src.anchor : Math.round((audioEpoch - src.born) * src.rate));
 
@@ -639,9 +706,12 @@ const activates = (ev) => (ev.type === "key" && ev.down && normKey(ev.key) !== "
 // past to the render quantum's own start time, which has the same problem), so it began on N or N + 1 depending on how
 // long the page ran before the reset: the same run gave different audio after some histories (3 in 40 preludes in
 // examples/js-browser). Half a sample later, "now" is always a future time half a frame from any rounding edge.
-function frameTime(t, rate) {
+// A running context's 0 too (a suspended one reads 0 until it runs, as games checking currentTime > 0 expect): a
+// context made by a tap reads 0 there, the same context in the next repeat pass n + 0.5 frames, and the sound the tap
+// started at currentTime + 0.01 sat half a sample earlier in the first pass (off by up to 0.03: Euchre).
+function frameTime(t, rate, running) {
   const n = Math.round(t * rate);
-  if (!(t > 0) || Math.abs(t * rate - n) > 1e-6) return t;
+  if (!(t > 0 || (t === 0 && running)) || Math.abs(t * rate - n) > 1e-6) return t;
   return (n + 0.5) / rate;
 }
 
@@ -743,6 +813,29 @@ function installVirtualEnded() {
   };
 }
 
+// decodeAudioData finishes on real time, whenever the decoder thread gets there: a WAV decoded on the first tap was
+// ready a frame or several later depending on the machine's load, so the card sound a timer played 80 ms on was there
+// in one run and missing in the next. Simulated time waits for it instead: a frame (and a call, sync or async) doesn't
+// end while a decode is pending, so to the game every decode takes no time, the same in every run (up to 10 s real).
+const decoding = new Set();
+function installDecodeHold() {
+  const P = G.BaseAudioContext ? G.BaseAudioContext.prototype : G.OfflineAudioContext && G.OfflineAudioContext.prototype;
+  const nDecode = P && P.decodeAudioData;
+  if (!nDecode) return;
+  P.decodeAudioData = function () {
+    const p = nDecode.apply(this, arguments);
+    if (p && typeof p.then === "function") { decoding.add(p); const off = () => decoding.delete(p); p.then(off, off); }
+    return p;
+  };
+}
+async function decodesDone() {   // then one macrotask: the game's continuations (await decode... ready = true) ran
+  let late = false, t;
+  const give = new Promise((r) => { t = real.setTimeout(() => { late = true; r(); }, 10000); });   // a decode that never ends
+  while (decoding.size && !late) { await Promise.race([Promise.allSettled([...decoding]), give]); await macrotask(); }
+  real.clearTimeout(t);
+  if (late) warnOnce("decode-late", "decodeAudioData still pending after 10 s: the frame went on without it (audio may differ between runs)");
+}
+
 /** In witness mode every AudioContext the game creates is an OfflineAudioContext rendered in step with simulated time. */
 function installWebAudioTap() {
   const Native = G.OfflineAudioContext;
@@ -753,6 +846,7 @@ function installWebAudioTap() {
   const timeGet = Object.getOwnPropertyDescriptor(G.BaseAudioContext ? G.BaseAudioContext.prototype : Native.prototype, "currentTime").get;
   const seconds = +CFG.audioSeconds || 300, capture = CFG.audioCapture !== false;
   installVirtualEnded();
+  installDecodeHold();
   function WitnessAudioContext(opts = {}) {
     const rate = (opts && opts.sampleRate) || +CFG.audioRate || 24000;
     // no capture (a play session: WITNESS_CONFIG.audioCapture false / ?witness_audio=0): nothing renders, and the clock
@@ -779,8 +873,19 @@ function installWebAudioTap() {
       const was = entry.st;
       entry.st = st;
       const at = Math.round(tap.outNow());
-      if (was === "running") gaps.push([at, Infinity]);
-      else if (st === "running" && gaps.length) gaps[gaps.length - 1][1] = Math.max(gaps[gaps.length - 1][0], at);
+      const last = gaps[gaps.length - 1];
+      // frozen again before the last gap's end (which can be after now, below): that gap goes on, counted once
+      if (was === "running") { if (last && last[1] > at) last[1] = Infinity; else gaps.push([at, Infinity]); }
+      else if (st === "running" && last) {
+        // it runs again from the reset's 128-frame grid boundary a running context's currentTime reads now (tap.gridNow:
+        // at or before now; after it right after an audio read), or the latest before it that keeps its quanta on the
+        // grid: a sound started after a resume() on a tap is timed as in a pass where the context never stopped (made
+        // frozen, it starts exactly there; see tap.anchor)
+        const c = last[0] - tap.frozenAt(last[0]);   // the context's position, frozen since
+        let end = tap.anchor + tap.gridNow() * 128 - (((-c % 128) + 128) % 128);
+        if (end < last[0]) end += Math.ceil((last[0] - end) / 128) * 128;
+        last[1] = end;
+      }
       try { ctx.dispatchEvent(new Event("statechange")); } catch { /* no events here */ }
     };
     entry.state = () => entry.st;
@@ -794,7 +899,7 @@ function installWebAudioTap() {
     if (webReg()) webReg().track(entry);
     Object.defineProperties(ctx, {
       destination: { get: () => bus },
-      currentTime: { get: () => (tap.full ? frameTime(ctxTime() + (entry.st === "running" ? audioClock.t - tap.fullAt : 0), rate) : frameTime(ctxTime(), rate)) },
+      currentTime: { get: () => { const on = entry.st === "running"; return frameTime(ctxTime() + (tap.full && on ? audioClock.t - tap.fullAt : 0), rate, on); } },
       state: { get: () => entry.st },
       resume: { value: () => {
         entry.resumes++;
@@ -845,8 +950,16 @@ function installWebAudioTap() {
     // too (since is summed from 0 at each reset: the same floats every run), not on the clock since the page loaded:
     // its quanta then line up with the frames the same way every run (with 400 samples a frame, every 8th frame ends
     // exactly on a quantum and float noise in t - born floored it either side: a frame's render, currentTime and
-    // the frame a source's "ended" fired at differed between runs).
-    tap.anchor = -Math.round(audioClock.since * rate);
+    // the frame a source's "ended" fired at differed between runs). Its sample 0 is the quantum boundary of that grid
+    // at or before now (counted from the reset, as an older context's boundaries are after its realign): a context
+    // made by the first tap of a test then times its sounds exactly as the same context does in the next repeat pass,
+    // when it already exists (rounded to "now", a tap 1/3 into a quantum put every sound 1/3 quantum off: Euchre).
+    // Precisely, the boundary an existing context has rendered to (tap.gridNow): the last frame's (made by a timer
+    // inside a frame: that frame's start), or after now when an audio read at this time rendered past it (was: a call
+    // at the time of a capture put every sound 128 samples off in the pass that made the context).
+    // The invariant kept from here on (realign, resume): anchor - frozen samples is a multiple of 128.
+    tap.gridNow = () => Math.max(Math.floor(audioFloorSince * rate / 128), Math.ceil(audioCeilSince * rate / 128));
+    tap.anchor = -tap.gridNow() * 128;
     tap.render = async (ceil) => {
       if (tap.dead) return;
       const pos = tap.ctxAt(tap.outNow()) / 128;
@@ -919,6 +1032,7 @@ function installWebAudioTap() {
 }
 
 async function renderAudio(ceil) {
+  if (ceil) audioCeilSince = audioClock.since; else audioFloorSince = audioClock.since;   // also with no context yet
   for (const s of sources) if (s.render) await s.render(ceil);
 }
 
@@ -1074,6 +1188,26 @@ const dom = {
     const c = this.canvases()[0];
     return c ? [c.width, c.height] : [G.innerWidth, G.innerHeight];
   },
+  /** A wheel's default action: scroll the nearest ancestor of el that can move by (dx, dy), else the page; instantly. */
+  scrollBy(el, dx, dy) {
+    const can = (e, d, axis) => {
+      if (!d) return false;
+      const cs = G.getComputedStyle(e), ov = axis === "y" ? cs.overflowY : cs.overflowX;
+      if (!/(auto|scroll|overlay)/.test(ov)) return false;
+      const pos = axis === "y" ? e.scrollTop : e.scrollLeft, max = axis === "y" ? e.scrollHeight - e.clientHeight : e.scrollWidth - e.clientWidth;
+      return d > 0 ? pos < max - 0.5 : pos > 0.5;
+    };
+    const root = document.scrollingElement || document.documentElement;
+    for (let e = el; e && e !== root && e !== document.body && e.nodeType === 1; e = e.parentElement) {
+      if (can(e, dy, "y") || can(e, dx, "x")) { e.scrollBy({ left: Math.round(dx), top: Math.round(dy), behavior: "instant" }); return; }
+      if (G.getComputedStyle(e).position === "fixed") break;   // a fixed bar: the wheel scrolls the page under it
+    }
+    // the page, unless its root clips that axis (html, or body when html is visible: overflow hidden|clip), as a browser
+    const html = document.documentElement, body = document.body;
+    const locked = (k) => { const h = G.getComputedStyle(html)[k]; return /^(hidden|clip)$/.test(h !== "visible" || !body ? h : G.getComputedStyle(body)[k]); };
+    const px = locked("overflowX") ? 0 : Math.round(dx), py = locked("overflowY") ? 0 : Math.round(dy);
+    if (px || py) G.scrollBy({ left: px, top: py, behavior: "instant" });
+  },
   toClient(x, y) {
     const c = this.canvases()[0];
     if (!c) return [x, y];
@@ -1210,9 +1344,14 @@ const dom = {
       case "touch":
         return this.finger(ev);
       case "wheel": {
-        const [cx, cy] = this.toClient(this.last[0], this.last[1]);
+        // at the event's x, y when it has them (play's scroll order), else at the pointer
+        const [cx, cy] = this.toClient(ev.x != null ? +ev.x : this.last[0], ev.y != null ? +ev.y : this.last[1]);
         const t = document.elementFromPoint(cx, cy) || this.canvases()[0] || document.body;
-        t.dispatchEvent(new WheelEvent("wheel", { deltaX: +ev.dx || 0, deltaY: +ev.dy || 0, deltaMode: 0, clientX: cx, clientY: cy, bubbles: true, cancelable: true, composed: true, view: G, ...this.mods() }));
+        const dx = +ev.dx || 0, dy = +ev.dy || 0;
+        const go = t.dispatchEvent(new WheelEvent("wheel", { deltaX: dx, deltaY: dy, deltaMode: 0, clientX: cx, clientY: cy, bubbles: true, cancelable: true, composed: true, view: G, ...this.mods() }));
+        // a synthetic wheel event doesn't scroll anything: do the browser's default here (unless the page cancelled it),
+        // at once and in whole pixels so a replay scrolls the same: the nearest ancestor that can scroll that way, else the page
+        if (go) this.scrollBy(t, dx, dy);
         break;
       }
       case "text": {
@@ -1591,10 +1730,14 @@ async function doStep(m) {
       const dt = Array.isArray(m.dts) && +m.dts[i] > 0 ? +m.dts[i] : dflt;
       lazy.drawing = !lazyStep || i === n - 1;
       if (!lazy.drawing) lazy.skipped++;
+      if (anim.pending) syncAnimations(false);   // started between frames and not caught yet: held at that time
+      if (anim.flush) await renderingUpdate();   // their start events go out before the frame, as in every run
       applyInputs(sim.frame);
+      if (anim.on && frameEvents.length && animMutated()) syncAnimations(false);   // one an input listener started: from the input's time
       runFrame(dt);
-      if (sources.length) await renderAudio(false);
+      if (sources.length) await renderAudio(false); else audioFloorSince = audioClock.since;
       if (endedQueue.size) fireEnded();   // sources that ended in what this frame rendered (see endedQueue)
+      if (decoding.size) await decodesDone();   // a decodeAudioData the frame started is done by its end (see decoding)
       if (anim.flush) await renderingUpdate();
       sim.frame++;
       sim.time += dt;
@@ -1624,6 +1767,7 @@ async function doReset(m) {
   const prevSince = audioClock.since;
   audioClock.since = 0;
   audioReadSince = 0;
+  audioFloorSince = audioCeilSince = 0;
   // a reset starts silent: tails still ringing from the previous run must not leak into this one
   // (WebAudio nodes the game scheduled are its own: its reset should stop them)
   // a context the game closed before the reset never sounds again: leave it out (a game that opens a fresh context
@@ -1668,12 +1812,12 @@ async function handle(m) {
       const fn = typeof c === "function" ? c : c && (c.run || c.fn);
       if (!fn) throw new Error(`unknown call '${m.name}'${H.calls ? ` (calls: ${Object.keys(H.calls).join(", ")})` : ""}`);
       const r = fn(...(Array.isArray(m.args) ? m.args : []));
-      if (!r || typeof r.then !== "function") return { result: jsonSafe(r) ?? null };
+      if (!r || typeof r.then !== "function") { if (decoding.size) await decodesDone(); if (anim.on) await animSettle(); return { result: jsonSafe(r) ?? null }; }
       // a promise: named while unresolved (the "busy" query reports it)
       const key = {};
       asyncCalls.set(key, { name: String(m.name), t0: real.now() });
       if (busyNow) busyNow.awaiting = true;
-      try { return { result: jsonSafe(await r) ?? null }; } finally { asyncCalls.delete(key); }
+      try { const v = await r; if (decoding.size) await decodesDone(); if (anim.on) await animSettle(); return { result: jsonSafe(v) ?? null }; } finally { asyncCalls.delete(key); }
     }
     case "eval": return { value: jsonSafe(await evaluate(String(m.expr))) ?? null };
     case "logs": return { logs: logs.splice(0) };
@@ -1830,11 +1974,60 @@ function describeEl(el, plain = false) {
   return plain ? label : `"${label}"`;
 }
 
-// DOM games: tap an element (touch-type pointer events, compatibility mouse events, click; a user gesture for the
-// audio policy), and list what can be tapped. Meant for the game's calls, so a replay repeats them:
+// DOM games: tap an element (touch-type pointer events, touch events on a touch device, compatibility mouse events,
+// click; a user gesture for the audio policy), and list what can be tapped. Meant for the game's calls, so a replay
+// repeats them:
 //   witness.start({ calls: { tap: (sel) => witness.dom.tap(sel) }, snapshot: () => ({ choices: witness.dom.tappables() }) })
+const TAP_HANDLERS = ["onclick", "onpointerdown", "onpointerup", "ontouchstart", "ontouchend", "onmousedown", "onmouseup"];
+const TAP_NATIVE = 'button, [role="button"], a[href], input:not([type="hidden"]), select, textarea';
+// focusable by tabindex: a tap target unless it is a surface (a canvas the game taps by coordinates, media, a dialog / log / region)
+const TAP_TABINDEX = '[tabindex]:not([tabindex="-1"]):not(canvas, video, audio, iframe, [role="dialog"], [role="alertdialog"], [role="log"], [role="region"], [role="document"], [role="application"], [role="main"], [role="tabpanel"])';
+/** Selectors of the page's readable style rules that set cursor: pointer (active @media only; cross-origin sheets skipped),
+ *  one per comma part; a part ending in * (.card, .card * {…}) is the inherit-it-anyway kind and left out. */
+function pointerSelectors() {
+  const out = [];
+  const parts = (sel) => {   // split at top-level commas (not inside :is(a, b))
+    const r = []; let depth = 0, from = 0;
+    for (let i = 0; i < sel.length; i++) {
+      const c = sel[i];
+      if (c === "(" || c === "[") depth++; else if (c === ")" || c === "]") depth--;
+      else if (c === "," && !depth) { r.push(sel.slice(from, i)); from = i + 1; }
+    }
+    r.push(sel.slice(from));
+    return r.map((s) => s.trim()).filter((s) => s && !/\*$/.test(s));
+  };
+  const walk = (rules) => {
+    for (const r of rules) {
+      if (r.media && r.media.mediaText && G.matchMedia && !G.matchMedia(r.media.mediaText).matches) continue;
+      if (r.selectorText && r.style && r.style.cursor === "pointer") out.push(...parts(r.selectorText));
+      if (r.cssRules) walk(r.cssRules);
+    }
+  };
+  for (const s of G.document.styleSheets) { try { if (!s.disabled) walk(s.cssRules); } catch { /* cross-origin: unreadable */ } }
+  return out;
+}
+const TAP_POINTER_TAGS = new Set(["DIV", "SPAN", "LI", "IMG", "TD", "TH", "TR", "SECTION", "ARTICLE", "LABEL", "P", "FIGURE", "HEADER", "FOOTER", "NAV", "ASIDE", "svg", "H1", "H2", "H3", "H4", "H5", "H6"]);
+/** A TouchEvent for dom.tap (one finger at cx, cy on target); an Event carrying the touch lists where the engine has no
+ *  Touch / TouchEvent constructor (WebKit): handlers read e.touches / e.changedTouches the same. */
+function tapTouchEvent(type, target, cx, cy, ends) {
+  const t = { id: 0, target, cx, cy, force: ends ? 0 : 1 }, cur = ends ? [] : [t];
+  const init = { bubbles: true, cancelable: true, composed: true, view: G };
+  if (typeof G.TouchEvent === "function" && typeof G.Touch === "function") {
+    const changed = dom.touchList([t]), touches = dom.touchList(cur);
+    if (changed && touches) { try { return new TouchEvent(type, { ...init, touches, targetTouches: touches, changedTouches: changed }); } catch { /* below */ } }
+  }
+  const list = (l) => { const o = l.map((x) => ({ identifier: x.id, target, clientX: cx, clientY: cy, screenX: cx, screenY: cy, pageX: cx + (G.scrollX || 0), pageY: cy + (G.scrollY || 0), radiusX: 0.5, radiusY: 0.5, rotationAngle: 0, force: x.force })); o.item = (i) => o[i] || null; return o; };
+  let e;
+  try { e = new (G.UIEvent || Event)(type, init); } catch { e = new Event(type, init); }
+  const v = (value) => ({ value, enumerable: true });
+  Object.defineProperties(e, { touches: v(list(cur)), targetTouches: v(list(cur)), changedTouches: v(list([t])), altKey: v(false), ctrlKey: v(false), metaKey: v(false), shiftKey: v(false) });
+  return e;
+}
 const domHelpers = {
-  /** Tap el (an Element or a CSS selector) at its centre. Returns "ok", or "blocked by <what is on top>" (warned). */
+  /** Tap el (an Element or a CSS selector) at its centre. Returns "ok", or "blocked by <what is on top>" (warned).
+   *  On a touch device (ontouchstart in window; or maxTouchPoints > 0 in an engine without TouchEvent: WebKit emulating one): pointerdown, touchstart, pointerup, touchend, then the
+   *  compatibility mouse events and click unless the page cancelled touchstart / touchend (preventDefault), as a browser
+   *  does; elsewhere pointer + mouse events and click. */
   tap(el) {
     if (!BROWSER) return "no page";
     const target = typeof el === "string" ? G.document.querySelector(el) : el;
@@ -1850,25 +2043,60 @@ const domHelpers = {
     }
     const base = { bubbles: true, cancelable: true, composed: true, view: G, clientX: cx, clientY: cy, screenX: cx, screenY: cy, button: 0 };
     const p = { ...base, pointerId: TOUCH_POINTER_ID, pointerType: "touch", isPrimary: true, width: 1, height: 1 };
+    const touch = "ontouchstart" in G || (G.navigator && G.navigator.maxTouchPoints > 0 && typeof G.TouchEvent !== "function");
+    const focus = () => { if (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) && target.focus) target.focus(); };
     const w = webReg();
     gestureDepth++;
     if (w) w.begin();
     try {
-      if (G.PointerEvent) hit.dispatchEvent(new PointerEvent("pointerdown", { ...p, buttons: 1, pressure: 1 }));
-      hit.dispatchEvent(new MouseEvent("mousedown", { ...base, buttons: 1 }));
-      if (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) && target.focus) target.focus();
-      if (G.PointerEvent) hit.dispatchEvent(new PointerEvent("pointerup", { ...p, buttons: 0, pressure: 0 }));
-      hit.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+      if (touch) {
+        const send = (e) => { try { return hit.dispatchEvent(e); } catch (x) { warnOnce("tap-touch", `dom.tap: a touch event could not be sent (${x && x.message})`); return true; } };
+        const down = G.PointerEvent ? hit.dispatchEvent(new PointerEvent("pointerdown", { ...p, buttons: 1, pressure: 1 })) : true;
+        const ts = send(tapTouchEvent("touchstart", hit, cx, cy, false));
+        if (G.PointerEvent) hit.dispatchEvent(new PointerEvent("pointerup", { ...p, buttons: 0, pressure: 0 }));
+        const te = send(tapTouchEvent("touchend", hit, cx, cy, true));
+        if (!ts || !te) return "ok";   // the page took the touch: no mouse events, no click
+        if (down) hit.dispatchEvent(new MouseEvent("mousedown", { ...base, buttons: 1 }));   // pointerdown cancelled: no mouse events
+        focus();
+        if (down) hit.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+      } else {
+        if (G.PointerEvent) hit.dispatchEvent(new PointerEvent("pointerdown", { ...p, buttons: 1, pressure: 1 }));
+        hit.dispatchEvent(new MouseEvent("mousedown", { ...base, buttons: 1 }));
+        focus();
+        if (G.PointerEvent) hit.dispatchEvent(new PointerEvent("pointerup", { ...p, buttons: 0, pressure: 0 }));
+        hit.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+      }
       hit.dispatchEvent(new (G.PointerEvent || MouseEvent)("click", { ...p, buttons: 0 }));
     } finally { gestureDepth--; if (w) w.end(); }
     return "ok";
   },
-  /** What can be tapped under root (default the document): [{label, id}], in view first; repeated labels get " #2". */
-  tappables(root) {
+  /** What can be tapped under root (an Element or a selector; default the document): [{label, id}], in view first;
+   *  repeated labels get " #2". tappables({root?, elements: true}) (or tappables(root, {elements: true})) adds el, the
+   *  element itself, for dom.tap(el). Found: buttons, links, fields, [role=button], [onclick], [tabindex] (not -1; not a
+   *  canvas, media or a dialog / log / region), an element given an onclick / onpointerdown / ontouchstart… property in
+   *  code, and one that sets cursor: pointer (by its own rule or inline style, not inherited from a pointer parent). A
+   *  plain element holding other tappables (a delegating panel, a focusable dialog) gives way to them; nested
+   *  buttons / links: the outer one. */
+  tappables(root, opts) {
     if (!BROWSER) return [];
+    if (root && typeof root === "object" && root.nodeType == null) { opts = root; root = root.root; }
+    const elements = !!(opts && opts.elements);
     const scope = root ? (typeof root === "string" ? G.document.querySelector(root) : root) : G.document;
     if (!scope) return [];
-    const els = Array.from(scope.querySelectorAll('button, [role="button"], a[href], input:not([type="hidden"]), select, textarea, [onclick]'));
+    const native = new Set(scope.querySelectorAll(TAP_NATIVE)), found = new Set([...native, ...scope.querySelectorAll(`[onclick], ${TAP_TABINDEX}`)]);
+    const html = G.document.documentElement, body = G.document.body;
+    let ptrSel = null;   // computed style cannot tell inherited from set: a style rule (or inline style) that matches says it is set
+    const setsPointer = (el) => el.style.cursor === "pointer" || (ptrSel ??= pointerSelectors()).some((s) => { try { return el.matches(s); } catch { return false; } });
+    for (const el of scope.querySelectorAll("*")) {
+      if (found.has(el) || el === html || el === body) continue;
+      if (TAP_HANDLERS.some((h) => typeof el[h] === "function")) { found.add(el); continue; }
+      if (TAP_POINTER_TAGS.has(el.tagName)) {
+        const cs = G.getComputedStyle(el);
+        // the element that sets cursor: pointer (its own rule: cards in a pointer hand), not children that inherit it
+        if (cs.cursor === "pointer" && cs.display !== "none" && !(el.parentElement && G.getComputedStyle(el.parentElement).cursor === "pointer" && !setsPointer(el))) found.add(el);
+      }
+    }
+    const els = [...found].sort((a, b) => (a === b ? 0 : a.compareDocumentPosition(b) & 4 ? -1 : 1));   // document order
     const visible = (el) => {
       if (el.closest('[hidden], [aria-hidden="true"]') || el.disabled) return false;
       const r = el.getBoundingClientRect();
@@ -1877,7 +2105,8 @@ const domHelpers = {
       return cs.visibility !== "hidden" && cs.display !== "none" && +cs.opacity !== 0;
     };
     const shown = els.filter(visible);
-    const kept = shown.filter((el) => !shown.some((o) => o !== el && o.contains(el)));   // nested tappables: the outer one
+    const inner = shown.filter((el) => native.has(el) || !shown.some((o) => o !== el && el.contains(o)));   // a plain container gives way
+    const kept = inner.filter((el) => !inner.some((o) => o !== el && o.contains(el)));   // nested tappables: the outer one
     const inView = (el) => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < G.innerHeight && r.right > 0 && r.left < G.innerWidth ? 1 : 0; };
     kept.sort((a, b) => inView(b) - inView(a));   // stable: document order within each group
     const seen = new Map();
@@ -1888,7 +2117,7 @@ const domHelpers = {
       const k = (seen.get(label) || 0) + 1;
       seen.set(label, k);
       if (k > 1) label = `${label.slice(0, 52)} #${k}`;
-      return { label, id: el.id || null, ...(/\[text field(: .*)?\]$/.test(label) ? { input: true } : {}) };
+      return { label, id: el.id || null, ...(/\[text field(: .*)?\]$/.test(label) ? { input: true } : {}), ...(elements ? { el } : {}) };
     });
   },
   /** The visible text under root (an Element or a selector; default the body), aria-hidden / hidden parts left out: for
@@ -2000,7 +2229,7 @@ const api = {
   createMixer: (opts) => new Mixer(opts),
   ready,
   boot,
-  /** DOM games: dom.tap(elementOrSelector) -> "ok" | "blocked by …"; dom.tappables(root?) -> [{label, id, input?}]; dom.text(root?) -> string. */
+  /** DOM games: dom.tap(elementOrSelector) -> "ok" | "blocked by …"; dom.tappables(root? | {root?, elements?}, opts?) -> [{label, id, input?, el?}]; dom.text(root?) -> string. */
   dom: domHelpers,
   /** Finite CSS / Web Animations still running (0 = settled): also globalThis.__witnessAnimating(). */
   animating: () => animatingCount(),
@@ -2035,6 +2264,7 @@ if (MODE === "witness") {
     if (sched.on && CFG.animations !== false && G.document && typeof G.document.getAnimations === "function") {
       anim.on = true;
       anim.videos = CFG.videos !== false;
+      installAnimationCatch();
     }
     G.__witnessAnimating = () => animatingCount();
     if (sched.on) startRealPump(() => runFrame(1 / fps));

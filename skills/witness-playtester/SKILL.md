@@ -70,6 +70,9 @@ fps:        look <dir|thing> · reload · weapon <n|name> · go forward|back|lef
 * `for 6s` caps any order's game time (`explore for 6s`). `careful` makes an order stop on anything new.
 * After dying: `respawn` (or press the key the game names). `set`, `wait` and `press` work while dead too.
 * An order that doesn't parse changes nothing in the game; the error suggests the right word.
+* A menu or page taller than the screen: `scroll down [n]`, `scroll up [n]`, `scroll top|bottom`, `scroll to <words>`.
+  When a pick is refused as covered (a fixed tab bar) or off screen, the answer says which scroll fixes it: do that,
+  then pick again.
 
 ## Reading an observation
 

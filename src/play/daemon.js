@@ -127,7 +127,7 @@ export async function runDaemon(dir) {
     until = new UntilWatch({ until: opts.until, gameHours: opts.gameHours, clock: opts.clock || (spec.cfg.play && spec.cfg.play.clock) || null });
     if (until.active || until.clock) until.start(await S.snapshot());
     grid = new NavGrid({ cell: world.cell, origin: perceiver.geo.origin, northSign: cfg.northSign });
-    ap = new Autopilot(cfg, { fps, grid, perceiver, size });
+    ap = new Autopilot(cfg, { fps, grid, perceiver, size, sizeKnown: !!S.hello.size });
     tracker = new EventTracker(cfg, perceiver);
     ap.observe(world);
     tracker.update(null, world, {});
@@ -202,6 +202,14 @@ export async function runDaemon(dir) {
     catch (e) { msg = `call ${dec.name} failed: ${e.message}`; failed = true; }
     lastCall = { t: +world.t.toFixed(2), call: head, value, failed, msg };
     if (ap.cur) { ap.cur.result = msg; ap.cur.callValue = value; ap.cur.callFailed = failed; }
+  }
+
+  /** An order's measurement (scroll: where a choice is on the page): an eval that only reads, so it isn't recorded. */
+  async function evalForOrder(dec) {
+    let value, failed = false;
+    if (!S.has("eval")) failed = true;
+    else { try { const r = await S.eval(dec.expr); value = r ? r.value ?? null : null; } catch (e) { failed = true; log(`order eval failed: ${e.message}`); } }
+    if (ap.cur) { ap.cur.evalValue = failed ? undefined : value; ap.cur.evalFailed = failed; }
   }
 
   // ---- settle: after an order changed the scene or a dialogue (and before a screenshot), step until the game's
@@ -319,6 +327,12 @@ export async function runDaemon(dir) {
         await stepWorld(1);   // a call is always followed by a step, so it lands inside the recording
         continue;
       }
+      if (dec.status === "eval") {
+        const ev0 = ap.ctrl.emit(dec.want, frame);
+        if (ev0.length) { await S.input(ev0); recorder.add(ev0); sent(ev0); }
+        await evalForOrder(dec);
+        continue;
+      }
       const ev = ap.ctrl.emit(dec.want, frame);
       if (ev.length) { await S.input(ev); recorder.add(ev); sent(ev); }
       if (DEBUG) {
@@ -411,6 +425,12 @@ export async function runDaemon(dir) {
       if (ev0.length) { await S.input(ev0); recorder.add(ev0); sent(ev0); }
       await callGame(dec);
       await stepWorld(1);
+      return;
+    }
+    if (dec.status === "eval") {
+      const ev0 = ap.ctrl.emit(dec.want, frame);
+      if (ev0.length) { await S.input(ev0); recorder.add(ev0); sent(ev0); }
+      await evalForOrder(dec);
       return;
     }
     const ev = ap.ctrl.emit(dec.want, frame);

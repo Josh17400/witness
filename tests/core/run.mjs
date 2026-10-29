@@ -598,7 +598,7 @@ await witness.start({ name: "cfg-epoch", fps: 60, reset: () => {}, snapshot: () 
   const { DEFAULT_EPOCH } = await import("../../src/core/launch.js");
   const fake = (o = {}) => ({
     fps: 60, frame: 0, score: 0, epoch: o.epoch ?? null, log: [], closed: false,
-    hello: { ...(o.helloEpoch != null ? { epoch: o.helloEpoch } : {}), capabilities: ["step", "snapshot", "call", "input", ...(o.noReset ? [] : ["reset"]), ...(o.noEval ? [] : ["eval"]), ...(o.audio ? ["audio"] : [])] },
+    hello: { ...(o.helloEpoch != null ? { epoch: o.helloEpoch } : {}), capabilities: ["step", "snapshot", "call", "input", ...(o.noReset ? [] : ["reset"]), ...(o.noEval ? [] : ["eval"]), ...(o.audio ? ["audio"] : []), ...(o.shot ? ["screenshot"] : [])] },
     has(c) { return this.hello.capabilities.includes(c); },
     async reset(seed, scene, params, epoch = this.epoch) { this.log.push(["reset", epoch]); this.frame = 0; this.score = 0; return {}; },
     async step(n) { this.frame += n; return { frame: this.frame, time: this.frame / 60 }; },
@@ -607,6 +607,7 @@ await witness.start({ name: "cfg-epoch", fps: 60, reset: () => {}, snapshot: () 
     async input(evs) { this.log.push(["input", evs.map((e) => e.frame)]); return {}; },
     async eval(expr) { if (expr === "boom") throw new WitnessError("game error on 'eval': boom is not defined"); return { value: new Function("frame", "score", `return (${expr});`)(this.frame, this.score) }; },
     async audio() { this.log.push(["audio", this.frame]); return o.pcm ? o.pcm(this) : { sampleRate: 22050, channels: 1, format: "f32", data: "" }; },
+    async screenshot() { this.log.push(["screenshot", this.frame]); return o.shot(this); },
     async pullLogs() {}, async drainLogs() { return []; },
   });
   const T = (steps, extra = {}) => ({ name: "t", file: "x.witness.json", index: 0, steps, ...extra });
@@ -674,6 +675,28 @@ await witness.start({ name: "cfg-epoch", fps: 60, reset: () => {}, snapshot: () 
     if (v === 0) ok("--repeat: silent step audio at 24000 then 44100 Hz is no mismatch (at most a 'both captures silent' note)", p1.ok && p2.ok && !mm.length && !/audio: (?!both captures silent)/.test(msgs(p2)), msgs(p1) + " || " + msgs(p2));
     else ok(`--repeat: ${name} step audio at 24000 then 44100 Hz fails the match`, p1.ok && !p2.ok && mm.length === 1 && /repeat: .*Hz/.test(mm[0].message), msgs(p2));
   }
+  // 0.7.11: --repeat and "match" screenshots within --shot-tol (default 2, witness.json "shotTol"): Chromium edge noise
+  const { shotTolOf } = await import("../../src/core/compare.js");
+  const { encodePNG: enc } = await import("../../src/media/png.js");
+  const sb = new Uint8Array(200 * 150 * 4); for (let i = 0; i < 200 * 150; i++) sb.set([(i * 7) % 200, (i * 3) % 180, 90, 255], i * 4);
+  const sn = sb.slice(); for (let k = 0; k < 123; k++) sn[((k * 211) % (200 * 150)) * 4] += 1;   // 123 px off by one level
+  const spng = (d) => ({ width: 200, height: 150, format: "png", data: Buffer.from(enc(200, 150, d)).toString("base64") });
+  const A = spng(sb), B = spng(sn);
+  ok("shotTolOf: --shot-tol over witness.json shotTol over 2; 0 stays exact; nonsense refused", shotTolOf({ "shot-tol": "0" }, { shotTol: 5 }) === 0 && shotTolOf({}, { shotTol: 5 }) === 5 && shotTolOf({}, {}) === 2 && shotTolOf({ "shot-tol": true }, {}) === 2
+    && (() => { try { shotTolOf({ "shot-tol": "300" }); return false; } catch (e) { return /--shot-tol/.test(e.message); } })());
+  for (const [tolv, want] of [[2, "note"], [0, "match"]]) {
+    s = fake({ shot: (me) => me.pass === 1 ? A : B });
+    const m = new Matcher({ shotTol: tolv }), t = T([{ at: 0.5, expect: "true" }, { at: 1, expect: "true" }]);
+    s.pass = 1; const p1 = await runTest(s, t, { matcher: m, matchAll: true });
+    s.pass = 2; const p2 = await runTest(s, { ...t, _lastPass: true }, { matcher: m, matchAll: true });
+    if (want === "note") ok("--repeat shotTol 2: 1-level screenshot noise passes with one note line per test", p1.ok && p2.ok && p2.failures.filter((f) => f.kind === "note").length === 1 && /^screenshot: 123 px differ by at most 1 level \(within the ±2 tolerance, --shot-tol.*; 1 more match\(es\) like it$/.test(p2.failures.find((f) => f.kind === "note").message), msgs(p2));
+    else ok("--repeat shotTol 0: the same noise is a repeat mismatch at both steps", p1.ok && !p2.ok && p2.failures.filter((f) => f.kind === "match" && /^repeat: screenshot differs: 123 px/.test(f.message)).length === 2, msgs(p2));
+  }
+  s = fake({ shot: (me) => me.pass === 1 ? A : B });
+  const lm = new Matcher({ shotTol: 2 });
+  s.pass = 1; await runTest(s, T([{ at: 0.5, match: "look" }]), { matcher: lm });
+  s.pass = 2; r = await runTest(s, T([{ at: 0.5, match: "look" }], { name: "t2" }), { matcher: lm });
+  ok("\"match\" steps: screenshots within --shot-tol match, with a note", r.ok && /screenshot: 123 px .*within the ±2 tolerance/.test(msgs(r)), msgs(r));
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

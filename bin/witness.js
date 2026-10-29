@@ -7,7 +7,7 @@ import { CONFIG_NAME } from "../src/core/launch.js";
 import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay } from "../src/core/runner.js";
 import { evaluate, fmt, keyPaths, ExprError, usesPrev, hint } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
-import { Matcher, diffValues, digestOf, pathFilter, audioTolOf } from "../src/core/compare.js";
+import { Matcher, diffValues, digestOf, pathFilter, audioTolOf, shotTolOf } from "../src/core/compare.js";
 import { prune, pruneRegistry, fmtBytes, markGenerated } from "../src/core/clean.js";
 import { CLI, die, say, forgetDie, DieError, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay, configFlag } from "../src/cli/common.js";
 import { parseNamedRects, stateLayers } from "../src/cli/scale-regions.js";
@@ -107,10 +107,13 @@ const CMD_HELP = {
   names; each runs its own scenario from reset after the timeline; "expect" is checked against its summary):
     { "measure": { "jump": { "y": "state.player.pos[1]", "input": "space@1" }, "expect": "apexPx between 60 and 70" } }
   "match": "label" — the first capture of a label (state, digest, screenshot, audio) is the reference; every later
-  capture of that label in this run must be identical (e.g. the same fight run twice, or a plain start after other tests).
+  capture of that label in this run must be identical (e.g. the same fight run twice, or a plain start after other tests;
+  screenshots within --shot-tol, audio within --audio-tol).
   --repeat N   run the whole selection N times in one game process; every step must equal the same step of pass 1
                (state, digest, screenshot and audio): the strongest determinism check. --no-shots / --no-audio skip those.
                --audio-tol 1e-5 (witness.json "audioTol"): per-sample audio difference allowed (0 = exact).
+               --shot-tol 2 (witness.json "shotTol"): per-channel screenshot difference allowed (0 = exact); pixels
+               that differed within it get a note line. Also used by "match" steps.
   An adapter without 'reset' gets a fresh game process for every test (not possible with --attach: one test at a
   time there); measure steps need 'reset'.`,
   eval: `witness eval [--at 0.5,2,90f] "expr" ["expr2" ...] [--input ...] [--json]
@@ -362,7 +365,7 @@ const CMD_HELP = {
               [--safe-overlay] [--scale-rect "name=x,y,w,h; ..."] [--shot-tol 2] [--audio-tol 1e-5] [--realtime-wait 2.5]
   Checks the connection, protocol, step/snapshot, screenshot and audio, and determinism: a scripted run (--time s), a
   different "dirty" run, then the first run again in the same process; state, digest, screenshot and audio must match.
-  Screenshots (rgba8 or PNG, e.g. --capture screen) match when every channel is within --shot-tol levels (default 2:
+  Screenshots (rgba8 or PNG, e.g. --capture screen) match when every channel is within --shot-tol levels (witness.json "shotTol"; default 2:
   Chromium anti-aliasing noise; 0 = exact); a mismatch reports the pixel count, box and largest difference and writes
   doctor-determinism-A.png / -A-again.png / -diff.png to the shots folder (pruned like other generated files).
   Audio matches when every sample is within --audio-tol (witness.json "audioTol"; default 1e-5: float rounding in
@@ -432,10 +435,8 @@ const commands = {
         const T = Math.max(0.5, +(opt.time || 3));
         const scriptA = "right@0.1-1.2, space@0.3, up@1.3-1.8, mouse:100,100@0.5, click:120,90@0.8, left@1.9-2.4, down@2.5-2.9, space@2.6";
         const scriptB = "left@0.1-0.9, down@0.4-1.4, click:60,40@0.6, right@1.5-2.6, space@1.1, up@2.7-3";
-        const shotTol = opt["shot-tol"] !== undefined && opt["shot-tol"] !== true ? +opt["shot-tol"] : 2;
-        if (!(shotTol >= 0 && shotTol <= 255)) die("--shot-tol wants a per-channel level 0..255 (default 2)");
-        let audioTol;
-        try { audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
+        let shotTol, audioTol;
+        try { shotTol = shotTolOf(opt, cfg); audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
         const matcher = new Matcher({ shotTol, audioTol });
         const exactAudio = caps.includes("audio") && h.audio_exact !== false;
         if (caps.includes("audio") && !exactAudio) report.push("  (hello says audio_exact: false — audio follows real time here, so it isn't compared)");
@@ -617,9 +618,9 @@ const commands = {
     const results = [];
     const shotDir = path.resolve(root, cfg.shots);
     const repeat = Math.max(1, Math.floor(+(opt.repeat === true ? 2 : opt.repeat || 1)));
-    let audioTol;
-    try { audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
-    const matcher = new Matcher({ audioTol });
+    let shotTol, audioTol;
+    try { shotTol = shotTolOf(opt, cfg); audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
+    const matcher = new Matcher({ shotTol, audioTol });
     const matchMedia = { shot: !opt["no-shots"], audio: !opt["no-audio"] };
     const schedule = [];
     for (let p = 1; p <= repeat; p++) for (const t of tests) schedule.push(repeat > 1 ? { ...t, name: `${t.name}  [pass ${p}/${repeat}]`, _lastPass: p === repeat } : t);

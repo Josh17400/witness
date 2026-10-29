@@ -1,7 +1,8 @@
 // A pure-DOM page (no canvas) through the JS adapter: CSS transitions / animations on the virtual clock (screenshots
 // reproducible mid-transition, end events still fire, __witnessAnimating() counts down), the adapter injected before
 // an inline classic script (launch.inject), dom: input on the real-time watch, a page reload for reset (launch.reset), the clock epoch (clock.epoch),
-// "browser (DOM)" and the viewport capture. Run: node tests/web/dom.mjs (also run by tests/web/run.mjs).
+// "browser (DOM)" and the viewport capture; animations started between frames held from the moment they exist, and
+// dom.tap / dom.tappables (touch events on a touch device, onclick properties, cursor: pointer) (0.7.11). Run: node tests/web/dom.mjs (also run by tests/web/run.mjs).
 // Needs Playwright (WITNESS_PLAYWRIGHT, or npm install in examples/js-browser); one browser at a time.
 import fs from "node:fs";
 import os from "node:os";
@@ -162,6 +163,87 @@ else {
     } finally { await g.stop(); }
   }
 
+  // 2e. animations started between frames are held from the moment they exist (0.7.11): a call's transition, an input
+  // listener's transition, boot code's keyframe animation and a call's element.animate() (rate 2) are at their exact
+  // virtual times, the first screenshot after a call shows its transition at the start however much real time passed,
+  // and two browsers (different real-time gaps) give the same pixels
+  {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const left = (im, y, rgb) => { for (let x = 0; x < im.width; x++) { const p = px(im, x, y); if (p.every((v, i) => Math.abs(v - rgb[i]) < 40)) return x; } return -1; };
+    const runAnim = async (gap) => {
+      const f = findConfig(P("anim-start"));
+      const g = await openGame(f.config, f.root, { quiet: true });
+      try {
+        const s = g.session, out = {};
+        const st = await begin(s, { seed: 1 });
+        out.t0 = (await s.snapshot()).state.now;
+        await stepTo(s, st, 10);
+        await s.call("go");
+        await sleep(gap);   // real time between the call and the shot: nothing moves
+        out.shot0 = await shotOf(s);
+        out.s0 = (await s.snapshot()).state;
+        await queueInput(s, st, [{ frame: 11, type: "key", key: "k", down: true }, { frame: 12, type: "key", key: "k", down: false }]);
+        await stepTo(s, st, 13);
+        await sleep(gap);
+        await s.call("wa");
+        await sleep(gap);
+        out.shot1 = await shotOf(s);
+        await stepTo(s, st, 25);
+        out.s1 = (await s.snapshot()).state;
+        out.shot2 = await shotOf(s);
+        return out;
+      } finally { await g.stop(); }
+    };
+    const r1 = await runAnim(300), r2 = await runAnim(40);
+    const a0 = r1.s0, a1 = r1.s1, near = (x, y) => x != null && Math.abs(x - y) < 0.01;
+    ok("a call's transition: held at 0 when the call answers, its transitionrun already sent (at the call's virtual time), the first shot (300 ms of real time later) at the start", a0.a === 0 && a0.runs.length === 1 && a0.runs[0] === a0.goAt && left(r1.shot0, 30, [255, 0, 0]) === 20, [a0, left(r1.shot0, 30, [255, 0, 0])]);
+    ok("at exact virtual times: the call's transition (now - call), the input's (from the frame the key went in), boot code's keyframe animation (since the reset), element.animate() at rate 2",
+      near(a1.a, a1.now - a1.goAt) && near(a1.b, a1.now - a1.keyAt) && near(a1.c, a1.now - r1.t0) && near(a1.d, 2 * (a1.now - a1.waAt)), [a1, r1.t0]);
+    ok("element.animate() from a call: the first shot shows it at its start (x 20)", left(r1.shot1, 180, [255, 255, 0]) === 20, left(r1.shot1, 180, [255, 255, 0]));
+    ok("two browsers, different real-time gaps (300 / 40 ms): the same pixels after the call, after the input + animate(), mid-animation", same(r1.shot0, r2.shot0) && same(r1.shot1, r2.shot1) && same(r1.shot2, r2.shot2) && ["a", "b", "c", "d"].every((k) => r1.s1[k] === r2.s1[k]), [r1.s1, r2.s1, left(r1.shot2, 30, [255, 0, 0]), left(r2.shot2, 30, [255, 0, 0])]);
+  }
+
+  // 2f. dom.tap on a touch device (iphone-15): touchstart / touchend with touches + changedTouches before the mouse
+  // events and click, touchend cancelled = no click; dom.tappables finds onclick / ontouchend properties, cursor: pointer
+  // and tabindex, a delegating panel gives way to its buttons, and {elements: true} hands back the element to tap
+  {
+    const f = findConfig(P("tap"));
+    const g = await openGame(f.config, f.root, { quiet: true });
+    try {
+      const s = g.session;
+      await stepTo(s, await begin(s, { seed: 1 }), 2);
+      let a = (await s.snapshot()).state;
+      const labels = a.choices.map((c) => c.label);
+      ok("dom.tappables: onclick / ontouchend properties, cursor: pointer (the setter, not its children), tabindex 0; not tabindex -1, a focusable canvas or plain text; the delegating panel gives way to its buttons, a pointer hand to its pointer cards",
+        a.touch > 0 && labels.join("|") === "Play|Stats|Shop|Deal|Skip|Focus me|Pass|Order up|A♠|9♥|10♥|J♥" && a.inBar.join() === "Play,Stats,Shop" && a.withEls.join() === "p1,p2", { labels, a });
+      await s.call("tap", ["#t1"]);
+      a = (await s.snapshot()).state;
+      ok("dom.tap on a touch device: pointer → touchstart (1 touch, 1 changed, at the centre; the document's capture listener too) → touchend (0 touches) → mousedown → click",
+        a.log.join() === "touchstart:doc/1.1+,touchstart:t1/1.1+,touchend:t1/0.1+,mousedown:t1,click:t1", a.log);
+      await s.call("clear");
+      await s.call("tap", ["#t3"]);
+      a = (await s.snapshot()).state;
+      ok("touchend cancelled (preventDefault): no mouse events, no click", a.log.join() === "touchstart:doc/1.1+,touchstart:t3/1.1+,touchend:t3/0.1+", a.log);
+      await s.call("clear");
+      const r = await s.call("tapAt", [a.choices.findIndex((c) => c.label === "Order up")]);
+      await s.call("tapAt", [a.choices.findIndex((c) => c.label === "Deal")]);
+      await s.call("tapAt", [a.choices.findIndex((c) => c.label === "10♥")]);
+      a = (await s.snapshot()).state;
+      ok("tappables({elements: true}): tap the exact element (a delegated button, an onclick property, a card in a delegating hand)", r.result === "ok" && a.log.includes("pick:p2") && a.log.includes("click:prop") && a.log.includes("card:10♥"), a.log);
+    } finally { await g.stop(); }
+  }
+  {
+    const f = findConfig(P("tap-desktop"));
+    const g = await openGame(f.config, f.root, { quiet: true });
+    try {
+      const s = g.session;
+      await stepTo(s, await begin(s, { seed: 1 }), 2);
+      await s.call("tap", ["#t1"]);
+      const a = (await s.snapshot()).state;
+      ok("dom.tap on a desktop page (no ontouchstart, even where the host reports maxTouchPoints): no touch events, mouse events and click as before", a.log.join() === "mousedown:t1,click:t1", a.log);
+    } finally { await g.stop(); }
+  }
+
   // 3. the CLI, two separate processes: the same shot mid-transition, byte for byte
   const files = [1, 2].map((i) => path.join(os.tmpdir(), `witness-dom-${process.pid}-${i}.png`));
   const runs = files.map((out) => spawnSync(process.execPath, [cli, "shot", "--at", "0.8", "--input", "space@0.3", "--out", out], { cwd: P("dom"), encoding: "utf8", timeout: 180000, env: process.env }));
@@ -174,7 +256,7 @@ else {
   const lines = j ? j.data.lines.join("\n") : doc.stdout + doc.stderr;
   ok("doctor on the DOM page: deterministic, no 'no visible <canvas>' warning, the DOM capture and the epoch named", j && j.summary.deterministic === true && !/⚠ no visible <canvas>/.test(lines) && /DOM page \(no visible <canvas>\)/.test(lines) && /clock: the game's Date starts at 2026-06-15/.test(lines) && /browser \(DOM\)/.test(lines), lines);
   ok("doctor on the DOM page (launch.inject, transitions, a rAF loop, end events): nothing on real time between frames, no inject tip", j && j.summary.web.realtime && j.summary.web.realtime.calls === 0 && !/real time between frames|inline classic/.test(lines), lines);
-  for (const n of ["dom", "dom-plain", "dom-boot", "hover", "a11y"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
+  for (const n of ["dom", "dom-plain", "dom-boot", "hover", "a11y", "anim-start", "tap", "tap-desktop"]) fs.rmSync(path.join(P(n), "witness"), { recursive: true, force: true });
 }
 
 console.log(`${pass} passed, ${fail} failed`);

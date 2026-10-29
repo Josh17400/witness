@@ -111,8 +111,16 @@ scripts (other than a `window.WITNESS_CONFIG = {...}` one) ran before the adapte
 DOM games (no `<canvas>`) need nothing else: `hello` says `browser (DOM)`, the CLI captures the
 whole viewport (`launch.capture` unset = `screen` for a page without a visible canvas), and
 **CSS transitions and animations run on the virtual clock** (§2). `witness.dom.tap(el)` taps an
-element (selector or Element) the way a finger does and says `"ok"` or `"blocked by #overlay"`;
-`witness.dom.tappables()` lists what can be tapped as `[{label, id}]` (in view first; labels from
+element (selector or Element) the way a finger does and says `"ok"` or `"blocked by #overlay"` (on a touch
+device (`ontouchstart` in window, or `maxTouchPoints > 0` in an engine without `TouchEvent`, e.g. WebKit, where the
+events are plain `Event`s carrying `touches` / `changedTouches`): `touchstart` / `touchend` with `touches` / `changedTouches` first, then the mouse
+events and `click`, none of them when the page cancels the touch, as on an iPhone);
+`witness.dom.tappables()` lists what can be tapped as `[{label, id}]` (buttons, links, fields, `[role=button]`,
+`[onclick]`, `[tabindex]` but not -1 (0.7.11; not a canvas, media or a dialog / log / region role: re-baseline
+snapshots that hold `choices` for a page with other focusable elements), an element given `el.onclick = …` /
+`ontouchend` … in code, one that sets `cursor: pointer` (in its own style rule or inline: cards in a pointer hand
+each count; children that only inherit it do not); a plain panel holding tappables gives way to them; `tappables({root, elements: true})` adds `el`
+for `witness.dom.tap(c.el)`) (in view first; labels from
 `aria-label`, then the visible text, `title`, `#id`; aria-hidden elements and decoration are left out; a text field
 reads `Loadout name [text field: Night Owl]` with `input: true`; `(selected)` for `.sel` / `aria-pressed`), and
 `witness.dom.text(root?)` gives a panel's visible text without aria-hidden parts (for `state.screenText`): handy as
@@ -139,7 +147,7 @@ In witness mode:
   (`WITNESS_CONFIG.epoch` sets it for a page on its own.) `witness doctor` prints the epoch.
 * **CSS transitions, CSS animations and `element.animate()`** run on the virtual clock too: every
   frame each animation of the document is held (playbackRate 0) and its `currentTime` set from the
-  virtual time since the frame it was first seen; past its end it is finished, so
+  virtual time it was created at; past its end it is finished, so
   `transitionend` / `animationend` still fire. A frame that starts, finishes or wraps one waits for
   one real display frame so those events are dispatched in the same frame every run. Infinite
   animations move along too; animations still running at a reset restart there; `<video>`
@@ -147,6 +155,10 @@ In witness mode:
   `witness.animating()`) is the number of **finite** animations still running: 0 once the screen
   has settled, e.g. `eval "globalThis.__witnessAnimating?.() ?? 0"` after a scene change. Off:
   `WITNESS_CONFIG.animations = false` / `?witness_animations=0` (`videos: false` leaves videos alone).
+  One started between frames (by a call, an input listener, boot code) is held the moment it exists
+  (`element.animate()` is hooked; a MutationObserver and `animationstart` / `transitionrun` catch the
+  CSS kind before the browser draws it; a call answers after its start events went out), so the first
+  screenshot shows it at its virtual start in every run: no game-side "freeze new animations" hold needed.
 * `setTimeout`/`setInterval`/`requestIdleCallback` are virtual timers. A timer due inside a frame
   fires during that frame, before the rAF callbacks, with the clock set to its own due time.
   Intervals keep their phase. The HTML 4 ms nesting clamp is applied, so `setTimeout(f, 0)`
@@ -178,7 +190,7 @@ real DOM events through the game's normal input path:
 |---|---|
 | `key` | `keydown` (+ `keypress` for printable keys) / `keyup` with correct `key`, `code`, `location`, legacy `keyCode`/`which` (Phaser reads `keyCode`) and modifier flags. Target: `keyTarget` option, else a canvas with `tabindex`, else the focused element, else `body`. It bubbles to `document` and `window`. |
 | `mouse` | `pointermove`/`pointerdown`/`pointerup` + the compat `mousemove`/`mousedown`/`mouseup` (skipped after a cancelled `pointerdown`, per spec), then `click` / `auxclick` / `contextmenu`, with `buttons`, `movementX/Y`. Coordinates are mapped from logical game pixels (`size`) to client pixels through the canvas's `getBoundingClientRect()`, so CSS scaling works. The target is the element under the point (DOM UI buttons get clicked too), or the pressed element while a button is held. |
-| `wheel` | `WheelEvent` (`deltaY` in pixels) at the last mouse position. |
+| `wheel` | `WheelEvent` (`deltaY` in pixels) at the last mouse position (or the event's own `x`, `y`); unless the page cancels it, the adapter then scrolls like a browser: the nearest scrollable ancestor, else the page, at once and in whole pixels (0.7.11). |
 | `touch` | `pointerdown`/`pointermove`/`pointerup` with `pointerType: "touch"` (`pointerId` 100 + finger id, `isPrimary` for finger 0, `pressure`, plus `pointerover`/`enter` before the down and `pointerout`/`leave` after the up), then real `TouchEvent`s `touchstart`/`touchmove`/`touchend` with `touches`/`targetTouches`/`changedTouches` across all fingers (`identifier` = finger id) where the browser has the `Touch` constructor (Chromium/Edge do). Every event of a finger goes to the element it went down on. Same coordinate mapping as the mouse. Finger 0 is then also the mouse (below). |
 | `text` | per character: `keydown`, `keypress`, `keyup`. Focused `<input>`/`<textarea>` elements also get the text and an `input` event. |
 | `pad`, `axis` | a virtual standard-mapping gamepad: `navigator.getGamepads()[0]` reflects them (buttons `a b x y lb rb lt rt back start ls rs up down left right home`, axes `leftx lefty rightx righty`, triggers `lefttrigger`/`righttrigger`) and `gamepadconnected` fires once. |
@@ -279,7 +291,11 @@ stopped (music queued while locked plays from its start after the tap). A source
 128-frame quantum reaches the source's end (start time + the buffer's playable length over `playbackRate`/`detune`,
 or its `stop()` time), the same frame every run and never before the sound was rendered; a closed context's sources
 never end. Timers (`setTimeout` voice counters) are virtual too. A context the game closed is dropped from the
-capture at the next reset. This works
+capture at the next reset. A context made mid-test (on the first tap) and one resumed after a freeze keep their
+128-frame quanta on the reset's grid, so one-shots timed from `currentTime` sound the same in a `--repeat` pass where
+the context already existed; `decodeAudioData` takes no simulated time (a frame or call doesn't end while a decode is
+pending, up to 10 s of real time: then it goes on with a `decode-late` warning), so a buffer decoded on a tap is ready
+on the same frame every run. This works
 for Phaser's WebAudio sound manager, Howler.js (WebAudio mode), three.js `AudioListener`, Tone.js
 and hand-written graphs. Limits:
 * `<audio>`/`HTMLAudioElement` playback and `createMediaElementSource` are **not** captured (a
@@ -635,7 +651,7 @@ witness.createMixer({ sampleRate, channels }).play(samples, { delay, volume })
 witness.real                 // the real setTimeout/requestAnimationFrame/now/Date
 await witness.ready({ frames, ms, timeout, each })  // pictures decoded + fonts ready (start() does it; each picture ≤ 2.5 s)
 await witness.boot()         // run <script type="text/witness"> deferred classic scripts (§1b)
-witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(root?) -> [{label, id, input?}]; witness.dom.text(root?) -> string
+witness.dom.tap(elOrSelector) -> "ok" | "blocked by …"; witness.dom.tappables(root? | {root, elements}) -> [{label, id, input?, el?}]; witness.dom.text(root?) -> string
 witness.animating()          // finite CSS / Web Animations still running; also globalThis.__witnessAnimating()
 witness.drawing              // false on frames nobody sees (step "draw": "last"): if (witness.drawing !== false) draw() (§8)
 witness.draw(draw) -> bool   // the same as a call: draws unless skipped; repaints before a screenshot after an undrawn frame

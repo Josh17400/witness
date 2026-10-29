@@ -9,7 +9,7 @@ const VERBS = [
   ["navigate to", "goto"], ["get to", "goto"], ["go over to", "goto"], ["walk over to", "goto"], ["return to", "goto"], ["go back to", "goto"],
   ["talk to", "talk"], ["talk with", "talk"], ["speak to", "talk"], ["speak with", "talk"], ["chat with", "talk"], ["chat to", "talk"],
   ["run away", "flee"], ["back off", "flee"], ["get away", "flee"], ["look at", "look"], ["aim at", "look"], ["turn to", "look"], ["face", "look"],
-  ["wait for", "waitfor"], ["interact with", "interact"], ["switch to", "weapon"], ["equip", "weapon"],
+  ["wait for", "waitfor"], ["scroll", "scroll"], ["swipe", "scroll"], ["interact with", "interact"], ["switch to", "weapon"], ["equip", "weapon"],
   ["goto", "goto"], ["approach", "goto"], ["reach", "goto"], ["go", "go"], ["walk", "go"], ["move", "go"], ["head", "go"], ["step", "go"],
   ["explore", "explore"], ["wander", "explore"], ["scout", "explore"], ["search", "explore"], ["roam", "explore"],
   ["fight", "fight"], ["attack", "fight"], ["kill", "fight"], ["engage", "fight"], ["hit", "fight"], ["slay", "fight"], ["defeat", "fight"],
@@ -56,6 +56,7 @@ export const ORDER_CARD_TURN = [
   "pick <n|words> (one of the choices: a card, a menu button, a move; by number or by words from its label)",
   "choose <n|words> (a dialogue option; pick works there too) · wait [s] (until your turn, new choices or a dialogue; cap s)",
   "press <key|control> [xN] · hold <key|control> <s> · stop",
+  "scroll <down|up> [n] · scroll top|bottom · scroll to <n|words> (a choice under a fixed bar or off screen: bring it into view)",
 ].join("\n");
 export const ORDER_CARD_DEFENSE = [
   "fight [enemies|thing] [for 25s] (stays put and attacks; waits for the next enemy when the field is empty; reaching the time is a success)",
@@ -291,6 +292,32 @@ function parseOne(text, ctx) {
       if (d) { o.dir = d; break; }
       if (/^(up|down)$/.test(lowRest)) { o.pitch = lowRest; break; }
       o.target = parseTarget(rest); if (!o.target) throw new OrderError(`"${text}": look where? e.g. "look north", "look at Red#6"`);
+      break;
+    }
+    case "scroll": {
+      // scroll down|up [n] · scroll top|bottom (also "to the top") · scroll to <choice: n | words> · "swipe up" = scroll down
+      let ws = rest.filter((x) => x.q || !/^(the|page|screen|list|a|bit|more|of|steps?|times?|notch(es)?|screens?)$/i.test(x.w));
+      const toWord = ws[0] && !ws[0].q && /^(to|until|till)$/i.test(ws[0].w);
+      if (toWord) ws = ws.slice(1);
+      const w0 = (ws[0] && !ws[0].q ? ws[0].w : "").toLowerCase();
+      const swipe = /^swipe$/i.test(text.trim().split(/\s+/)[0]);
+      if (/^(top|start|beginning)$/.test(w0) && ws.length === 1) { o.dir = "top"; break; }
+      if (/^(bottom|end)$/.test(w0) && ws.length === 1) { o.dir = "bottom"; break; }
+      if (!toWord && /^(down|up|d|u|s|n|south|north|downward|upward|downwards|upwards)$/.test(w0)) {
+        const down = /^(down|d|s|south|downwards?)$/.test(w0);
+        o.dir = down !== swipe ? "down" : "up";   // a swipe up moves the page down
+        const n = ws.slice(1).find((x) => NUM.test(x.w));
+        o.n = Math.min(50, Math.max(1, n ? Math.round(+n.w) : 1));
+        break;
+      }
+      if (!ws.length) { o.dir = swipe ? "up" : "down"; o.n = 1; break; }
+      if (!toWord && NUM.test(w0) && ws.length === 1) { o.dir = "down"; o.n = Math.min(50, Math.max(1, Math.round(+w0))); break; }
+      // scroll to: a choice by number or words (as choose / pick)
+      const lw = w0.replace(/[).:]$/, "").replace(/^#/, "");
+      if (/^\d+$/.test(lw) && ws.length === 1) o.option = +lw;
+      else if (ORDINAL[lw] && ws.length <= 2 && lw !== "top") o.option = ORDINAL[lw];
+      else o.optionText = ws.map((x) => x.w).join(" ").replace(/^["']|["']$/g, "");
+      o.to = true;
       break;
     }
     case "reload": break;

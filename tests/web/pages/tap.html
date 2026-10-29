@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tap targets</title>
+  <!-- witness.dom.tap / tappables on a pure-DOM page (0.7.11): an iOS-style tab bar that only listens for touchend (one
+       tab cancels it, so no click follows), elements made clickable by an onclick PROPERTY, cursor: pointer and
+       tabindex, a panel that delegates clicks to its buttons, and a card whose children inherit its pointer cursor; a pointer
+       hand that delegates to pointer cards (their own rule: each is a target), and a focusable canvas (not a target). -->
+  <style>
+    html, body { margin: 0; background: #123; color: #fff; font: 16px sans-serif; }
+    #bar { display: flex; gap: 4px; padding: 4px; }
+    .tab { padding: 8px; background: #345; }
+    .x { margin: 4px; padding: 6px; background: #234; }
+    .ptr { cursor: pointer; }
+    #hand { display: flex; gap: 4px; cursor: pointer; }
+    .hc, .hc * { cursor: pointer; padding: 4px; background: #456; }
+  </style>
+</head>
+<body>
+  <div id="bar"><div class="tab" id="t1">Play</div><div class="tab" id="t2">Stats</div><div class="tab" id="t3">Shop</div></div>
+  <div class="x" id="prop">Deal</div>
+  <span class="x ptr" id="ptr">Skip</span>
+  <div class="x" id="ti" tabindex="0">Focus me</div>
+  <div class="x" id="ti-1" tabindex="-1">Not a target</div>
+  <div class="x" id="panel"><button id="p1">Pass</button><button id="p2">Order up</button></div>
+  <div class="x ptr" id="card"><span>A</span><span>&spades;</span></div>
+  <div class="x" id="plain">Just text</div>
+  <div class="x" id="hand"><div class="hc">9<b>&hearts;</b></div><div class="hc">10<b>&hearts;</b></div><div class="hc">J<b>&hearts;</b></div></div>
+  <canvas id="cv" tabindex="0" width="40" height="20"></canvas>
+  <script type="module">
+    import witness from "/witness/witness.js";
+    const $ = (s) => document.querySelector(s);
+    const log = [];
+    const note = (e) => log.push(`${e.type}:${e.currentTarget.id || "doc"}${e.touches ? `/${e.touches.length}.${e.changedTouches.length}${e.changedTouches[0] && e.changedTouches[0].clientX > 0 ? "+" : ""}` : ""}`);
+    for (const t of document.querySelectorAll(".tab")) {
+      t.ontouchend = (e) => { note(e); if (t.id === "t3") e.preventDefault(); };   // a property, not an attribute
+      t.addEventListener("touchstart", note);
+      t.addEventListener("mousedown", note);
+      t.addEventListener("click", note);
+    }
+    $("#prop").onclick = note;
+    $("#ptr").addEventListener("click", note);
+    $("#ti").addEventListener("click", note);
+    $("#panel").onclick = (e) => { if (e.target.tagName === "BUTTON") log.push(`pick:${e.target.id}`); };
+    $("#card").addEventListener("click", note);
+    $("#hand").onclick = (e) => { const c = e.target.closest(".hc"); if (c) log.push(`card:${c.textContent}`); };
+    document.addEventListener("touchstart", note, true);   // tap-to-skip listens on the document
+    await witness.start({
+      name: "tap", fps: 60,
+      calls: {
+        tap: (sel) => witness.dom.tap(sel),
+        tapAt: (i) => { const c = witness.dom.tappables({ elements: true })[i]; return c ? witness.dom.tap(c.el) : "none"; },
+        clear: () => { log.length = 0; return true; },
+      },
+      snapshot: () => ({ log: log.slice(), choices: witness.dom.tappables(), inBar: witness.dom.tappables("#bar").map((c) => c.label),
+        withEls: witness.dom.tappables({ root: "#panel", elements: true }).map((c) => c.el instanceof Element && c.el.id), touch: navigator.maxTouchPoints }),
+    });
+  </script>
+</body>
+</html>

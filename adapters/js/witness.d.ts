@@ -8,7 +8,7 @@ export type WitnessEvent =
   | { frame: number; type: "key"; key: string; down: boolean }
   /** `fromTouch`: the mouse fallback of finger 0 (delivered right after its touch event; never recorded). */
   | { frame: number; type: "mouse"; x: number; y: number; button?: 0 | 1 | 2; down?: boolean; fromTouch?: boolean }
-  | { frame: number; type: "wheel"; dx?: number; dy: number }
+  | { frame: number; type: "wheel"; dx?: number; dy: number; x?: number; y?: number }
   | { frame: number; type: "text"; text: string }
   | { frame: number; type: "action"; action: string; down: boolean }
   | { frame: number; type: "pad"; button: string; down: boolean }
@@ -187,11 +187,15 @@ declare global {
 }
 
 export interface WitnessDomHelpers {
-  /** Tap an element (or the first match of a selector) at its centre: touch pointer events, mouse events, click.
+  /** Tap an element (or the first match of a selector) at its centre: touch pointer events, mouse events, click; on a
+   *  touch device (ontouchstart in window, or maxTouchPoints > 0 in an engine without TouchEvent, e.g. WebKit, where the
+   *  events are plain Events carrying touches / changedTouches) touchstart / touchend first, and no mouse events / click
+   *  when the page cancels them.
    *  "ok", "blocked by <what covers it>" (warned), or "not found: <selector>". */
   tap(el: Element | string): string;
-  /** What can be tapped (buttons, links, inputs, [role=button], [onclick]), visible, in view first. */
-  tappables(root?: Element | string): { label: string; id: string | null; input?: true }[];
+  /** What can be tapped (buttons, links, inputs, [role=button], [onclick], [tabindex] not -1, an onclick / ontouchend…
+   *  property set in code, cursor: pointer set by its own rule, not inherited), visible, in view first. elements: true adds el (the element, for tap). */
+  tappables(root?: Element | string | { root?: Element | string; elements?: boolean }, opts?: { elements?: boolean }): { label: string; id: string | null; input?: true; el?: Element }[];
   /** The visible text under root (default the body), aria-hidden / hidden parts left out: for state.screenText. */
   text(root?: Element | string): string;
 }

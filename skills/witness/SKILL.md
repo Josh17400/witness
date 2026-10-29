@@ -204,7 +204,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    player can click or play now; `legal: false` for moves it can't take) and `state.yourTurn`, and say how a pick
    reaches the game (`"pick": {"call": "<fn>"}` gets the choice's id; or `"click"` on a choice `rect`). Testers then
    `pick <n|words>` and `wait` (until their turn), and see the game's own fields (`"show": ["score", "hand"]`) instead
-   of a map. `play suggest` detects such games.
+   of a map. `play suggest` detects such games. A page taller than the phone: testers `scroll down|up [n]`,
+   `scroll top|bottom` or `scroll to <words>` (recorded wheel input; a pick covered by a fixed bar fails with the
+   fix, e.g. "scroll down 1"); `"scroll": {"call": "<fn>"}` lets the game scroll to a choice itself.
    **Static / tower / base defense games** (you never move, enemies come in waves) use `"profile": "defense"`: no move
    control needed, the base is `state.player` (pos, hp), enemies are listed closest first with arrival times, alerts
    don't break waits, and `fight enemies for 25s` waits for the next wave and ends on its time as a success. For a

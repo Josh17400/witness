@@ -151,6 +151,10 @@ before it in the file (put them in time order).
   accept `super`, `command`, `cmd`, `win` and `windows` for `meta` and report it as `meta`.
 * Mouse coordinates are in the game's logical pixels, with the top-left origin.
 * `button`: 0 = left, 1 = middle, 2 = right.
+* `wheel`: `dy` > 0 scrolls down (`dx` sideways), in pixels; at the pointer, or at the event's own `x`, `y` when it
+  has them (the pointer doesn't move). The JS adapter also does the browser's default when the page doesn't cancel
+  the event: it scrolls the nearest scrollable ancestor (else the page) by whole pixels at once, so `witness play`'s
+  `scroll` order and replays scroll a page the same way every run.
 * `action` events are for games with an input-mapping layer: the adapter passes the action
   straight to it.
 * Adapters inject events through the game's normal input path, so gameplay code can't tell
@@ -256,7 +260,9 @@ adapter writes a replay:
    journey, a fight) use `"match"` steps in tests or `witness test --repeat 2`, which compares every
    step of every test against the first pass. Audio matches when every sample is within `--audio-tol`
    (witness.json `"audioTol"`, default 1e-5: float rounding in compressors / convolvers; 0 = exact); a capture longer
-   by at most one silent 128-frame render quantum matches too.
+   by at most one silent 128-frame render quantum matches too. Screenshots match when every channel is within
+   `--shot-tol` levels (witness.json `"shotTol"`, default 2: Chromium anti-aliasing noise; 0 = exact), with a note
+   line when pixels differed within it; state and `digest` always match exactly.
 
 ## 7. Transports
 

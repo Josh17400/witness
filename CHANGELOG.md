@@ -3,6 +3,67 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.11 (2026-10-28)
+
+From Euchre Unleashed's adoption of 0.7.10 (pure-DOM iPhone web card game: 197 tests green twice in a row, but only
+with its own workarounds). Each workaround is now built in.
+
+**CSS animations started between frames**
+- An animation started by a call, an input listener, boot code or an async callback is held on the virtual clock the
+  moment it exists, not from the end of the next frame. `element.animate()` is hooked; a MutationObserver plus
+  `animationstart` / `transitionrun` listeners catch CSS ones before the browser draws them; a call answers after
+  their start events went out; a step catches any left before its first frame. The first screenshot shows it at its
+  virtual start in every run, so a game-side "freeze new animations" hold isn't needed. Animations count their time
+  from the virtual time they were created at.
+
+**`witness.dom.tap` / `tappables`**
+- `dom.tap` on a touch device (`ontouchstart` in window, or `maxTouchPoints > 0` in an engine without `TouchEvent`,
+  e.g. WebKit, where the events are plain `Event`s carrying `touches` / `changedTouches`) sends `touchstart` /
+  `touchend` first, then the mouse events and `click`, none of them when the page cancels the touch, as an iPhone
+  does. A game's own touch pair before `dom.tap` now doubles the touch.
+- `tappables()` also finds `[tabindex]` (not -1; not a canvas, media or a dialog / log / region role), an element
+  given `el.onclick = …` / `ontouchend` … in code, and one that sets `cursor: pointer` in its own style rule or inline:
+  cards in a pointer hand each count (the delegating hand gives way to them), children that only inherit the cursor
+  don't. `tappables({root, elements: true})` adds `el` to each entry, for `witness.dom.tap(c.el)`.
+
+**WebAudio: identical audio across `--repeat` passes**
+- A context made mid-test (on the first tap) or resumed after a freeze keeps its 128-frame quanta on the reset's grid,
+  including right after an audio capture, so one-shots timed from `currentTime` land on the same sample in a pass
+  where the context already existed (they were up to 127 samples apart). A running context at `currentTime` 0 reads
+  half a sample like every other boundary; a suspended one still reads 0.
+- `decodeAudioData` takes no simulated time: a frame or a call doesn't end while a decode it started is pending, so a
+  buffer decoded on a tap is ready on the same frame every run (sounds played from it were sometimes missing). After
+  10 s of real time it goes on with a `decode-late` warning.
+
+**Tests**
+- `--shot-tol N` (witness.json `"shotTol"`, default 2) now applies to `witness test --repeat` and `"match"` steps as it
+  did to `doctor`; pixels that differed within it get one note line per test.
+
+**`witness play`: pages taller than the screen**
+- New `scroll` order (any profile): `scroll down|up [n]` (n × `play.scroll.step`, 200 px of wheel), `scroll top|bottom`,
+  `scroll to <n|words>` (brings a choice clear of fixed bars: through `play.scroll.call` if set, else a read-only page
+  measurement plus recorded wheel input, else the choice's `rect`). Answers say where the page is.
+- A pick a finger couldn't make fails with the reason and the fix: a call answered `blocked by …` / `off screen`, a
+  `click` pick whose rect is off a declared screen, or a `click` that changed nothing on a measurable page (`covered
+  by the fixed bar at the bottom (#tabs): scroll down 1 (or "scroll to save current look"), then pick again`). A
+  full-screen overlay says `close it first` instead.
+- Orders may answer `status: "eval"` (protocol): the daemon runs the page measurement for them.
+- The JS adapter's `wheel` input now scrolls like a browser unless the page cancels it: the nearest scrollable
+  ancestor under the point, else the page (not a root with `overflow: hidden` / `clip`), at once in whole pixels.
+  Wheel events may carry `x`, `y`. `witness.dom.scrollBy` is new.
+
+**Adoption steps**
+1. Re-copy `adapters/js/witness.js` (the version note says when).
+2. *Euchre and other DOM games:* drop the game's own "freeze new animations" hold; drop the touch pair the harness sent
+   before `witness.dom.tap` (tap sends it now: keeping it taps twice); remove `--no-audio` and `--no-shots` from
+   `--repeat` runs; replace hand-written card lookups with `witness.dom.tappables({elements: true})` and tap `c.el`.
+3. Re-baseline snapshots that hold `tappables()` (`choices`) on pages with other focusable or `cursor: pointer`
+   elements: the list can gain entries (pointer cards instead of their hand).
+4. A canvas game on a scrollable page that doesn't cancel wheel events now scrolls under witness, as it would for a
+   player: call `preventDefault()` in its wheel handler, or lock the root with `overflow: hidden`.
+5. *Optional:* testers of long pages get `scroll`; set `play.scroll` (`{"step": 300}` or `{"call": "scrollToChoice",
+   "args": ["id"]}`) if the defaults don't fit.
+
 ## 0.7.10 (2026-10-28)
 
 From Euchre Unleashed's loadouts round.

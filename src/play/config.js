@@ -1,5 +1,6 @@
 // Witness play: resolve the "play" section of witness.json into a complete config, filling everything the game
 // doesn't specify from conventions (docs/PLAYTEST.md). Pure: no game access; `hello` and a first snapshot refine it.
+import { parseScroll } from "./scroll.js";
 
 const has = (keys, k) => keys.includes(k);
 const firstIn = (keys, cands) => cands.find((c) => keys.includes(c)) || null;
@@ -155,6 +156,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     choices: raw.choices || null, yourTurn: raw.yourTurn || null,
     show: Array.isArray(raw.show) ? raw.show : null,
     pick: parsePick(raw.pick),
+    scroll: parseScroll(raw.scroll),          // `scroll to <choice>` through a game call; px per `scroll down 1` (step, 200)
     turnWait: Math.max(1, +(raw.turnWait ?? 30) || 30),
   };
   cfg.northSign = /^\+/.test(String(cfg.north)) ? 1 : -1;
