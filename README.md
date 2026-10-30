@@ -104,7 +104,9 @@ than the adapter.
 
 Witness keeps the machine responsive when several agents use it at once: every game or headless-browser launch takes
 a slot of a machine-wide budget (`WITNESS_MAX_PROCS`, default 3; `WITNESS_MAX_BROWSERS`, default 1) and waits up to
-`WITNESS_BUDGET_WAIT` seconds (default 90; 600 for `test`, `doctor` and `play batch`) for one, and a launched game is killed with its whole process tree when the
+`WITNESS_BUDGET_WAIT` seconds (default 90; 600 for `test`, `doctor` and `play batch`) for one. While you have a game open (an exe under a Steam, Epic, GOG, Xbox or EA game folder, or `Desktop\Embervale.exe`; `WITNESS_GAME_RE` /
+`WITNESS_GAME_EXCLUDE_RE` adjust the match) the limit drops to `WITNESS_MAX_PROCS_GAMING` (default 2; `0` or `WITNESS_GAMING_PROBE=0` turns it off),
+so you can keep playing: running launches go on, new ones wait (checked at every launch; the process scan is cached ~30 s). A launched game is killed with its whole process tree when the
 command ends, fails or is interrupted. Generated output (witness/shots, replays, playtests, Godot movies) is pruned
 automatically; named baselines go in witness/refs (`shot --save-ref`), which is never pruned.
 

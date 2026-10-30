@@ -3,6 +3,28 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.12 (2026-10-30)
+
+The owner's rule, via Embervale: "if i have a game open im playing … only allow 2 so i can keep playing my game".
+
+- **A lower machine-wide cap while a game is being played.** Whenever a game is open, the heavy-process budget is
+  `min(WITNESS_MAX_PROCS, WITNESS_MAX_PROCS_GAMING)` (default 2) and browsers `min(WITNESS_MAX_BROWSERS, 2)`. It is
+  checked at every launch and while waiting: running games and browsers finish, new ones wait. Applies to test, doctor,
+  play daemons, batch testers and browsers. `play batch` says when a game lowered its tester count.
+- **Game detection:** a running exe under `steamapps\common\`, `Epic Games\`, `GOG Galaxy\Games\`, `GOG Games\`,
+  `XboxGames\`, `EA Games\`, or `Desktop\Embervale.exe`; crash handlers, launchers, helpers, updaters, anti-cheat,
+  redistributables and tray tools that live under game folders (Lossless Scaling, Wallpaper Engine, SteamVR, the Epic
+  launcher's subprocesses) don't count. `WITNESS_GAME_RE` / `WITNESS_GAME_EXCLUDE_RE` add or remove paths. The scan
+  (~0.3 s on Windows via CIM, no window) is shared machine-wide for 30 s (`gaming.json` in the budget folder); a failed
+  scan counts as no game. `WITNESS_MAX_PROCS_GAMING=0` or `WITNESS_GAMING_PROBE=0` turns it off.
+- The waiting line names the game: `▸ waiting for a free slot: a game is open (Hades.exe), so the limit is 2
+  (WITNESS_MAX_PROCS_GAMING) …`. While a game lowers the cap, a command that holds every slot itself waits instead of
+  failing at once (the game may close).
+
+**Adoption steps**
+1. Nothing required. Embervale can stop lowering `WITNESS_MAX_PROCS` by hand while the owner plays.
+2. *Optional:* `WITNESS_MAX_PROCS_GAMING=1` for a tighter cap, `WITNESS_GAME_RE` for games installed elsewhere.
+
 ## 0.7.11 (2026-10-28)
 
 From Euchre Unleashed's adoption of 0.7.10 (pure-DOM iPhone web card game: 197 tests green twice in a row, but only

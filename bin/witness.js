@@ -72,7 +72,10 @@ Common options:
 Times are seconds, or frames with an "f": --at 90f, --every 1f, space@60f. "+2f" = 2 frames after the input's frame.
 Machine-wide limit: at most 3 games/browsers run at once (WITNESS_MAX_PROCS; 0 = no limit), 1 of them a headless
 browser (WITNESS_MAX_BROWSERS); a launch over it waits (naming each holder and how long it has run; a line every
-~60 s), then gives up after 90 s, or 600 s for test, doctor and play batch (WITNESS_BUDGET_WAIT overrides).
+~60 s), then gives up after 90 s, or 600 s for test, doctor and play batch (WITNESS_BUDGET_WAIT overrides). While a game
+is open (a Steam/Epic/GOG/Xbox/EA game folder's exe or Desktop\\Embervale.exe; WITNESS_GAME_RE / WITNESS_GAME_EXCLUDE_RE adjust
+it) the process cap drops to at most 2 (WITNESS_MAX_PROCS_GAMING; browsers stay at min(WITNESS_MAX_BROWSERS, 2); 0 or
+WITNESS_GAMING_PROBE=0 = off): running ones go on, new ones wait.
 
 Run 'witness help <command>' for details. Protocol: docs/PROTOCOL.md`;
 

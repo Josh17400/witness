@@ -29,7 +29,7 @@ const DEFAULT_ADDR = "127.0.0.1:7357";
 const VERSION = "1.0.0";
 // the Witness release this copy came from: the CLI says so when a game's copy is older than the CLI (a core test keeps
 // it equal to package.json)
-const WITNESS_VERSION = "0.7.11";
+const WITNESS_VERSION = "0.7.12";
 
 // The real APIs, captured before any takeover. The adapter only ever uses these.
 const real = {

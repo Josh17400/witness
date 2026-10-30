@@ -317,7 +317,8 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   `$`). The tester's line and its batch-file section then say `· N commands denied (<first>)` and list them, plus
   `END was denied (no feedback recorded)` when the END itself was (the batch then stopped the session).
 * **At most 2 at once** (`--parallel 1` or `2`; each tester is a claude process plus a game and a daemon), never more
-  than the machine-wide game budget (`WITNESS_MAX_PROCS`), and **one at a time for a web game** (each session is a
+  than the machine-wide game budget (`WITNESS_MAX_PROCS`, or `WITNESS_MAX_PROCS_GAMING` while a game is open: the start
+  line then says "a game is open (Hades.exe): at most 2 at a time"), and **one at a time for a web game** (each session is a
   headless browser).
 * **One batch machine-wide.** A lock (`<registry>/locks/batch.json`) refuses a second batch while one runs; a lock
   whose batch died (its pid gone, from before a reboot, or untouched for 2 minutes) is taken over, and
@@ -847,7 +848,11 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
   game plus one light daemon. Every game or browser launch, playtests included, also takes a slot of the machine-wide
   budget (`WITNESS_MAX_PROCS`, default 3; `WITNESS_MAX_BROWSERS`, default 1): a daemon waits up to
   `WITNESS_BUDGET_WAIT` seconds (default 90) for one, and `start` shows its "waiting for a free slot" lines (each
-  holder and how long it has run). `play batch` itself queues up to 10 min for a free slot before starting each tester.
+  holder and how long it has run). While the owner has a game open (an exe under a Steam, Epic, GOG, Xbox or EA game
+  folder, or `Desktop\Embervale.exe`; `WITNESS_GAME_RE` / `WITNESS_GAME_EXCLUDE_RE` adjust it) the caps are at most
+  `WITNESS_MAX_PROCS_GAMING` (default 2; `0` or `WITNESS_GAMING_PROBE=0` = off), checked at every launch with the
+  process scan cached ~30 s machine-wide (`gaming.json` in the budget
+  folder); running sessions go on, new launches wait. `play batch` itself queues up to 10 min for a free slot before starting each tester.
   `play suggest` runs a game too but isn't counted as a session.
 * **Cleanup.** `witness play list` shows what's alive. `witness play stop --all` ends every live session.
   `witness play list --clean` marks unresponsive ones ended and forgets entries older than a day or whose folder was

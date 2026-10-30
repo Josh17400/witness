@@ -176,7 +176,7 @@ if (!hasSh) console.log("  batch with a fake tester: skipped (no sh)");
 else {
   fs.writeFileSync(path.join(mock, "goals.json"), JSON.stringify([{ goal: "collect a coin block-once", name: "fb1" }, { goal: "collect a coin block-always", name: "fb2" }]));
   const tB = Date.now();
-  const b = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "play", "batch", "--goals", "goals.json", "--parallel", "1", "--wall-minutes", "50"], { cwd: mock, encoding: "utf8", timeout: 300000, env: { ...process.env, ...env, WITNESS_CLAUDE: path.join(here, "fake-claude.mjs") } });
+  const b = spawnSync(process.execPath, [path.join(root, "bin", "witness.js"), "play", "batch", "--goals", "goals.json", "--wall-minutes", "50"], { cwd: mock, encoding: "utf8", timeout: 300000, env: { ...process.env, ...env, WITNESS_CLAUDE: path.join(here, "fake-claude.mjs"), WITNESS_GAMING_FORCE: "Hades.exe", WITNESS_MAX_PROCS: "3", WITNESS_MAX_PROCS_GAMING: "1" } });   // "the owner is playing Hades"
   const batchSec = (Date.now() - tB) / 1000;
   const bo = (b.stdout || "") + (b.stderr || "");
   const walls = [...bo.matchAll(/· (\d+)s wall/g)].map((m) => +m[1]);
@@ -189,6 +189,7 @@ else {
   ok("batch md: the blocked row and the retry note", /\| 2 \| collect a coin block-always \| newbie \| blocked: permission denied \(cd /.test(bm) && /\| 1 \| .* \| ended \(after a retry\) \|/.test(bm) && /retried once with the exact allowed command, which worked/.test(bm), bm);
   ok("batch: the blocked attempt's empty session folder was removed", fs.readdirSync(path.join(mock, "witness", "playtests")).filter((f) => f.startsWith("fb1")).length === 1, fs.readdirSync(path.join(mock, "witness", "playtests")).join(","));
   ok("batch: the header names the units", /about 3 game minutes \(hard stop after 50 wall min\) each, tester timeout 53 wall min/.test(bo), bo.split("\n")[0]);
+  ok("batch: a game open → the header says why it runs fewer at once", /^▶ batch of 2 playtests \(a game is open \(Hades\.exe\): at most 1 at a time, /.test(bo), bo.split("\n")[0]);
 }
 
 // ---- nothing left running

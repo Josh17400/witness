@@ -12,7 +12,7 @@ import { makeBrief, PERSONAS, configArg, cmdRoot, launchArgs } from "./brief.js"
 import { resolvePlayConfig, describeControls } from "./config.js";
 import { readEntry, pidAlive, shimPath, shimCommand, acquireBatchLock, validName, LOCK_BEAT_MS, localTime } from "./registry.js";
 import { prune, fmtBytes } from "../core/clean.js";
-import { budgetLimits, acquireSlot } from "../core/budget.js";
+import { effectiveLimits, budgetLimits, acquireSlot } from "../core/budget.js";
 import { UntilWatch, fmtHours } from "./until.js";
 
 const r1 = (x) => Math.round(x * 10) / 10;
@@ -112,8 +112,11 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
   // a web game's session is a headless browser: one tester at a time (the session limit allows one web session); never
   // more games at once than the machine-wide heavy-process budget allows (WITNESS_MAX_PROCS; the rest would only queue)
   const web = !!(cfg.launch && cfg.launch.url && !cfg.launch.attach);
-  const procs = budgetLimits().max;
+  // (WITNESS_MAX_PROCS_GAMING while the owner has a game open: checked once here, and again by each tester's slot)
+  const E = effectiveLimits(), procs = E.max;
   const parallel = web ? 1 : Math.max(1, Math.min(2, +(opt.parallel || 2), procs || Infinity));
+  const full = web ? 1 : Math.max(1, Math.min(2, +(opt.parallel || 2), budgetLimits().max || Infinity));   // without the game
+  const gamingNote = E.lowered && !web && parallel < full ? `a game is open (${E.game}): at most ${parallel} at a time` : "";
   const val = (k) => (opt[k] !== undefined && opt[k] !== true ? opt[k] : null);
   const minutes = opt.minutes ? +opt.minutes : 3;   // GAME minutes (the tester's budget)
   const wallDefault = val("wall-minutes") != null ? +val("wall-minutes") : null;   // a hard wall-clock stop per session
@@ -162,7 +165,7 @@ export async function playBatch(opt, { loadConfig, ROOT }) {
   process.on("SIGINT", onSig); process.on("SIGTERM", onSig);
 
   const budget = budgetText(runs[0]);
-  console.log(`▶ batch of ${runs.length} playtest${runs.length > 1 ? "s" : ""} (${parallel} at once, ${runs[0].model} at ${opt.effort || "low"} effort, ${budget} each, tester timeout ${runs[0].timeoutMin} wall min)`);
+  console.log(`▶ batch of ${runs.length} playtest${runs.length > 1 ? "s" : ""} (${gamingNote || `${parallel} at once`}, ${runs[0].model} at ${opt.effort || "low"} effort, ${budget} each, tester timeout ${runs[0].timeoutMin} wall min)`);
   const [claudeBin, ...claudePre] = claudeCommand();
   /** One claude process for run r with this prompt; fills r's result fields when it exits. */
   const attempt = (r, prompt) => new Promise((resolve) => {

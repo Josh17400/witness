@@ -290,7 +290,9 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
   and play batch queue up to 10 min (a line every ~60 s), so run those in the background. To change the wait, set
   WITNESS_BUDGET_WAIT=<seconds> and give the Bash call a timeout to match.
   Don't start more in parallel; finish or stop (`witness play stop --all`) what you started. Limits:
-  WITNESS_MAX_PROCS / WITNESS_MAX_BROWSERS.
+  WITNESS_MAX_PROCS / WITNESS_MAX_BROWSERS. While the owner has a game open ("a game is open (Hades.exe), so the limit
+  is 2") the cap is WITNESS_MAX_PROCS_GAMING (default 2): they're playing, leave them the RAM; don't turn it off
+  (WITNESS_MAX_PROCS_GAMING=0) unless they ask.
 * Engines you can't launch headlessly (editor-based): `witness <cmd> --attach`, then start
   the game with the adapter active.
 * The protocol (for writing a new adapter): `${CLAUDE_PLUGIN_ROOT}/docs/PROTOCOL.md`.

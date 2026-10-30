@@ -12,7 +12,7 @@ import { loadReplay } from "../../src/core/runner.js";
 import { listen, Session } from "../../src/core/session.js";
 import { prune, markGenerated, unsafeDir, GENERATED, MANIFEST } from "../../src/core/clean.js";
 import { stampSkill, staleSkillCopies, isInstalledPlugin } from "../../src/core/init.js";
-import { acquireSlot, scanSlots, startKeys, pidAlive, defaultWaitSec, fmtAge, who } from "../../src/core/budget.js";
+import { acquireSlot, scanSlots, startKeys, pidAlive, defaultWaitSec, fmtAge, who, gameExe, effectiveLimits, openGame, probeGame } from "../../src/core/budget.js";
 import { killTree } from "../../src/core/procs.js";
 import { Matcher } from "../../src/core/compare.js";
 import { loopSeam } from "../../src/media/hygiene.js";
@@ -297,7 +297,8 @@ ok("splitRange: bad", splitRange("0.9") === null && splitRange("1..2..3") === nu
   ok("isInstalledPlugin", isInstalledPlugin("C:\\Users\\a\\.claude\\plugins\\cache\\m\\witness\\0.7.3") && isInstalledPlugin("/home/a/.claude/plugins/witness") && !isInstalledPlugin(root));
 }
 
-// ---- NEW: the machine-wide heavy-process budget
+// ---- NEW: the machine-wide heavy-process budget (the owner's open game must not lower these caps: forced "no game")
+process.env.WITNESS_GAMING_FORCE = "0";
 {
   const dir = path.join(tmp, "budget");
   const a = await acquireSlot({ dir, max: 2, maxBrowsers: 1, waitMs: 0, log: () => {} });
@@ -357,6 +358,107 @@ ok("splitRange: bad", splitRange("0.9") === null && splitRange("1..2..3") === nu
   d.release(); a.release();
   ok("budget: max 0 = no limit", (await acquireSlot({ dir, max: 0 })).files.length === 0);
 }
+
+// ---- NEW: a game open (the owner is playing) lowers the caps to WITNESS_MAX_PROCS_GAMING
+{
+  const saved = Object.fromEntries(["WITNESS_GAME_RE", "WITNESS_GAME_EXCLUDE_RE", "WITNESS_GAMING_PROBE", "WITNESS_MAX_PROCS_GAMING", "WITNESS_GAMING_FORCE"].map((k) => [k, process.env[k]]));
+  const restore = () => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+  for (const k of Object.keys(saved)) delete process.env[k];
+  const games = ["C:\\Program Files (x86)\\Steam\\steamapps\\common\\Hades\\x64\\Hades.exe", "D:/SteamLibrary/steamapps/common/Celeste/Celeste.exe",
+    "C:\\Program Files\\Epic Games\\Fortnite\\FortniteClient-Win64-Shipping.exe", "C:\\Program Files (x86)\\GOG Galaxy\\Games\\Stardew Valley\\Stardew Valley.exe",
+    "C:\\GOG Games\\Witcher 3\\bin\\x64\\witcher3.exe", "C:\\XboxGames\\Starfield\\Content\\Starfield.exe", "C:\\Program Files\\EA Games\\Sims 4\\TS4_x64.exe",
+    "C:\\Users\\josh\\Desktop\\Embervale.exe", "D:\\SteamLibrary\\steamapps\\common\\Crashlands\\Crashlands.exe", "/home/j/.steam/steam/steamapps/common/Hades/Hades"];
+  const not = ["C:\\Program Files (x86)\\Steam\\steamapps\\common\\Hades\\crashpad_handler.exe", "C:\\Program Files (x86)\\Steam\\steamapps\\common\\X\\UnityCrashHandler64.exe",
+    "C:\\Program Files\\Epic Games\\Launcher\\Portal\\Binaries\\Win64\\EpicGamesLauncher.exe", "C:\\Program Files (x86)\\Steam\\steamapps\\common\\X\\EasyAntiCheat\\EasyAntiCheat_EOS_Setup.exe",
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Steamworks Shared\\_CommonRedist\\vcredist.exe", "C:\\Program Files (x86)\\Steam\\bin\\cef\\cef.win7x64\\steamwebhelper.exe",
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Lossless Scaling\\LosslessScaling.exe", "C:\\Program Files (x86)\\Steam\\steamapps\\common\\wallpaper_engine\\wallpaper32.exe",
+    "C:\\Program Files\\Epic Games\\Launcher\\Engine\\Binaries\\Win64\\UnrealCEFSubProcess.exe", "C:\\Program Files (x86)\\Epic Games\\Epic Online Services\\service\\EpicOnlineServices.exe",
+    "D:/SteamLibrary/steamapps/common/SteamVR/bin/win64/vrmonitor.exe", "C:\\Program Files\\Epic Games\\Fortnite\\Engine\\Binaries\\Win64\\CrashReportClient.exe",
+    "C:\\Program Files (x86)\\Steam\\steam.exe", "C:\\Windows\\notepad.exe", "C:\\Users\\josh\\Desktop\\Embervale.exe.bak", "C:\\Users\\josh\\Documents\\embervale\\Embervale.exe", "", null];
+  ok("gaming: game folders match (either slash, any store), the exe name returned", games.every((p) => gameExe(p)) && gameExe(games[0]) === "Hades.exe" && gameExe(games[1]) === "Celeste.exe", games.filter((p) => !gameExe(p)));
+  ok("gaming: helpers, launchers, crash handlers, redists and other folders don't", not.every((p) => gameExe(p) === null), not.filter((p) => gameExe(p)));
+  process.env.WITNESS_GAME_RE = "\\\\Games\\\\Itch\\\\"; process.env.WITNESS_GAME_EXCLUDE_RE = "celeste";
+  ok("gaming: WITNESS_GAME_RE adds paths, WITNESS_GAME_EXCLUDE_RE removes them (helpers stay out)", gameExe("E:\\Games\\Itch\\Pizza Tower\\PizzaTower.exe") === "PizzaTower.exe"
+    && gameExe(games[1]) === null && gameExe(games[0]) === "Hades.exe" && gameExe("E:\\Games\\Itch\\X\\UpdaterTool.exe") === null);
+  process.env.WITNESS_GAME_RE = "("; delete process.env.WITNESS_GAME_EXCLUDE_RE;
+  ok("gaming: a bad WITNESS_GAME_RE is ignored", gameExe(games[1]) === "Celeste.exe" && gameExe("E:\\Games\\Itch\\a.exe") === null);
+  delete process.env.WITNESS_GAME_RE;
+  // the caps: min(cap, gaming), an unlimited 0 becomes the gaming cap; gaming 0 = off
+  const E = (o) => effectiveLimits({ maxBrowsers: 1, gamingMax: 2, ...o });
+  ok("gaming: caps", JSON.stringify(E({ max: 3, game: null })) === JSON.stringify({ max: 3, maxBrowsers: 1, game: null, gamingMax: 2, lowered: false, loweredBrowsers: false })
+    && E({ max: 3, game: "Hades.exe" }).max === 2 && E({ max: 3, game: "Hades.exe" }).lowered && E({ max: 3, game: "Hades.exe" }).maxBrowsers === 1 && !E({ max: 3, game: "Hades.exe" }).loweredBrowsers
+    && E({ max: 0, game: "Hades.exe" }).max === 2 && E({ max: 1, game: "Hades.exe" }).max === 1 && !E({ max: 1, game: "Hades.exe" }).lowered
+    && E({ max: 5, maxBrowsers: 3, game: "Hades.exe" }).maxBrowsers === 2 && E({ max: 5, maxBrowsers: 3, game: "Hades.exe" }).loweredBrowsers
+    && E({ max: 3, game: "Hades.exe", gamingMax: 0 }).max === 3);
+  process.env.WITNESS_MAX_PROCS = "3"; process.env.WITNESS_MAX_PROCS_GAMING = "1"; process.env.WITNESS_GAMING_FORCE = "Hades.exe";
+  const env1 = effectiveLimits();
+  ok("gaming: from the environment (WITNESS_MAX_PROCS_GAMING, WITNESS_GAMING_FORCE)", env1.max === 1 && env1.game === "Hades.exe" && env1.lowered, JSON.stringify(env1));
+  delete process.env.WITNESS_MAX_PROCS; delete process.env.WITNESS_MAX_PROCS_GAMING; delete process.env.WITNESS_GAMING_FORCE;
+  // the machine-wide cache: fresh → no probe; stale or unreadable → probe and rewrite; off switches → no probe
+  const gdir = path.join(tmp, "gaming"), cache = path.join(gdir, "gaming.json");
+  fs.mkdirSync(gdir, { recursive: true });
+  let probes = 0;
+  const probe = () => { probes++; return { game: "Probed.exe", path: "X:\\XboxGames\\P\\Probed.exe", ms: 5 }; };
+  fs.writeFileSync(cache, JSON.stringify({ at: Date.now() - 5000, game: "Cached.exe" }));
+  ok("gaming cache: a fresh cache answers without probing", openGame({ dir: gdir, probe }) === "Cached.exe" && probes === 0);
+  fs.writeFileSync(cache, JSON.stringify({ at: Date.now() - 31000, game: "Cached.exe" }));
+  const g2 = openGame({ dir: gdir, probe }), c2 = JSON.parse(fs.readFileSync(cache, "utf8"));
+  ok("gaming cache: a stale one is probed again and rewritten (atomically: no temp file left)", g2 === "Probed.exe" && probes === 1 && c2.game === "Probed.exe" && Date.now() - c2.at < 5000 && fs.readdirSync(gdir).length === 1, JSON.stringify([g2, probes, c2, fs.readdirSync(gdir)]));
+  ok("gaming cache: and now answers from the cache", openGame({ dir: gdir, probe }) === "Probed.exe" && probes === 1);
+  fs.writeFileSync(cache, "{not json");
+  ok("gaming cache: an unreadable one → probe", openGame({ dir: gdir, probe }) === "Probed.exe" && probes === 2);
+  fs.writeFileSync(cache, JSON.stringify({ at: Date.now() + 600000, game: "Future.exe" }));
+  ok("gaming cache: a time in the future (clock change) → probe", openGame({ dir: gdir, probe }) === "Probed.exe" && probes === 3);
+  fs.writeFileSync(cache, JSON.stringify({ at: Date.now() - 31000, game: "Cached.exe" }));
+  ok("gaming cache: a failed probe is no game", openGame({ dir: gdir, probe: () => ({ game: null, ms: 15000, error: "timed out" }) }) === null && JSON.parse(fs.readFileSync(cache, "utf8")).error === "timed out");
+  fs.unlinkSync(cache);
+  process.env.WITNESS_GAMING_PROBE = "0";
+  const off1 = openGame({ dir: gdir, probe }); delete process.env.WITNESS_GAMING_PROBE;
+  process.env.WITNESS_MAX_PROCS_GAMING = "0";
+  const off2 = openGame({ dir: gdir, probe }); delete process.env.WITNESS_MAX_PROCS_GAMING;
+  ok("gaming: WITNESS_GAMING_PROBE=0 / WITNESS_MAX_PROCS_GAMING=0 → off (no probe)", off1 === null && off2 === null && probes === 3 && !fs.existsSync(cache));
+  // the real probe on this machine: it answers (a game or not) well under its 15 s cap
+  const real = probeGame();
+  console.log(`  (gaming probe on this machine: ${real.ms} ms, ${real.game ? `game open: ${real.game}` : "no game"}${real.error ? `, error: ${real.error}` : ""})`);
+  ok("gaming: the real probe answers in under 10 s", !real.error && real.ms < 10000, JSON.stringify(real));
+  // acquire under the gaming cap: holders that took their slots under the full cap of 3 (slot-0, slot-2) still count
+  const bdir = path.join(tmp, "budget-gaming");
+  fs.mkdirSync(bdir, { recursive: true });
+  const h = [0, 2].map(() => spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" }));
+  await sleep(200);
+  const keys = startKeys(h.map((c) => c.pid));
+  h.forEach((c, i) => fs.writeFileSync(path.join(bdir, `slot-${i * 2}.json`), JSON.stringify({ pid: c.pid, key: keys.get(c.pid), token: `g${i}`, at: new Date(Date.now() - 60000).toISOString(), label: `game ${i}` })));
+  const lines = []; let msg = "";
+  try { await acquireSlot({ dir: bdir, max: 3, gamingMax: 2, game: "Hades.exe", waitMs: 1200, pollMs: 200, log: (m) => lines.push(m) }); } catch (e) { msg = e.message; }
+  ok("gaming: a launch waits while 2 run and a game is open (the line names the game and the cap), then fails",
+    /^▸ waiting for a free slot: a game is open \(Hades\.exe\), so the limit is 2 \(WITNESS_MAX_PROCS_GAMING\), in use by game 0 .*game 1/.test(lines[0] || "") && /no free slot after .*a game is open \(Hades\.exe\).*WITNESS_MAX_PROCS_GAMING=0/.test(msg)
+    && fs.readdirSync(bdir).sort().join() === "slot-0.json,slot-2.json", `${lines[0]} | ${msg} | ${fs.readdirSync(bdir)}`);
+  const free = await acquireSlot({ dir: bdir, max: 3, gamingMax: 2, game: null, waitMs: 0, log: () => {} });
+  ok("gaming: no game → the full cap (slot-1 taken at once)", free.files.length === 1 && free.files[0].endsWith("slot-1.json"));
+  free.release();
+  // the game closes while waiting (rechecked on every poll) → the launch goes ahead
+  let open = true; setTimeout(() => { open = false; }, 800);
+  lines.length = 0;
+  const t0 = Date.now(), g = await acquireSlot({ dir: bdir, max: 3, gamingMax: 2, game: () => (open ? "Hades.exe" : null), waitMs: 8000, pollMs: 200, log: (m) => lines.push(m) });
+  ok("gaming: the game closing while waiting lets the launch go", g.files.length === 1 && Date.now() - t0 >= 700 && /a game is open/.test(lines[0] || ""), `${lines} ${Date.now() - t0}`);
+  g.release();
+  // a holder exits: the waiting launch takes a slot under the gaming cap
+  setTimeout(() => h[0].kill(), 600);
+  const g3 = await acquireSlot({ dir: bdir, max: 3, gamingMax: 2, game: "Hades.exe", waitMs: 8000, pollMs: 200, log: () => {} });
+  ok("gaming: a holder exiting frees a place under the gaming cap", g3.files.length === 1);
+  // a browser launch: the browser cap drops to the gaming cap too
+  for (const c of h) c.kill();
+  for (let i = 0; i < 30 && h.some((c) => pidAlive(c.pid)); i++) await sleep(100);
+  const bh = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  await sleep(200);
+  fs.writeFileSync(path.join(bdir, "browser-0.json"), JSON.stringify({ pid: bh.pid, key: startKeys([bh.pid]).get(bh.pid), token: "b0", at: new Date().toISOString(), label: "web" }));
+  g3.release(); lines.length = 0; msg = "";
+  try { await acquireSlot({ dir: bdir, browser: true, max: 5, maxBrowsers: 3, gamingMax: 1, game: "Hades.exe", waitMs: 600, pollMs: 200, log: (m) => lines.push(m) }); } catch (e) { msg = e.message; }
+  ok("gaming: browsers capped too (min(WITNESS_MAX_BROWSERS, gaming))", /a game is open \(Hades\.exe\), so the limit is 1 headless browser \(WITNESS_MAX_PROCS_GAMING\)/.test(lines[0] || "") && /no free slot/.test(msg), `${lines[0]} | ${msg}`);
+  bh.kill();
+  restore();
+}
+delete process.env.WITNESS_GAMING_FORCE;   // the end-to-end part runs the real probe (its gaming.json lands in the budget folder)
 
 // ---- process trees: a shell's child dies with it
 {
@@ -437,7 +539,7 @@ const tinyCfg = (dir, extraLaunch = {}) => { fs.mkdirSync(dir, { recursive: true
   fs.writeFileSync(path.join(proj, "witness.json"), JSON.stringify({ name: "x", launch: { command: process.execPath, args: [path.join(proj, "quiet.mjs")] }, timeout: 2 }));
   const r2 = cli(["eval", "--at", "1", "frame"], {}, proj);
   ok("timeout: the error shows the game's output", r2.status !== 0 && /no game connected within 2s/.test(r2.stderr) && /config missing, waiting forever/.test(r2.stderr), r2.stderr);
-  ok("budget slots are released after failed launches", !fs.existsSync(env.WITNESS_BUDGET_DIR) || fs.readdirSync(env.WITNESS_BUDGET_DIR).length === 0, fs.existsSync(env.WITNESS_BUDGET_DIR) ? fs.readdirSync(env.WITNESS_BUDGET_DIR) : "");
+  ok("budget slots are released after failed launches", !fs.existsSync(env.WITNESS_BUDGET_DIR) || fs.readdirSync(env.WITNESS_BUDGET_DIR).filter((n) => n !== "gaming.json").length === 0, fs.existsSync(env.WITNESS_BUDGET_DIR) ? fs.readdirSync(env.WITNESS_BUDGET_DIR) : "");
 }
 {
   // H4: a die() inside a command stops the game (no leaked process), and SIGTERM does too
