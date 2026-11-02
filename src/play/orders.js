@@ -61,7 +61,7 @@ export const ORDER_CARD_TURN = [
 export const ORDER_CARD_DEFENSE = [
   "fight [enemies|thing] [for 25s] (stays put and attacks; waits for the next enemy when the field is empty; reaching the time is a success)",
   "press <key|control> [xN] · hold <key|control> <s> · wait [s] [quiet] (quiet: only big things wake it) · stop",
-  "choose <n|words> (a dialogue option) · call <name> [args] (when calls are on; a several-word value in single quotes) · set heal <hp%>",
+  "choose <n|words> (a dialogue option; skipped when none is open) · call <name> [args] (when calls are on; a several-word value in single quotes) · set heal <hp%>",
 ].join("\n");
 export const ORDER_CARD_FPS = "fight [thing] [hold] · look <dir|thing> · reload · weapon <n|name> · go forward|back|left|right [cells]";
 
@@ -228,6 +228,10 @@ function parseOne(text, ctx) {
     case "talk": o.target = rest.length ? parseTarget(rest) : { raw: "", words: [], category: "npc", plural: false, nearest: true, id: null }; break;
     case "interact": o.target = rest.length ? parseTarget(rest) : null; break;
     case "choose": {
+      // "choose 1 if open" (if any / if shown / if offered; only as the last two words): explicit about the skip when nothing is open to choose from
+      const io = rest.findIndex((x, j) => !x.q && j > 0 && j + 2 === rest.length && /^if$/i.test(x.w) && /^(open|opened|any|shown|showing|there|present|asked|offered|available|one|it)$/i.test(rest[j + 1]?.w || ""));
+      if (io >= 0) { o.ifOpen = true; rest = rest.slice(0, io); }
+      const restStr = rest.map((x) => x.w).join(" ").trim();
       if (rest.some((x) => !x.q)) rest = rest.filter((x) => x.q || !/^(the|option|number|choice|answer|#|no\.?)$/i.test(x.w));
       const w = (rest[0]?.w || "").toLowerCase().replace(/[).:]$/, "").replace(/^#/, "");
       if (/^\d+$/.test(w) && rest.length === 1) o.option = +w;

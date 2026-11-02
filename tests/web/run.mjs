@@ -23,7 +23,8 @@ const root = path.resolve(here, "..", "..");
 const cli = path.join(root, "bin", "witness.js");
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => { if (cond) pass++; else { fail++; console.log("FAIL", name, typeof extra === "string" ? extra.slice(-2500) : JSON.stringify(extra)); } };
-const witness = (cwd, args, env = {}) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 240000, env: { ...process.env, ...env } });
+// a command waiting for a browser slot held elsewhere (a playtest) waits WITNESS_BUDGET_WAIT on top of its run
+const witness = (cwd, args, env = {}) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 240000 + Math.max(0, +process.env.WITNESS_BUDGET_WAIT || 0) * 1000, env: { ...process.env, ...env } });
 const json = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
 
 // ---- 1. units ----------------------------------------------------------------------------------------------------

@@ -238,10 +238,50 @@ export class Session {
 
   /** The default per-request wait (ms): WITNESS_CALL_TIMEOUT / launch.callTimeout seconds (set by openGame), else 60 s. */
   get requestMs() { return this.requestTimeoutMs > 0 ? this.requestTimeoutMs : 60000; }
+  /**
+   * Wall ms per frame of the recent steps (weighted to the latest, by frames), null before any (the first step alone,
+   * provisionally); speed: game time per wall time (the stepped dts), null until trusted (≥ 60 frames over ≥ 2 steps).
+   */
+  get msPerFrame() { return this._stepF > 0 ? this._stepMs / this._stepF : this._stepHold ? this._stepHold.ms / this._stepHold.frames : null; }
+  get _stepTrusted() { return this._stepF > 0 && this._stepN >= 60 && this._stepReqs >= 2; }
+  get speed() { return this._stepTrusted && this._stepMs > 0 ? this._stepSec * 1000 / this._stepMs : null; }
+  /**
+   * A step request's wait: the per-request wait plus, per frame, 3× the measured ms per frame (at least 0.1 s), so a
+   * 15 s step of a big battle under software rendering doesn't time out while a hung game is still caught; until the
+   * measure is trusted at most 1 s a frame (one slow first frame, a shader compile, doesn't stretch a hang to minutes).
+   */
+  stepWaitMs(frames) { return this.requestMs + Math.max(1, frames | 0) * this.frameWaitMs(); }
+  frameWaitMs(floor = 100) { const m = 3 * (this.msPerFrame || 0); return Math.max(floor, this._stepTrusted ? m : Math.min(m, 1000)); }
+  /**
+   * Count a step's wall time (sec: the game seconds it stepped). The first step waits for the second to judge it (a
+   * shader compile or asset load is dropped when 3× slower), later ones count at most 10× the estimate; a game under
+   * half real time on two trusted steps says so once (software rendering, mostly).
+   */
+  _stepTimed(frames, ms, sec = frames / this.fps) {
+    if (!(frames >= 1)) return;
+    this._stepN = (this._stepN || 0) + frames; this._stepReqs = (this._stepReqs || 0) + 1;
+    const h = this._stepHold; this._stepHold = null;
+    if (!(this._stepF > 0) && !h) { this._stepHold = { frames, ms, sec }; return; }
+    if (this._stepF > 0) ms = Math.min(ms, frames * 10 * this._stepMs / this._stepF);
+    const fold = (f, w, s) => { const keep = Math.pow(0.5, f / 600);   // half the weight after ~600 more frames
+      this._stepF = (this._stepF || 0) * keep + f; this._stepMs = (this._stepMs || 0) * keep + w; this._stepSec = (this._stepSec || 0) * keep + s; };
+    const held = h && h.ms / h.frames <= 3 * ms / frames;
+    if (held) fold(h.frames, h.ms, h.sec);
+    fold(frames, ms, sec);
+    const sp = this.speed;
+    this._slowHits = sp != null && sp < 0.5 ? (this._slowHits || 0) + (held ? 2 : 1) : 0;
+    if (!this.slowNote && this._slowHits >= 2) {
+      this.slowNote = `the game runs at ${sp < 0.1 ? sp.toFixed(3) : sp.toFixed(2)}× real time here (software rendering?): long runs take a while; the step wait scales with it`;
+      if (!this.quiet) console.error(`▸ note: ${this.slowNote}`);
+    }
+  }
   request(cmd, args = {}, timeoutMs = this.requestMs) {
     if (this.closed) return Promise.reject(new WitnessError(`the game is not connected (it may have crashed) — can't '${cmd}'`));
     const id = this.nextId++;
-    return new Promise((res, rej) => {
+    const t0 = Date.now();
+    return new Promise((res0, rej) => {
+      const res = cmd === "step" ? (m) => { const n = args.frames || 1, d = +args.dt > 0 ? +args.dt : 1 / this.fps;
+        this._stepTimed(n, Date.now() - t0, Array.isArray(args.dts) ? Array.from({ length: n }, (_, i) => (+args.dts[i] > 0 ? +args.dts[i] : d)).reduce((a, b) => a + b, 0) : n * d); res0(m); } : res0;
       // what was pending: the call (name and args), and from the JS adapter (an out-of-line "busy" query) whether a game
       // promise was still unresolved
       const timer = setTimeout(async () => {
@@ -254,7 +294,7 @@ export class Session {
             if (b && b.busy) busy = `; the page was still in '${b.busy.cmd}'${b.busy.name ? ` ${b.busy.name}` : ""} for ${Math.round(b.busy.ms / 100) / 10}s${b.busy.awaiting ? ", waiting on a promise the game returned that never resolved" : ""}${b.calls && b.calls.length ? ` (unresolved async calls: ${b.calls.map((c) => `${c.name} ${Math.round(c.ms / 1000)}s`).join(", ")})` : ""}`;
           } catch { /* an older adapter, or the page is frozen */ }
         }
-        rej(new WitnessError(`the game didn't answer ${what} within ${timeoutMs / 1000}s (is it stuck, or not handling '${cmd}'?${cmd === "call" || cmd === "eval" ? " A slow machine: raise WITNESS_CALL_TIMEOUT / launch.callTimeout (seconds)" : ""})${busy}`));
+        rej(new WitnessError(`the game didn't answer ${what} within ${timeoutMs / 1000}s (is it stuck, or not handling '${cmd}'?${cmd === "call" || cmd === "eval" || cmd === "step" ? ` A slow machine${this.speed != null && this.speed < 0.5 ? ` (it ran at ${this.speed.toFixed(2)}× real time)` : ""}: raise WITNESS_CALL_TIMEOUT / launch.callTimeout (seconds)` : ""})${busy}`));
       }, timeoutMs);
       this.pending.set(id, { res, rej, cmd, timer });
       this.conn.send({ id, cmd, ...args });
@@ -275,7 +315,7 @@ export class Session {
     }
     if (part.length) await this.request("input", { events: part });
   }
-  step(frames, dt, dts) { return this.request("step", { frames, ...(dt ? { dt } : {}), ...(dts ? { dts } : {}) }, Math.max(this.requestMs, frames * 50)); }
+  step(frames, dt, dts) { return this.request("step", { frames, ...(dt ? { dt } : {}), ...(dts ? { dts } : {}) }, this.stepWaitMs(frames)); }
   snapshot(paths) { return this.request("snapshot", paths ? { paths } : {}); }
   screenshot(scale) { return this.request("screenshot", scale ? { scale } : {}, Math.max(120000, this.requestMs)); }
   audio() { return this.request("audio", {}, Math.max(120000, this.requestMs)); }

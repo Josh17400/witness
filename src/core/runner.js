@@ -8,7 +8,9 @@ import { check, evaluate, fmt, ExprError, TimeContext, usesPrev, RESERVED_NAMES 
 import { WitnessError } from "./session.js";
 import { parseEpoch, DEFAULT_EPOCH } from "./launch.js";
 
-const MAX_CHUNK = 600; // frames per step request (keeps requests short and responsive)
+// frames per step request: requests stay short (2 s at 60 fps; a big battle under software rendering at 0.1× real time is
+// 20 s, well inside its wait) and the chunks are the same on every machine (a step's frames are the same split or not)
+const MAX_CHUNK = 120;
 
 /** Run replay `calls` that are due at the current frame (written by `witness play`; docs/PROTOCOL.md section 5). */
 async function runDueCalls(session, state) {

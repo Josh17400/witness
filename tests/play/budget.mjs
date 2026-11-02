@@ -121,6 +121,18 @@ const daemonGone = async (name, dir) => { const pid = JSON.parse(fs.readFileSync
   r = wE(mock, ["replay", path.join(dirOf(mock, "tl"), "replay.jsonl")]);
   ok("time limit: the replay ends in exactly the recorded state", r.code === 0 && /ended in exactly the recorded end state/.test(r.out), r.out.split("\n").slice(-4).join("\n"));
 
+  // a game far under real time (software rendering): one order answers within WITNESS_PLAY_DO_WALL wall seconds, and
+  // the reply says how slow the game runs here (0.7.13: a 13-min playtest took hours at late waves)
+  const slower = { MOCK_STEP_MS: "40", WITNESS_PLAY_DO_WALL: "4" };   // 0.42× real time
+  r = wE(mock, ["play", "start", "--name", "sl"], slower);
+  const tw = Date.now();
+  r = wE(mock, ["play", "do", "wait 600", "-s", "sl"], slower);
+  ok("slow game: the order stops at the per-order wall limit, saying the game's speed", /s of wall time is the limit per order \(the game runs at 0\.[34]\d× real time here\)/.test(r.out) && Date.now() - tw < 20000, r.out);
+  ok("slow game: the reply notes the speed once, with what a 25 s order costs", /note: the game runs at 0\.[34]\d× real time here \(software rendering\?\): a 25 s order takes about \d+ s here/.test(r.out), r.out);
+  r = wE(mock, ["play", "do", "wait 1", "-s", "sl"], slower);
+  ok("slow game: the note isn't repeated", !/note: the game runs/.test(r.out), r.out);
+  wE(mock, ["play", "end", "-s", "sl", "--fun", "3"], slower);
+
   // live: the waiting order is told the same
   r = wE(mock, ["play", "start", "--name", "tll", "--live", "--wall-minutes", "0.05"]);
   r = wE(mock, ["play", "do", "wait 600", "--for", "60", "-s", "tll"]);

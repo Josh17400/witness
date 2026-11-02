@@ -22,6 +22,9 @@ import { updateEntry, writeJson } from "./registry.js";
 import { r1, clip, oneLine } from "./util.js";
 import { PERSONAS } from "./brief.js";
 import { UntilWatch } from "./until.js";
+import { SoundLog, soundsText } from "./sounds.js";
+import { SleepWatch, exitVerdict } from "./interrupt.js";
+import { chooseCapture, domUiProbe } from "./shotui.js";
 export { PERSONAS };
 
 
@@ -29,6 +32,8 @@ export { PERSONAS };
 const DEBUG = !!process.env.WITNESS_PLAY_DEBUG;
 const ANIM_EXPR = "globalThis.__witnessAnimating?.() ?? 0";
 const OPEN_ENDED = new Set(["explore", "wait", "follow", "run", "waitfor", "hold", "block"]);
+/** One finished order of a chain: "✔ press 3: pressed 3", "✖ …", or "↷ skipped choose 1: no dialogue open". */
+const partOf = (r) => (r.skipped ? `↷ ${r.msg}` : `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}`);
 
 export async function runDaemon(dir) {
   const specFile = path.join(dir, "session.json");
@@ -42,8 +47,20 @@ export async function runDaemon(dir) {
   const wallMin = Math.max(0.01, +(opts.wallMinutes ?? opts.minutes ?? 20) || 20);
   // a step the game doesn't answer within this long means it hung (WITNESS_PLAY_HANG seconds, for tests)
   const hangMs = Math.max(1, +process.env.WITNESS_PLAY_HANG || 60) * 1000;
+  // one `do` (or a live wait) answers within this much wall time whatever its game-time cap: a slow game (software
+  // rendering at 0.1× real time) would otherwise keep the tester waiting for many minutes per order (WITNESS_PLAY_DO_WALL s)
+  const doWallMs = Math.max(1, +process.env.WITNESS_PLAY_DO_WALL || 300) * 1000;
+  let slowSaid = false;
+  /** Once per session, in a reply: the game runs well under real time here, so orders take longer than they say. */
+  const slowLine = () => { if (slowSaid || !S.slowNote) return ""; slowSaid = true; log(`note: ${S.slowNote}`); return `\n  note: ${S.slowNote.replace(/: long runs.*$/, "")}: a 25 s order takes about ${Math.round(25 / S.speed)} s here; give shorter orders`; };
   let stopWhy = null, doRunning = null, hung = null;   // why the session is ending (told to a running order); the running `do`
   log(`daemon ${process.pid} starting session ${spec.name} in ${spec.root}`);
+  // host sleep (a closed laptop): a 2 s timer that wakes up far too late, or a wall clock that jumped past the monotonic
+  // one. A connection that drops after it is "session interrupted", not GAME CRASHED (interrupt.js). WITNESS_PLAY_FAKE_SLEEP
+  // (tests): a sleep of that many seconds noted at the start
+  const sleepWatch = new SleepWatch();
+  let sleepTimer = null;
+  if (process.env.WITNESS_PLAY_FAKE_SLEEP) sleepWatch.note(+process.env.WITNESS_PLAY_FAKE_SLEEP || 60);
 
   let g;
   try {
@@ -58,6 +75,9 @@ export async function runDaemon(dir) {
   const stopAsked = () => fs.existsSync(path.join(dir, "stop.request"));
   if (stopAsked()) { log("stop requested while starting"); try { await g.stop(); } catch { /* gone */ } setStatus({ state: "ended", endedAt: new Date().toISOString(), reason: "stopped while starting", outcome: "stopped", summary: "stopped while starting" }); process.exit(0); }
   const S = g.session, fps = S.fps;
+  // a browser tab whose renderer dies (out of memory at a late wave) is a crash, not "the browser closed"
+  let pageCrashed = false;
+  if (S.web && S.web.page && S.web.page.on) S.web.page.on("crash", () => { pageCrashed = true; log("the page crashed (its renderer died)"); });
   // a replay that stands on its own: the effective config in the playtest folder (absolute paths, launch.server kept),
   // and a fingerprint of the build played (the page and the scripts it loads, or the launched files)
   const runConfig = writeRunConfig(dir, spec.cfg, spec.root);
@@ -138,10 +158,16 @@ export async function runDaemon(dir) {
     process.exit(1);
   }
 
+  // web games: the screen when the page's own buttons/text sit over or by the canvas (play.shotCapture, shotui.js)
+  let lastCapture = null;
   async function screenshot(why, scaleUp = 0) {
     if (!S.has("screenshot") || S.closed) return null;
     try {
-      const sh = await S.screenshot();
+      const web = S.web && S.web.page ? S.web : null;
+      lastCapture = await chooseCapture(cfg.shotCapture, web, () => web.page.evaluate(domUiProbe, 24));
+      let sh;
+      if (lastCapture.mode === "screen" && web.captureMode !== "screen") { const c = await web.capture("screen"); sh = { width: c.width, height: c.height, format: "png", data: c.png.toString("base64") }; }
+      else sh = await S.screenshot();
       fs.mkdirSync(shotsDir, { recursive: true });
       const file = path.join(shotsDir, `${String(world.t.toFixed(1)).replace(".", "_")}s-${why.replace(/[^\w-]+/g, "_").slice(0, 40)}.png`);
       if (sh.path) fs.copyFileSync(path.resolve(sh.path), file);
@@ -163,10 +189,17 @@ export async function runDaemon(dir) {
   async function keyShot(why) {
     if (shots.length >= cfg.maxShots) return null;
     const file = await screenshot(why);
-    if (file) shots.push({ t: +world.t.toFixed(2), why, file });
+    if (file) shots.push({ t: +world.t.toFixed(2), why, file, ...(lastCapture && lastCapture.note ? { capture: lastCapture.mode } : {}) });
     return file;
   }
   await keyShot("start");
+  sleepTimer = setInterval(() => {
+    const sl = sleepWatch.tick(Date.now(), performance.now(), world.t);
+    if (!sl) return;
+    log(`the machine seems to have slept: ~${sl.gapS}s of wall time passed in one 2 s tick (t=${r1(world.t)}s)`);
+    timeline.push({ t: +world.t.toFixed(2), frame, kind: "sleep", text: `the machine slept or was suspended (~${sl.gapS}s of wall time passed in one tick)` });
+  }, 2000);
+  sleepTimer.unref?.();
 
   // the timeline keeps one line per run of regen ticks (or damage over time with no attacker), not one per tick
   let regenRun = null;
@@ -235,15 +268,16 @@ export async function runDaemon(dir) {
   const turnPace = { wall: 0, frame: 0 };
   async function stepWorld(k) {
     const hint = lazy && lazy.on && k > 1;
-    try { await S.request("step", { frames: k, dts: dts(k), ...(hint ? { draw: "last" } : {}) }, Math.max(hangMs, k * 50)); }
-    catch (e) { if (!S.closed && /didn't answer/.test(e.message)) hung ??= { t: world.t, frame }; throw e; }
+    try { await S.request("step", { frames: k, dts: dts(k), ...(hint ? { draw: "last" } : {}) }, Math.max(hangMs, k * S.frameWaitMs(50))); }
+    catch (e) { if (!S.closed && /didn't answer/.test(e.message)) hung ??= { t: world.t, frame, at: Date.now() }; throw e; }
     frame += k;
     if (hint) { lazy.steps++; lazy.undrawn += k - 1; }
     if (opts.watch && !live.on) { const ahead = turnPace.wall + ((frame - turnPace.frame) / fps) * 1000 - Date.now(); if (ahead > 1) await new Promise((r) => setTimeout(r, ahead)); }
     const snap = await S.snapshot();
     let logs = [];
-    if (frame - lastLogFrame >= Math.max(1, Math.round(fps / 4))) { logs = await S.drainLogs(); lastLogFrame = frame; }
-    for (const l of logs) { lastLogs.push(`${l.level ? `[${l.level}] ` : ""}${oneLine(l.message)}`); if (lastLogs.length > 5) lastLogs.shift(); }
+    if (frame - lastLogFrame >= Math.max(1, Math.round(fps / 4))) { logs = sounds.fromLogs(await S.drainLogs()); lastLogFrame = frame; }
+    sounds.fromState(snap.state);
+    for (const l of logs) { lastLogs.push({ t: world.t, text: `${l.level ? `[${l.level}] ` : ""}${oneLine(l.message)}` }); if (lastLogs.length > 5) lastLogs.shift(); }
     const nw = perceiver.perceive(snap, frame);
     if (until && !until.hit && (until.active || until.clock) && until.check(snap, nw.t)) untilReached();
     ap.observe(nw);
@@ -269,6 +303,17 @@ export async function runDaemon(dir) {
     return ev;
   }
 
+  // ---- sounds (sounds.js): named by the game's sound events, state.sounds or "sound: <name>" log lines, else counted
+  // through the JS adapter's perf.audio.started; shown on the events line of the next observation
+  const sounds = new SoundLog();
+  async function hearSounds() {
+    if (S.closed || hung) return;
+    sounds.fromEvents(S.drainEvents("sound"));
+    if (sounds.perfAudio === false || !S.has("perf")) return;
+    try { sounds.fromPerf(await S.request("perf", {}, 5000)); } catch { sounds.perfAudio = false; }
+  }
+  const hear = () => (live.on ? lock.run(hearSounds) : hearSounds()).catch((e) => log(`sounds failed: ${e.message}`));
+
   // ---- stuck dead: respawn attempts change nothing for play.stuckDead game seconds (default 20) → the session ends
   const deadWatch = new DeadWatch(rawPlay.stuckDead ?? 20);
   const lastLogs = [];
@@ -290,13 +335,26 @@ export async function runDaemon(dir) {
   async function gameTrouble() {
     const tail = () => {
       const out = (g.output ? g.output() : "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-3);
-      const lines = [...lastLogs.slice(-3), ...out];
+      const lines = [...lastLogs.slice(-3).map((l) => l.text), ...out];
       return lines.length ? `; last lines: ${lines.map((l) => `"${clip(l, 120)}"`).join(" | ")}` : "";
     };
+    // a sleep under the step (Windows timers count it: the step's timeout fires on waking) isn't a hang
+    sleepWatch.tick(Date.now(), performance.now(), world.t);
+    const slept = sleepWatch.recent();
+    if (hung && !S.closed && slept && slept.at >= (hung.at ?? 0) - hangMs - 5000) return { status: "error", outcome: "interrupted", msg: `session interrupted (the machine slept) at t=${r1(hung.t)}s: the machine slept for ~${slept.gapS}s and a step got no answer after it; not a game crash${tail()}` };
     if (hung && !S.closed) return { status: "error", outcome: "not responding", msg: `the game is not responding since t=${r1(hung.t)}s (a step got no answer for ${Math.round(hangMs / 1000)}s)${tail()}` };
     if (g.proc && g.proc.exitCode == null) await new Promise((res) => { const t = setTimeout(res, 1500); g.proc.once("exit", () => { clearTimeout(t); res(); }); });
     const code = g.proc ? g.proc.exitCode ?? g.proc.signalCode : null;
-    return { status: "error", outcome: "crashed", msg: `the game exited${code != null ? ` (code ${code})` : ""} at t=${r1(world.t)}s${tail()}` };
+    // a closed laptop / a closed browser isn't a crash: the sleep watch reads the clocks once more (the drop can beat its timer)
+    sleepWatch.tick(Date.now(), performance.now(), world.t);
+    const out = (g.output ? g.output() : "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-3);
+    const v = exitVerdict({ slept: sleepWatch.recent(), web: !!S.web && !g.proc, code, lines: [...lastLogs.filter((l) => l.t >= world.t - 5).slice(-3).map((l) => l.text), ...out], gameError: errors.some((e) => e.t >= world.t - 5), pageCrashed });
+    const at = `at t=${r1(world.t)}s`;
+    if (v.outcome === "interrupted") return { status: "error", outcome: "interrupted", msg: `session interrupted (the machine slept or the browser was closed) ${at}: ${v.why}, then the game's connection dropped; not a game crash${tail()}` };
+    if (v.outcome === "browser closed") return { status: "error", outcome: "browser closed", msg: `the browser closed (or the page went away) ${at} with no game error; not a game crash${tail()}` };
+    if (v.outcome === "exited") return { status: "error", outcome: "exited", msg: `the game exited by itself (code 0, no error) ${at}${tail()}` };
+    if (pageCrashed) return { status: "error", outcome: "crashed", msg: `the page crashed ${at}: ${v.why}${tail()}` };
+    return { status: "error", outcome: "crashed", msg: `the game exited${code != null ? ` (code ${code})` : ""} ${at}${tail()}` };
   }
 
   async function runDo(text, forS) {
@@ -306,7 +364,7 @@ export async function runDaemon(dir) {
     if (until && until.hit) return { code: 0, result: untilResult(true) };
     thaw();
     turnPace.wall = Date.now(); turnPace.frame = frame;
-    const t0 = world.t;
+    const t0 = world.t, wallT0 = Date.now();
     // turn profile: a wait runs as long as it says (a bare wait up to play.turnWait), since it ends early on your turn
     // (a defense game's timed wait, and any "wait N quiet", runs its N seconds too: nothing small cuts it short)
     const turnWait = (o) => (cfg.profile === "turn" && o.verb === "wait" ? (o.untimed ? cfg.turnWait : o.seconds) : o.verb === "wait" && !o.untimed && (cfg.profile === "defense" || o.quiet) ? o.seconds : null);
@@ -348,6 +406,7 @@ export async function runDaemon(dir) {
       const wake = wakeFor(evs, b);
       if (wake) { result = evs.some((e) => e.kind === "goal") ? { status: "goal", msg: "the game reports a win" } : { status: "interrupted", msg: wake }; break; }
       if (world.t - t0 >= cap - 1e-9) { result = { status: "time", msg: `stopped after ${r1(world.t - t0)}s of game time${ap.cur ? ` (${clip(ap.cur.label, 40)} still running; give a new order or the same one again)` : ""}` }; break; }
+      if (Date.now() - wallT0 >= doWallMs) { result = { status: "time", msg: `stopped after ${r1(world.t - t0)}s of game time: ${Math.round((Date.now() - wallT0) / 1000)} s of wall time is the limit per order (the game runs at ${S.speed != null ? S.speed.toFixed(2) : "?"}× real time here)${ap.cur ? ` (${clip(ap.cur.label, 40)} still running; give a new order or the same one again)` : ""}` }; break; }
     }
     } catch (e) {
       // the game closed or hung under a step: a session stop (the wall cap) says so; a real exit/hang is told apart
@@ -360,14 +419,14 @@ export async function runDaemon(dir) {
     if (!result.outcome && result.status !== "ended" && !S.closed && (world.sceneKey !== scene0 || (world.dialogue ? JSON.stringify(world.dialogue) : null) !== dlg0)) await settleAnims();
     if (result.outcome) { const why = result.msg; setTimeout(() => shutdown(why, result.outcome), 10); }
     // results of a chain: show each finished order
-    const parts = ap.results.map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}${ap.results.length > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
+    const parts = ap.results.map((r) => `${partOf(r)}${ap.results.length > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
     if (result.status === "interrupted" || result.status === "time" || result.status === "goal" || result.status === "until") { if (ap.cur) parts.push(`… ${clip(ap.cur.label, 40)} (stopped)`); ap.clear(); }
     rec.status = result.status; rec.msg = parts.length > 1 ? parts.join(" → ") : result.msg || ap.results.at(-1)?.msg || ""; rec.seconds = +(world.t - t0).toFixed(2);
     if (ap.results.length > 1 && (result.status === "done" || result.status === "fail")) result.msg = parts.join(" → ");
     // flush logs so errors/notices from the last frames show up now
-    const lateLogs = S.closed || hung || stopWhy ? [] : await S.drainLogs().catch(() => []);
+    const lateLogs = S.closed || hung || stopWhy ? [] : sounds.fromLogs(await S.drainLogs().catch(() => []));
     if (lateLogs.length) for (const e of tracker.update(world, world, { logs: lateLogs })) { timeline.push({ t: +e.t.toFixed(2), frame: e.frame, kind: e.kind, text: e.text }); pending.push(e); if (e.kind === "error") errors.push({ t: +e.t.toFixed(2), text: e.text }); }
-    const line = resultLine({ status: result.status, order: list.length > 1 && (result.status === "interrupted" || result.status === "time") ? text : list.length === 1 ? text : null, msg: result.msg, seconds: world.t - t0 }) + (result.hint && result.status === "fail" ? `\n  hint: ${result.hint.split("\n")[0]}` : "");
+    const line = resultLine({ status: result.status, order: list.length > 1 && (result.status === "interrupted" || result.status === "time") ? text : list.length === 1 ? text : null, msg: result.msg, seconds: world.t - t0 }) + (result.hint && result.status === "fail" ? `\n  hint: ${result.hint.split("\n")[0]}` : "") + slowLine();
     writeProgress();
     freeze();
     return { code: 0, result: { ...result, line } };
@@ -397,7 +456,7 @@ export async function runDaemon(dir) {
   function settle(status, msg, hint) {
     const wt = live.waiter; if (!wt) return;
     live.waiter = null;
-    const parts = ap.results.slice(wt.results0).map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}${ap.results.length - wt.results0 > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
+    const parts = ap.results.slice(wt.results0).map((r) => `${partOf(r)}${ap.results.length - wt.results0 > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
     const running = orderLabel();
     let m = msg;
     if ((status === "done" || status === "fail") && parts.length > 1) m = parts.join(" → ");
@@ -411,7 +470,7 @@ export async function runDaemon(dir) {
   function chainFinished(dec) {
     const rec = live.order; live.order = null;
     const st = dec.status === "idle" ? "done" : dec.status;
-    const all = ap.results.map((r) => `${r.status === "fail" ? "✖" : "✔"} ${clip(r.order, 40)}: ${r.msg}`);
+    const all = ap.results.map((r) => `${partOf(r)}`);
     if (rec) { rec.status = st; rec.msg = all.length > 1 ? all.join(" → ") : dec.message || ""; rec.seconds = +(world.t - rec.t).toFixed(2); }
     if (live.waiter && live.waiter.rec === rec) settle(st, dec.message, dec.hint);
     else if (rec) pending.push({ t: world.t, frame, kind: "order", text: `${st === "fail" ? "✖" : "✔"} your order "${clip(rec.text, 40)}" finished: ${clip(rec.msg, 120)}` });
@@ -451,7 +510,7 @@ export async function runDaemon(dir) {
     if (live.waiter) {
       const wake = wakeFor(evs, bi);
       if (wake) { if (evs.some((e) => e.kind === "goal")) settle("goal", "the game reports a win"); else settle("event", wake); }
-      else if (world.t - live.waiter.t0 >= live.waiter.cap - 1e-9) settle("running");
+      else if (world.t - live.waiter.t0 >= live.waiter.cap - 1e-9 || Date.now() - live.waiter.wall0 >= doWallMs) settle("running");
     }
   }
 
@@ -516,7 +575,7 @@ export async function runDaemon(dir) {
           orders.push(rec); live.order = rec;
         }
         if (live.waiter) settle("running");   // a newer command supersedes an older wait
-        live.waiter = { t0: world.t, cap: forS != null ? +forS : live.horizon, resolve, text, list, same, rec: live.order, results0: list ? 0 : ap.results.length };
+        live.waiter = { t0: world.t, wall0: Date.now(), cap: forS != null ? +forS : live.horizon, resolve, text, list, same, rec: live.order, results0: list ? 0 : ap.results.length };
       });
     });
     resumeLive();
@@ -526,7 +585,8 @@ export async function runDaemon(dir) {
   function look(result, asJson, full = false) {
     const ctx = { cfg, grid, ap, result: result ? { ...result } : null, events: coalesceEvents(pending.splice(0)), first: firstLook, session: { goal: opts.goal, name: spec.name },
       live: live.on ? (live.paused ? `PAUSED: ${live.pauseReason}` : "LIVE") : null, order: live.on ? orderLabel() : null, clock: until ? until.line() : null,
-      death: world.dead || world.over ? (tracker.deaths.at(-1)?.cause ?? null) : null, full };
+      death: world.dead || world.over ? (tracker.deaths.at(-1)?.cause ?? null) : null, full,
+      sounds: soundsText(sounds.take(), { quietOk: !!result && result.status !== "running" && sounds.channel }) };
     firstLook = false;
     // look --full: dialogue / notice / menu / screen text uncut (play.textCap), and the latest game call's answer, whole
     // (observations cut it at play.resultChars)
@@ -576,7 +636,7 @@ export async function runDaemon(dir) {
   function finalize(reason, outcome, feedback) { return (finalP ??= finalizeNow(reason, outcome, feedback)); }
   async function finalizeNow(reason, outcome, feedback) {
     finalizing = true;
-    clearTimeout(idleTimer); clearTimeout(maxTimer); clearTimeout(untilTimer);
+    clearTimeout(idleTimer); clearTimeout(maxTimer); clearTimeout(untilTimer); clearInterval(sleepTimer);
     log(`finalizing: ${reason}`);
     // a running order stops first and is told why (it used to step on into the closed game: "the game disconnected")
     stopWhy ??= reason;
@@ -653,18 +713,20 @@ export async function runDaemon(dir) {
         let shot = null, res = null;
         if (a.wait && live.on) res = (await liveDo(null, a.for, true)).result;   // keep the plan; answer at the next event or the horizon
         if (a.shot) { await settleAnims(); shot = await shoot("look", a.scale ? +a.scale : 0); }
+        await hear();
         const o = look(res, a.json, !!a.full);
-        return { ok: true, ...o, shot };
+        return { ok: true, ...o, shot, ...(shot && lastCapture && lastCapture.note ? { shotNote: `captured ${lastCapture.note}` } : {}) };
       }
       case "do": {
         let r;
         if (live.on) r = await liveDo(String(a.orders || ""), a.for);
         else { doRunning = runDo(String(a.orders || ""), a.for); try { r = await doRunning; } finally { doRunning = null; } }
         if (r.code === 2) return { ok: false, code: 2, text: r.text };
+        await hear();
         const o = look(r.result, a.json);
         return { ok: true, ...o };
       }
-      case "shot": { await settleAnims(); const f = await shoot(a.why || "shot", a.scale ? +a.scale : 0); return f ? { ok: true, text: f, shot: f } : { ok: false, code: 1, text: "this game can't take screenshots (no 'screenshot' capability)" }; }
+      case "shot": { await settleAnims(); const f = await shoot(a.why || "shot", a.scale ? +a.scale : 0); return f ? { ok: true, text: lastCapture && lastCapture.note ? `${f}\ncaptured ${lastCapture.note}` : f, shot: f } : { ok: false, code: 1, text: "this game can't take screenshots (no 'screenshot' capability)" }; }
       case "note": {
         const kind = ["bug", "confusing", "fun", "idea"].includes(a.kind) ? a.kind : "note";
         const n = { t: +world.t.toFixed(2), frame, kind, text: oneLine(a.text || "").slice(0, 1000), cell: world.player && world.player.p2 ? cellOf(world, world.player.p2) : null };

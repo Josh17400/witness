@@ -236,8 +236,11 @@ export async function acquireSlot({ browser = false, label = "", log = (m) => co
       : `no free slot after ${Math.round(el / 1000)} s: this machine is already running ${what}, held by ${by}. Wait for them to finish (or stop them: 'witness play stop --all' for playtests), or raise the limit with the environment variable (budget folder: ${dir})`);
     if (!told) {
       told = Date.now();
+      // a playtest holds its slot until it ends: a tester running another command meanwhile (a replay, a shot) waits for
+      // its own session, the whole WITNESS_BUDGET_WAIT, unless it is told
+      const plays = holders.map((r) => /witness play _daemon (\S+)/.exec((r.owner && r.owner.label) || "")).filter(Boolean).map((m) => m[1]);
       // over 110 s an agent's Bash call (120 s by default) would be cut off first: say how to wait that long
-      log(`▸ waiting for a free slot: ${limit}, in use by ${by} (gives up after ${cap} s${waitMs > 110000 ? `: more than an agent's Bash call waits (120 s by default), so run this command in the background (or set WITNESS_BUDGET_WAIT=<seconds> and a Bash timeout to match)` : ""})`);
+      log(`▸ waiting for a free slot: ${limit}, in use by ${by} (gives up after ${cap} s${waitMs > 110000 ? `: more than an agent's Bash call waits (120 s by default), so run this command in the background (or set WITNESS_BUDGET_WAIT=<seconds> and a Bash timeout to match)` : ""})${plays.length ? `. A playtest session keeps its slot until it ends: if ${plays.join(", ")} is yours, END it first (witness play end -s ${plays[0]}), then run this` : ""}`);
     } else if (Date.now() - told >= progressMs) { told = Date.now(); log(`▸ still waiting for a free slot (${fmtAge(el)} of ${fmtAge(waitMs)}): in use by ${by}`); }
     await new Promise((r) => setTimeout(r, pollMs));
   }

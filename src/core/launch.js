@@ -201,7 +201,7 @@ function staleAdapter(hello, quiet) {
   if (n) { staleSaid = true; console.error(`⚠ ${n}`); }
 }
 
-/** The per-request wait in seconds: WITNESS_CALL_TIMEOUT (env) or launch.callTimeout, else null (Session's 60 s). */
+/** The per-request wait in seconds: WITNESS_CALL_TIMEOUT (env) or launch.callTimeout, else null (Session's 60 s; a step adds its frames × 3× the measured ms per frame). */
 export function callTimeout(cfg) {
   const env = process.env.WITNESS_CALL_TIMEOUT, v = env != null && env !== "" ? env : cfg && cfg.launch ? cfg.launch.callTimeout : null;
   if (v == null || v === "") return null;
@@ -291,6 +291,7 @@ export async function openGame(cfg, root, opts = {}) {
     if (cfg.fps) session.hello.fps = cfg.fps;
     session.epoch = epoch;
     if (callSec) session.requestTimeoutMs = callSec * 1000;
+    session.quiet = !!opts.quiet;   // (--json, play daemons) the slow-game note stays in session.slowNote
     staleAdapter(session.hello, opts.quiet);
     if (web) {
       await attachWeb(session, web);

@@ -1718,9 +1718,12 @@ export class Autopilot {
       case "talk": return new Talk(o, this, w, resolveTarget(o.target, w, { prefer: "npc" }).things[0]);
       case "interact": return new Interact(o, this, w, o.target ? resolveTarget(o.target, w).things[0] : null);
       case "choose":
+        // nothing open to choose from (no dialogue, no choices): a skip with a note, and the chain goes on ("choose 1;
+        // fight enemies for 25s" after a commendation that didn't come; "choose 1 if open" says it outright). A dialogue
+        // that IS open without the asked option still fails (Choose / Pick below)
+        if (!w.dialogue && !(w.choices && w.choices.length)) return new Instant(o, this, w, () => ({ status: "done", skipped: true, msg: `skipped ${clip(o.text, 40)}: no ${cfg.profile === "turn" ? "choices or dialogue" : "dialogue"} open${o.ifOpen ? "" : cfg.profile === "turn" ? " (wait for your turn, or look at a screenshot)" : " (talk to someone first, or wait for it)"}` }));
         // the game's choices (cards, menu buttons, moves) when no dialogue with options is open
-        if (w.choices && !(w.dialogue && w.dialogue.options.length)) return new Pick(o, this, w);
-        if (!w.dialogue && cfg.profile === "turn") throw new OrderError("there are no choices right now (no state.choices, no dialogue): wait for your turn, or look at a screenshot", ORDER_CARD_TURN);
+        if (w.choices && w.choices.length && !(w.dialogue && w.dialogue.options.length)) return new Pick(o, this, w);
         return new Choose(o, this, w);
       case "pickup": {
         let r;
@@ -1903,7 +1906,7 @@ export class Autopilot {
   }
   finish(b, res, want) {
     this.cur = null;
-    const r = { order: b.label, status: res.status, msg: res.msg, seconds: +(this.t - b.t0).toFixed(2) };
+    const r = { order: b.label, status: res.status, msg: res.msg, seconds: +(this.t - b.t0).toFixed(2), ...(res.skipped ? { skipped: true } : {}) };
     this.results.push(r);
     if (res.status === "fail") this.queue = [];
     this.wantedMove = false;

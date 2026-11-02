@@ -3,6 +3,60 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.13 (2026-11-02)
+
+From The Fort's v11new / v11late playtests: the DOM HUD was missing from shots, testers couldn't tell when a sound
+played, the `powers` stat was cut off, "choose 1; fight …" failed when no commendation came, a closed laptop read as
+GAME CRASHED, and a slow (software-rendered) machine made orders take many minutes.
+
+**Shots show the page's own buttons**
+- `play shot`, `look --shot` and key-moment shots choose per shot: on `play.shotCapture: "auto"` (default) the screen
+  when the page has buttons or text over the canvas or within 24 px of it, else the canvas. `"screen"` / `"canvas"`
+  force one; anything else fails the session start with the choices. DOM pages with no canvas and an explicit
+  `launch.capture` keep theirs. `play shot` / `look --shot` say which was used (`captured the screen: the page has 4
+  buttons/text over or next to the canvas ("LOCK ON", "FRAG", …)`); report.json shots record `capture`. The screen
+  capture skips the `--safe-overlay` drawing.
+
+**Sounds for testers who can't hear**
+- After an order the events line ends with `sounds: deny, hit ×3`, `sounds: 2 played` or `sounds: none`. Names come
+  from `witness.sound(name)`, `state.sounds` (names since the last snapshot, a growing list, or a rolling list with
+  `state.soundCount` / `sounds: {count, recent}`), or log lines `sound: deny`, `[sound] deny`, `witness.log("sound",
+  "deny")` (taken out of the game-log events). Without names the JS adapter's new `perf.audio_started` counts started
+  sources (reset on reset). `sounds: none` only shows on a game that has reported sounds before.
+
+**Long stats**
+- A `play.stats` value over 24 characters (40 for `score`) gets its own line(s) under the header, wrapped at 100 and cut
+  at 300 (`look --full` shows all). Topdown, platformer, fps and defense views.
+
+**`choose` with nothing open**
+- `choose <n|words>` with no dialogue (and no `state.choices`) open is skipped with a note (`↷ skipped choose 1: no
+  dialogue open`) and the chain goes on; `choose 1 if open` (if any / shown / offered…, last two words only) says so
+  outright. A dialogue that is open without the option still fails.
+
+**Sleep, closed browsers, crashes**
+- A dropped connection after host sleep (a 2 s timer that wakes far too late, or the wall clock jumping past the
+  monotonic one) ends as SESSION INTERRUPTED, not GAME CRASHED; a step that timed out across a sleep isn't "not
+  responding". A browser that goes away with no game error is BROWSER CLOSED, a native exit 0 with no error "exited".
+  A page `crash` event (renderer died), a recent game error, or a fatal line / stack frame in the last 5 s of output stay
+  CRASHED.
+
+**Slow machines**
+- Step waits scale with the measured speed (3× ms per frame; at most 1 s a frame until ≥ 60 frames over ≥ 2 steps are
+  measured; a slow first step, a shader compile, is dropped; spikes count at most 10×). Speed counts the stepped `dts`.
+  A game under half real time on two trusted steps notes it once (`the game runs at 0.08× real time here (software
+  rendering?)`), and a play reply adds how long a 25 s order takes. One `do` answers within 300 s of wall time
+  (`WITNESS_PLAY_DO_WALL`), and the client prints `▸ still playing` each minute. Runner step chunks are 120 frames.
+- A command waiting on a slot held by a playtest daemon names it: END it first (`witness play end -s <name>`).
+
+**Adoption steps** (The Fort)
+1. Nothing required. Its reset scenes (incl. `late`), params, calls, `state.command.powers`, `hvt` entities, the
+   `powers` stat, profile `defense` and `tap:target` attacks work as before.
+2. Shots now include the DOM HUD (`play.shotCapture` is `"auto"` by default); set `"canvas"` for the old shots.
+3. *Optional:* name sounds for testers: push names to `state.sounds` or call `witness.log("sound", "deny")`. Copy the
+   0.7.13 `adapters/js/witness.js` for the unnamed `sounds: N played` count and `sounds: none`.
+4. The `powers` stat now wraps in full; nothing to change. `choose 1` after a commendation that didn't come is skipped
+   instead of failing the chain.
+
 ## 0.7.12 (2026-10-30)
 
 The owner's rule, via Embervale: "if i have a game open im playing … only allow 2 so i can keep playing my game".

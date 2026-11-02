@@ -72,7 +72,7 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
   // flags: the launch overrides the session started with (--device iphone-15-landscape --engine webkit): same viewport
   if (flags) replayCmd += flags;
   const L = [];
-  const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped", "until reached": "UNTIL REACHED", "stuck dead": "STUCK DEAD", "not responding": "GAME NOT RESPONDING" }[r.outcome] || r.outcome || "in progress";
+  const outcome = { won: "WON", died: "DIED", ended: "ended", crashed: "GAME CRASHED", timeout: "timed out", idle: "abandoned (idle timeout)", stopped: "stopped", "until reached": "UNTIL REACHED", "stuck dead": "STUCK DEAD", "not responding": "GAME NOT RESPONDING", interrupted: "SESSION INTERRUPTED (the machine slept or the browser was closed; not a game crash)", "browser closed": "BROWSER CLOSED (no game error; not a game crash)", exited: "game exited by itself (no error)" }[r.outcome] || r.outcome || "in progress";
   L.push(`# Playtest ${r.session}: ${r.game?.name || "game"} — ${outcome}`);
   L.push("");
   L.push(`${r.model ? `Tester: **${r.model}** · ` : ""}${r.persona ? `persona: **${r.persona}** · ` : ""}goal: ${r.goal ? `"${r.goal}"` : "(none)"} · seed ${r.seed}${r.scene ? ` · scene ${r.scene}` : ""}${r.params ? ` · params \`${JSON.stringify(r.params)}\`` : ""}`);

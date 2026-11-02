@@ -96,7 +96,11 @@ function request(e, cmd, args = {}, timeoutMs = 20 * 60000) {
   const info = sessionInfo(e);
   if (!info || !info.port) return Promise.reject(Object.assign(new Error(`session "${e.name}" has no control port (state: ${info ? info.state : "unknown"})`), { code: "ENOPORT" }));
   const body = JSON.stringify({ token: info.token, cmd, args });
-  return new Promise((resolve, reject) => {
+  // an order on a slow game (software rendering) can take minutes: a line every minute shows it is still going
+  const t0 = Date.now(), tick = cmd === "do" || (cmd === "look" && args.wait) ? setInterval(() => console.error(`▸ still playing (${Math.round((Date.now() - t0) / 60000)} min; the session answers within ${Math.round((+process.env.WITNESS_PLAY_DO_WALL || 300) / 60)} min per order)…`), 60000) : null;
+  if (tick) tick.unref();
+  return new Promise((resolve0, reject0) => {
+    const resolve = (v) => { clearInterval(tick); resolve0(v); }, reject = (err) => { clearInterval(tick); reject0(err); };
     const req = http.request({ host: "127.0.0.1", port: info.port, method: "POST", path: "/", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) }, timeout: timeoutMs }, (res) => {
       let data = "";
       res.setEncoding("utf8");   // decodes across chunks: a multibyte character split in two stays whole
@@ -112,7 +116,7 @@ function request(e, cmd, args = {}, timeoutMs = 20 * 60000) {
 function print(out, opt) {
   if (opt.json && out.data !== undefined) console.log(JSON.stringify(out.data, null, 1));
   else if (out.text) console.log(out.text);
-  if (out.shot && !opt.json) console.log(`screenshot: ${out.shot}`);
+  if (out.shot && !opt.json) { if (out.shotNote) console.log(out.shotNote); console.log(`screenshot: ${out.shot}`); }   // shotNote: which capture (the screen / the canvas)
   if (!out.ok) process.exit(out.code || 1);
 }
 

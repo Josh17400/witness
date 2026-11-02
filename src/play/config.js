@@ -144,6 +144,7 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
     lazyDraw: !!raw.lazyDraw,                // steps send "draw": "last": the game may skip drawing frames nobody sees
     logs: raw.logs === false ? false : raw.logs || true,   // true | false | "regex" for which info logs count as game events
     maxShots: +(raw.maxShots ?? 24),
+    shotCapture: shotCaptureOf(raw.shotCapture),   // web games: "auto" (the screen when DOM buttons/text sit over or by the canvas), "screen", "canvas"
     platformer: { jumpFrames: 18, runJumpFrames: 22, stomp: true, ...(raw.platformer || {}) },
     fps: { sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2, ...(raw.fps || {}) },
     module: raw.module || null,
@@ -163,6 +164,13 @@ export function resolvePlayConfig(raw = {}, hello = {}) {
   return cfg;
 }
 
+/** play.shotCapture: "auto" (default) | "screen" | "canvas"; anything else is refused with the choices. */
+function shotCaptureOf(v) {
+  if (v == null) return "auto";
+  const m = String(v).toLowerCase();
+  if (!["auto", "screen", "canvas"].includes(m)) throw new Error(`play.shotCapture ${JSON.stringify(v)}: use "auto" (the screen when the page has buttons or text over or next to the canvas, else the canvas), "screen" or "canvas"`);
+  return m;
+}
 /** play.textCap: a number (every field) or {dialogue, notice, menu, screen}; defaults 600 / 600 / 600 / 1200. */
 export const TEXT_CAP = { dialogue: 600, notice: 600, menu: 600, screen: 1200 };
 export function parseTextCap(t) {

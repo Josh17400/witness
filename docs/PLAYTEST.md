@@ -133,7 +133,7 @@ of a second. `--config DIR` or `--config file.json` (e.g. `witness.web.json` bes
 | `play do "<orders>"` | `-s t1` `--for S` `--json` | Turn-based: runs an order chain until it's done, failed, interrupted by a wake event, or hits the time cap. Live: replaces the plan at once and answers at the first of done/failed, an important event, or the horizon (`--for S`, default 4 s); the game keeps going. Prints the observation. |
 | `play look` | `-s t1` `--shot` `--scale K` `--json` `--wait` `--for S` `--full` | The observation now (turn-based: no game time passes). Live `--wait`: keep the plan and answer at the next important event or the horizon. `--full`: the game's texts uncut (dialogue, notice, menu and screen text, which observations cut at `play.textCap`) and the latest game call's answer, uncut (an order's answer shows the first `play.resultChars`, 800, and says when it cut). |
 | `play next` | `-s t1` `--for S` | Live mode: the same as `look --wait`. |
-| `play shot` | `-s t1` `--scale K` | Screenshot → PNG path (open it with the Read tool). Frames narrower than 600 px are upscaled 2× (nearest). |
+| `play shot` | `-s t1` `--scale K` | Screenshot → PNG path (open it with the Read tool). Frames narrower than 600 px are upscaled 2× (nearest). Web games: the whole screen when the page has buttons or text over or next to the canvas (a DOM HUD), else the canvas (`play.shotCapture`); a second line says which (`captured the screen: the page has 4 buttons/text over or next to the canvas ("LOCK ON", "FRAG", …)`). `look --shot` and the automatic shots choose the same way. |
 | `play note "<text>"` | `--bug` `--confusing` `--fun` `--idea` `--shot` `-s t1` | Adds a note to the timeline and a mark to the replay. `--bug` notes always take a screenshot. |
 | `play end` | `-s t1` `--fun 1-5` `--difficulty 1-5` `--feedback '…'` `--all` | Writes report.md/report.json/coverage.png and the final replay, stops the game and the daemon. |
 | `play stop` | `-s t1` or `--all` | Same as `end`, without feedback (reason "stopped by the main agent"). Kills the daemon and game if they don't exit within 15 s. |
@@ -171,7 +171,7 @@ get a did-you-mean. If the text can't be mapped to an order, nothing happens in 
 | `fight [thing] [mode]` | attack, kill, engage, hit, slay, defeat, battle, strike, shoot, destroy | Approach, face, attack, react to telegraphs. No target: nearest hostiles. A plural (`wolves`, `all enemies`) fights until none is near. With a time given (`fight enemies for 25s`), reaching it is the plan: `✔ done: fought for 25s as ordered: 4 enemies defeated, 2 still on the field` (without one it still fails at 60 s). `fight enemies when they come` (also `as they arrive`, `incoming`; always in the defense profile) waits for the next enemy instead of failing on an empty field: with a time, it fights and waits until the time is up; without, it ends when a kill clears the field or after `play.fightWait` (20 s) with none. With no move control (`"move": false`, or the defense profile) it attacks from where it stands and never presses a move key. |
 | `flee [from thing]` | retreat, escape, evade, run away, back off, get away | Move to the reachable spot farthest from hostiles; done when none is within 1.6 × alert. |
 | `talk <who>` | talk to/with, speak to/with, chat, greet, ask | Walk up, face, press interact, wait for `dialogue`; retries closer, fails after 3 tries. When the dialogue names a `speaker` that isn't the target (by name or type), it says `X answered instead of Guard#4`, presses cancel, steps closer and tries again; without a cancel control, or after 2 wrong answers, it fails with that message and leaves the dialogue open. No target: nearest NPC. |
-| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; a hint button that only opens a bubble answers `chose 6) "Hint": notice changed → "…", dialogue unchanged` (the game's `notice` changing counts even when it comes from `play.notice` or fades again within the half second; `pick` adds `notice changed → "…"` the same way); with no change at all it fails, only after the retry window below. **Pick lockouts**: a game that ignores picks for a moment after a dialogue opens (an anti-misclick delay) can say so with `dialogue.ready: false`; `choose` (and `pick`) then wait until it's `true`, at most 2 s, and press once (`… (waited 0.6s for the dialogue to accept picks)`). Without a `ready` field (or still not ready after 2 s), `choose` presses the option's key again every 0.25 s for up to 1 s while the same dialogue stays open and nothing changed (`… (pressed 3×: the game ignored the first)`); timed by game frames, the presses are ordinary recorded input. So `choose 2; fight enemies for 25s` works right after a dialogue stopped a fight, no `wait 1` first. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). |
+| `choose <n\|words>` | pick, select, answer, reply, say, option | Pick a dialogue option by number, ordinal (`first`), `last`, or words in it (`choose "get it back"`). Done when the dialogue changes, or (after half a second) when another field of the state changed and stayed changed: a toggle like a difficulty button answers `chose 3) "Hard": state changed (difficulty), dialogue unchanged`; a hint button that only opens a bubble answers `chose 6) "Hint": notice changed → "…", dialogue unchanged` (the game's `notice` changing counts even when it comes from `play.notice` or fades again within the half second; `pick` adds `notice changed → "…"` the same way); with no change at all it fails, only after the retry window below. **Pick lockouts**: a game that ignores picks for a moment after a dialogue opens (an anti-misclick delay) can say so with `dialogue.ready: false`; `choose` (and `pick`) then wait until it's `true`, at most 2 s, and press once (`… (waited 0.6s for the dialogue to accept picks)`). Without a `ready` field (or still not ready after 2 s), `choose` presses the option's key again every 0.25 s for up to 1 s while the same dialogue stays open and nothing changed (`… (pressed 3×: the game ignored the first)`); timed by game frames, the presses are ordinary recorded input. So `choose 2; fight enemies for 25s` works right after a dialogue stopped a fight, no `wait 1` first. With no dialogue options open and `state.choices` listed, it picks from those (see the turn profile). **Nothing open** (no dialogue, no choices): `choose` / `pick` is skipped with a note and a chain goes on (`↷ skipped choose 1: no dialogue open`), so `choose 1; fight enemies for 25s` works whether or not the commendation came; `choose 1 if open` (also `if any`, `if shown`, `if offered`) says it outright. A dialogue that **is** open without the asked option still fails and stops the chain. |
 | `pickup [thing]` | pick up, get, grab, collect, take, loot, fetch | Walk onto the item; press interact if it's still there. No target: nearest item. Plural: collects them all nearby. |
 | `use <control\|item>` | drink, quaff, eat, heal | Tap a control. `use potion` / `heal` / `drink` → the heal control. An unknown word becomes `interact <it>`. |
 | `interact [thing]` | interact with, activate, open, unlock, inspect, read, examine | Walk up, face, press interact (no target: press it here). Reports a new `notice`, or a dialogue that opened. |
@@ -248,24 +248,55 @@ events: 0.6 dialogue — Old Guard: "Take this potion…" [1) Thanks.] · 0.6 go
 
 | line | content |
 |---|---|
-| header | `[t game-time]`, hp, stats (from `play.stats`, else up to 5 numeric player fields plus `score`/`lives`/`gold`…), player cell, facing (platformer: on ground / in the air; fps: pitch) |
+| header | `[t game-time]`, hp, stats (from `play.stats`, else up to 5 numeric player fields plus `score`/`lives`/`gold`…), player cell, facing (platformer: on ground / in the air; fps: pitch). A stat longer than 24 characters (40 for `score`) gets its own line(s) under the header (`powers: Gunship (2 charges, ready) / …`), wrapped at 100 characters and cut at 300 with `… (cut at 300 of 512 chars: look --full shows all)` |
 | `your goal:` | the `--goal`, on the first observation only |
 | `goal:` | the game's own `state.goal` |
-| result | `✔ done` · `✖ failed` · `⚠ interrupted` (a wake event, named) · `⏱ time` (cap reached; the order was still running) · `★ GOAL REACHED` · `■ session ended` (the session ended under the order: the wall cap, stuck dead; run END, the feedback still counts) · `✖ error: the game exited (code 3) at t=12.4s; last lines: …` / `the game is not responding since t=…`. A chain lists each finished order. A failure may add `hint:`. |
+| result | `✔ done` · `✖ failed` · `⚠ interrupted` (a wake event, named) · `⏱ time` (cap reached; the order was still running; also after 5 min of wall time on one order, `WITNESS_PLAY_DO_WALL` seconds: a game far under real time, e.g. software rendering, never keeps the tester waiting longer, and the first reply after the game measured under 0.5× real time adds one `note: the game runs at 0.12× real time here`; `play do` prints a progress line each minute meanwhile) · `★ GOAL REACHED` · `■ session ended` (the session ended under the order: the wall cap, stuck dead; run END, the feedback still counts) · `✖ error: the game exited (code 3) at t=12.4s; last lines: …` / `the game is not responding since t=…`. A chain lists each finished order. A failure may add `hint:`. |
 | `near` | up to 8 things within max(2.5 × alert, 12) cells, hostiles inside the alert range first: key, distance, direction, then hp, `WINDUP 0.2s`, a non-idle state (`chasing you`, `stagger`), `item` / `npc` / `teammate` / `enemy`, `locked` / `open`, the name; fps adds `in sight` / `no line of sight`; platformer adds `2 up` / `1 down` |
 | `farther`, `out of view` | counts by type beyond that range; up to 4 remembered things with last known distance |
 | `dialogue` | speaker, text and numbered options with the exact `choose` orders |
 | `game says:` | the game's `notice` |
 | `screen text:` | the game's own full readable text of the current screen (`state.screenText`, or `play.screenText`: a results panel, a rules page), on one line; not shown when it only repeats the dialogue or notice |
 | `map` | a 19×9 window around you (fps 17×11; platformer: the map rows ahead): `#` wall (the game's map or learned by bumping), `.` open, `?` unknown, one letter per type (uppercase = hostile; a type on both sides gets two letters, marked enemy/ally in the legend). Shown only when walls are known. |
-| `events` | the last 9 notable events since the previous observation: damage, hits, kills, pickups, dialogue, notices, stat changes, game logs, reflexes, bumps and stuck incidents. Game logs that say the same thing as an inferred event replace it, and a log line with the same words as a `notice` shown within 2 s (either first) is one event, not two. Regeneration is one line per observation (`regenerated +12 over 5s (hp 40→52)`), and so is damage over time with no attacker near (it never wakes the tester or stops an order); hp changes too small to print (0.02 a tick) are added up first. A thing flickering at the edge of the list is `gone` once, and the same text twice within half a second shows once. |
+| `events` | the last 9 notable events since the previous observation: damage, hits, kills, pickups, dialogue, notices, stat changes, game logs, reflexes, bumps and stuck incidents. Game logs that say the same thing as an inferred event replace it, and a log line with the same words as a `notice` shown within 2 s (either first) is one event, not two. Regeneration is one line per observation (`regenerated +12 over 5s (hp 40→52)`), and so is damage over time with no attacker near (it never wakes the tester or stops an order); hp changes too small to print (0.02 a tick) are added up first. A thing flickering at the edge of the list is `gone` once, and the same text twice within half a second shows once. Ends with what the game played since the last observation, when it can tell ([Sounds](#sounds)): `sounds: deny, hit ×3`, `sounds: 2 played`, or `sounds: none` after an order. |
 
 Other lines you'll see: `✔ done: fight wolves block — 3 enemies defeated (7.2s)`, `Wolf#6   3.1 E   hp 3/3  WINDUP
 0.2s`, `★ GOAL REACHED: goto Exit#13 — the game reports a win (1.3s)`, `YOU ARE DEAD — game says: "…"`. The first
 observation also prints the controls and the order card. Dialogue, notice and menu text show up to 600 characters,
 screen text up to 1200 (`play.textCap`); a longer one ends `…" (cut, 412 more chars; look --full)`, and `look --full`
 shows it whole. `--json` returns the same content as data (`{t, frame,
-player, stats, near[], farther, remembered[], dialogue, goal, notice, screenText, dead, won, result, events[], map}`, always uncut).
+player, stats, near[], farther, remembered[], dialogue, goal, notice, screenText, dead, won, result, events[], sounds, map}`, always uncut).
+
+### Sounds
+
+A tester can't hear. When the game tells what it played, the observation after an order ends its events line with it,
+so "pressing 3 did nothing" becomes "pressing 3 played deny":
+
+* **Named** (best): the game names its sounds, any of:
+  * `witness.sound("deny")` (the JS adapter; a `{"event": "sound", "name": "deny"}` line for other adapters,
+    [PROTOCOL.md](PROTOCOL.md) §3), the same call `witness listen` uses;
+  * `state.sounds` in the snapshot: an array of the names played since the last snapshot (clear it when a snapshot is
+    taken, or keep it: an unchanged list isn't heard again, and a list that only grows counts its new tail), or a
+    rolling list with a counter, `state.sounds = ["deny", "hit"]` plus `state.soundCount: 42` (or
+    `sounds: {count: 42, recent: [...]}`): the last `count − previous count` entries are the new ones;
+  * a log line `sound: deny` (or `witness.log("sound", "deny")`, `[sound] deny`): taken out of the game-log events.
+
+  Shown as `sounds: deny, hit ×3` (up to 8 names).
+* **Counted**: with no names, the JS adapter counts the WebAudio sources the page started (`perf.audio_started`, also
+  in play sessions, which capture no audio): `sounds: 2 played`, so the tester knows something answered.
+* After an order on a game that can tell (names seen, or the counter), nothing played reads `sounds: none`.
+
+### Interrupted is not crashed
+
+The daemon watches the clocks (a 2 s timer; a tick more than 20 s late, or a wall clock that jumped past the monotonic
+one, is the machine sleeping: a closed laptop). When the game's connection drops after a sleep (within 3 minutes of
+waking), the session ends **interrupted**: `session interrupted (the machine slept or the browser was closed) at
+t=110.2s: the machine slept for ~600s, then the game's connection dropped; not a game crash` (report headline
+`SESSION INTERRUPTED`, outcome `interrupted`, a `sleep` line in the timeline). A browser page that goes away with no
+game error is `browser closed` (`the browser closed (or the page went away) at t=… with no game error`), a native game
+that exits with code 0 and no error is `exited`. A real crash stays **CRASHED**: a game error in the last 5 seconds,
+an error / exception / fatal line or a stack frame in the last output (harmless warnings such as `BiquadFilter … will be
+clamped` don't count), or a nonzero exit code with no sleep before it.
 
 ## Batch runs (`witness play batch`)
 
@@ -762,6 +793,7 @@ The key-based defaults come from `hello.keys`. If the game's hello doesn't list 
 | `lazyDraw` | `false` | steps of more than one frame tell the game only their last frame is observed (`"draw": "last"`, [PROTOCOL.md](PROTOCOL.md) §3), so a game that checks `witness.drawing` skips drawing the others: a busy 2D canvas on a software renderer plays several times faster. Shots and `look --shot` still see a fully drawn frame; a watched session (`--watch`) draws every frame. The game opts in ([adapters/js/GUIDE.md](../adapters/js/GUIDE.md) §8) and must not change state while drawing: `witness doctor` checks it when this is on. The report says how many frames ran undrawn and whether the game read the hint (same as `--lazy-draw`) |
 | `logs` | `true` | which game info logs become events: `true`, `false`, or a regex |
 | `maxShots` | 24 | cap on automatic key-moment screenshots |
+| `shotCapture` | `"auto"` | web games: what `play shot`, `look --shot` and the automatic shots capture. `"auto"`: the screen (the viewport at device pixels) when the page shows buttons, links, inputs or text inside the canvas's box or within 24 CSS px of it (a DOM HUD the canvas alone would leave out), else the canvas; `"screen"` / `"canvas"` always. A DOM page with no canvas, or `launch.capture`, keeps its own capture. The shot line says which was used |
 | `platformer` | `{jumpFrames: 18, runJumpFrames: 22, stomp: true}` | also `run` (false: never hold run), `stuckLimit` (7 s), `airAccel` (air control per frame, default 0.005 cells) |
 | `fps` | `{sens: null, aimTolerance: 1.0, strafe: true, eye: 1.5, aimHeight: 1.2}` | also `range` (12 cells), `degrees`, `yawSign`, `maxTurn` (0.5 rad per tick), `floorHeight` (2.2 world units: a bigger vertical gap is another floor) |
 | `module` | none | see below |
@@ -794,6 +826,7 @@ ones.
 | entity `enter: "s"` (`n s e w ne nw se sw`) or a vector in the plane (`[0, 1]`) | the push that uses a door or exit ([Doors and exits](#doors-and-exits)) |
 | `state.won` / `state.dead` | outcome, goal and death wakes |
 | game logs (info level) | the game's own words in the timeline ("You block Wolf#3's bite. It staggers!"); error logs wake the tester and go to the report |
+| sound names: `witness.sound("deny")`, `state.sounds`, or a `sound: deny` log line | a tester who can't hear learns what answered a press: `sounds: deny, hit ×3` on the events line ([Sounds](#sounds)) |
 | platformer: player `onGround`, `vel`, `size`; map `=` one-way, `^` hazard; entity `stompable: false` and a harmless `state` (`hidden`…) | jump planning; stopping before enemies it can't jump on |
 | fps: player `look` or `yaw`/`pitch`, `ammo`; entity `los` | aiming, line of sight, reload |
 | `state.camera = {pos: [x, y], zoom?}` (pos = the world point at the screen's top-left; screen = (world − pos) × zoom) | `shot --annotate` boxes in the right place; `measure align` checks the drawing against it |
@@ -830,7 +863,8 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 * **Lifetime.** The daemon writes the report, stops the game and exits on: `end` / `stop`; `--idle` seconds without a
   command (default 300, minimum 30; outcome `idle`); `--wall-minutes` of real time (default 20, old name `--minutes`;
   outcome `timeout`); `--until` / `--game-hours` reached and no END within 3 minutes (outcome `until reached`); the
-  game exiting (outcome `crashed`, reason `the game exited (code N) at t=…` and its last log/output lines); a step the
+  game exiting (outcome `crashed`, reason `the game exited (code N) at t=…` and its last log/output lines; see
+  [Interrupted is not crashed](#interrupted-is-not-crashed) for a sleeping machine or a closed browser); a step the
   game doesn't answer for 60 s (outcome `not responding`, `not responding since t=…`); **stuck dead** (below);
   SIGINT/SIGTERM or an internal error (outcome `stopped`). An order running at that moment stops first and is told
   why (`■ session ended: session time limit reached (max 20 min)`), so the replay ends on the reported state.
@@ -865,8 +899,8 @@ witness/playtests/<name>/        (<name>-2, -3 … if it exists; --out DIR chang
 
 **report.md**, most useful first:
 
-1. headline (session, game, outcome: `WON` / `DIED` / ended / `UNTIL REACHED` / `GAME CRASHED` / timed out / abandoned
-   (idle timeout) / stopped), tester model, persona, goal, seed, game time, wall time, order counts, and what it played
+1. headline (session, game, outcome: `WON` / `DIED` / ended / `UNTIL REACHED` / `GAME CRASHED` / `SESSION INTERRUPTED` /
+   `BROWSER CLOSED` / timed out / abandoned (idle timeout) / stopped), tester model, persona, goal, seed, game time, wall time, order counts, and what it played
    until (`--until` / `--game-hours`);
 2. **Summary**: fights won/lost, enemy windups avoided/hit, kills, deaths, pickups, stuck incidents, coverage, game
    errors, pace (mode, orders per game minute, frozen time);

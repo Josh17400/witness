@@ -123,7 +123,8 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
   Accessibility: `--reduced-motion` / `--color-scheme dark` (witness.json `launch.media`, also `forcedColors`,
   `contrast`) are emulated by the browser, so `matchMedia` and `@media` both see them. A slow `call` / `eval`
   (cold WebKit under load): `WITNESS_CALL_TIMEOUT=120` or `launch.callTimeout`; the error names the call and an
-  unresolved game promise. A config may live outside the game (e.g. the temp folder): Playwright is then found from
+  unresolved game promise. Steps go at most 120 frames per request and their wait grows with the measured speed; a
+  game under half real time (software GL in a big battle) prints one `▸ note: the game runs at 0.12× real time here`. A config may live outside the game (e.g. the temp folder): Playwright is then found from
   the current folder, Witness or a global install.
 
 ## 3. Test files: prove gameplay, keep it proven
@@ -252,6 +253,10 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    **Slow headless web games** (a busy 2D canvas on SwiftShader: game time crawls slower than real time): gate the
    game's draw call with `if (witness.drawing !== false) draw()` (update untouched) and set `"play": {"lazyDraw": true}`:
    steps then draw only their last frame. Run `witness doctor` after: it warns if drawing changes game state.
+   **Testers can't hear:** name sounds (`witness.sound("deny")`, `state.sounds`, or a `sound: deny` log line) so the
+   observation says `sounds: deny` after a press that can't fire (unnamed, the JS adapter still counts: `sounds: 1 played`).
+   A DOM HUD over the canvas is in `play shot` automatically (`play.shotCapture`). `SESSION INTERRUPTED` / `BROWSER
+   CLOSED` in a report means the machine slept or the browser went away, not a game crash.
 5. **Read `witness/playtests/t1/report.md`**: tester feedback and bug notes first, then fights (windups avoided vs
    hit), stuck spots (incidents grouped by place, most first, one replay command each), deaths, coverage. Open the
    key shots and `coverage.png`.

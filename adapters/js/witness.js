@@ -29,7 +29,7 @@ const DEFAULT_ADDR = "127.0.0.1:7357";
 const VERSION = "1.0.0";
 // the Witness release this copy came from: the CLI says so when a game's copy is older than the CLI (a core test keeps
 // it equal to package.json)
-const WITNESS_VERSION = "0.7.12";
+const WITNESS_VERSION = "0.7.13";
 
 // The real APIs, captured before any takeover. The adapter only ever uses these.
 const real = {
@@ -813,6 +813,23 @@ function installVirtualEnded() {
   };
 }
 
+// perf.audio_started: sounds the game started (AudioScheduledSourceNode start() calls: buffer sources, oscillators,
+// constant sources) on Witness's audio contexts since the reset. Counted with capture off too (play sessions), so a
+// playtest can tell a silent game from a quiet one without reading any audio.
+let audioStarted = 0;
+function installStartCount() {
+  const SSN = G.AudioScheduledSourceNode && G.AudioScheduledSourceNode.prototype, ABS = G.AudioBufferSourceNode && G.AudioBufferSourceNode.prototype;
+  for (const P of [SSN, ABS]) {
+    if (!P || !Object.prototype.hasOwnProperty.call(P, "start")) continue;
+    const nStart = P.start;
+    P.start = function () {
+      const r = nStart.apply(this, arguments);   // a start() the browser refused (twice on one node) throws first: not counted
+      try { if (taps.has(this.context)) audioStarted++; } catch { /* a detached node */ }
+      return r;
+    };
+  }
+}
+
 // decodeAudioData finishes on real time, whenever the decoder thread gets there: a WAV decoded on the first tap was
 // ready a frame or several later depending on the machine's load, so the card sound a timer played 80 ms on was there
 // in one run and missing in the next. Simulated time waits for it instead: a frame (and a call, sync or async) doesn't
@@ -847,6 +864,7 @@ function installWebAudioTap() {
   const seconds = +CFG.audioSeconds || 300, capture = CFG.audioCapture !== false;
   installVirtualEnded();
   installDecodeHold();
+  installStartCount();
   function WitnessAudioContext(opts = {}) {
     const rate = (opts && opts.sampleRate) || +CFG.audioRate || 24000;
     // no capture (a play session: WITNESS_CONFIG.audioCapture false / ?witness_audio=0): nothing renders, and the clock
@@ -1764,6 +1782,7 @@ async function doReset(m) {
   if (ep != null) { clock.epoch = ep; clock.dateBase = ep - clock.now(); } else clock.align();
   // the audio epoch first, so sounds the game's reset starts (music...) belong to the new run
   audioMark = audioEpoch = audioClock.t;
+  audioStarted = 0;
   const prevSince = audioClock.since;
   audioClock.since = 0;
   audioReadSince = 0;
@@ -1823,7 +1842,7 @@ async function handle(m) {
     case "logs": return { logs: logs.splice(0) };
     case "perf": {
       const extra = H.perf ? jsonSafe(await H.perf()) : {};
-      return { frame_ms: perfStats.frames ? perfStats.ms / perfStats.frames : 0, ...extra, counts: { raf_callbacks: sched.rafs.size, timers: sched.tasks.size, ...(extra && extra.counts) }, ...(rt.early ? { realtime: realtimeReport() } : {}), lazy_draw: { reads: lazy.reads, skipped: lazy.skipped, rng: rngCalls } };
+      return { frame_ms: perfStats.frames ? perfStats.ms / perfStats.frames : 0, ...extra, counts: { raf_callbacks: sched.rafs.size, timers: sched.tasks.size, ...(extra && extra.counts) }, ...(rt.early ? { realtime: realtimeReport() } : {}), lazy_draw: { reads: lazy.reads, skipped: lazy.skipped, rng: rngCalls }, audio_started: audioStarted };
     }
     case "quit": {
       real.setTimeout(() => quit(), 20);

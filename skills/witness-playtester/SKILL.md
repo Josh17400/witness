@@ -100,7 +100,10 @@ events: 0.6 dialogue — … · 0.6 potions 0→1
 * `near`: distance in map cells and compass direction (north = up), then details: `hp 3/3`, `WINDUP 0.2s` (about to
   strike), `chasing you`, `item`, `npc`, `locked`.
 * `map`: `@` is you, `#` wall, `.` open, `?` unknown, letters are things (uppercase = enemies).
-* `goal:` and `game says:` lines are the game's own hints. `events:` is what happened since your last order.
+* `goal:` and `game says:` lines are the game's own hints. `events:` is what happened since your last order; its
+  `sounds:` part (when the game reports sounds) is what you would have heard: `sounds: deny` or `sounds: none` after a
+  press means it didn't work. `↷ skipped choose 1: no dialogue open` is not a failure: the rest of the chain ran.
+* The screenshot shows the page's own buttons over the game when it has them (the shot line says `captured the screen`).
 
 ## Playing well
 

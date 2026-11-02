@@ -142,6 +142,50 @@ ok("splitRange: bad", splitRange("0.9") === null && splitRange("1..2..3") === nu
   ok("input: nothing to send → no request", sent.length === 3);
 }
 
+// ---- slow games: a step's wait grows with the measured speed, long steps go in ≤ 120-frame requests (0.7.13)
+{
+  const { stepTo } = await import(pathToFileURL(path.join(root, "src", "core", "runner.js")).href);
+  const sent = [], handlers = [];
+  let msPer = 0;   // the fake game's wall ms per frame
+  const conn = { send: (o) => { sent.push(o); const d = o.cmd === "step" ? o.frames * msPer : 0; if (o.cmd === "step" && msPer < 0) return; setTimeout(() => handlers.forEach((h) => h({ id: o.id, ok: true, ...(o.cmd === "step" ? { frame: (sent.filter((x) => x.cmd === "step").reduce((n, x) => n + x.frames, 0)) } : {}) })), d); }, onMessage: (h) => handlers.push(h), onClose: () => {}, close: () => {} };
+  const s = new Session(conn);
+  s.quiet = true;
+  handlers.forEach((h) => h({ hello: { protocol: 1, fps: 60, capabilities: ["step"] } }));
+  const st = { frame: 0, time: 0 }, dts = Array.from({ length: 900 }, (_, i) => (i % 2 ? 1 / 60 : 1 / 30));
+  await stepTo(s, st, 900, dts);
+  const steps = sent.filter((x) => x.cmd === "step");
+  ok("stepTo: a 15 s step goes in ≤ 120-frame requests, the replay dts split exactly", steps.length === 8 && steps.every((x) => x.frames <= 120) && steps.reduce((n, x) => n + x.frames, 0) === 900 && JSON.stringify(steps.flatMap((x) => x.dts)) === JSON.stringify(dts) && st.frame === 900, steps.map((x) => x.frames));
+  ok("step wait: 60 s + frames × 0.1 s before any measurement; callTimeout replaces the 60 s", s.stepWaitMs(120) >= 60000 + 12000 && (s.requestTimeoutMs = 5000, s.stepWaitMs(10) >= 6000) && (s.requestTimeoutMs = 0, true));
+  const s2 = new Session(conn);
+  s2.quiet = true;
+  handlers.forEach((h) => h({ hello: { protocol: 1, fps: 60, capabilities: ["step"] } }));
+  s2._stepTimed(120, 15000);   // 125 ms a frame: 0.13× real time (wave 36 under SwiftShader)
+  ok("slow game: one step alone isn't trusted (no speed, no note), its wait capped at 1 s a frame", s2.speed == null && !s2.slowNote && s2.stepWaitMs(120) === 60000 + 120 * 375, `${s2.speed} ${s2.slowNote} ${s2.stepWaitMs(120)}`);
+  s2._stepTimed(120, 15000);
+  ok("slow game: speed measured, one note naming it, a 120-frame step waits 60 s + 120 × 375 ms", Math.abs(s2.speed - 0.133) < 0.01 && /the game runs at 0\.13× real time here \(software rendering\?\)/.test(s2.slowNote || "") && s2.stepWaitMs(120) === 60000 + 120 * 375, `${s2.speed} ${s2.slowNote} ${s2.stepWaitMs(120)}`);
+  const note1 = s2.slowNote; s2._stepTimed(120, 30000);
+  ok("slow game: the note is said once", s2.slowNote === note1);
+  // one slow first frame (a 3.2 s shader compile) then normal steps: no false note, a hang still caught in ~72 s
+  const s5 = new Session(conn); s5.quiet = true; handlers.forEach((h) => h({ hello: { protocol: 1, fps: 60, capabilities: ["step"] } }));
+  s5._stepTimed(1, 3200);
+  const w5a = s5.stepWaitMs(120);
+  s5._stepTimed(120, 2000); s5._stepTimed(120, 2000); s5._stepTimed(1, 3200); s5._stepTimed(120, 2000);
+  ok("slow first frame: no note, the wait stays near 72 s (≤ 3 min before the next step measures)", !s5.slowNote && s5.stepWaitMs(120) < 90000 && w5a <= 60000 + 120 * 1000 && Math.abs(s5.speed - 1) < 0.2, `${s5.slowNote} ${s5.stepWaitMs(120)} ${w5a} ${s5.speed}`);
+  // a 30 fps replay in a 60 fps game (dts 1/30): 120 frames in 2 s is 2× real time, not 1×
+  const s6 = new Session(conn); s6.quiet = true; handlers.forEach((h) => h({ hello: { protocol: 1, fps: 60, capabilities: ["step"] } }));
+  s6._stepTimed(120, 2000, 4); s6._stepTimed(120, 2000, 4);
+  ok("speed follows the stepped dts (game seconds per wall second)", Math.abs(s6.speed - 2) < 0.01, s6.speed);
+  // a real slow step: 40 frames at 30 ms (1.2 s) passes a 0.2 s per-request wait; a hung one names the speed and the knob
+  const s3 = new Session(conn); s3.quiet = true; handlers.forEach((h) => h({ hello: { protocol: 1, fps: 60, capabilities: ["step"] } }));
+  s3.requestTimeoutMs = 200; msPer = 30;
+  const r3 = await s3.step(40).then(() => "ok", (e) => e.message);
+  ok("slow step: the wait scales with its frames (1.2 s step, 0.2 s per-request wait)", r3 === "ok" && s3.msPerFrame >= 25, `${r3} ${s3.msPerFrame}`);
+  msPer = -1;
+  const r4 = await s3.request("step", { frames: 1 }, 300).then(() => "answered", (e) => e.message);
+  ok("hung step: the error says a slow machine can raise WITNESS_CALL_TIMEOUT", /didn't answer 'step' within 0\.3s/.test(r4) && /WITNESS_CALL_TIMEOUT/.test(r4), r4);
+  msPer = 0;
+}
+
 // ---- compare: --repeat references released after the last pass
 {
   const m = new Matcher();
@@ -348,6 +392,7 @@ process.env.WITNESS_GAMING_FORCE = "0";
   lines.length = 0; msg = "";
   try { await acquireSlot({ dir, max: 2, waitMs: 120000, pollMs: 100, log: (m) => { lines.push(m); throw new Error("stop"); } }); } catch (e) { msg = e.message; }
   ok("budget: holder label + pid + running time; over 110 s → run it in the background", (lines[0] || "").includes(`the-fort: witness play _daemon b1 (pid ${s2.pid}, running 4 min)`) && /gives up after 120 s: .*run this command in the background .*WITNESS_BUDGET_WAIT/.test(lines[0] || ""), lines[0]);
+  ok("budget: a playtest holding the slot is named with how to end it (a tester waiting on its own session)", /A playtest session keeps its slot until it ends: if b1 is yours, END it first \(witness play end -s b1\)/.test(lines[0] || ""), lines[0]);
   s2.kill();
   try { fs.unlinkSync(path.join(dir, "slot-1.json")); } catch { /* reclaimed */ }
   ok("budget: who() without owner / without label", who({ owner: null }) === "a launch starting" && /^pid 7 \(running 5 s\)$/.test(who({ owner: { pid: 7, at: new Date(1e12).toISOString() } }, 1e12 + 5000)));

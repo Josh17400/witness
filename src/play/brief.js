@@ -118,6 +118,7 @@ PLAY WELL:
 ${tips}
 - If an order fails, read the message and try something different (another route, explore, another target). Don't repeat the same failing order more than twice.
 - Take a screenshot when you're unsure what's going on, when the text seems wrong, and at least once early on.
+- You can't hear the game: the "sounds:" part of the events line (when the game reports sounds) says what it played after your order (a "deny" sound, or "sounds: none", after a press usually means the press did nothing).
 - Write a note the moment something seems off: a bug (what happened, where, what you expected), something confusing, a fun moment.
 
 Don't stop early: dying or failing is part of playing (respawn or carry on and get straight back in). Unless the goal is done, play until the budget is used up.
