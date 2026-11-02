@@ -127,10 +127,15 @@ const daemonGone = async (name, dir) => { const pid = JSON.parse(fs.readFileSync
   r = wE(mock, ["play", "start", "--name", "sl"], slower);
   const tw = Date.now();
   r = wE(mock, ["play", "do", "wait 600", "-s", "sl"], slower);
-  ok("slow game: the order stops at the per-order wall limit, saying the game's speed", /s of wall time is the limit per order \(the game runs at 0\.[34]\d× real time here\)/.test(r.out) && Date.now() - tw < 20000, r.out);
-  ok("slow game: the reply notes the speed once, with what a 25 s order costs", /note: the game runs at 0\.[34]\d× real time here \(software rendering\?\): a 25 s order takes about \d+ s here/.test(r.out), r.out);
-  r = wE(mock, ["play", "do", "wait 1", "-s", "sl"], slower);
-  ok("slow game: the note isn't repeated", !/note: the game runs/.test(r.out), r.out);
+  ok("slow game: the order stops at the per-order wall limit", /s of wall time is the limit per order/.test(r.out) && !/\?× real time/.test(r.out) && Date.now() - tw < 20000, r.out);
+  // the speed is known from the second step on: on a slow runner (macOS CI) the first order may end after one step, so
+  // the note comes with the first or the second order, and only once
+  let notes = (r.out.match(/note: the game runs at [\d.]+× real time here \(software rendering\?\): a 25 s order takes about \d+ s here/g) || []).length;
+  const r2 = wE(mock, ["play", "do", "wait 600", "-s", "sl"], slower);
+  notes += (r2.out.match(/note: the game runs at/g) || []).length;
+  const r3 = wE(mock, ["play", "do", "wait 1", "-s", "sl"], slower);
+  ok("slow game: the speed is noted exactly once, with what a 25 s order costs", notes === 1 && !/note: the game runs/.test(r3.out), r.out + r2.out + r3.out);
+  ok("slow game: a stopped order names the game's speed once it is known", /limit per order \(the game runs at 0\.\d+× real time here\)/.test(r2.out + r3.out), r2.out + r3.out);
   wE(mock, ["play", "end", "-s", "sl", "--fun", "3"], slower);
 
   // live: the waiting order is told the same

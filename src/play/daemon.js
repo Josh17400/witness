@@ -406,7 +406,7 @@ export async function runDaemon(dir) {
       const wake = wakeFor(evs, b);
       if (wake) { result = evs.some((e) => e.kind === "goal") ? { status: "goal", msg: "the game reports a win" } : { status: "interrupted", msg: wake }; break; }
       if (world.t - t0 >= cap - 1e-9) { result = { status: "time", msg: `stopped after ${r1(world.t - t0)}s of game time${ap.cur ? ` (${clip(ap.cur.label, 40)} still running; give a new order or the same one again)` : ""}` }; break; }
-      if (Date.now() - wallT0 >= doWallMs) { result = { status: "time", msg: `stopped after ${r1(world.t - t0)}s of game time: ${Math.round((Date.now() - wallT0) / 1000)} s of wall time is the limit per order (the game runs at ${S.speed != null ? S.speed.toFixed(2) : "?"}× real time here)${ap.cur ? ` (${clip(ap.cur.label, 40)} still running; give a new order or the same one again)` : ""}` }; break; }
+      if (Date.now() - wallT0 >= doWallMs) { result = { status: "time", msg: `stopped after ${r1(world.t - t0)}s of game time: ${Math.round((Date.now() - wallT0) / 1000)} s of wall time is the limit per order${S.speed != null ? ` (the game runs at ${S.speed.toFixed(2)}× real time here)` : ""}${ap.cur ? ` (${clip(ap.cur.label, 40)} still running; give a new order or the same one again)` : ""}` }; break; }
     }
     } catch (e) {
       // the game closed or hung under a step: a session stop (the wall cap) says so; a real exit/hang is told apart
