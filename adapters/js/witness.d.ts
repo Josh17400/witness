@@ -166,6 +166,9 @@ export interface WitnessConfig {
   /** false: render and capture no audio (play sessions; ?witness_audio=0, WITNESS_AUDIO=0); AudioContext clocks and
    *  "ended" events still follow simulated time exactly as with capture. */
   audioCapture?: boolean;
+  /** true: leave 2D canvases GPU-rasterized (the CLI sets ?witness_gpu_canvas=1 when the page renders on the GPU);
+   *  otherwise they are pinned to the CPU (willReadFrequently) so screenshots stay pixel-stable. */
+  gpuCanvas?: boolean;
   /** false: iPhone-Safari audio policy on pages without the CLI's init script (contexts start suspended; resume()
    *  only during a gesture). Browser launches take it from --no-auto-unlock instead. ?witness_audio_unlock=0 */
   audioUnlock?: boolean;

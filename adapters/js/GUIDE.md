@@ -674,11 +674,13 @@ witness.drawing              // false on frames nobody sees (step "draw": "last"
 witness.draw(draw) -> bool   // the same as a call: draws unless skipped; repaints before a screenshot after an undrawn frame
 ```
 Page config, read at import: `globalThis.WITNESS_CONFIG = { addr, record, seed, takeover, raf,
-timers, webaudio, console, animations, videos, audioSeconds, audioRate, virtualEnded, realtimeWatch, epoch, audioCapture }` (also
+timers, webaudio, console, animations, videos, audioSeconds, audioRate, virtualEnded, realtimeWatch, epoch, audioCapture, gpuCanvas }` (also
 `?witness_<name>=0` in the URL for the on/off ones, `?witness_epoch=`, and `WITNESS_EPOCH` in Node). `audioCapture: false`
 (`?witness_audio=0`, `WITNESS_AUDIO=0`; what `witness play` sessions use: nothing there reads audio) renders no audio, while
 every AudioContext's `currentTime` and `ended` events still follow simulated time exactly as with capture; witness.json
-`play.audio: true` keeps the capture in play sessions.
+`play.audio: true` keeps the capture in play sessions. `gpuCanvas: true` (`?witness_gpu_canvas=1`, set by the CLI when the
+page renders on the GPU: `launch.gpu`, agent playtests) leaves 2D canvases GPU-rasterized; otherwise the adapter pins
+them to the CPU (`willReadFrequently`) so screenshots anti-alias the same all run long.
 `witness.json` for browser games also takes `launch.inject`, `launch.reset`, `launch.keepStorage`,
 `launch.media` (`{"reducedMotion": "reduce", "colorScheme": "dark", "forcedColors": "active", "contrast": "more"}`:
 emulated by the browser, so `matchMedia` and `@media` rules both see it; `--reduced-motion`, `--color-scheme dark`;

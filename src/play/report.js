@@ -62,6 +62,43 @@ export function lazyLine(z) {
   return `lazy drawing: on; ${z.framesUndrawn} of ${z.frames} frames hinted undrawn (${z.frames ? Math.round((100 * z.framesUndrawn) / z.frames) : 0}%) in ${z.steps} steps${game}`;
 }
 
+/** True when (nearly) every step in a Session.stepSplit() difference said how its page time split (the JS adapter). */
+const splitKnown = (wall, pageWall) => wall > 0 && pageWall >= 0.95 * wall;
+
+/**
+ * pace.time: where the wall time went while the game ran (runningS: the session's wall minus the time it sat frozen
+ * waiting for the tester), from Session.stepSplit() totals: the game's own code, the adapter around it, the step round
+ * trips, and the rest (snapshots, observing, deciding, shots). Seconds; game/adapter/protocol null when the adapter
+ * doesn't report its step time.
+ */
+export function timeSplit(sp, runningS, gameS) {
+  const s = (ms) => +(Math.max(0, ms) / 1000).toFixed(1), run = Math.max(0, runningS) * 1000, steps = Math.min(run, sp.wall);
+  const known = splitKnown(sp.wall, sp.pageWall);
+  return { runningSeconds: s(run), gameSeconds: +(+gameS || 0).toFixed(1), speed: run > 0 ? +((gameS * 1000) / run).toFixed(2) : null, steps: s(steps),
+    game: known ? s(sp.game) : null, adapter: known ? s(sp.page - sp.game) : null, protocol: known ? s(steps - sp.page) : null, witness: s(run - steps) };
+}
+
+/** An order's wall time (report.json orders[].wall): seconds, and when known the game's own code vs the rest (Witness). */
+export function orderWall(a, b, wallMs) {
+  const wall = b.wall - a.wall, game = b.game - a.game, sec = Math.max(0, wallMs) / 1000;
+  if (!splitKnown(wall, b.pageWall - a.pageWall)) return { seconds: +sec.toFixed(2) };
+  return { seconds: +sec.toFixed(2), game: +(game / 1000).toFixed(2), witness: +Math.max(0, sec - game / 1000).toFixed(2) };
+}
+
+/**
+ * Where the playing time went (pace.time: seconds of wall while the game ran): the game's own code (sim and draw), the
+ * Witness adapter in the page, step round trips, and the daemon observing and deciding between steps.
+ */
+export function timeLine(t) {
+  const pct = (s) => `${Math.round((100 * s) / t.runningSeconds)}%`;
+  if (!(t.runningSeconds > 0)) return "time: nothing ran";
+  const parts = t.game != null
+    ? [`the game's own code ${pct(t.game)} (its sim and draw)`, `the Witness adapter ${pct(t.adapter)}`, `step round trips ${pct(t.protocol)}`]
+    : [`game steps ${pct(t.steps)} (the game and its adapter; the adapter doesn't split them)`];
+  parts.push(`observing and deciding ${pct(t.witness)}`);
+  return `time: ${t.runningSeconds}s of wall while the game ran, for ${t.gameSeconds}s of game time${t.speed != null ? ` (${t.speed}× real time)` : ""}: ${parts.join(", ")}`;
+}
+
 /** report.md: readable, most useful first. `rel` makes paths relative to the project root. */
 export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "witness replay", config = null, flags = "", server = null } = {}) {
   // link: paths for markdown links (relative to report.md itself); rel: paths for shell commands (relative to the project);
@@ -92,6 +129,7 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
   if (r.errors.length) bits.push(`**${r.errors.length} game error(s)**`);
   if (r.lazyDraw) bits.push(lazyLine(r.lazyDraw));
   if (r.pace) bits.push(`pace: ${r.pace.mode}; ${r.pace.orders} orders (${r.pace.ordersPerGameMinute} per game minute, ${r.pace.ordersStoppedEarly} stopped early); game frozen ${r.pace.freezes}× for ${r.pace.frozenWallSeconds}s of ${r.pace.wallSeconds}s wall (${Math.round(100 * r.pace.frozenShare)}%)`);
+  if (r.pace && r.pace.time) bits.push(timeLine(r.pace.time));
   L.push(`- ${bits.join("\n- ")}`);
   L.push("");
   // tester feedback first: it's the part nothing else can produce

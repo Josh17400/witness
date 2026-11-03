@@ -17,7 +17,7 @@ import { readGoals, testerArgs, batchMarkdown, blockedBy, blockedText, nudge, bu
 import { shArg, launchArgs, cmdRoot } from "../../src/play/brief.js";
 import { spawnSync } from "node:child_process";
 import { shimCommand } from "../../src/play/registry.js";
-import { stuckSpots, reportMarkdown as reportMd } from "../../src/play/report.js";
+import { stuckSpots, reportMarkdown as reportMd, timeSplit, orderWall, timeLine } from "../../src/play/report.js";
 import { UntilWatch, fmtHours } from "../../src/play/until.js";
 import { PLAY_HELP } from "../../src/play/client.js";
 import fs from "node:fs";
@@ -678,6 +678,18 @@ ok("help: units named", /brief .*--minutes 4 \(GAME minutes\)/.test(PLAY_HELP) &
 
 // ---- regressions from a real game's reports (Embervale)
 runFixTests(ok);
+
+// ---- pace.time: where a playtest's wall time went (the JS adapter's step ms / game_ms)
+{
+  const t = timeSplit({ steps: 100, frames: 300, wall: 9000, pageWall: 9000, page: 8500, game: 7000 }, 10, 3);
+  ok("timeSplit: game / adapter / round trips / observing add up to the running wall", t.runningSeconds === 10 && t.gameSeconds === 3 && t.speed === 0.3 && t.steps === 9 && t.game === 7 && t.adapter === 1.5 && t.protocol === 0.5 && t.witness === 1, JSON.stringify(t));
+  const u = timeSplit({ steps: 10, frames: 30, wall: 4000, pageWall: 0, page: 0, game: 0 }, 5, 1);
+  ok("timeSplit: an adapter without step timing → game/adapter/protocol null", u.game === null && u.adapter === null && u.protocol === null && u.steps === 4 && u.witness === 1, JSON.stringify(u));
+  const L = timeLine(t);
+  ok("timeLine: names each share", /^time: 10s of wall while the game ran, for 3s of game time \(0\.3× real time\): the game's own code 70% \(its sim and draw\), the Witness adapter 15%, step round trips 5%, observing and deciding 10%$/.test(L) && /game steps 80%/.test(timeLine(u)), L + " | " + timeLine(u));
+  const w = orderWall({ wall: 1000, pageWall: 1000, page: 900, game: 800 }, { wall: 3000, pageWall: 3000, page: 2700, game: 2400 }, 2500);
+  ok("orderWall: an order's wall split into the game's code and the rest", w.seconds === 2.5 && w.game === 1.6 && w.witness === 0.9 && orderWall({ wall: 0, pageWall: 0, page: 0, game: 0 }, { wall: 50, pageWall: 0, page: 0, game: 0 }, 80).game === undefined, JSON.stringify(w));
+}
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

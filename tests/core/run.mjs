@@ -162,9 +162,21 @@ ok("splitRange: bad", splitRange("0.9") === null && splitRange("1..2..3") === nu
   s2._stepTimed(120, 15000);   // 125 ms a frame: 0.13× real time (wave 36 under SwiftShader)
   ok("slow game: one step alone isn't trusted (no speed, no note), its wait capped at 1 s a frame", s2.speed == null && !s2.slowNote && s2.stepWaitMs(120) === 60000 + 120 * 375, `${s2.speed} ${s2.slowNote} ${s2.stepWaitMs(120)}`);
   s2._stepTimed(120, 15000);
-  ok("slow game: speed measured, one note naming it, a 120-frame step waits 60 s + 120 × 375 ms", Math.abs(s2.speed - 0.133) < 0.01 && /the game runs at 0\.13× real time here \(software rendering\?\)/.test(s2.slowNote || "") && s2.stepWaitMs(120) === 60000 + 120 * 375, `${s2.speed} ${s2.slowNote} ${s2.stepWaitMs(120)}`);
+  ok("slow game: speed measured, one note naming it, a 120-frame step waits 60 s + 120 × 375 ms", Math.abs(s2.speed - 0.133) < 0.01 && /the game runs at 0\.13× real time here \(the game itself is slow here: its sim\/draw at a busy moment, or a slow machine\)/.test(s2.slowNote || "") && !/software/.test(s2.slowNote) && s2.stepWaitMs(120) === 60000 + 120 * 375, `${s2.speed} ${s2.slowNote} ${s2.stepWaitMs(120)}`);
   const note1 = s2.slowNote; s2._stepTimed(120, 30000);
   ok("slow game: the note is said once", s2.slowNote === note1);
+  // the note's reason follows the renderer (session.web.gpu) and, when the adapter reports it, the step's split
+  const slowS = (web, reply) => { const s = new Session(conn); s.quiet = true; s.web = web; for (let i = 0; i < 2; i++) { s._stepSplit(120, 15000, reply); s._stepTimed(120, 15000); } return s.slowNote || ""; };
+  const nSw = slowS({ gpu: { asked: false, used: false, renderer: null, software: null } }), nSwAfter = slowS({ gpu: { asked: "high-performance", used: true, renderer: "ANGLE (Google, Vulkan (SwiftShader Device))", software: true } });
+  const nGpu = slowS({ gpu: { asked: "high-performance", used: true, renderer: "ANGLE (NVIDIA RTX)", software: false } }, { frame: 1, time: 1, ms: 14000, game_ms: 12000 });
+  const nOver = slowS({ gpu: { asked: "high-performance", used: true, renderer: "ANGLE (NVIDIA RTX)", software: false } }, { frame: 1, time: 1, ms: 6000, game_ms: 3000 });
+  const nGpu0 = slowS({ gpu: { asked: "high-performance", used: true, renderer: "ANGLE (NVIDIA RTX)", software: false } });
+  ok("slow game: '(software rendering?)' only on software (no GPU asked, or SwiftShader after all)", /\(software rendering\?\)/.test(nSw) && /\(software rendering\?\)/.test(nSwAfter), [nSw, nSwAfter]);
+  ok("slow game on the GPU: the game itself, with the share of each step its own code took; never 'software'", /\(rendering on the GPU; the game itself is slow here: its own sim and draw take 80% of each step\)/.test(nGpu) && /\(rendering on the GPU; the game itself is slow here: its sim\/draw at a busy moment\)/.test(nGpu0) && ![nGpu, nGpu0, nOver].some((n) => /software/.test(n)), [nGpu, nGpu0]);
+  ok("slow game, the game's code a small share: the note says the rest is Witness", /the game's own code takes only 20% of each step: the rest is Witness's own work/.test(nOver), nOver);
+  const sp = new Session(conn); sp._stepSplit(10, 100, { ms: 80, game_ms: 60 }); sp._stepSplit(10, 50, { frame: 1 }); sp._stepSplit(1, 5, { ms: 9, game_ms: 12 });
+  const spl = sp.stepSplit();
+  ok("step split: totals of wall / page / game (ms, capped by the wall), page only from replies that carry it", spl.steps === 3 && spl.frames === 21 && spl.wall === 155 && spl.pageWall === 105 && spl.page === 85 && spl.game === 65, JSON.stringify(spl));
   // one slow first frame (a 3.2 s shader compile) then normal steps: no false note, a hang still caught in ~72 s
   const s5 = new Session(conn); s5.quiet = true; handlers.forEach((h) => h({ hello: { protocol: 1, fps: 60, capabilities: ["step"] } }));
   s5._stepTimed(1, 3200);

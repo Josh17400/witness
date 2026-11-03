@@ -439,6 +439,7 @@ else {
     const { begin, stepTo } = await import(pathToFileURL(path.join(root, "src", "core", "runner.js")).href);
     const f = findConfig(P("lazy"));
     const g = await openGame(f.config, f.root, { quiet: true });
+    let softState = null;
     try {
       const s = g.session, draws = async () => (await s.call("draws", [])).result;
       const lz = async () => (await s.request("perf")).lazy_draw;
@@ -454,6 +455,7 @@ else {
       await stepTo(s, st, 60);
       const dFull = (await draws()) - d1;
       const b = await s.snapshot(), shotB = await s.screenshot();
+      softState = b.state;
       ok("lazy draw: the same run without the hint draws all 60 frames", dFull === 60, dFull);
       ok("lazy draw: identical state with and without the hint (x, y, t after 60 frames of input)", JSON.stringify(a.state) === JSON.stringify(b.state) && a.state.x > 40 && a.state.y > 45, [a.state, b.state]);
       ok("lazy draw: the final screenshot is fully drawn and pixel-identical to the unhinted run's", shotA.data === shotB.data && shotA.width === 160, [shotA.width, shotA.data === shotB.data]);
@@ -462,7 +464,24 @@ else {
       await s.request("step", { frames: 5 });
       ok("lazy draw: a 1-frame hinted step draws its frame; a step without the hint draws every frame", (await draws()) - d2 === 6);
       ok("lazy draw: witness.drawing is true again between steps (read by eval)", (await s.eval("witness.drawing")).value === true);
+      const wrf = await s.eval("document.createElement('canvas').getContext('2d').getContextAttributes().willReadFrequently");
+      ok("software rendering: 2D canvases are pinned to the CPU (willReadFrequently) for pixel-stable shots", wrf.value === true && !/witness_gpu_canvas/.test(s.web.url), [wrf.value, s.web.url]);
+      const rep = await s.request("step", { frames: 3 });
+      ok("step reply: ms and game_ms (the JS adapter's page time and the game's share of it)", typeof rep.ms === "number" && typeof rep.game_ms === "number" && rep.game_ms >= 0 && rep.game_ms <= rep.ms + 0.01 && s.stepSplit().pageWall > 0, rep);
     } finally { await g.stop(); }
+    // launch.gpu: 2D canvases stay GPU-rasterized (0.7.14 pinned them to the CPU: The Fort drew ~3× slower), the
+    // screenshot reads a copy; the same input gives the same state and a full-size picture
+    const gaming0 = process.env.WITNESS_GAMING_FORCE; process.env.WITNESS_GAMING_FORCE = "0";
+    const g2 = await openGame({ ...f.config, launch: { ...f.config.launch, gpu: "high-performance" } }, f.root, { quiet: true });
+    try {
+      const s = g2.session;
+      await begin(s, { seed: 1, input: "right@0-0.5, down@0.2-0.8" });
+      const st = { frame: 0, time: 0 }; await stepTo(s, st, 60);
+      const c = await s.snapshot(), shot1 = await s.screenshot(), shot2 = await s.screenshot();
+      const wrf = await s.eval("document.createElement('canvas').getContext('2d').getContextAttributes().willReadFrequently");
+      ok("--gpu: the page is told (witness_gpu_canvas=1) and leaves 2D canvases GPU-rasterized", /witness_gpu_canvas=1/.test(s.web.url) && wrf.value === false, [s.web.url, wrf.value]);
+      ok("--gpu: same state as the software run for the same input; screenshots read a copy (full size, the same twice)", JSON.stringify(c.state) === JSON.stringify(softState) && c.frame === 60 && shot1.width === 160 && shot1.data === shot2.data, [c.state, softState, shot1.width]);
+    } finally { await g2.stop(); if (gaming0 == null) delete process.env.WITNESS_GAMING_FORCE; else process.env.WITNESS_GAMING_FORCE = gaming0; }
   }
   // doctor: play.lazyDraw on → the extra run with the hint; safe page ✔, draw() mutating state ⚠, picture-only ⚠
   const dl = (d, rr) => (d ? d.data.lines.join("\n") : rr.stdout + rr.stderr);

@@ -271,9 +271,43 @@ export class Session {
     const sp = this.speed;
     this._slowHits = sp != null && sp < 0.5 ? (this._slowHits || 0) + (held ? 2 : 1) : 0;
     if (!this.slowNote && this._slowHits >= 2) {
-      this.slowNote = `the game runs at ${sp < 0.1 ? sp.toFixed(3) : sp.toFixed(2)}× real time here (software rendering?): long runs take a while; the step wait scales with it`;
+      this.slowNote = `the game runs at ${sp < 0.1 ? sp.toFixed(3) : sp.toFixed(2)}× real time here (${this.slowWhy()}): long runs take a while; the step wait scales with it`;
       if (!this.quiet) console.error(`▸ note: ${this.slowNote}`);
     }
+  }
+  /**
+   * Where step time went, summed over every step (ms): wall (the request, round trip included), and from adapters that
+   * report it (the JS adapter's step reply: ms, game_ms) page (inside the adapter's step) and game (inside the game's
+   * own code); pageWall: the wall of the steps that reported. Read with stepSplit().
+   */
+  _stepSplit(frames, ms, m) {
+    const t = this.split ||= { steps: 0, frames: 0, wall: 0, pageWall: 0, page: 0, game: 0 };
+    t.steps++; t.frames += frames; t.wall += ms;
+    const page = m ? +m.ms : NaN, game = m ? +m.game_ms : NaN;
+    if (m && m.ms != null && m.game_ms != null && Number.isFinite(page) && Number.isFinite(game)) { t.pageWall += ms; t.page += Math.min(ms, page); t.game += Math.min(ms, page, game); }
+  }
+  /** A copy of the step time totals (see _stepSplit). */
+  stepSplit() { return { ...(this.split || { steps: 0, frames: 0, wall: 0, pageWall: 0, page: 0, game: 0 }) }; }
+  /**
+   * What a browser game renders with: "software" (SwiftShader: no GPU asked for, a fallback, or software after all),
+   * "gpu" (a real GPU), null (not a browser game, or the renderer is unknown). From session.web.gpu (launch.gpu).
+   */
+  get renderer() {
+    if (!this.web) return null;
+    const g = this.web.gpu;
+    if (!g || !g.used || g.software === true) return "software";
+    return g.software === false ? "gpu" : null;
+  }
+  /** Why a game may run under real time, for the slow-game note: software rendering only when it is software. */
+  slowWhy() {
+    const r = this.renderer, t = this.split;
+    if (r === "software") return "software rendering?";
+    // the adapter said how much of its steps the game's own code took (the JS adapter): name the side that is slow
+    const share = t && t.pageWall > 0 ? t.game / t.pageWall : null;
+    const where = share == null ? "the game itself is slow here: its sim/draw at a busy moment"
+      : share >= 0.5 ? `the game itself is slow here: its own sim and draw take ${Math.round(100 * share)}% of each step`
+        : `the game's own code takes only ${Math.round(100 * share)}% of each step: the rest is Witness's own work`;
+    return r === "gpu" ? `rendering on the GPU; ${where}` : `${where}${!this.web && share == null ? ", or a slow machine" : ""}`;
   }
   request(cmd, args = {}, timeoutMs = this.requestMs) {
     if (this.closed) return Promise.reject(new WitnessError(`the game is not connected (it may have crashed) — can't '${cmd}'`));
@@ -281,6 +315,7 @@ export class Session {
     const t0 = Date.now();
     return new Promise((res0, rej) => {
       const res = cmd === "step" ? (m) => { const n = args.frames || 1, d = +args.dt > 0 ? +args.dt : 1 / this.fps;
+        this._stepSplit(n, Date.now() - t0, m);
         this._stepTimed(n, Date.now() - t0, Array.isArray(args.dts) ? Array.from({ length: n }, (_, i) => (+args.dts[i] > 0 ? +args.dts[i] : d)).reduce((a, b) => a + b, 0) : n * d); res0(m); } : res0;
       // what was pending: the call (name and args), and from the JS adapter (an out-of-line "busy" query) whether a game
       // promise was still unresolved

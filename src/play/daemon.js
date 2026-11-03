@@ -17,7 +17,7 @@ import { parseOrders, OrderError } from "./orders.js";
 import { ReplayRecorder } from "./recorder.js";
 import { writeRunConfig, fingerprint } from "./build.js";
 import { gpuSummary } from "../core/browser.js";
-import { reportData, coveragePNG, writeReports, addLateFeedback } from "./report.js";
+import { reportData, coveragePNG, writeReports, addLateFeedback, timeSplit, orderWall } from "./report.js";
 import { DeadWatch } from "./deadwatch.js";
 import { updateEntry, writeJson } from "./registry.js";
 import { r1, clip, oneLine } from "./util.js";
@@ -368,7 +368,7 @@ export async function runDaemon(dir) {
     if (until && until.hit) return { code: 0, result: untilResult(true) };
     thaw();
     turnPace.wall = Date.now(); turnPace.frame = frame;
-    const t0 = world.t, wallT0 = Date.now();
+    const t0 = world.t, wallT0 = Date.now(), split0 = S.stepSplit();
     // turn profile: a wait runs as long as it says (a bare wait up to play.turnWait), since it ends early on your turn
     // (a defense game's timed wait, and any "wait N quiet", runs its N seconds too: nothing small cuts it short)
     const turnWait = (o) => (cfg.profile === "turn" && o.verb === "wait" ? (o.untimed ? cfg.turnWait : o.seconds) : o.verb === "wait" && !o.untimed && (cfg.profile === "defense" || o.quiet) ? o.seconds : null);
@@ -426,6 +426,7 @@ export async function runDaemon(dir) {
     const parts = ap.results.map((r) => `${partOf(r)}${ap.results.length > 1 ? ` (${r1(r.seconds)}s)` : ""}`);
     if (result.status === "interrupted" || result.status === "time" || result.status === "goal" || result.status === "until") { if (ap.cur) parts.push(`… ${clip(ap.cur.label, 40)} (stopped)`); ap.clear(); }
     rec.status = result.status; rec.msg = parts.length > 1 ? parts.join(" → ") : result.msg || ap.results.at(-1)?.msg || ""; rec.seconds = +(world.t - t0).toFixed(2);
+    rec.wall = orderWall(split0, S.stepSplit(), Date.now() - wallT0);   // where its wall time went (report.json)
     if (ap.results.length > 1 && (result.status === "done" || result.status === "fail")) result.msg = parts.join(" → ");
     // flush logs so errors/notices from the last frames show up now
     const lateLogs = S.closed || hung || stopWhy ? [] : sounds.fromLogs(await S.drainLogs().catch(() => []));
@@ -613,7 +614,8 @@ export async function runDaemon(dir) {
     const stopped = orders.filter((o) => ["interrupted", "time", "replaced"].includes(o.status)).length;
     return { mode: live.on ? (opts.watch ? "live (watched)" : "live") : "turns", speed: live.on ? live.speed : null, wallSeconds: +wallS.toFixed(1), gameSeconds: +world.t.toFixed(1),
       freezes: pace.freezes, frozenWallSeconds: +(frozen / 1000).toFixed(1), frozenShare: wallS ? +(frozen / 1000 / wallS).toFixed(2) : 0,
-      orders: orders.length, ordersPerGameMinute: world.t ? +(orders.length / (world.t / 60)).toFixed(1) : 0, ordersStoppedEarly: stopped };
+      orders: orders.length, ordersPerGameMinute: world.t ? +(orders.length / (world.t / 60)).toFixed(1) : 0, ordersStoppedEarly: stopped,
+      ...(live.on || opts.watch ? {} : { time: timeSplit(S.stepSplit(), Math.max(0, wallS - frozen / 1000), world.t) }) };
   }
   function state(extra = {}) {
     return {

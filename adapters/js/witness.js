@@ -29,7 +29,7 @@ const DEFAULT_ADDR = "127.0.0.1:7357";
 const VERSION = "1.0.0";
 // the Witness release this copy came from: the CLI says so when a game's copy is older than the CLI (a core test keeps
 // it equal to package.json)
-const WITNESS_VERSION = "0.7.14";
+const WITNESS_VERSION = "0.7.15";
 
 // The real APIs, captured before any takeover. The adapter only ever uses these.
 const real = {
@@ -57,6 +57,7 @@ function readConfig() {
     if (c.audioUnlock == null && q.has("witness_audio_unlock")) c.audioUnlock = q.get("witness_audio_unlock") !== "0";
     if (c.epoch == null && q.has("witness_epoch")) c.epoch = q.get("witness_epoch");
     if (c.audioCapture == null && q.has("witness_audio")) c.audioCapture = q.get("witness_audio") !== "0";
+    if (c.gpuCanvas == null && q.has("witness_gpu_canvas")) c.gpuCanvas = q.get("witness_gpu_canvas") !== "0";
     for (const k of ["takeover", "raf", "timers", "webaudio", "console", "animations", "videos", "virtualEnded", "realtimeWatch"]) {
       if (c[k] == null && q.has(`witness_${k}`)) c[k] = q.get(`witness_${k}`) !== "0";
     }
@@ -394,6 +395,7 @@ function runRafs() {
 /** One frame of virtual time: timers due within it fire at their own times, then rAF callbacks. */
 function runFrame(dt) {
   const target = clock.ticks + clock.dtTicks(dt);
+  const g0 = real.now();
   audioClock.t += dt;
   audioClock.since += dt;   // summed from 0 at every reset: the same run gives the same float sums
   if (sched.timers) runTasks(target);
@@ -402,6 +404,7 @@ function runFrame(dt) {
     try { H.step(dt, sim.frame); } catch (e) { reportError(e, "step handler"); }
   }
   if (sched.raf) runRafs();
+  perfStats.game += real.now() - g0;
   if (anim.on) syncAnimations();
 }
 
@@ -1450,7 +1453,10 @@ function patchCanvasContexts() {
     if (/^(webgl2?|experimental-webgl)$/.test(type)) attrs = Object.assign({}, attrs, { preserveDrawingBuffer: true });
     // 2D: rasterize on the CPU from the first frame. Browsers move a canvas from GPU to CPU raster after a few
     // readbacks (screenshots), and the two anti-alias edges differently, so later shots would differ by a few px.
-    if (type === "2d") attrs = Object.assign({}, attrs, { willReadFrequently: true });
+    // Not when the page renders on a real GPU (CFG.gpuCanvas: the CLI's launch.gpu): CPU raster there made a busy
+    // 2D frame ~3× slower (The Fort: 22 → 7 ms a frame) and the GPU did nothing for 2D; screenshots then read a copy
+    // (grab), so the game's canvas never sees a readback and stays on the GPU for the whole run.
+    if (type === "2d" && !CFG.gpuCanvas) attrs = Object.assign({}, attrs, { willReadFrequently: true });
     const ctx = orig.call(this, type, attrs);
     if (ctx && !contextKind.has(this)) contextKind.set(this, type);
     return ctx;
@@ -1475,7 +1481,8 @@ function grab(list, scale) {
   const w = Math.max(1, Math.round(base.width * scale)), h = Math.max(1, Math.round(base.height * scale));
   const png = H.screenshotFormat === "png";
   let c2;
-  if (list.length === 1 && scale === 1 && contextKind.get(base) === "2d" && !png) c2 = base.getContext("2d");
+  // (on the GPU the game's own 2D canvas is never read: a copy is, so the browser keeps it GPU-rasterized)
+  if (list.length === 1 && scale === 1 && contextKind.get(base) === "2d" && !png && !CFG.gpuCanvas) c2 = base.getContext("2d");
   else {
     const off = document.createElement("canvas");
     off.width = w; off.height = h;
@@ -1684,7 +1691,9 @@ let conn = null;
 let chain = Promise.resolve();
 let busyNow = null;              // the command being handled: {cmd, name, t0, awaiting} (answered to "busy")
 const asyncCalls = new Map();    // calls whose promise hasn't resolved yet
-const perfStats = { frames: 0, ms: 0 };
+// the last step: frames, real ms in the page, and game_ms: the part inside the game's own code (timers, the step handler,
+// rAF callbacks); the rest is the adapter (CSS animations on the virtual clock, yields, audio). The step reply carries both.
+const perfStats = { frames: 0, ms: 0, game: 0 };
 
 function callsList() {
   return Object.entries(H.calls || {}).map(([name, c]) => {
@@ -1743,6 +1752,7 @@ async function doStep(m) {
   const yieldEach = sched.raf || sched.timers || H.yieldEachFrame;
   const lazyStep = m.draw === "last";   // every frame but the last runs with witness.drawing false
   const t0 = real.now();
+  perfStats.game = 0;
   try {
     for (let i = 0; i < n; i++) {
       const dt = Array.isArray(m.dts) && +m.dts[i] > 0 ? +m.dts[i] : dflt;
@@ -1769,7 +1779,8 @@ async function doStep(m) {
   }
   perfStats.frames = n;
   perfStats.ms = real.now() - t0;
-  return { frame: sim.frame, time: sim.time };
+  // ms / game_ms: wall time in the page (the CLI splits a slow step into the game's frames vs Witness; never compared)
+  return { frame: sim.frame, time: sim.time, ms: Math.round(perfStats.ms * 100) / 100, game_ms: Math.round(perfStats.game * 100) / 100 };
 }
 
 async function doReset(m) {

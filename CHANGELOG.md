@@ -3,6 +3,35 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.15 (2026-11-03)
+
+From The Fort's map1b playtest: on the RTX 4060 it still ran at ~0.25× real time, and the slow note blamed software
+rendering. Profiling a copy at busy waves (30-37) found the cause in Witness: the JS adapter pins every 2D canvas to CPU
+raster (`willReadFrequently`, for pixel-stable shots), so in 0.7.14 the GPU only helped WebGL.
+
+**2D canvases stay on the GPU in GPU sessions**
+- With launch.gpu on (playtests by default), the CLI tells the page `witness_gpu_canvas=1` (adapter setting
+  `gpuCanvas`): 2D contexts are no longer pinned to the CPU, and screenshots read a copy so the game's canvas never
+  sees a readback. Software sessions are unchanged.
+- The Fort, busy wave, speed 2: 22-26 → 7-9 ms a frame; a `witness play` run went from ~0.6× to ~1.9× real time,
+  with the same final state hash and replay inputs.
+
+**Where the time goes**
+- Step replies from the JS adapter carry `ms` (wall time in the page) and `game_ms` (inside the game's own timers,
+  step handler and rAF callbacks).
+- Play reports: `pace.time` in report.json (game code / adapter / round trips / observing, seconds), a `time:` line
+  in report.md, and `orders[].wall` per order (`{seconds, game, witness}`). Left out of live/watched sessions.
+
+**Slow-game note**
+- "(software rendering?)" only when the renderer really is software. On a real GPU: "(rendering on the GPU; the game
+  itself is slow here: its own sim and draw take N% of each step)", or that the rest is Witness's own work.
+
+**Adoption steps**
+1. Nothing required: restart to pick up the plugin. Games using `launch.inject` get the new adapter automatically;
+   games with a vendored witness.js should re-copy `adapters/js/witness.js` to get `gpuCanvas` and the step timing.
+2. *Optional* (The Fort): `play.lazyDraw` (draw only a step's last frame) and assigning entity ids at spawn rather than
+   inside `snapshot()` (so replays keep the same ids).
+
 ## 0.7.14 (2026-11-02)
 
 From The Fort: SwiftShader (software WebGL) made agent playtests run at 0.35-0.5× real time. Browser games can now

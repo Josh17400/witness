@@ -233,6 +233,8 @@ export async function openBrowserGame(launch, root, addr, keep, extra = {}) {
     const u = new URL(launch.url);
     u.searchParams.set("witness", addr);
     for (const [k, v] of Object.entries(extra.query || {})) if (v != null) u.searchParams.set(k, String(v));
+    // on the GPU the JS adapter leaves 2D canvases GPU-rasterized (it pins them to the CPU otherwise, for stable shots)
+    if (plan.used && opts.engine === "chromium") u.searchParams.set("witness_gpu_canvas", "1");
     await page.goto(u.toString());
     const web = makeWeb(page, browser, opts, pwInfo);
     web.gpu = { ...plan, renderer: null, software: null };

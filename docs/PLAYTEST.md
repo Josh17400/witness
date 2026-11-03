@@ -316,8 +316,10 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   `--persona`, `--scene`, `--params`, `--seed`, `--minutes`, `--until`, `--game-hours`, `--wall-minutes` and `--live`
   are the defaults for every goal.
 * **Speed (browser games):** a Chromium playtest renders on the machine's GPU by default when `launch.gpu` is unset
-  (`"gpu": false` or `WITNESS_GPU=0` keeps SwiftShader; `--gpu` / `launch.gpu: true` does the same for tests and shots): The Fort, which crawled at 0.35-0.5× real time, ran about 3× faster (WebGL pages gain
-  most; a plain 2D canvas may gain nothing, so measure). `play start` prints the renderer line (or why GPU rendering
+  (`"gpu": false` or `WITNESS_GPU=0` keeps SwiftShader; `--gpu` / `launch.gpu: true` does the same for tests and shots): The Fort, which crawled at 0.35-0.5× real time, ran about 3× faster (WebGL and 2D
+  canvases both draw on the GPU then; on software the JS adapter keeps 2D canvases on the CPU for pixel-stable shots).
+  When a game still runs well under real time, report.json `pace.time` (a line in report.md) says where the wall time
+  went: the game's own code (its update and draw), the Witness adapter, step round trips, observing. `play start` prints the renderer line (or why GPU rendering
   wasn't used) as the session starts. The renderer is in the report (`gpu` in report.json, a line in report.md) and the replay header; a replay compares state, not
   pixels, so it still checks on software and says when the rendering differs. While the owner has a game open the
   session renders in software anyway (`WITNESS_GPU_WHILE_GAMING=1` overrides; only `WITNESS_GAMING_PROBE=0` turns the
