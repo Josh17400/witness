@@ -161,6 +161,9 @@ function wsUpgrade(sock, first) {
   };
 }
 
+/** Session.split before any step (see _stepSplit). */
+const emptySplit = () => ({ steps: 0, frames: 0, wall: 0, pageWall: 0, page: 0, game: 0, browserWall: 0, browser: 0 });
+
 export class Session {
   constructor(conn) {
     this.conn = conn;
@@ -277,17 +280,23 @@ export class Session {
   }
   /**
    * Where step time went, summed over every step (ms): wall (the request, round trip included), and from adapters that
-   * report it (the JS adapter's step reply: ms, game_ms) page (inside the adapter's step) and game (inside the game's
-   * own code); pageWall: the wall of the steps that reported. Read with stepSplit().
+   * report it (the JS adapter's step reply: ms, game_ms, browser_ms) page (inside the adapter's step), game (inside the
+   * game's own code) and browser (the browser's own work between frames: drawing the game's canvases on the GPU,
+   * rendering updates; 0.7.16+); pageWall: the wall of the steps that reported ms / game_ms, browserWall: of those, the
+   * wall of the ones that also reported browser_ms. Read with stepSplit().
    */
   _stepSplit(frames, ms, m) {
-    const t = this.split ||= { steps: 0, frames: 0, wall: 0, pageWall: 0, page: 0, game: 0 };
+    const t = this.split ||= emptySplit();
     t.steps++; t.frames += frames; t.wall += ms;
-    const page = m ? +m.ms : NaN, game = m ? +m.game_ms : NaN;
-    if (m && m.ms != null && m.game_ms != null && Number.isFinite(page) && Number.isFinite(game)) { t.pageWall += ms; t.page += Math.min(ms, page); t.game += Math.min(ms, page, game); }
+    const page = m ? +m.ms : NaN, game = m ? +m.game_ms : NaN, browser = m && m.browser_ms != null ? +m.browser_ms : NaN;
+    if (m && m.ms != null && m.game_ms != null && Number.isFinite(page) && Number.isFinite(game)) {
+      const p = Math.min(ms, page), g = Math.min(p, game);
+      t.pageWall += ms; t.page += p; t.game += g;
+      if (Number.isFinite(browser)) { t.browserWall += ms; t.browser += Math.max(0, Math.min(p - g, browser)); }
+    }
   }
   /** A copy of the step time totals (see _stepSplit). */
-  stepSplit() { return { ...(this.split || { steps: 0, frames: 0, wall: 0, pageWall: 0, page: 0, game: 0 }) }; }
+  stepSplit() { return { ...(this.split || emptySplit()) }; }
   /**
    * What a browser game renders with: "software" (SwiftShader: no GPU asked for, a fallback, or software after all),
    * "gpu" (a real GPU), null (not a browser game, or the renderer is unknown). From session.web.gpu (launch.gpu).
@@ -302,11 +311,14 @@ export class Session {
   slowWhy() {
     const r = this.renderer, t = this.split;
     if (r === "software") return "software rendering?";
-    // the adapter said how much of its steps the game's own code took (the JS adapter): name the side that is slow
+    // the adapter said how much of its steps the game's own code took (the JS adapter): name the side that is slow. The
+    // browser drawing the game's frames between them (browser_ms, 0.7.16+) is the game's draw cost too, not Witness's
     const share = t && t.pageWall > 0 ? t.game / t.pageWall : null;
+    const draw = t && t.browserWall > 0 && t.browserWall >= 0.95 * t.pageWall ? t.browser / t.pageWall : 0;
+    const pc = (v) => `${Math.round(100 * v)}%`;
     const where = share == null ? "the game itself is slow here: its sim/draw at a busy moment"
-      : share >= 0.5 ? `the game itself is slow here: its own sim and draw take ${Math.round(100 * share)}% of each step`
-        : `the game's own code takes only ${Math.round(100 * share)}% of each step: the rest is Witness's own work`;
+      : share + draw >= 0.5 ? `the game itself is slow here: its own sim and draw take ${pc(share)} of each step${draw >= 0.05 ? `, the browser drawing its frames another ${pc(draw)}` : ""}`
+        : `the game's own code takes only ${pc(share)} of each step${draw >= 0.05 ? ` (the browser drawing its frames ${pc(draw)})` : ""}: the rest is Witness's own work`;
     return r === "gpu" ? `rendering on the GPU; ${where}` : `${where}${!this.web && share == null ? ", or a slow machine" : ""}`;
   }
   request(cmd, args = {}, timeoutMs = this.requestMs) {

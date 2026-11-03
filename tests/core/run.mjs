@@ -176,7 +176,13 @@ ok("splitRange: bad", splitRange("0.9") === null && splitRange("1..2..3") === nu
   ok("slow game, the game's code a small share: the note says the rest is Witness", /the game's own code takes only 20% of each step: the rest is Witness's own work/.test(nOver), nOver);
   const sp = new Session(conn); sp._stepSplit(10, 100, { ms: 80, game_ms: 60 }); sp._stepSplit(10, 50, { frame: 1 }); sp._stepSplit(1, 5, { ms: 9, game_ms: 12 });
   const spl = sp.stepSplit();
-  ok("step split: totals of wall / page / game (ms, capped by the wall), page only from replies that carry it", spl.steps === 3 && spl.frames === 21 && spl.wall === 155 && spl.pageWall === 105 && spl.page === 85 && spl.game === 65, JSON.stringify(spl));
+  ok("step split: totals of wall / page / game (ms, capped by the wall), page only from replies that carry it", spl.steps === 3 && spl.frames === 21 && spl.wall === 155 && spl.pageWall === 105 && spl.page === 85 && spl.game === 65 && spl.browserWall === 0 && spl.browser === 0, JSON.stringify(spl));
+  const sb = new Session(conn); sb._stepSplit(10, 100, { ms: 80, game_ms: 30, browser_ms: 40 }); sb._stepSplit(10, 100, { ms: 90, game_ms: 50, browser_ms: 70 }); sb._stepSplit(10, 100, { ms: 50, game_ms: 20 });
+  const spb = sb.stepSplit();
+  ok("step split: browser_ms summed (capped by page − game) over the replies that carry it; browserWall their wall", spb.pageWall === 300 && spb.browserWall === 200 && spb.browser === 80 && spb.game === 100 && spb.page === 220, JSON.stringify(spb));
+  const nDraw = slowS({ gpu: { asked: "high-performance", used: true, renderer: "ANGLE (NVIDIA RTX)", software: false } }, { frame: 1, time: 1, ms: 14000, game_ms: 5000, browser_ms: 7000 });
+  const nDrawOver = slowS({ gpu: { asked: "high-performance", used: true, renderer: "ANGLE (NVIDIA RTX)", software: false } }, { frame: 1, time: 1, ms: 6000, game_ms: 1500, browser_ms: 1500 });
+  ok("slow game: the browser drawing the game's frames counts with the game, not as Witness's work", /the game itself is slow here: its own sim and draw take 33% of each step, the browser drawing its frames another 47%\)/.test(nDraw) && /the game's own code takes only 10% of each step \(the browser drawing its frames 10%\): the rest is Witness's own work/.test(nDrawOver), [nDraw, nDrawOver]);
   // one slow first frame (a 3.2 s shader compile) then normal steps: no false note, a hang still caught in ~72 s
   const s5 = new Session(conn); s5.quiet = true; handlers.forEach((h) => h({ hello: { protocol: 1, fps: 60, capabilities: ["step"] } }));
   s5._stepTimed(1, 3200);

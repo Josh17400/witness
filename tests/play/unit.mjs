@@ -688,7 +688,13 @@ runFixTests(ok);
   const L = timeLine(t);
   ok("timeLine: names each share", /^time: 10s of wall while the game ran, for 3s of game time \(0\.3× real time\): the game's own code 70% \(its sim and draw\), the Witness adapter 15%, step round trips 5%, observing and deciding 10%$/.test(L) && /game steps 80%/.test(timeLine(u)), L + " | " + timeLine(u));
   const w = orderWall({ wall: 1000, pageWall: 1000, page: 900, game: 800 }, { wall: 3000, pageWall: 3000, page: 2700, game: 2400 }, 2500);
-  ok("orderWall: an order's wall split into the game's code and the rest", w.seconds === 2.5 && w.game === 1.6 && w.witness === 0.9 && orderWall({ wall: 0, pageWall: 0, page: 0, game: 0 }, { wall: 50, pageWall: 0, page: 0, game: 0 }, 80).game === undefined, JSON.stringify(w));
+  ok("orderWall: an order's wall split into the game's code and the rest", w.seconds === 2.5 && w.game === 1.6 && w.witness === 0.9 && w.browser === undefined && orderWall({ wall: 0, pageWall: 0, page: 0, game: 0 }, { wall: 50, pageWall: 0, page: 0, game: 0 }, 80).game === undefined, JSON.stringify(w));
+  // 0.7.16 adapters: browser_ms, the browser drawing the game's frames between them, is its own bucket (not the adapter's)
+  const tb = timeSplit({ steps: 100, frames: 300, wall: 9000, pageWall: 9000, page: 8500, game: 3000, browserWall: 9000, browser: 4000 }, 10, 3);
+  ok("timeSplit: browser split out of the adapter when the adapter reports it", tb.game === 3 && tb.browser === 4 && tb.adapter === 1.5 && tb.protocol === 0.5 && tb.witness === 1 && t.browser === null && t.adapter === 1.5, JSON.stringify([tb, t]));
+  ok("timeLine: the browser drawing the game's frames named on its own", /the game's own code 30% \(its sim and draw\), the browser drawing its frames 40% \(rasterising and compositing what it drew\), the Witness adapter 15%, step round trips 5%, observing and deciding 10%$/.test(timeLine(tb)) && !/browser/.test(timeLine(t)), timeLine(tb));
+  const wb = orderWall({ wall: 1000, pageWall: 1000, page: 900, game: 800, browserWall: 1000, browser: 100 }, { wall: 3000, pageWall: 3000, page: 2700, game: 1600, browserWall: 3000, browser: 1100 }, 2500);
+  ok("orderWall: game / browser / the rest (Witness)", wb.seconds === 2.5 && wb.game === 0.8 && wb.browser === 1 && wb.witness === 0.7, JSON.stringify(wb));
 }
 
 console.log(`${pass} passed, ${fail} failed`);

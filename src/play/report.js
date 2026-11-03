@@ -65,35 +65,46 @@ export function lazyLine(z) {
 /** True when (nearly) every step in a Session.stepSplit() difference said how its page time split (the JS adapter). */
 const splitKnown = (wall, pageWall) => wall > 0 && pageWall >= 0.95 * wall;
 
+/** The browser's share between frames (browser_ms, adapters 0.7.16+): known when (nearly) every timed step said it. */
+const browserKnown = (pageWall, browserWall) => pageWall > 0 && (browserWall || 0) >= 0.95 * pageWall;
+
 /**
  * pace.time: where the wall time went while the game ran (runningS: the session's wall minus the time it sat frozen
- * waiting for the tester), from Session.stepSplit() totals: the game's own code, the adapter around it, the step round
+ * waiting for the tester), from Session.stepSplit() totals: the game's own code, the browser drawing its frames between
+ * them (on the GPU: rasterising the canvases the game drew, rendering updates), the adapter around them, the step round
  * trips, and the rest (snapshots, observing, deciding, shots). Seconds; game/adapter/protocol null when the adapter
- * doesn't report its step time.
+ * doesn't report its step time; browser null when it doesn't report browser_ms (older adapters: then adapter includes
+ * it, as before 0.7.16).
  */
 export function timeSplit(sp, runningS, gameS) {
   const s = (ms) => +(Math.max(0, ms) / 1000).toFixed(1), run = Math.max(0, runningS) * 1000, steps = Math.min(run, sp.wall);
-  const known = splitKnown(sp.wall, sp.pageWall);
+  const known = splitKnown(sp.wall, sp.pageWall), bk = known && browserKnown(sp.pageWall, sp.browserWall);
   return { runningSeconds: s(run), gameSeconds: +(+gameS || 0).toFixed(1), speed: run > 0 ? +((gameS * 1000) / run).toFixed(2) : null, steps: s(steps),
-    game: known ? s(sp.game) : null, adapter: known ? s(sp.page - sp.game) : null, protocol: known ? s(steps - sp.page) : null, witness: s(run - steps) };
+    game: known ? s(sp.game) : null, browser: bk ? s(sp.browser) : null, adapter: known ? s(sp.page - sp.game - (bk ? sp.browser : 0)) : null,
+    protocol: known ? s(steps - sp.page) : null, witness: s(run - steps) };
 }
 
-/** An order's wall time (report.json orders[].wall): seconds, and when known the game's own code vs the rest (Witness). */
+/**
+ * An order's wall time (report.json orders[].wall): seconds, and when known the game's own code, the browser drawing
+ * its frames (browser_ms adapters) and the rest (Witness).
+ */
 export function orderWall(a, b, wallMs) {
   const wall = b.wall - a.wall, game = b.game - a.game, sec = Math.max(0, wallMs) / 1000;
   if (!splitKnown(wall, b.pageWall - a.pageWall)) return { seconds: +sec.toFixed(2) };
-  return { seconds: +sec.toFixed(2), game: +(game / 1000).toFixed(2), witness: +Math.max(0, sec - game / 1000).toFixed(2) };
+  const browser = browserKnown(b.pageWall - a.pageWall, (b.browserWall || 0) - (a.browserWall || 0)) ? ((b.browser || 0) - (a.browser || 0)) / 1000 : null;
+  return { seconds: +sec.toFixed(2), game: +(game / 1000).toFixed(2), ...(browser != null ? { browser: +browser.toFixed(2) } : {}), witness: +Math.max(0, sec - game / 1000 - (browser || 0)).toFixed(2) };
 }
 
 /**
  * Where the playing time went (pace.time: seconds of wall while the game ran): the game's own code (sim and draw), the
- * Witness adapter in the page, step round trips, and the daemon observing and deciding between steps.
+ * browser drawing its frames (when the adapter says), the Witness adapter in the page, step round trips, and the daemon
+ * observing and deciding between steps.
  */
 export function timeLine(t) {
   const pct = (s) => `${Math.round((100 * s) / t.runningSeconds)}%`;
   if (!(t.runningSeconds > 0)) return "time: nothing ran";
   const parts = t.game != null
-    ? [`the game's own code ${pct(t.game)} (its sim and draw)`, `the Witness adapter ${pct(t.adapter)}`, `step round trips ${pct(t.protocol)}`]
+    ? [`the game's own code ${pct(t.game)} (its sim and draw)`, ...(t.browser != null ? [`the browser drawing its frames ${pct(t.browser)} (rasterising and compositing what it drew)`] : []), `the Witness adapter ${pct(t.adapter)}`, `step round trips ${pct(t.protocol)}`]
     : [`game steps ${pct(t.steps)} (the game and its adapter; the adapter doesn't split them)`];
   parts.push(`observing and deciding ${pct(t.witness)}`);
   return `time: ${t.runningSeconds}s of wall while the game ran, for ${t.gameSeconds}s of game time${t.speed != null ? ` (${t.speed}× real time)` : ""}: ${parts.join(", ")}`;

@@ -3,6 +3,28 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.16 (2026-11-03)
+
+From The Fort's map1c playtest (6.59× real time, but the report put 62% of the time on "the Witness adapter"):
+profiled at a busy wave, that bucket was mostly Chrome flushing the game's 2D canvas drawing to the GPU after each
+frame (`FinalizeFrame`, ~2.35 ms of a ~2.6 ms yield): the game's real draw cost, not Witness's.
+
+**Honest time split**
+- JS adapter step replies add `browser_ms` (time in the per-frame yields: the browser drawing/compositing the frame);
+  `ms` and `game_ms` keep their meaning.
+- Play reports: `pace.time.browser` (and `orders[].wall.browser`); `adapter` no longer includes it. report.md reads
+  e.g. "the game's own code 56%, the browser drawing its frames 27%, the Witness adapter 5%…". Older adapters report
+  `browser: null` and the old meaning.
+- The slow-game note counts browser drawing as the game's cost.
+- Witness's own per-frame work at a busy Fort wave: ~0.4-0.5 ms (about 5%). The per-frame video check no longer walks
+  the page (`getElementsByTagName`).
+- Speed is unchanged (2.05-2.12× before and after, same replay inputs and state hashes). Yielding less often would be
+  faster but changes when game-queued tasks run, so it isn't done.
+
+**Adoption steps**
+1. Nothing required: restart. `launch.inject` games get the new adapter automatically; vendored copies should
+   re-copy `adapters/js/witness.js` for `browser_ms`.
+
 ## 0.7.15 (2026-11-03)
 
 From The Fort's map1b playtest: on the RTX 4060 it still ran at ~0.25× real time, and the slow note blamed software

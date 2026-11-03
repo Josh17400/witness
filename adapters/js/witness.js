@@ -29,7 +29,7 @@ const DEFAULT_ADDR = "127.0.0.1:7357";
 const VERSION = "1.0.0";
 // the Witness release this copy came from: the CLI says so when a game's copy is older than the CLI (a core test keeps
 // it equal to package.json)
-const WITNESS_VERSION = "0.7.15";
+const WITNESS_VERSION = "0.7.16";
 
 // The real APIs, captured before any takeover. The adapter only ever uses these.
 const real = {
@@ -473,7 +473,8 @@ function syncAnimations(all = true) {
     if (!all) { const st = anim.state.get(a); if (st && st.rate != null) continue; }
     try { syncOne(a, now, tl); } catch (e) { warnOnce("css-anim", `a CSS / Web Animation could not be put on the virtual clock: ${e && e.message}`); }
   }
-  if (all && anim.videos) for (const v of G.document.querySelectorAll("video")) if (!v.paused) { try { v.pause(); } catch { /* gone */ } }
+  // getElementsByTagName: the engine keeps that collection, so a page with no <video> costs no tree walk a frame
+  if (all && anim.videos) for (const v of G.document.getElementsByTagName("video")) if (!v.paused) { try { v.pause(); } catch { /* gone */ } }
 }
 /** Something may have started an animation: catch it in the next real animation frame, before it is drawn. */
 function animSoon() {
@@ -1691,9 +1692,13 @@ let conn = null;
 let chain = Promise.resolve();
 let busyNow = null;              // the command being handled: {cmd, name, t0, awaiting} (answered to "busy")
 const asyncCalls = new Map();    // calls whose promise hasn't resolved yet
-// the last step: frames, real ms in the page, and game_ms: the part inside the game's own code (timers, the step handler,
-// rAF callbacks); the rest is the adapter (CSS animations on the virtual clock, yields, audio). The step reply carries both.
-const perfStats = { frames: 0, ms: 0, game: 0 };
+// the last step: frames, real ms in the page, game_ms: the part inside the game's own code (timers, the step handler,
+// rAF callbacks), and browser_ms (browser only): the per-frame yields to the event loop, where the browser does its own
+// work between frames: on the GPU mostly Chrome drawing the canvases the game just drew (a 2D canvas drawn faster than
+// the display refreshes is flushed to the GPU at the end of every task, and the page waits for the GPU to catch up), plus
+// rendering updates and any other tasks the page queued. The rest is the adapter (CSS animations on the virtual clock,
+// waits for a real rendering update so animation events go out, audio). The step reply carries all three.
+const perfStats = { frames: 0, ms: 0, game: 0, browser: 0 };
 
 function callsList() {
   return Object.entries(H.calls || {}).map(([name, c]) => {
@@ -1753,6 +1758,7 @@ async function doStep(m) {
   const lazyStep = m.draw === "last";   // every frame but the last runs with witness.drawing false
   const t0 = real.now();
   perfStats.game = 0;
+  perfStats.browser = 0;
   try {
     for (let i = 0; i < n; i++) {
       const dt = Array.isArray(m.dts) && +m.dts[i] > 0 ? +m.dts[i] : dflt;
@@ -1769,7 +1775,7 @@ async function doStep(m) {
       if (anim.flush) await renderingUpdate();
       sim.frame++;
       sim.time += dt;
-      if (yieldEach) await macrotask();
+      if (yieldEach) { const y0 = real.now(); await macrotask(); perfStats.browser += real.now() - y0; }
     }
   } finally {
     // the last frame of every step is drawn, so a screenshot always follows a drawn frame; only a step that failed
@@ -1779,8 +1785,10 @@ async function doStep(m) {
   }
   perfStats.frames = n;
   perfStats.ms = real.now() - t0;
-  // ms / game_ms: wall time in the page (the CLI splits a slow step into the game's frames vs Witness; never compared)
-  return { frame: sim.frame, time: sim.time, ms: Math.round(perfStats.ms * 100) / 100, game_ms: Math.round(perfStats.game * 100) / 100 };
+  // ms / game_ms / browser_ms: wall time in the page (the CLI splits a slow step into the game's frames, the browser
+  // drawing them, and Witness; never compared)
+  const r2 = (v) => Math.round(v * 100) / 100;
+  return { frame: sim.frame, time: sim.time, ms: r2(perfStats.ms), game_ms: r2(perfStats.game), ...(BROWSER ? { browser_ms: r2(perfStats.browser) } : {}) };
 }
 
 async function doReset(m) {

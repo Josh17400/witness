@@ -319,7 +319,9 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   (`"gpu": false` or `WITNESS_GPU=0` keeps SwiftShader; `--gpu` / `launch.gpu: true` does the same for tests and shots): The Fort, which crawled at 0.35-0.5× real time, ran about 3× faster (WebGL and 2D
   canvases both draw on the GPU then; on software the JS adapter keeps 2D canvases on the CPU for pixel-stable shots).
   When a game still runs well under real time, report.json `pace.time` (a line in report.md) says where the wall time
-  went: the game's own code (its update and draw), the Witness adapter, step round trips, observing. `play start` prints the renderer line (or why GPU rendering
+  went: the game's own code (its update and draw), the browser drawing its frames (rasterising and compositing
+  what the game drew between frames: on the GPU usually the larger part of a canvas game's draw cost), the Witness
+  adapter, step round trips, observing. `play start` prints the renderer line (or why GPU rendering
   wasn't used) as the session starts. The renderer is in the report (`gpu` in report.json, a line in report.md) and the replay header; a replay compares state, not
   pixels, so it still checks on software and says when the rendering differs. While the owner has a game open the
   session renders in software anyway (`WITNESS_GPU_WHILE_GAMING=1` overrides; only `WITNESS_GAMING_PROBE=0` turns the
@@ -943,7 +945,9 @@ cells, count, unresolved, seconds, first, last, headings, replayAt, shot}], unti
 cause}], kills[], pickups[], dialogues[{t, speaker, text, options}], coverage{cells, seen, openCells, percent,
 mapWindow?, bounds, png}, shots[{t, why, file}], errors[{t, text}], notes[{t, frame, kind, text, cell, shot?}],
 feedback{fun, difficulty, text}, replay{file, frames, calls}, build{kind, url, hash, count}, runConfig, profile, pace{mode, speed, wallSeconds, gameSeconds,
-freezes, frozenWallSeconds, frozenShare, orders, ordersPerGameMinute, ordersStoppedEarly}, lazyDraw{on, steps,
+freezes, frozenWallSeconds, frozenShare, orders, ordersPerGameMinute, ordersStoppedEarly, time{runningSeconds, gameSeconds, speed, steps,
+game, browser, adapter, protocol, witness}} (`time`: seconds of wall while the game ran; `browser` is null with adapters older than 0.7.16, whose
+`adapter` still includes it), lazyDraw{on, steps,
 framesUndrawn, frames, game{reads, skipped}} (null without `play.lazyDraw`; `game` from the adapter's `perf.lazy_draw`), stats{…counts…}`. Live
 orders can also end as `replaced` (a newer `do` replaced them) or `ended` (still running at the end).
 `coverage.mapWindow` is true when the game's `state.map` is a window that follows the player: then `openCells` only

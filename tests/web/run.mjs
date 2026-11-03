@@ -468,6 +468,7 @@ else {
       ok("software rendering: 2D canvases are pinned to the CPU (willReadFrequently) for pixel-stable shots", wrf.value === true && !/witness_gpu_canvas/.test(s.web.url), [wrf.value, s.web.url]);
       const rep = await s.request("step", { frames: 3 });
       ok("step reply: ms and game_ms (the JS adapter's page time and the game's share of it)", typeof rep.ms === "number" && typeof rep.game_ms === "number" && rep.game_ms >= 0 && rep.game_ms <= rep.ms + 0.01 && s.stepSplit().pageWall > 0, rep);
+      ok("step reply: browser_ms (the browser's own work between frames, part of ms beside game_ms)", typeof rep.browser_ms === "number" && rep.browser_ms >= 0 && rep.game_ms + rep.browser_ms <= rep.ms + 0.02 && s.stepSplit().browserWall > 0, rep);
     } finally { await g.stop(); }
     // launch.gpu: 2D canvases stay GPU-rasterized (0.7.14 pinned them to the CPU: The Fort drew ~3× slower), the
     // screenshot reads a copy; the same input gives the same state and a full-size picture
