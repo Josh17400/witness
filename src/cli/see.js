@@ -4,6 +4,23 @@ import path from "node:path";
 import { begin, stepTo } from "../core/runner.js";
 import { evaluate } from "../core/expr.js";
 import { REFS_DIR, markGenerated } from "../core/clean.js";
+import { pngWithText, pngText } from "../media/png.js";
+import { onGpu } from "../core/browser.js";
+
+// browser launches tag the PNGs they save as baselines with how they were rendered (launch.gpu), so a --diff against a
+// baseline from the other mode says why small differences appear
+const RENDER_KEY = "witness-render";
+/** "software" | "gpu: <renderer>" for a browser launch, else null. */
+export const renderTag = (web) => (!web || !web.gpu ? null : onGpu(web.gpu) ? `gpu: ${web.gpu.renderer || "unknown renderer"}` : "software");   // software after all (SwiftShader under --gpu) is software
+/** A note when a --diff baseline was rendered another way than this shot (null when the same, or not a browser launch). */
+export function renderNote(refBuf, web) {
+  const now = renderTag(web);
+  if (!now) return null;
+  const was = pngText(refBuf)[RENDER_KEY] || null;
+  if (was === now || (!was && now === "software")) return null;
+  const say = (t) => (t === "software" ? "software rendering (SwiftShader)" : `the GPU (${t.slice(5)})`);
+  return `the reference was ${was ? `made with ${say(was)}` : "saved without a rendering tag (before 0.7.14, or not by a browser launch: likely software)"}, this shot with ${say(now)}: expect small anti-aliasing / colour differences (--threshold sets how much a pixel may change; default 16)`;
+}
 import {
   die, say, withGame, gamePixels, runOpts, media, printLogs, timeList, framesOf, fmtT, shotImage, envelope, emit,
 } from "./common.js";
@@ -173,7 +190,7 @@ async function singleShots(opt) {
       }
       const { img, rect } = await frameImage(m, shot, snap, fr);
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, m.encodePNG(img.width, img.height, img.data));
+      { const png = m.encodePNG(img.width, img.height, img.data), tag = saveRef ? renderTag(s.web) : null; fs.writeFileSync(file, tag ? pngWithText(png, RENDER_KEY, tag) : png); }
       markGenerated(path.resolve(root, cfg.shots), file);
       const r = { frame: it.f, t: +(it.f / fps).toFixed(3), file, width: img.width, height: img.height, source: rect, ...(saveRef ? { ref: path.basename(file, ".png") } : {}) };
       const dev = s.web && s.web.captureMode && s.web.captureMode !== "canvas" ? `  (${img.width}×${img.height} device px: ${s.web.captureMode} capture at DPR ${s.web.device ? s.web.device.dpr : 1}, not game pixels)` : "";
@@ -192,14 +209,15 @@ async function singleShots(opt) {
         const desc = (b) => (b.kind === "moved" && b.from ? `moved ${b.moved[0] >= 0 ? "+" : ""}${b.moved[0]},${b.moved[1] >= 0 ? "+" : ""}${b.moved[1]}: x=${b.from.x} y=${b.from.y} → x=${b.x} y=${b.y} ${b.w}×${b.h}`
           : b.kind === "moved" && b.within ? `moved ${b.moved[0] >= 0 ? "+" : ""}${b.moved[0]},${b.moved[1] >= 0 ? "+" : ""}${b.moved[1]} inside x=${b.x} y=${b.y} ${b.w}×${b.h}`
           : `${b.kind} x=${b.x} y=${b.y} ${b.w}×${b.h} (${b.pixels} px)`);
-        const shown = d.boxes.filter((b) => !b.isFrom);
-        r.diff = { changedPercent: d.changedPercent, changedPixels: d.changedPixels, ssim: d.ssim, shift: d.shift, regions: shown.map(({ x, y, w, h, pixels, kind, moved, from }) => ({ x, y, w, h, pixels, kind, moved, from })), sizeMismatch: d.sizeMismatch, file: dfile };
+        const shown = d.boxes.filter((b) => !b.isFrom), rnote = renderNote(refBuf, s.web);
+        r.diff = { changedPercent: d.changedPercent, changedPixels: d.changedPixels, ssim: d.ssim, shift: d.shift, regions: shown.map(({ x, y, w, h, pixels, kind, moved, from }) => ({ x, y, w, h, pixels, kind, moved, from })), sizeMismatch: d.sizeMismatch, file: dfile, ...(rnote ? { renderNote: rnote } : {}) };
         if (!opt.json) {
           const head = d.changedPixels ? `${(+d.changedPercent).toFixed(3)}% changed (${d.changedPixels} px) in ${shown.length} region${shown.length === 1 ? "" : "s"}` : d.shift ? "nothing changed but the camera" : "identical";
           say(`  diff vs ${opt.diff}: ${head} · SSIM ${d.ssim}${d.shift ? ` · the camera moved (picture shifted ${d.shift.dx},${d.shift.dy}; compared after undoing it, ${d.shift.rawPercent}% differed before)` : ""}${ignore.length ? ` · ignoring ${ignore.length} region${ignore.length === 1 ? "" : "s"}` : ""}`);
           shown.slice(0, 8).forEach((b, i) => say(`    ${i + 1} ${desc(b)}`));
           if (shown.length > 8) say(`    … ${shown.length - 8} more (--json)`);
           say(`    → ${dfile}  (A │ B │ changes: green appeared, red gone, blue moved, yellow changed)`);
+          if (rnote) say(`  ▸ ${rnote}`);
           if (d.sizeMismatch) say(`  ⚠ sizes differ: reference ${d.sizeMismatch.a.join("×")} vs shot ${d.sizeMismatch.b.join("×")} (--resize scaled the shot to compare)`);
         }
       }

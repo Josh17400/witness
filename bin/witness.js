@@ -7,7 +7,8 @@ import { CONFIG_NAME } from "../src/core/launch.js";
 import { begin, stepTo, frameAt, findTestFiles, loadTests, runTest, loadReplay } from "../src/core/runner.js";
 import { evaluate, fmt, keyPaths, ExprError, usesPrev, hint } from "../src/core/expr.js";
 import { WitnessError } from "../src/core/session.js";
-import { Matcher, diffValues, digestOf, pathFilter, audioTolOf, shotTolOf } from "../src/core/compare.js";
+import { Matcher, diffValues, digestOf, pathFilter, audioTolOf, shotTolOf, shotTolSet, gpuShotTolNote } from "../src/core/compare.js";
+import { gpuSummary, onGpu } from "../src/core/browser.js";
 import { prune, pruneRegistry, fmtBytes, markGenerated } from "../src/core/clean.js";
 import { CLI, die, say, forgetDie, DieError, nums, fmtT, timeList, framesOf, envelope, printJSON, loadConfig, withGame, runOpts, media, writeShot, printLogs, summarizeState, splitTop, resolveReplay, configFlag } from "../src/cli/common.js";
 import { parseNamedRects, stateLayers } from "../src/cli/scale-regions.js";
@@ -65,7 +66,10 @@ Common options:
   393×852, gets that device's preset; launch.device {"safeInsets": [..]} too) · --safe-overlay (launch.safeOverlay): the
   island, home indicator and rounded corners drawn over screenshots after capture · --engine chromium|webkit|firefox · --no-auto-unlock (iPhone audio policy: suspended and frozen until a
   tap) · --reduced-motion / --color-scheme dark|light (launch.media {reducedMotion, colorScheme, forcedColors, contrast}:
-  matchMedia and @media both see them) · launch.callTimeout / WITNESS_CALL_TIMEOUT (seconds a call/eval may take, 60) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
+  matchMedia and @media both see them) · --gpu [high-performance|default] (launch.gpu true|"high-performance"|"default",
+  WITNESS_GPU=1|high-performance|default): Chromium renders on the real GPU instead of SwiftShader (3-5× faster busy
+  canvases; the renderer is reported; screenshots then differ by machine/driver, so pixel matches default to ±8; while
+  a game is open it falls back to software, WITNESS_GPU_WHILE_GAMING=1 overrides) · launch.callTimeout / WITNESS_CALL_TIMEOUT (seconds a call/eval may take, 60) · --capture canvas|element|screen (element/screen: device pixels; crop/follow/annotate refuse them) · input
   dom:tap:x,y@t / dom:click / dom:key:space (real browser input) · expressions web.audio.state, web.dpr
   --json: one shape for every command: { ok, command, verdict, summary, data, files }   --timeout 60
   --expect "apexPx between 60 and 70"   a threshold on the result (summary fields; "36f" = 36): exit 1 if it fails
@@ -420,7 +424,8 @@ const commands = {
         report.push(`  ${describeWeb(s.web)}`);
         const clock = clockLine(s);
         if (clock) report.push(`  ${clock}`);
-        webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy, dom: !!s.web.domPage, media: s.web.media || null, epoch: s.epoch ?? null, reset: s.web.resetMode || "handler" };
+        webSummary = { engine: s.web.engine, device: s.web.device ? s.web.device.name : null, policy: s.web.policy, dom: !!s.web.domPage, media: s.web.media || null, epoch: s.epoch ?? null, reset: s.web.resetMode || "handler", gpu: gpuSummary(s.web) };
+        if (s.web.gpu && s.web.gpu.line) report.push(`${s.web.gpu.line.startsWith("⚠") ? "⚠" : onGpu(s.web.gpu) ? "✔" : " "} ${s.web.gpu.line.replace(/^[▸⚠] /, "")}`);
         if (s.web.policy === "gesture") { const p = await unlockProbe(s); p.forEach(mark); webSummary.unlock = p[0] ? p[0][1] : null; const none = p.some(([, t]) => /no AudioContext was created/.test(t)); webSummary.audioLocked = none ? null : p.some(([, t]) => /stayed SUSPENDED/.test(t)); if (none) webSummary.noAudioContext = true; }
       }
       // step + snapshot
@@ -439,7 +444,9 @@ const commands = {
         const scriptA = "right@0.1-1.2, space@0.3, up@1.3-1.8, mouse:100,100@0.5, click:120,90@0.8, left@1.9-2.4, down@2.5-2.9, space@2.6";
         const scriptB = "left@0.1-0.9, down@0.4-1.4, click:60,40@0.6, right@1.5-2.6, space@1.1, up@2.7-3";
         let shotTol, audioTol;
-        try { shotTol = shotTolOf(opt, cfg); audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
+        const gpuNow = onGpu(s.web && s.web.gpu);
+        try { shotTol = shotTolOf(opt, cfg, { gpu: gpuNow }); audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
+        if (gpuNow && !shotTolSet(opt, cfg) && caps.includes("screenshot")) report.push(`  ${gpuShotTolNote(shotTol)}`);
         const matcher = new Matcher({ shotTol, audioTol });
         const exactAudio = caps.includes("audio") && h.audio_exact !== false;
         if (caps.includes("audio") && !exactAudio) report.push("  (hello says audio_exact: false — audio follows real time here, so it isn't compared)");
@@ -550,6 +557,7 @@ const commands = {
         const wg = await webglReport(s.web, d.info);
         wg.lines.forEach(mark);
         if (wg.summary) webSummary.webgl = wg.summary;
+        if (wg.summary && webSummary.gpu && !webSummary.gpu.renderer) Object.assign(webSummary.gpu, { renderer: wg.summary.renderer, software: wg.summary.software });
         if (d.display) webSummary.display = { scale: d.display.scale, problem: d.display.problem, pixels: d.display.pixels };
         if (s.web.policy === "auto") (await audioReport(s.web)).forEach(mark);
         const au = await s.web.audio();
@@ -625,6 +633,7 @@ const commands = {
     try { shotTol = shotTolOf(opt, cfg); audioTol = audioTolOf(opt, cfg); } catch (e) { die(e.message); }
     const matcher = new Matcher({ shotTol, audioTol });
     const matchMedia = { shot: !opt["no-shots"], audio: !opt["no-audio"] };
+    let gpuInfo = null;
     const schedule = [];
     for (let p = 1; p <= repeat; p++) for (const t of tests) schedule.push(repeat > 1 ? { ...t, name: `${t.name}  [pass ${p}/${repeat}]`, _lastPass: p === repeat } : t);
     await withGame(opt, async (s, c, r, g) => {
@@ -633,6 +642,12 @@ const commands = {
       const restart = !s.has("reset") && schedule.length > 1;
       if (restart && (opt.attach || (c.launch && c.launch.attach))) die(`the adapter has no 'reset' and the game was attached (--attach), so Witness can't restart it between tests: run one test at a time (--name, no --repeat), or add 'reset' to the adapter`);
       if (restart) say(`▸ the adapter has no 'reset': each test runs in a fresh game process (slower)`);
+      // GPU rendering (launch.gpu): pictures carry driver noise, so "match" steps and --repeat get a wider default tolerance
+      if (s.web && s.web.gpu) gpuInfo = gpuSummary(s.web);
+      if (s.web && onGpu(s.web.gpu) && !shotTolSet(opt, cfg) && matchMedia.shot) {
+        matcher.shotTol = shotTolOf(opt, cfg, { gpu: true });
+        say(`▸ ${gpuShotTolNote(matcher.shotTol)} (for "match" steps and --repeat)`);
+      }
       for (const [i, t] of schedule.entries()) {
         if (restart && i > 0) {
           try { s = await g.restart(); }
@@ -652,7 +667,7 @@ const commands = {
       }
     });
     const failed = results.filter((r) => !r.ok).length;
-    if (opt.json) printJSON(envelope("test", { ok: !failed, verdict: `${results.length - failed} passed, ${failed} failed`, summary: { passed: results.length - failed, failed, expects: results.reduce((a, x) => a + (x.expects ? x.expects.passed + x.expects.failed : 0), 0) }, data: { results } }));
+    if (opt.json) printJSON(envelope("test", { ok: !failed, verdict: `${results.length - failed} passed, ${failed} failed`, summary: { passed: results.length - failed, failed, expects: results.reduce((a, x) => a + (x.expects ? x.expects.passed + x.expects.failed : 0), 0), ...(gpuInfo ? { gpu: gpuInfo } : {}) }, data: { results } }));
     else {
       if (repeat > 1) {
         const diverged = results.some((x) => (x.failures || []).some((f) => f.kind === "match" && f.message.startsWith("repeat:")));
@@ -686,6 +701,8 @@ const commands = {
         const txt = (l) => `${l.engine} · ${l.device || "desktop"}`;
         if (now.engine !== r.launch.engine || now.device !== r.launch.device) console.log(`⚠ recorded on ${txt(r.launch)}, replaying on ${txt(now)}: the viewport differs (touch coordinates, layout); add${r.launch.device ? ` --device ${r.launch.device}` : " --device none"} --engine ${r.launch.engine}`);
         // launch.media (reduced motion, colour scheme …): a game that honours it plays differently without it
+        // launch.gpu: rendered on the GPU vs software (or another GPU) — pixels only, the state check is the same
+        { const { gpuChange } = await import("../src/play/build.js"); const gc = gpuChange(r.launch.gpu, s.web.gpu); if (gc) console.log(gc); }
         if (JSON.stringify(r.launch.media || null) !== JSON.stringify(s.web.media || null)) console.log(`⚠ recorded with launch.media ${JSON.stringify(r.launch.media || {})}, replaying with ${JSON.stringify(s.web.media || {})}: a game that honours prefers-reduced-motion / color-scheme can play differently; set the same launch.media`);
       }
       // a playtest records a fingerprint of the build it played (src/play/build.js): say when this one differs

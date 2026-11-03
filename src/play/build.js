@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { SOFTWARE_RENDERER } from "../core/browser.js";
 
 export const RUN_CONFIG = "witness.run.json";
 const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
@@ -120,4 +121,17 @@ export async function buildWarning(replayFile, cfg, root) {
   if (!now) return null;
   const d = buildDiff(rec, now);
   return d ? `⚠ the build changed since this playtest (${d}): the replay may not match what the tester saw` : null;
+}
+
+/**
+ * `witness replay`: a note when the playtest rendered differently (launch.gpu: GPU vs software, or another GPU) from
+ * this replay, else null. Replays compare state, not pixels, so nothing else changes. rec: the replay header's
+ * launch.gpu ({used, renderer}; absent = software); now: session.web.gpu.
+ */
+export function gpuChange(rec, now) {
+  // software after all (SwiftShader under --gpu) counts as software
+  const on = (x) => (x && x.used && x.software !== true && !SOFTWARE_RENDERER.test(x.renderer || "") ? x.renderer || "a GPU" : "software");
+  const a = on(rec), b = on(now);
+  if (a === b) return null;
+  return `▸ the playtest rendered on ${a === "software" ? "software (SwiftShader)" : `the GPU (${a})`}, this replay on ${b === "software" ? "software (SwiftShader)" : `the GPU (${b})`}: state is compared, not pixels, so the replay still checks; screenshots (--shot) can look slightly different`;
 }

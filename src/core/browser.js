@@ -12,6 +12,7 @@ import { WitnessError } from "./session.js";
 import { track, untrack } from "./procs.js";
 import { resolveDevice, contextOptions, safeInsetsFor } from "./devices.js";
 import { webInit, safeInsetsInit } from "./web-init.js";
+import { openGame as openUserGame } from "./budget.js";
 
 export const ENGINES = ["chromium", "webkit", "firefox"];
 export const CAPTURES = ["canvas", "element", "screen"];
@@ -77,7 +78,74 @@ export function mediaOptions(media) {
   return Object.keys(out).length ? out : null;
 }
 
-/** launch.{engine, device, audioUnlock, capture, media} checked and resolved: {engine, device, policy, capture, media}. */
+// launch.gpu: real-GPU rendering for Chromium (opt-in). false (default): SwiftShader, software, the same pixels on every
+// machine; true / "high-performance": the discrete GPU (Windows: --force_high_performance_gpu); "default": the GPU the
+// OS picks. Screenshots then depend on the machine and its driver, so pixel comparisons get a default tolerance
+// (GPU_SHOT_TOL, src/core/compare.js). While the owner has a game open, GPU mode falls back to software (gpuPlan).
+export const GPU_MODES = ["high-performance", "default"];
+export const GPU_VALUES = 'false (software rendering, the default), true or "high-performance" (the discrete GPU), "default" (the GPU the OS picks)';
+/** A software WebGL renderer string (SwiftShader, llvmpipe, Microsoft Basic Render …): not the machine's GPU. */
+export const SOFTWARE_RENDERER = /swiftshader|llvmpipe|softpipe|software|microsoft basic render/i;
+/** launch.gpu / --gpu / WITNESS_GPU → false | "high-performance" | "default"; a bad value throws, naming the valid ones. */
+export function gpuOption(v, where = "launch.gpu") {
+  if (v === undefined || v === null || v === false || v === 0) return false;
+  if (v === true || v === 1) return "high-performance";
+  const s = String(v).trim().toLowerCase();
+  if (["", "0", "false", "off", "no", "software", "swiftshader"].includes(s)) return false;
+  if (["1", "true", "on", "yes", "high-performance", "high", "discrete"].includes(s)) return "high-performance";
+  if (s === "default") return "default";
+  throw new WitnessError(`${where} ${JSON.stringify(v)}: use ${GPU_VALUES}`);
+}
+/**
+ * Chromium's command-line args for a launch: SwiftShader (gpu false, byte-identical to before launch.gpu) or the
+ * platform's real-GPU ANGLE backend. GPU mode adds --enable-unsafe-swiftshader: recent Chromium no longer falls back
+ * to SwiftShader for WebGL on its own, so without it a machine whose GPU process can't start (VM, RDP, no GPU, broken
+ * driver) would have no WebGL at all; with it, it gets SwiftShader and gpuLine says so. Pure.
+ */
+export function chromiumArgs(gpu, platform = process.platform) {
+  const autoplay = "--autoplay-policy=no-user-gesture-required";
+  if (!gpu) return ["--use-gl=angle", "--use-angle=swiftshader", autoplay];
+  const fallback = "--enable-unsafe-swiftshader";
+  if (platform === "win32") return ["--use-gl=angle", "--use-angle=d3d11", "--ignore-gpu-blocklist", ...(gpu === "high-performance" ? ["--force_high_performance_gpu"] : []), fallback, autoplay];
+  if (platform === "darwin") return ["--use-angle=metal", "--ignore-gpu-blocklist", fallback, autoplay];
+  return ["--use-gl=angle", "--use-angle=default", "--ignore-gpu-blocklist", "--enable-gpu", fallback, autoplay];
+}
+/** Really rendering on a GPU: the GPU args were passed AND the renderer isn't software (SwiftShader/llvmpipe after all). */
+export const onGpu = (g) => !!(g && g.used && g.software !== true);
+export const GAMING_GPU_NOTE = "a game is open: using software rendering so the playtest doesn't take the GPU from it (WITNESS_GPU_WHILE_GAMING=1 to override)";
+/**
+ * What this launch renders with, decided per launch: {asked, used, mode, fallback, game, note}. gpu: gpuOption's value;
+ * game: the open game's exe name (src/core/budget.js openGame) or null; override: WITNESS_GPU_WHILE_GAMING=1. Pure.
+ */
+export function gpuPlan(gpu, engine = "chromium", { game = null, override = false } = {}) {
+  const plan = { asked: gpu || false, used: false, mode: gpu || "software", fallback: null, game: null, note: null };
+  if (!gpu) { plan.mode = "software"; return plan; }
+  if (engine !== "chromium") { plan.mode = "engine-default"; plan.fallback = "engine"; plan.note = `launch.gpu is for Chromium: ${engine} renders as Playwright sets it up (gpu ignored)`; return plan; }
+  if (game && !override) { plan.mode = "software"; plan.fallback = "gaming"; plan.game = game; plan.note = GAMING_GPU_NOTE.replace("a game is open", `a game is open (${game})`); return plan; }
+  plan.used = true;
+  return plan;
+}
+/** gpuPlan for a launch now: the gaming probe (cached 30 s; WITNESS_GAMING_FORCE in tests) and WITNESS_GPU_WHILE_GAMING. */
+export function gpuPlanNow(gpu, engine = "chromium") {
+  return gpuPlan(gpu, engine, { game: gpu && engine === "chromium" ? openUserGame({ ignoreCap: true }) : null, override: process.env.WITNESS_GPU_WHILE_GAMING === "1" });
+}
+/** The one line a GPU launch prints once the renderer is known (null when GPU rendering wasn't asked for). */
+export function gpuLine(g) {
+  if (!g || !g.asked) return null;
+  if (g.fallback) return `▸ GPU rendering not used: ${g.note}`;
+  if (!g.renderer) return `⚠ asked for the GPU but WebGL is unavailable in this browser: WebGL games won't draw; drop --gpu (launch.gpu) if the game uses WebGL`;
+  if (g.software) return `⚠ asked for the GPU but got ${/swiftshader/i.test(g.renderer) ? "SwiftShader" : "a software renderer"}: ${g.renderer} (no usable GPU, or the driver is blocklisted / missing; the run goes on in software)`;
+  return `▸ GPU rendering: ${g.renderer} (screenshots may differ by machine/driver)`;
+}
+
+/** web.gpu for reports (report.json, doctor --json, replay headers): {asked, used, mode, renderer, software, fallback, game}. */
+export function gpuSummary(web) {
+  const g = web && web.gpu;
+  if (!g) return null;
+  return { asked: g.asked || false, used: !!g.used, mode: g.mode, renderer: g.renderer || null, software: g.software ?? null, fallback: g.fallback || null, ...(g.game ? { game: g.game } : {}), ...(g.note ? { note: g.note } : {}) };
+}
+
+/** launch.{engine, device, audioUnlock, capture, media, gpu} checked and resolved: {engine, device, policy, capture, media, gpu}. */
 export function browserOptions(launch) {
   const engine = String(launch.engine || "chromium").toLowerCase();
   if (!ENGINES.includes(engine)) throw new WitnessError(`unknown browser engine '${launch.engine}': use chromium (default), webkit (iPhone/iPad Safari's engine) or firefox`);
@@ -89,7 +157,7 @@ export function browserOptions(launch) {
   // corners drawn over screenshots (safeOverlay); both need a phone or tablet profile
   const safe = launch.safeInsets || launch.safeOverlay ? safeInsetsFor(device, launch.safeInsets || true) : null;
   if ((launch.safeInsets || launch.safeOverlay) && !safe) throw new WitnessError(`--safe-insets / --safe-overlay need a phone or tablet profile (--device iphone-15[-landscape], iphone-15-safari, iphone-15-pro-max, iphone-se, ipad), a custom device of a known size, or explicit insets (--safe-insets 59,0,34,0: top,right,bottom,left CSS px; or a preset name such as iphone-portrait); ${device ? `${device.name} has no safe-area preset` : "this launch has no device"}`);
-  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture, captureSet: launch.capture != null, safeInsets: launch.safeInsets ? safe : null, safeOverlay: launch.safeOverlay ? safe : null, media: mediaOptions(launch.media) };
+  return { engine, device, policy: launch.audioUnlock === false ? "gesture" : "auto", capture, captureSet: launch.capture != null, safeInsets: launch.safeInsets ? safe : null, safeOverlay: launch.safeOverlay ? safe : null, media: mediaOptions(launch.media), gpu: gpuOption(launch.gpu) };
 }
 
 /** A clear message when the engine's browser build isn't installed for this Playwright version. */
@@ -136,7 +204,9 @@ export async function openBrowserGame(launch, root, addr, keep, extra = {}) {
     const pwInfo = await loadPlaywright(root);
     const type = pwInfo.pw[opts.engine];
     if (!type) throw new WitnessError(`this Playwright build has no ${opts.engine}`);
-    const args = opts.engine === "chromium" ? ["--use-gl=angle", "--use-angle=swiftshader", "--autoplay-policy=no-user-gesture-required"] : [];
+    // launch.gpu: decided per launch (a game the owner opened since the last launch keeps the GPU to itself)
+    const plan = gpuPlanNow(opts.gpu, opts.engine);
+    const args = opts.engine === "chromium" ? chromiumArgs(plan.used ? opts.gpu : false) : [];
     try { browser = await type.launch({ headless: launch.headless !== false, args }); }
     catch (e) { throw launchError(e, opts.engine, pwInfo, root); }
     const context = await browser.newContext({ ...contextOptions(opts.device, launch.size || [1280, 720]), ...(opts.media || {}) });
@@ -165,6 +235,7 @@ export async function openBrowserGame(launch, root, addr, keep, extra = {}) {
     for (const [k, v] of Object.entries(extra.query || {})) if (v != null) u.searchParams.set(k, String(v));
     await page.goto(u.toString());
     const web = makeWeb(page, browser, opts, pwInfo);
+    web.gpu = { ...plan, renderer: null, software: null };
     web.url = u.toString();
     web.inject = !!launch.inject;
     /** Load the page again (launch.reset "reload"): same URL plus query (witness_seed …); storage cleared unless keepStorage. */
@@ -214,7 +285,7 @@ function makeWeb(page, browser, opts, pwInfo) {
     async state() {
       const i = await evalWeb(() => (globalThis.__witnessWeb ? globalThis.__witnessWeb.info() : null));
       if (!i) return null;
-      return { engine: opts.engine, device: opts.device ? opts.device.name : null, dpr: i.dpr, viewport: i.viewport, standalone: i.standalone, touch: i.maxTouchPoints > 0, audio: i.audio, media: opts.media || null };
+      return { engine: opts.engine, device: opts.device ? opts.device.name : null, dpr: i.dpr, viewport: i.viewport, standalone: i.standalone, touch: i.maxTouchPoints > 0, audio: i.audio, media: opts.media || null, gpu: this.gpu ? { asked: this.gpu.asked || false, used: !!this.gpu.used, renderer: this.gpu.renderer || null, software: this.gpu.software ?? null } : null };
     },
     /** PNG of the main canvas as displayed (element) or of the viewport (screen), at device pixels. */
     async capture(kind = "element") {

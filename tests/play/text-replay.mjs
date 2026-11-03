@@ -194,6 +194,14 @@ const hintGame = ({ fades = false, viaUi = false } = {}) => ({
   ok("report.md: replay commands load the playtest's own config; no-server localhost warning; the fingerprint line", /witness replay --config witness\/playtests\/b1\/witness\.run\.json witness\/playtests\/b1\/replay\.jsonl/.test(md) && /served by something Witness didn't start \(no launch\.server\)/.test(md) && /Build played: http:\/\/127\.0\.0\.1:8123\/index\.html and 5 files it loads, fingerprint `abcdef0123456789`/.test(md), md.slice(md.indexOf("## Reproduce")));
   md = reportMarkdown(base, { rel, config: rel(base.runConfig), server: true });
   ok("report.md with launch.server: says the replay starts the server again, no warning", /so the replay starts the server again/.test(md) && !/didn't start/.test(md));
+  // launch.gpu (0.7.14): the renderer the session used, or why it fell back to software; nothing when not asked
+  const gmd = (gpu) => reportMarkdown({ ...base, gpu }, { rel, config: rel(base.runConfig), server: true });
+  ok("report.md: GPU rendering named with its renderer; a gaming fallback says why; silent when not asked",
+    /Rendered on the GPU \(NVIDIA RTX 4060\) \(launch\.gpu\): screenshots may differ by machine\/driver; a replay compares state, not pixels\./.test(gmd({ asked: "high-performance", used: true, renderer: "NVIDIA RTX 4060", software: false }))
+    && /GPU rendering was asked for but not used \(a game was open/.test(gmd({ asked: "high-performance", used: false, fallback: "gaming" }))
+    && /not used \(a game was open, so software rendering kept the GPU free for it\): a game is open \(Hades\.exe\): using software rendering so the playtest doesn't take the GPU from it \(WITNESS_GPU_WHILE_GAMING=1 to override\)\./.test(gmd({ asked: "high-performance", used: false, fallback: "gaming", note: "a game is open (Hades.exe): using software rendering so the playtest doesn't take the GPU from it (WITNESS_GPU_WHILE_GAMING=1 to override)" }))
+    && /software after all \(asked for the GPU, got SwiftShader\)/.test(gmd({ asked: "default", used: true, renderer: "SwiftShader", software: true }))
+    && !/GPU/.test(gmd({ asked: false, used: false })) && !/GPU/.test(gmd(null)));
 }
 
 // ---- end to end: a session's own run config replays after the original config is gone; a changed build warns

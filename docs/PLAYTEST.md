@@ -315,6 +315,13 @@ witness play batch --goals goals.json --parallel 1             # [{"goal": "…"
   `{goal, persona, scene, params, seed, minutes, until, gameHours, wallMinutes, model, live, name}`. Command-line
   `--persona`, `--scene`, `--params`, `--seed`, `--minutes`, `--until`, `--game-hours`, `--wall-minutes` and `--live`
   are the defaults for every goal.
+* **Speed (browser games):** a Chromium playtest renders on the machine's GPU by default when `launch.gpu` is unset
+  (`"gpu": false` or `WITNESS_GPU=0` keeps SwiftShader; `--gpu` / `launch.gpu: true` does the same for tests and shots): The Fort, which crawled at 0.35-0.5× real time, ran about 3× faster (WebGL pages gain
+  most; a plain 2D canvas may gain nothing, so measure). `play start` prints the renderer line (or why GPU rendering
+  wasn't used) as the session starts. The renderer is in the report (`gpu` in report.json, a line in report.md) and the replay header; a replay compares state, not
+  pixels, so it still checks on software and says when the rendering differs. While the owner has a game open the
+  session renders in software anyway (`WITNESS_GPU_WHILE_GAMING=1` overrides; only `WITNESS_GAMING_PROBE=0` turns the
+  check off). `play start --gpu` works the same.
 * **Units:** `--minutes` is the tester's budget in GAME time (the `[t …s]` in the header; turn-based game time only
   passes during orders, so it can take several times as long in real time). `--wall-minutes` is a hard real-time stop:
   it goes into the tester's start line (the session ends itself, outcome `timeout`) and sets the tester's timeout to

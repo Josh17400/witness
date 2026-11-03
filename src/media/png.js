@@ -223,3 +223,23 @@ export function writeRow({ width, depth, color, channels, palette, trns, out }, 
 
 /** True when `buf` starts with the PNG signature. */
 export const isPNG = (buf) => !!buf && buf.length >= 8 && Buffer.from(buf.subarray(0, 8)).equals(SIGNATURE);
+
+/** The PNG with a tEXt chunk key=value added before IEND (Latin-1 text; decoders skip it). */
+export function pngWithText(buf, key, value) {
+  if (!isPNG(buf)) return buf;
+  const iend = buf.length - 12;
+  if (buf.toString("latin1", iend + 4, iend + 8) !== "IEND") return buf;
+  return Buffer.concat([buf.subarray(0, iend), pngChunk("tEXt", Buffer.from(`${key}\0${value}`, "latin1")), buf.subarray(iend)]);
+}
+/** The PNG's tEXt chunks as {key: value} ({} for a non-PNG or none). */
+export function pngText(buf) {
+  const out = {};
+  if (!isPNG(buf)) return out;
+  for (let p = 8; p + 12 <= buf.length;) {
+    const n = buf.readUInt32BE(p), type = buf.toString("latin1", p + 4, p + 8);
+    if (type === "tEXt") { const d = buf.subarray(p + 8, p + 8 + n), z = d.indexOf(0); if (z > 0) out[d.toString("latin1", 0, z)] = d.toString("latin1", z + 1); }
+    if (type === "IEND") break;
+    p += 12 + n;
+  }
+  return out;
+}

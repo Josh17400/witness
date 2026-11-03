@@ -7,6 +7,7 @@ import { begin, stepTo, queueInput } from "../core/runner.js";
 import { nameRegions, scaleLayers, groupsLine, regionLines, fmtScale, readRect, rectVerdict } from "./scale-regions.js";
 import { parseWitnessInput } from "../core/input-spec.js";
 import { epochNote } from "../core/launch.js";
+import { SOFTWARE_RENDERER } from "../core/browser.js";
 
 const fx = (v, d = 2) => +(+v).toFixed(d);
 
@@ -213,9 +214,9 @@ export async function webglReport(web, info) {
   const uses = c && c.context ? c.context : null;
   const gl = (k) => g[k] && g[k].available;
   const r = (gl("webgl2") ? g.webgl2 : gl("webgl") ? g.webgl : null);
-  const soft = r && /swiftshader|llvmpipe|software|microsoft basic render/i.test(r.renderer || "");
+  const soft = r && SOFTWARE_RENDERER.test(r.renderer || "");
   const masked = r && /^apple gpu$/i.test(r.renderer || "") && web.engine === "webkit";
-  const what = r ? `${gl("webgl2") ? "WebGL 2" : "WebGL 1 only (no WebGL 2)"} · renderer ${r.renderer}${soft ? " (software: slower, not tied to the machine's GPU)" : masked ? " (WebKit's generic name; the real backend isn't shown)" : ""} · max texture ${r.maxTexture}` : "no WebGL in this engine";
+  const what = r ? `${gl("webgl2") ? "WebGL 2" : "WebGL 1 only (no WebGL 2)"} · renderer ${r.renderer}${soft ? ` (software: slower, not tied to the machine's GPU${web.gpu && !web.gpu.asked && web.engine === "chromium" ? "; launch.gpu / --gpu renders on the real GPU, faster" : ""})` : masked ? " (WebKit's generic name; the real backend isn't shown)" : ""} · max texture ${r.maxTexture}` : "no WebGL in this engine";
   const lines = [];
   if (uses && uses.endsWith(" (failed)")) lines.push(["✖", `WebGL: the game asked for ${uses.slice(0, -9)} and got none: ${what}`]);
   else if (uses === "webgl" || uses === "webgl2") lines.push(["✔", `WebGL: the game's canvas draws with ${uses} · ${what}`]);
@@ -231,5 +232,5 @@ export function clockLine(session) {
 }
 
 export function describeWeb(web) {
-  return `browser: ${web.engine} ${web.engineVersion}${web.playwright ? ` (Playwright ${web.playwright})` : ""} · ${describeDevice(web.device)}${web.captureMode !== "canvas" ? ` · screenshots: ${web.captureMode} capture (device pixels)` : ""}${web.media ? ` · media ${Object.entries(web.media).map(([k, v]) => `${k} ${v}`).join(", ")}` : ""}`;
+  return `browser: ${web.engine} ${web.engineVersion}${web.playwright ? ` (Playwright ${web.playwright})` : ""} · ${describeDevice(web.device)}${web.captureMode !== "canvas" ? ` · screenshots: ${web.captureMode} capture (device pixels)` : ""}${web.media ? ` · media ${Object.entries(web.media).map(([k, v]) => `${k} ${v}`).join(", ")}` : ""}${web.gpu && web.gpu.used ? " · GPU rendering (launch.gpu)" : ""}`;
 }

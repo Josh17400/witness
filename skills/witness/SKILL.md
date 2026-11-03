@@ -121,7 +121,9 @@ witness shot --clip --from 1 --to 3            # an animated PNG for the USER to
   (SDL: open the device, fed silence; cpp GUIDE §13). Keep a web config beside the desktop one: `--config
   witness.web.json`.
   Accessibility: `--reduced-motion` / `--color-scheme dark` (witness.json `launch.media`, also `forcedColors`,
-  `contrast`) are emulated by the browser, so `matchMedia` and `@media` both see them. A slow `call` / `eval`
+  `contrast`) are emulated by the browser, so `matchMedia` and `@media` both see them. Speed: playtests render on the real GPU by default (unset `launch.gpu`); `--gpu` (witness.json
+  `launch.gpu: true`, `WITNESS_GPU=1`) does it for tests and shots too, instead of SwiftShader (The Fort ~3× faster; WebGL gains most, a plain 2D canvas maybe nothing; the
+  renderer is printed; screenshot matches default to ±8; software again while the owner has a game open). A slow `call` / `eval`
   (cold WebKit under load): `WITNESS_CALL_TIMEOUT=120` or `launch.callTimeout`; the error names the call and an
   unresolved game promise. Steps go at most 120 frames per request and their wait grows with the measured speed; a
   game under half real time (software GL in a big battle) prints one `▸ note: the game runs at 0.12× real time here`. A config may live outside the game (e.g. the temp folder): Playwright is then found from
@@ -250,7 +252,8 @@ user. Tests prove what you thought of; a playtester finds what you didn't. Full 
    **Games with a day clock:** `--game-hours 4` (brief, batch, start) plays 4 in-game hours, given `play.clock` in
    witness.json (an expression giving in-game hours that keeps increasing: include the day, `"state.day*24 + state.hour"`); `--until "<expr>"` plays
    until any state condition. Orders stop there and the tester ENDs (outcome `until reached`).
-   **Slow headless web games** (a busy 2D canvas on SwiftShader: game time crawls slower than real time): gate the
+   **Slow headless web games** (a busy 2D canvas on SwiftShader: game time crawls slower than real time): check the start line says
+   `▸ GPU rendering` (playtests use the GPU by default; `launch.gpu`), and/or gate the
    game's draw call with `if (witness.drawing !== false) draw()` (update untouched) and set `"play": {"lazyDraw": true}`:
    steps then draw only their last frame. Run `witness doctor` after: it warns if drawing changes game state.
    **Testers can't hear:** name sounds (`witness.sound("deny")`, `state.sounds`, or a `sound: deny` log line) so the

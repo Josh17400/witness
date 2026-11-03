@@ -462,6 +462,12 @@ process.env.WITNESS_GAMING_FORCE = "0";
   process.env.WITNESS_MAX_PROCS_GAMING = "0";
   const off2 = openGame({ dir: gdir, probe }); delete process.env.WITNESS_MAX_PROCS_GAMING;
   ok("gaming: WITNESS_GAMING_PROBE=0 / WITNESS_MAX_PROCS_GAMING=0 → off (no probe)", off1 === null && off2 === null && probes === 3 && !fs.existsSync(cache));
+  // launch.gpu's owner protection (ignoreCap) still probes with the gaming process cap off; only WITNESS_GAMING_PROBE=0 stops it
+  process.env.WITNESS_MAX_PROCS_GAMING = "0";
+  const ic1 = openGame({ dir: gdir, probe, ignoreCap: true }); process.env.WITNESS_GAMING_PROBE = "0";
+  const ic2 = openGame({ dir: gdir, probe: () => ({ game: "Other.exe", ms: 1 }), ignoreCap: true, maxAgeMs: 0 }); delete process.env.WITNESS_GAMING_PROBE; delete process.env.WITNESS_MAX_PROCS_GAMING;
+  ok("gaming: ignoreCap (launch.gpu) probes even with WITNESS_MAX_PROCS_GAMING=0; WITNESS_GAMING_PROBE=0 still turns it off", ic1 === "Probed.exe" && probes === 4 && ic2 === null, JSON.stringify([ic1, ic2, probes]));
+  try { fs.unlinkSync(cache); } catch { /* none */ }
   // the real probe on this machine: it answers (a game or not) well under its 15 s cap
   const real = probeGame();
   console.log(`  (gaming probe on this machine: ${real.ms} ms, ${real.game ? `game open: ${real.game}` : "no game"}${real.error ? `, error: ${real.error}` : ""})`);
@@ -499,7 +505,7 @@ process.env.WITNESS_GAMING_FORCE = "0";
   fs.writeFileSync(path.join(bdir, "browser-0.json"), JSON.stringify({ pid: bh.pid, key: startKeys([bh.pid]).get(bh.pid), token: "b0", at: new Date().toISOString(), label: "web" }));
   g3.release(); lines.length = 0; msg = "";
   try { await acquireSlot({ dir: bdir, browser: true, max: 5, maxBrowsers: 3, gamingMax: 1, game: "Hades.exe", waitMs: 600, pollMs: 200, log: (m) => lines.push(m) }); } catch (e) { msg = e.message; }
-  ok("gaming: browsers capped too (min(WITNESS_MAX_BROWSERS, gaming))", /a game is open \(Hades\.exe\), so the limit is 1 headless browser \(WITNESS_MAX_PROCS_GAMING\)/.test(lines[0] || "") && /no free slot/.test(msg), `${lines[0]} | ${msg}`);
+  ok("gaming: browsers capped too (min(WITNESS_MAX_BROWSERS, gaming))", /a game is open \(Hades\.exe\), so the limit is 1 headless browser \(WITNESS_MAX_PROCS_GAMING\)/.test(`${lines[0] || ""} ${msg}`) && /no free slot/.test(msg), `${lines[0]} | ${msg}`);   // under load the wait can end before the first wait line
   bh.kill();
   restore();
 }
@@ -680,6 +686,85 @@ const tinyCfg = (dir, extraLaunch = {}) => { fs.mkdirSync(dir, { recursive: true
   const fr = (mode, canvases, size) => ({ img: { width: 1179, height: 2556 }, web: { mode, device: resolveDevice("iphone-15"), info: { viewport: [393, 852], dpr: 3, canvases }, size } });
   const gDom = uiGeometry(fr("screen", [], [393, 852]), {}), gCv = uiGeometry(fr("screen", [{ w: 320, h: 180, rect: [0, 100, 393, 221.0625] }], [320, 180]), {});
   ok("uiGeometry: a DOM game on the screen: CSS px ×3; a canvas game: game px through the canvas box", gDom.pxPerPt === 3 && gDom.map.kx === 3 && gDom.units === "css" && gCv.units === "game" && Math.abs(gCv.map.kx - (3 * 393) / 320) < 1e-9 && gCv.map.oy === 300, JSON.stringify([gDom, gCv]));
+}
+
+// ---- 0.7.14: launch.gpu (real-GPU rendering, opt-in): args per platform, values, gaming fallback, tolerance, tags
+{
+  const B = await import("../../src/core/browser.js");
+  const { shotTolOf, shotTolSet, GPU_SHOT_TOL } = await import("../../src/core/compare.js");
+  const { encodePNG, decodePNG, pngWithText, pngText } = await import("../../src/media/png.js");
+  const { renderNote, renderTag } = await import("../../src/cli/see.js");
+  const { gpuChange } = await import("../../src/play/build.js");
+  const auto = "--autoplay-policy=no-user-gesture-required";
+  ok("chromiumArgs: software is SwiftShader (unchanged), on every platform", ["win32", "darwin", "linux"].every((p) => JSON.stringify(B.chromiumArgs(false, p)) === JSON.stringify(["--use-gl=angle", "--use-angle=swiftshader", auto])));
+  ok("chromiumArgs: win32 d3d11 + blocklist off; high-performance adds --force_high_performance_gpu, default doesn't",
+    JSON.stringify(B.chromiumArgs("high-performance", "win32")) === JSON.stringify(["--use-gl=angle", "--use-angle=d3d11", "--ignore-gpu-blocklist", "--force_high_performance_gpu", "--enable-unsafe-swiftshader", auto])
+    && JSON.stringify(B.chromiumArgs("default", "win32")) === JSON.stringify(["--use-gl=angle", "--use-angle=d3d11", "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader", auto]));
+  ok("chromiumArgs: darwin metal, linux angle default + --enable-gpu, autoplay kept",
+    JSON.stringify(B.chromiumArgs("high-performance", "darwin")) === JSON.stringify(["--use-angle=metal", "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader", auto])
+    && JSON.stringify(B.chromiumArgs("default", "linux")) === JSON.stringify(["--use-gl=angle", "--use-angle=default", "--ignore-gpu-blocklist", "--enable-gpu", "--enable-unsafe-swiftshader", auto]));
+  ok("chromiumArgs: GPU mode keeps a SwiftShader fallback (Chromium no longer adds one itself); software args never carry it", ["win32", "darwin", "linux"].every((p) => B.chromiumArgs("default", p).includes("--enable-unsafe-swiftshader") && !B.chromiumArgs(false, p).includes("--enable-unsafe-swiftshader")));
+  const gbad = (v, where) => { try { B.gpuOption(v, where); return null; } catch (e) { return e.message; } };
+  {
+    // play start (opt.playGpu): an unset launch.gpu on Chromium means the GPU; explicit false, WITNESS_GPU=0, webkit and others stay software
+    const { gpuOverride } = await import("../../src/cli/common.js");
+    const web = (launch) => ({ name: "g", launch: { url: "http://localhost:1/", ...launch } });
+    const env0 = process.env.WITNESS_GPU; delete process.env.WITNESS_GPU;
+    const auto = gpuOverride(web({}), { playGpu: true }).launch;
+    const off = gpuOverride(web({ gpu: false }), { playGpu: true }).launch.gpu;
+    const wk = gpuOverride(web({ engine: "webkit" }), { playGpu: true }).launch.gpu;
+    const notPlay = gpuOverride(web({}), {}).launch.gpu;
+    process.env.WITNESS_GPU = "0"; const envOff = gpuOverride(web({}), { playGpu: true }).launch.gpu;
+    if (env0 === undefined) delete process.env.WITNESS_GPU; else process.env.WITNESS_GPU = env0;
+    ok("play start: launch.gpu unset on Chromium -> GPU (auto); false, WITNESS_GPU=0, webkit and non-play commands stay software",
+      auto.gpu === "high-performance" && auto.gpuAuto === true && off === false && wk === undefined && notPlay === undefined && envOff === false, { auto, off, wk, notPlay, envOff });
+  }
+  ok("gpuOption: false/undefined/0 off; true/1/'high-performance' discrete; 'default'; a bad value lists the valid ones",
+    B.gpuOption(undefined) === false && B.gpuOption(false) === false && B.gpuOption("0") === false && B.gpuOption(true) === "high-performance" && B.gpuOption("1") === "high-performance"
+    && B.gpuOption("High-Performance") === "high-performance" && B.gpuOption("default") === "default" && /launch\.gpu "fast": use false .*"high-performance".*"default"/.test(gbad("fast") || "") && /^WITNESS_GPU 7/.test(gbad(7, "WITNESS_GPU") || ""), gbad("fast"));
+  ok("browserOptions resolves launch.gpu (and refuses a bad one)", B.browserOptions({ url: "x" }).gpu === false && B.browserOptions({ url: "x", gpu: true }).gpu === "high-performance" && /launch\.gpu/.test((() => { try { B.browserOptions({ url: "x", gpu: "turbo" }); } catch (e) { return e.message; } })() || ""));
+  const p0 = B.gpuPlan(false), p1 = B.gpuPlan("high-performance"), pf = B.gpuPlan("default", "firefox"), pg = B.gpuPlan("high-performance", "chromium", { game: "Hades.exe" }), po = B.gpuPlan("high-performance", "chromium", { game: "Hades.exe", override: true });
+  ok("gpuPlan: off; on; firefox ignores it with a note; a game open falls back to software with the note; the override keeps the GPU",
+    !p0.used && !p0.asked && p1.used && !pf.used && pf.fallback === "engine" && /for Chromium/.test(pf.note) && !pg.used && pg.fallback === "gaming" && /a game is open \(Hades\.exe\): using software rendering so the playtest doesn't take the GPU from it \(WITNESS_GPU_WHILE_GAMING=1 to override\)/.test(pg.note) && po.used, JSON.stringify([pg, po]));
+  // the per-launch decision through the real gaming probe's test hook
+  const envSave = { f: process.env.WITNESS_GAMING_FORCE, o: process.env.WITNESS_GPU_WHILE_GAMING };
+  process.env.WITNESS_GAMING_FORCE = "1"; delete process.env.WITNESS_GPU_WHILE_GAMING;
+  const n1 = B.gpuPlanNow("high-performance");
+  process.env.WITNESS_GPU_WHILE_GAMING = "1";
+  const n2 = B.gpuPlanNow("high-performance");
+  process.env.WITNESS_GAMING_FORCE = "0"; delete process.env.WITNESS_GPU_WHILE_GAMING;
+  const n3 = B.gpuPlanNow("default");
+  const n4 = B.gpuPlanNow(false);
+  for (const [k, v] of [["WITNESS_GAMING_FORCE", envSave.f], ["WITNESS_GPU_WHILE_GAMING", envSave.o]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  ok("gpuPlanNow: WITNESS_GAMING_FORCE=1 → software (gaming), +WITNESS_GPU_WHILE_GAMING=1 → GPU, no game → GPU, not asked → software", !n1.used && n1.fallback === "gaming" && n2.used && n3.used && n3.mode === "default" && !n4.used && !n4.asked, JSON.stringify([n1, n2, n3, n4]));
+  ok("gpuLine: the renderer; software after all said plainly; nothing when not asked",
+    /^▸ GPU rendering: NVIDIA GeForce RTX 4060 .* \(screenshots may differ by machine\/driver\)$/.test(B.gpuLine({ asked: "high-performance", used: true, renderer: "NVIDIA GeForce RTX 4060 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11", software: false }))
+    && /^⚠ asked for the GPU but got SwiftShader: ANGLE \(Google, Vulkan 1\.3\.0 \(SwiftShader Device/.test(B.gpuLine({ asked: "default", used: true, renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)", software: true }))
+    && /a game is open/.test(B.gpuLine(pg)) && B.gpuLine({ asked: false }) === null
+    && /^⚠ asked for the GPU but WebGL is unavailable in this browser: WebGL games won't draw; drop --gpu/.test(B.gpuLine({ asked: "high-performance", used: true, renderer: null, software: null })) && B.SOFTWARE_RENDERER.test("llvmpipe (LLVM 15.0.7, 256 bits)") && !B.SOFTWARE_RENDERER.test("ANGLE (Intel, Intel(R) Arc(TM) Graphics Direct3D11)"));
+  ok("shotTolOf: GPU rendering defaults to ±8, software to ±2; --shot-tol / shotTol always win",
+    GPU_SHOT_TOL === 8 && shotTolOf({}, {}, { gpu: true }) === 8 && shotTolOf({}, {}) === 2 && shotTolOf({ "shot-tol": "0" }, {}, { gpu: true }) === 0 && shotTolOf({}, { shotTol: 3 }, { gpu: true }) === 3 && shotTolSet({}, { shotTol: 0 }) && !shotTolSet({ "shot-tol": true }, {}));
+  ok("onGpu: really on a GPU only when the GPU args were passed and the renderer isn't software", B.onGpu({ used: true, software: false }) && B.onGpu({ used: true, software: null }) && !B.onGpu({ used: true, software: true }) && !B.onGpu({ used: false }) && !B.onGpu(null));
+  ok("gpuSummary carries the fallback note (report.json / doctor --json)", B.gpuSummary({ gpu: pg }).note === pg.note && !("note" in B.gpuSummary({ gpu: p1 })));
+  const px = new Uint8Array(4 * 4 * 4).fill(200), raw = encodePNG(4, 4, px), tagged = pngWithText(raw, "witness-render", "gpu: Intel Arc");
+  ok("PNG tEXt: tag round-trips, the picture decodes the same", pngText(tagged)["witness-render"] === "gpu: Intel Arc" && JSON.stringify(pngText(raw)) === "{}" && Buffer.from(decodePNG(tagged).data).equals(Buffer.from(decodePNG(raw).data)));
+  const gw = { gpu: { used: true, renderer: "NVIDIA RTX" } }, sw = { gpu: { used: false } };
+  ok("baseline render tags: software ref vs GPU shot noted; same mode silent; untagged ref vs software silent, vs GPU noted",
+    renderTag(gw) === "gpu: NVIDIA RTX" && renderTag(sw) === "software" && renderTag(null) === null && renderTag({ gpu: { used: true, renderer: "SwiftShader", software: true } }) === "software"
+    && /made with software rendering \(SwiftShader\), this shot with the GPU \(NVIDIA RTX\)/.test(renderNote(pngWithText(raw, "witness-render", "software"), gw) || "")
+    && renderNote(pngWithText(raw, "witness-render", "gpu: NVIDIA RTX"), gw) === null && renderNote(raw, sw) === null && /without a rendering tag/.test(renderNote(raw, gw) || "") && renderNote(raw, null) === null);
+  ok("gpuChange: replay rendered differently from the recording is mentioned, the same is silent", /rendered on software \(SwiftShader\), this replay on the GPU \(RTX\): state is compared, not pixels/.test(gpuChange(undefined, { used: true, renderer: "RTX" }) || "") && gpuChange({ used: true, renderer: "RTX" }, { used: true, renderer: "RTX" }) === null && gpuChange(null, { used: false }) === null
+    && gpuChange(undefined, { used: true, renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))", software: true }) === null && gpuChange({ used: true, renderer: "Google SwiftShader" }, { used: false }) === null);
+  const ga = parseArgs(["--gpu", "t.witness.json"], "test"), gb = parseArgs(["--gpu", "default", "--json"], "doctor");
+  ok("args: --gpu bare (= high-performance) never eats a file; --gpu default takes it; a known flag", ga.opt.gpu === true && ga.pos[0] === "t.witness.json" && gb.opt.gpu === "default" && KNOWN_FLAGS.has("gpu"));
+  // config / flag errors die before any launch (no browser): a bad launch.gpu, a bad --gpu, --gpu on a command game
+  const gdir = path.join(tmp, "gpu-cfg");
+  fs.mkdirSync(gdir, { recursive: true });
+  fs.writeFileSync(path.join(gdir, "witness.json"), JSON.stringify({ name: "g", launch: { url: "http://127.0.0.1:9/x.html", gpu: "turbo" } }));
+  const wr = (args, env = {}) => spawnSync(process.execPath, [W, ...args], { cwd: gdir, encoding: "utf8", timeout: 60000, env: { ...process.env, WITNESS_GPU: "", ...env } });
+  const e1 = wr(["doctor"]), e2 = wr(["doctor", "--gpu", "fast"]), e3 = wr(["doctor", "--gpu", "--cmd", "node nothing.js"]), e4 = wr(["doctor"], { WITNESS_GPU: "warp" });
+  ok("a bad launch.gpu is a config error listing the valid values (before launching)", e1.status === 1 && /witness\.json launch\.gpu "turbo": use false \(software rendering, the default\), true or "high-performance"/.test(e1.stderr), e1.stderr);
+  ok("a bad --gpu / WITNESS_GPU names its source; --gpu on a command game is refused", e2.status === 1 && /--gpu "fast"/.test(e2.stderr) && e3.status === 1 && /--gpu is for browser games/.test(e3.stderr) && e4.status === 1 && /WITNESS_GPU "warp"/.test(e4.stderr), e2.stderr + e3.stderr + e4.stderr);
 }
 
 // ---- measure ui on a phone screenshot (a PNG + ui.json in CSS px, --device): pt defaults, tap targets, scroll, gradient text

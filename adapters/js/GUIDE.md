@@ -366,7 +366,7 @@ scene with a 2D UI canvas on top) at its backing resolution × `scale`, as exact
 
 Headless play runs the game's rAF callback, draw included, for every frame it steps, although an agent playtest
 (`witness play`) only looks at the last one of each step: on a software rasterizer (SwiftShader) a busy 2D canvas can
-make a playtest run slower than real time. A step can say so (`"draw": "last"`, docs/PROTOCOL.md §3): the frames
+make a playtest run slower than real time (`launch.gpu` / `--gpu` renders on the real GPU instead, several times faster: §10). A step can say so (`"draw": "last"`, docs/PROTOCOL.md §3): the frames
 before its last run with `witness.drawing === false`. Opt in by gating the draw only, never the update:
 
 ```js
@@ -495,6 +495,23 @@ the viewport meta the insets are 0, as on the phone (which letterboxes such a pa
   screenshots are right and repeat exactly); it names its renderer "Apple GPU" whatever draws underneath. Headless
   Chromium renders WebGL in software (SwiftShader through ANGLE). `witness doctor` prints both: whether WebGL 1/2
   exist, the renderer, and what the game's canvas draws with (✖ when it needs a WebGL the engine lacks).
+* **Real-GPU rendering (Chromium): `launch.gpu`.** SwiftShader is slow but gives the same pixels on every
+  machine, so it stays the default for tests, doctor, look and shots. Agent playtests (`play start`, `play batch`) use
+  the GPU by default when `launch.gpu` is unset (they compare state, not pixels); `"gpu": false` or `WITNESS_GPU=0` opts out. `"launch": {"gpu": true}` (or `"high-performance"`: the discrete GPU;
+  `"default"`: the GPU the OS picks), `--gpu [high-performance|default]` on any command that launches the game, or
+  `WITNESS_GPU=1|high-performance|default` renders on the machine's GPU instead (Windows: ANGLE D3D11, macOS: Metal,
+  Linux: ANGLE default; the GPU blocklist is ignored; SwiftShader stays enabled as Chromium's fallback). On The Fort's
+  busy canvas (250 enemies) that took a frame from ~30 ms to ~6-8 ms; WebGL pages gain most, a plain 2D canvas may gain
+  nothing (measure with `witness measure perf`). After the page loads Witness reads the WebGL renderer and prints it once (`▸ GPU rendering: NVIDIA
+  GeForce RTX 4060 … (screenshots may differ by machine/driver)`); if a software renderer came back anyway it says so
+  (`⚠ asked for the GPU but got SwiftShader: …`) and goes on as software (±2; baselines saved then are tagged software); a page with no
+  WebGL at all gets `⚠ asked for the GPU but WebGL is unavailable in this browser …`. `play start` relays the line. It's in `web.gpu` (expressions), doctor's JSON
+  (`summary.web.gpu`), `witness test --json` (`summary.gpu`), play reports and replay headers. Pixels: in GPU mode
+  "match" steps, `test --repeat` and doctor's determinism check compare screenshots within **±8** levels per channel
+  unless `--shot-tol` / `"shotTol"` says otherwise (software: ±2); `shot --save-ref` tags the PNG with how it was
+  rendered and `shot --diff` says when the baseline came from the other mode. While you have a game open (the same
+  probe as `WITNESS_MAX_PROCS_GAMING`, still on when that cap is 0) GPU mode falls back to software so a playtest never
+  takes the GPU from your game (`WITNESS_GPU_WHILE_GAMING=1` overrides; `WITNESS_GAMING_PROBE=0` turns the check off). Firefox / WebKit ignore it (a note says so).
 
 ## 11. Engine notes
 
@@ -665,6 +682,6 @@ every AudioContext's `currentTime` and `ended` events still follow simulated tim
 `witness.json` for browser games also takes `launch.inject`, `launch.reset`, `launch.keepStorage`,
 `launch.media` (`{"reducedMotion": "reduce", "colorScheme": "dark", "forcedColors": "active", "contrast": "more"}`:
 emulated by the browser, so `matchMedia` and `@media` rules both see it; `--reduced-motion`, `--color-scheme dark`;
-recorded in play replays), `launch.callTimeout` (seconds a `call` / `eval` may take before it fails, default 60;
+recorded in play replays), `launch.gpu` (real-GPU rendering, §10), `launch.callTimeout` (seconds a `call` / `eval` may take before it fails, default 60;
 `WITNESS_CALL_TIMEOUT` wins: the error names the call, its args and whether the game's promise was still unresolved)
 and `"clock": { "epoch": … }`.

@@ -6,6 +6,7 @@ import { frameAt, secondsOf } from "../core/runner.js";
 import { ExprError, fmt } from "../core/expr.js";
 import { WitnessError } from "../core/session.js";
 import { markGenerated } from "../core/clean.js";
+import { gpuOption } from "../core/browser.js";
 
 export const CLI = { json: false };   // with --json, human-readable extras go to stderr so stdout stays valid JSON
 
@@ -41,7 +42,7 @@ export const launchFlags = (opt) => {
   if (!opt) return "";
   let f = "";
   for (const k of ["device", "engine", "capture", "color-scheme"]) if (opt[k] !== undefined && opt[k] !== true) f += ` --${k} ${shq(String(opt[k]))}`;
-  for (const k of ["no-auto-unlock", "auto-unlock", "safe-insets", "safe-overlay", "reduced-motion"]) if (opt[k]) f += ` --${k}${opt[k] !== true ? ` ${shq(String(opt[k]))}` : ""}`;
+  for (const k of ["no-auto-unlock", "auto-unlock", "safe-insets", "safe-overlay", "reduced-motion", "gpu"]) if (opt[k]) f += ` --${k}${opt[k] !== true ? ` ${shq(String(opt[k]))}` : ""}`;
   return f;
 };
 /** " --config <what was passed>" plus the launch flags that were passed, for follow-up commands printed to the user
@@ -55,7 +56,7 @@ export const configFlag = (opt) => {
 export function loadConfig(opt) {
   if (opt.cmd) {
     // ad-hoc launch: the whole command line goes to the shell as one string
-    return { cfg: { name: "game", launch: { command: String(opt.cmd), args: [], shell: true }, tests: "witness", seed: 1, timeout: +(opt.timeout || 60), shots: "witness/shots", replays: "witness/replays" }, root: process.cwd() };
+    return { cfg: gpuOverride({ name: "game", launch: { command: String(opt.cmd), args: [], shell: true }, tests: "witness", seed: 1, timeout: +(opt.timeout || 60), shots: "witness/shots", replays: "witness/replays" }, opt), root: process.cwd() };
   }
   if (opt.config === true) die(`--config needs a folder or a file (--config web/witness.web.json)`);
   if (opt.config && !fs.existsSync(path.resolve(String(opt.config)))) die(`--config ${opt.config}: no such ${/\.json$/i.test(String(opt.config)) ? "file" : "folder"}`);
@@ -67,6 +68,7 @@ export function loadConfig(opt) {
 /** --device / --engine / --no-auto-unlock / --capture / --safe-insets / --safe-overlay: browser launch options from the command line (they win over
  *  witness.json launch.device / engine / audioUnlock / capture). */
 export function browserOverrides(cfg, opt) {
+  cfg = gpuOverride(cfg, opt);
   const want = { device: opt.device, engine: opt.engine, capture: opt.capture };
   const any = Object.values(want).some((v) => v !== undefined) || opt["no-auto-unlock"] || opt["auto-unlock"] || opt["safe-insets"] || opt["safe-overlay"] || opt["reduced-motion"] || opt["color-scheme"] !== undefined;
   if (!any) return cfg;
@@ -88,6 +90,27 @@ export function browserOverrides(cfg, opt) {
   if (opt["color-scheme"] === true) die("--color-scheme needs a value: dark or light");
   if (opt["reduced-motion"] || opt["color-scheme"] !== undefined) launch.media = { ...(launch.media || {}), ...(opt["reduced-motion"] ? { reducedMotion: "reduce" } : {}), ...(opt["color-scheme"] !== undefined ? { colorScheme: String(opt["color-scheme"]) } : {}) };
   return { ...cfg, launch };
+}
+
+/**
+ * --gpu [high-performance|default] (bare: high-performance), else WITNESS_GPU=1|high-performance|default|0, else
+ * witness.json launch.gpu: real-GPU rendering for Chromium (src/core/browser.js). A bad value dies naming the valid ones;
+ * WITNESS_GPU on a game that isn't a browser game is ignored, --gpu there is refused (like --device).
+ * opt.playGpu (play start): with none of those set, a Chromium playtest uses the GPU when there is one (high-performance;
+ * software after all, or while a game is open, as usual). Playtests compare state, not pixels; launch.gpu false opts out.
+ */
+export function gpuOverride(cfg, opt) {
+  const cli = opt.gpu !== undefined, env = process.env.WITNESS_GPU;
+  const browser = !!(cfg.launch && cfg.launch.url);
+  if (cli && !browser) die(`--gpu is for browser games (${CONFIG_NAME} launch.url): this launch is ${cfg.launch && cfg.launch.attach ? "attach" : "a command"}, and its GPU use is the game's own`);
+  if (!browser) return cfg;
+  try {
+    if (cli) return { ...cfg, launch: { ...cfg.launch, gpu: gpuOption(opt.gpu === true ? "high-performance" : opt.gpu, "--gpu") } };
+    if (env !== undefined && env !== "") return { ...cfg, launch: { ...cfg.launch, gpu: gpuOption(env, "WITNESS_GPU") } };
+    gpuOption(cfg.launch.gpu, `${CONFIG_NAME} launch.gpu`);
+    if (opt.playGpu && cfg.launch.gpu === undefined && String(cfg.launch.engine || "chromium").toLowerCase() === "chromium") return { ...cfg, launch: { ...cfg.launch, gpu: "high-performance", gpuAuto: true } };
+  } catch (e) { die(e.message); }
+  return cfg;
 }
 
 export async function withGame(opt, fn) {

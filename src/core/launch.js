@@ -109,6 +109,14 @@ export function epochNote(session) {
  */
 async function attachWeb(session, web) {
   session.web = web;
+  // launch.gpu asked for: what the page really renders with (a GPU, or software after all), said once by openGame
+  if (web.gpu && web.gpu.asked) {
+    try {
+      const g = await web.webgl();
+      const r = g && ((g.webgl2 && g.webgl2.available && g.webgl2) || (g.webgl && g.webgl.available && g.webgl));
+      if (r) { const { SOFTWARE_RENDERER } = await import("./browser.js"); web.gpu.renderer = r.renderer || null; web.gpu.software = SOFTWARE_RENDERER.test(r.renderer || ""); }
+    } catch { /* page gone / attached: renderer unknown */ }
+  }
   if (web.policy === "auto") { try { web.autoUnlocked = await web.unlock(); } catch { web.autoUnlocked = 0; } }
   // a DOM game (no visible <canvas>): screenshots are of the viewport, unless launch.capture says otherwise
   if (web.captureMode === "canvas" && !web.captureSet) {
@@ -295,6 +303,7 @@ export async function openGame(cfg, root, opts = {}) {
     staleAdapter(session.hello, opts.quiet);
     if (web) {
       await attachWeb(session, web);
+      if (web.gpu && web.gpu.asked) { const { gpuLine } = await import("./browser.js"); web.gpu.line = gpuLine(web.gpu); if (!opts.quiet && !opts.restarted) console.error(web.gpu.line); }
       setupReload(session, web, launch, srv, (opts.timeout || cfg.timeout || 60) * 1000);
     }
     const handle = {
@@ -304,7 +313,7 @@ export async function openGame(cfg, root, opts = {}) {
         if (attach) throw new WitnessError("can't restart a game Witness didn't launch (--attach): add 'reset' to the adapter");
         await handle.stop();
         // keep this restart: the fresh handle's own would update it, not the one the caller holds (3rd+ restart)
-        const { restart: _r, ...fresh } = await openGame(cfg, root, opts);
+        const { restart: _r, ...fresh } = await openGame(cfg, root, { ...opts, restarted: true });   // the GPU line once, not per restart
         Object.assign(handle, fresh);
         return handle.session;
       },

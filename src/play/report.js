@@ -44,7 +44,7 @@ export function reportData(s) {
     fights, telegraphs: tele,
     stuck: s.incidents, stuckSpots: stuckSpots(s.incidents), until: s.until || null, deaths: tr.deaths, kills: tr.kills, pickups: tr.pickups, dialogues: tr.dialogues,
     coverage: s.coverage, shots: s.shots, errors: s.errors, notes: s.notes, feedback: s.feedback || null, stuckDead: s.stuckDead || null,
-    replay: s.replay, profile: s.profile, pace: s.pace || null, lazyDraw: s.lazyDraw || null, build: s.build || null, runConfig: s.runConfig || null,
+    replay: s.replay, profile: s.profile, pace: s.pace || null, lazyDraw: s.lazyDraw || null, build: s.build || null, runConfig: s.runConfig || null, gpu: s.gpu || null,
     stats: {
       orders: s.orders.length, ordersFailed: s.orders.filter((o) => o.status === "fail").length, parseErrors: s.parseErrors || 0,
       fightsWon: fights.filter((f) => f.result === "won").length, fightsLost: fights.filter((f) => f.result === "lost").length, fightsHeld: fights.filter((f) => f.result === "held").length,
@@ -197,6 +197,7 @@ export function reportMarkdown(r, { rel = (p) => p, link = rel, replayCmd = "wit
     // the run config in this folder carries the launch (and its server) whole; the fingerprint says what build was played
     if (r.runConfig) L.push(`The commands load this playtest's own config (${sh(rel(r.runConfig))}: the session's launch with absolute paths${server === true ? ", and launch.server, so the replay starts the server again" : ""}).`);
     if (server === false && r.build && r.build.url && /^https?:\/\/(localhost|127\.|\[::1\])/i.test(r.build.url)) L.push(`⚠ ${r.build.url} was served by something Witness didn't start (no launch.server): start that server before replaying.`);
+    if (r.gpu && r.gpu.asked) L.push(r.gpu.used ? `Rendered on ${r.gpu.software ? `software after all (asked for the GPU, got ${r.gpu.renderer || "no renderer"})` : `the GPU (${r.gpu.renderer || "renderer unknown"})`} (launch.gpu): screenshots may differ by machine/driver; a replay compares state, not pixels.` : `GPU rendering was asked for but not used (${r.gpu.fallback === "gaming" ? "a game was open, so software rendering kept the GPU free for it" : "not a Chromium launch"})${r.gpu.note ? `: ${r.gpu.note}` : ""}.`);
     if (r.build) L.push(`Build played: ${r.build.kind === "web" ? `${r.build.url} and ${r.build.count - 1} file${r.build.count === 2 ? "" : "s"} it loads` : `${r.build.count} launched file${r.build.count === 1 ? "" : "s"}`}, fingerprint \`${r.build.hash}\` (in the replay header: \`witness replay\` warns when the build changed since).`);
   }
   return L.join("\n") + "\n";

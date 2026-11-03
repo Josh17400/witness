@@ -24,7 +24,7 @@ const cli = path.join(root, "bin", "witness.js");
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => { if (cond) pass++; else { fail++; console.log("FAIL", name, typeof extra === "string" ? extra.slice(-2500) : JSON.stringify(extra)); } };
 // a command waiting for a browser slot held elsewhere (a playtest) waits WITNESS_BUDGET_WAIT on top of its run
-const witness = (cwd, args, env = {}) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 240000 + Math.max(0, +process.env.WITNESS_BUDGET_WAIT || 0) * 1000, env: { ...process.env, ...env } });
+const witness = (cwd, args, env = {}) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 240000 + Math.max(0, +process.env.WITNESS_BUDGET_WAIT || 0) * 1000, env: { ...process.env, WITNESS_GPU: "", ...env } });   // WITNESS_GPU in the shell would turn every launch to the GPU
 const json = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
 
 // ---- 1. units ----------------------------------------------------------------------------------------------------
@@ -294,6 +294,40 @@ else {
   rtQuiet.push(["gl, --no-auto-unlock, --time, 1, --json", j]);
   ok("webgl: doctor reports the game's webgl2 canvas and Chromium's SwiftShader renderer (software)", j && j.ok && j.summary.web.webgl && j.summary.web.webgl.webgl2 === true && j.summary.web.webgl.canvasContext === "webgl2" && /SwiftShader/.test(j.summary.web.webgl.renderer) && j.summary.web.webgl.software === true && /✔ WebGL: the game's canvas draws with webgl2 · WebGL 2 · renderer ANGLE/.test(j.data.lines.join("\n")), r.stdout + r.stderr);
   ok("no AudioContext in witness mode: --no-auto-unlock says so and how to fix it (audioLocked null, not false)", j && j.summary.web.audioLocked === null && j.summary.web.noAudioContext === true && /no AudioContext was created .* open audio in witness mode too/.test(j.data.lines.join("\n")), j && j.data.lines.join("\n"));
+  // launch.gpu (--gpu): Chromium on the real GPU; the renderer is reported whatever comes back (a GPU, or software on a
+  // machine without one: said plainly, never a failure). No game open (WITNESS_GAMING_FORCE=0) so it isn't held back.
+  r = witness(P("gl"), ["doctor", "--gpu", "--time", "1", "--json"], { ...env, WITNESS_GAMING_FORCE: "0" });
+  j = json(r);
+  {
+    const g = j && j.summary.web && j.summary.web.gpu, L = j ? j.data.lines.join("\n") : "";
+    // a real GPU, SwiftShader after all (no usable GPU), or no WebGL at all (the GPU process failed): each said, none a failure
+    const real = g && typeof g.renderer === "string" && g.renderer.length > 3 && g.software === false, swAfter = g && g.software === true, noGl = g && g.renderer === null;
+    ok("--gpu: doctor reports GPU rendering asked for and used, with the WebGL renderer (GPU, software-after-all, or no WebGL said)", j && g && g.asked === "high-performance" && g.used === true && /GPU rendering \(launch\.gpu\)/.test(L)
+      && (real ? /✔ GPU rendering: .*\(screenshots may differ by machine\/driver\)/.test(L) && j.summary.web.webgl.renderer === g.renderer : swAfter ? /⚠ asked for the GPU but got/.test(L) : noGl ? /⚠ asked for the GPU but WebGL is unavailable/.test(L) : false), r.stdout + r.stderr);
+    // the wider default only when really on a GPU: software after all keeps ±2 (deterministic) and prints no GPU note
+    ok("--gpu: the determinism check uses the GPU default tolerance (±8) and says so once (software after all: ±2, no note)", swAfter ? !/GPU-rendering default/.test(L) : /within ±8 levels per channel \(the GPU-rendering default/.test(L) && L.split("GPU-rendering default").length === 2, L);
+    if (g) console.log(`  (--gpu here rendered with: ${g.renderer}${g.software ? " — software" : ""})`);
+  }
+  // a game open (the probe's test hook): software rendering, with the note; the launch goes on
+  r = witness(P("gl"), ["doctor", "--gpu", "--time", "0.5", "--json"], { ...env, WITNESS_GAMING_FORCE: "Hades.exe" });
+  j = json(r);
+  {
+    const g = j && j.summary.web && j.summary.web.gpu, L = j ? j.data.lines.join("\n") : "";
+    ok("--gpu while a game is open: software rendering (SwiftShader), the note names the game and the override", g && g.asked === "high-performance" && g.used === false && g.fallback === "gaming" && /SwiftShader/.test(j.summary.web.webgl.renderer)
+      && /GPU rendering not used: a game is open \(Hades\.exe\): using software rendering so the playtest doesn't take the GPU from it \(WITNESS_GPU_WHILE_GAMING=1 to override\)/.test(L), r.stdout + r.stderr);
+  }
+  // play start --gpu: the daemon launches quietly, so start relays its GPU line (here the gaming note, the same on
+  // every machine); a copy of the project in a temp folder, so the playtest folder doesn't land in the fixture
+  {
+    const pdir = fs.mkdtempSync(path.join(os.tmpdir(), "witness-gpuplay-"));
+    fs.writeFileSync(path.join(pdir, "witness.json"), JSON.stringify({ name: "gl-play", launch: { url: "http://127.0.0.1:5318/gl.html", server: { command: `node "${path.join(here, "serve.mjs")}" 5318` } }, seed: 1, timeout: 40 }));
+    const penv = { ...env, WITNESS_GAMING_FORCE: "Hades.exe" };   // the default registry: its folder holds the machine-wide budget
+    r = witness(pdir, ["play", "start", "--name", "gpu-webtest", "--gpu"], penv);
+    const out = r.stdout + r.stderr;
+    witness(pdir, ["play", "stop", "-s", "gpu-webtest"], penv);
+    ok("play start --gpu: the GPU line reaches the caller (gaming fallback note, word for word)", r.status === 0 && /▸ GPU rendering not used: a game is open \(Hades\.exe\): using software rendering so the playtest doesn't take the GPU from it \(WITNESS_GPU_WHILE_GAMING=1 to override\)/.test(out), out);
+    try { fs.rmSync(pdir, { recursive: true, force: true }); } catch { /* a daemon still closing */ }
+  }
   r = witness(P("unlock"), ["doctor", "--time", "1", "--json"], env);
   j = json(r);
   rtQuiet.push(["unlock, --time, 1, --json", j]);

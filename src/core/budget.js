@@ -96,11 +96,12 @@ export function probeGame() {
 /**
  * The open game's exe name, or null: WITNESS_GAMING_FORCE (tests: 0 = none, 1 = "a game", else that name) first, then
  * <dir>/gaming.json if under maxAgeMs old (written atomically; unreadable/stale = probe again), else a fresh probe.
+ * WITNESS_GAMING_PROBE=0 or WITNESS_MAX_PROCS_GAMING=0 = null; ignoreCap (launch.gpu owner protection): only the former.
  */
-export function openGame({ dir = budgetDir(), maxAgeMs = 30000, probe = probeGame } = {}) {
+export function openGame({ dir = budgetDir(), maxAgeMs = 30000, probe = probeGame, ignoreCap = false } = {}) {
   const f = process.env.WITNESS_GAMING_FORCE;
   if (f !== undefined && f !== "") return f === "0" ? null : f === "1" ? "a game" : f;
-  if (process.env.WITNESS_GAMING_PROBE === "0" || envInt("WITNESS_MAX_PROCS_GAMING", 2) === 0) return null;
+  if (process.env.WITNESS_GAMING_PROBE === "0" || (!ignoreCap && envInt("WITNESS_MAX_PROCS_GAMING", 2) === 0)) return null;   // ignoreCap: launch.gpu's owner protection (only WITNESS_GAMING_PROBE=0 turns it off)
   const file = path.join(dir, "gaming.json"), c = readSlot(file), age = c && Date.now() - c.at;
   if (c && Number.isFinite(age) && age >= 0 && age < maxAgeMs) return c.game || null;
   const r = probe(), tmp = `${file}.${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`;

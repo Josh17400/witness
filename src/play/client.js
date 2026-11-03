@@ -157,7 +157,7 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
     case "_daemon": { const { runDaemon } = await import("./daemon.js"); await runDaemon(path.resolve(pos[0])); return; }
 
     case "start": {
-      const L = loadConfig(opt), { cfg, file } = L, root = cmdRoot(opt, L.root);
+      const L = loadConfig({ ...opt, playGpu: true }), { cfg, file } = L, root = cmdRoot(opt, L.root);
       if (isTester() && opt.force) fail("--force isn't available to a batch tester: the session limits keep the machine responsive");
       const name = String(opt.name && opt.name !== true ? opt.name : `play-${new Date().toISOString().replace(/[-:T]/g, "").slice(4, 14)}`);
       if (!validName(name)) fail(`bad session name "${name}" (letters, digits, - _ . only, not all dots)`);
@@ -213,14 +213,16 @@ export async function playCommand(sub, pos, opt, { loadConfig, ROOT }) {
       // the daemon may first wait for a machine-wide heavy-process slot (src/core/budget.js): allow for it, and say so
       const deadline = Date.now() + ((cfg.timeout || 60) + 20) * 1000 + budgetLimits().waitMs;
       let info = null, told = 0;
+      // relay the daemon's wait lines (the first, then its ~60 s progress lines) and its launch.gpu line as they appear
+      const relay = () => { try { const w = fs.readFileSync(path.join(dir, "daemon.log"), "utf8").match(/^(▸ (still )?waiting for a free slot|▸ GPU rendering|⚠ asked for the GPU).*$/gm) || []; for (; told < w.length; told++) console.error(w[told]); } catch { /* not yet */ } };
       while (Date.now() < deadline) {
         await sleep(100);
-        // relay the daemon's wait lines (the first, then its ~60 s progress lines) as they appear
-        try { const w = fs.readFileSync(path.join(dir, "daemon.log"), "utf8").match(/^▸ (still )?waiting for a free slot.*$/gm) || []; for (; told < w.length; told++) console.error(w[told]); } catch { /* not yet */ }
+        relay();
         info = sessionInfo({ dir });
         if (info && (info.state === "ready" || info.state === "failed")) break;
         if (!pidAlive(child.pid)) { info = sessionInfo({ dir }); break; }
       }
+      relay();
       if (!info || info.state !== "ready") {
         const tail = (() => { try { return fs.readFileSync(path.join(dir, "daemon.log"), "utf8").trim().split("\n").slice(-12).join("\n"); } catch { return ""; } })();
         kill(child.pid);

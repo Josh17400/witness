@@ -3,6 +3,50 @@
 Each release lists what changed and **Adoption steps**: what a game that already uses Witness has to do (or may do)
 to pick it up. Steps marked *optional* unlock new features; everything else keeps working without them.
 
+## 0.7.14 (2026-11-02)
+
+From The Fort: SwiftShader (software WebGL) made agent playtests run at 0.35-0.5× real time. Browser games can now
+render on the machine's real GPU, and agent playtests do by default.
+
+**Playtests use the GPU by default.** `witness play start` (so `play batch` testers too) on a Chromium game with no
+`launch.gpu`, `--gpu` or `WITNESS_GPU` set renders on the GPU (high-performance) when there is one: playtests compare
+state, not pixels. No usable GPU → SwiftShader after all (said once); a game open → software, as below. Opt out with
+`"gpu": false` or `WITNESS_GPU=0`. Tests, doctor, look and shots keep SwiftShader unless asked.
+
+**Real-GPU rendering (Chromium): `launch.gpu`**
+- witness.json `"launch": {"gpu": true}` (or `"high-performance"`: the discrete GPU; `"default"`: the GPU the OS
+  picks; `false`, the default: SwiftShader as before, the same pixels on every machine). `--gpu [high-performance|default]`
+  on every command that launches a game (`play start`, `play batch`, `test`, `doctor`, `shot`, `look` …; bare =
+  high-performance) and `WITNESS_GPU=1|high-performance|default|0`; order `--gpu`, then `WITNESS_GPU`, then witness.json.
+  A bad value fails before anything launches, naming where it came from and the valid values. `--gpu` on a non-browser
+  game is refused; `WITNESS_GPU` there is ignored.
+- Chromium args: Windows ANGLE D3D11 (+ `--force_high_performance_gpu` for high-performance), macOS Metal, Linux ANGLE
+  default + `--enable-gpu`; the GPU blocklist is ignored and SwiftShader stays enabled as the fallback
+  (`--enable-unsafe-swiftshader`), so a machine whose GPU can't be used still gets WebGL. Software-mode args are
+  unchanged. Firefox / WebKit ignore the setting with a one-line note.
+- After the page loads Witness prints the WebGL renderer once: `▸ GPU rendering: NVIDIA GeForce RTX 4060 … (screenshots
+  may differ by machine/driver)`, `⚠ asked for the GPU but got SwiftShader: …`, or `⚠ asked for the GPU but WebGL is
+  unavailable in this browser …`. Never a failure. `play start` relays the line as the session starts. It is in
+  `web.gpu` (expressions), doctor (a line, and `summary.web.gpu` in JSON), `test --json` (`summary.gpu`), the play
+  report (`gpu` in report.json, a line in report.md) and the replay header.
+- Owner protection: each launch checks the gaming probe (the one behind `WITNESS_MAX_PROCS_GAMING`, still on when that
+  cap is 0). With a game open GPU mode falls back to software: `a game is open (Game.exe): using software rendering so
+  the playtest doesn't take the GPU from it (WITNESS_GPU_WHILE_GAMING=1 to override)`. `WITNESS_GAMING_PROBE=0` turns
+  the check off.
+- Pixels: really on a GPU, "match" steps, `test --repeat` and doctor's determinism check default to ±8 per channel
+  (software, including SwiftShader after all under `--gpu`: ±2) and say so once; `--shot-tol` / `"shotTol"` always
+  win. `shot --save-ref` tags the PNG with how it was rendered; `shot --diff` notes a baseline from the other mode.
+- Replays compare state, not pixels: `witness replay` prints one line when the recording and the replay rendered
+  differently, nothing else changes.
+- Measured on a laptop (RTX 4060 + Intel Arc): The Fort 20 game-seconds in 10 s with `--gpu` vs 32 s in software; a
+  WebGL test page 175 → 0.9 ms/frame. Plain 2D canvas pages gained nothing: measure with `witness measure perf`.
+
+**Adoption steps**
+1. Playtests: nothing to do; they now use the GPU when one is there. The Fort: *optional* `"gpu": true` in `launch`
+   so its tests and shots render on the RTX 4060 too. Screenshot "match" steps then use ±8 unless `shotTol` is set; baselines saved in
+   software mode still compare (with a note). While the owner has a game open it renders in software by itself.
+2. Everyone else: nothing required; tests stay in software. `"gpu": false` keeps playtests in software as well.
+
 ## 0.7.13 (2026-11-02)
 
 From The Fort's v11new / v11late playtests: the DOM HUD was missing from shots, testers couldn't tell when a sound

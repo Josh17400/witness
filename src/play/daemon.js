@@ -16,6 +16,7 @@ import { observeText, observeData, resultLine } from "./observe.js";
 import { parseOrders, OrderError } from "./orders.js";
 import { ReplayRecorder } from "./recorder.js";
 import { writeRunConfig, fingerprint } from "./build.js";
+import { gpuSummary } from "../core/browser.js";
 import { reportData, coveragePNG, writeReports, addLateFeedback } from "./report.js";
 import { DeadWatch } from "./deadwatch.js";
 import { updateEntry, writeJson } from "./registry.js";
@@ -75,6 +76,9 @@ export async function runDaemon(dir) {
   const stopAsked = () => fs.existsSync(path.join(dir, "stop.request"));
   if (stopAsked()) { log("stop requested while starting"); try { await g.stop(); } catch { /* gone */ } setStatus({ state: "ended", endedAt: new Date().toISOString(), reason: "stopped while starting", outcome: "stopped", summary: "stopped while starting" }); process.exit(0); }
   const S = g.session, fps = S.fps;
+  // launch.gpu: the renderer line (GPU, software after all, or held back because a game is open), unstamped so `play start` relays it
+  if (S.web && S.web.gpu && S.web.gpu.line) { try { fs.appendFileSync(logFile, `${S.web.gpu.line}
+`); } catch { /* disk */ } }
   // a browser tab whose renderer dies (out of memory at a late wave) is a crash, not "the browser closed"
   let pageCrashed = false;
   if (S.web && S.web.page && S.web.page.on) S.web.page.on("crash", () => { pageCrashed = true; log("the page crashed (its renderer died)"); });
@@ -109,7 +113,7 @@ export async function runDaemon(dir) {
   let frame = 0, world = null, finalizing = false, server = null, finalP = null;
   const timeline = [], orders = [], notes = [], shots = [], errors = [], pending = [], trail = [];
   let parseErrors = 0, lastLogFrame = 0, firstLook = true, lastCall = null;
-  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, epoch: S.epoch ?? null, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null, ...(S.web.media ? { media: S.web.media } : {}) } : null, build });
+  const recorder = new ReplayRecorder({ name: S.hello.name || spec.cfg.name, seed: opts.seed ?? spec.cfg.seed ?? 1, fps, scene: opts.scene ?? null, params: opts.params ?? null, session: spec.name, epoch: S.epoch ?? null, launch: S.web ? { engine: S.web.engine, device: S.web.device ? S.web.device.name : null, ...(S.web.media ? { media: S.web.media } : {}), ...(S.web.gpu && S.web.gpu.asked ? { gpu: { used: !!S.web.gpu.used, renderer: S.web.gpu.renderer || null } } : {}) } : null, build });
   const dts = (k) => Array(k).fill(1 / fps);
   // play.lazyDraw / --lazy-draw: multi-frame steps say only their last frame is observed ("draw": "last", PROTOCOL.md
   // §3), so a game that checks witness.drawing skips drawing the others. Not when watched: the viewer sees every frame.
@@ -620,6 +624,7 @@ export async function runDaemon(dir) {
       replay: { file: path.join(dir, "replay.jsonl"), frames: frame, calls: recorder ? [...recorder.frames.values()].reduce((a, x) => a + x.calls.length, 0) : 0 },
       lazyDraw: lazy ? { on: lazy.on, steps: lazy.steps, framesUndrawn: lazy.undrawn, frames: frame, game: lazy.game } : null,
       build: build ? { kind: build.kind, url: build.url || null, hash: build.hash, count: build.count } : null, runConfig: runConfig || null,
+      gpu: S.web ? gpuSummary(S.web) : null,
       ...extra,
     };
   }

@@ -185,10 +185,19 @@ export function audioTolOf(opt = {}, cfg = {}) {
   return n;
 }
 
-/** The screenshot tolerance from --shot-tol, else witness.json "shotTol", else 2 (per channel, 0..255; 0 = exact). */
-export function shotTolOf(opt = {}, cfg = {}) {
+/** The default screenshot tolerance while the browser renders on a real GPU (launch.gpu): driver / rasteriser noise. */
+export const GPU_SHOT_TOL = 8;
+/** Whether --shot-tol / witness.json "shotTol" set the screenshot tolerance (an explicit one always wins). */
+export const shotTolSet = (opt = {}, cfg = {}) => (opt["shot-tol"] !== undefined && opt["shot-tol"] !== true) || (cfg && cfg.shotTol !== undefined && cfg.shotTol !== null && cfg.shotTol !== "");
+/** The note said once when GPU rendering raised the default tolerance. */
+export const gpuShotTolNote = (tol = GPU_SHOT_TOL) => `screenshots are compared within ±${tol} levels per channel (the GPU-rendering default; software rendering uses ±2): --shot-tol N sets it`;
+/**
+ * The screenshot tolerance from --shot-tol, else witness.json "shotTol", else 2 (per channel, 0..255; 0 = exact);
+ * gpu: the browser renders on a real GPU (session.web.gpu.used), where the default is GPU_SHOT_TOL instead.
+ */
+export function shotTolOf(opt = {}, cfg = {}, { gpu = false } = {}) {
   const v = opt["shot-tol"] !== undefined && opt["shot-tol"] !== true ? opt["shot-tol"] : cfg && cfg.shotTol;
-  if (v === undefined || v === null || v === "") return 2;
+  if (v === undefined || v === null || v === "") return gpu ? GPU_SHOT_TOL : 2;
   const n = +v;
   if (!(n >= 0 && n <= 255)) throw new RangeError(`--shot-tol / "shotTol" wants a per-channel level 0..255 (default 2; 0 = exact), got ${JSON.stringify(v)}`);
   return n;
